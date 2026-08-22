@@ -1451,9 +1451,10 @@ body[data-ds-dark-theme="false"] .nav-cell.active { background: #EBEEF2; }
   font: inherit; font-size: 14px; line-height: 22px; cursor: pointer;
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
 }
-.m-btn.m-add:hover { background: var(--dsw-alias-interactive-bg-hover); border-color: var(--dsw-alias-state-business-primary); color: var(--dsw-alias-state-business-primary); }
-/* Focus frame = white (设置对齐): clicking keeps the pointer over the button,
-   so the hover accent would otherwise read as a blue focus frame. */
+/* dsh addButton hover keeps a subtle tint, but the frame stays white (设置对
+   齐: 鼠标移上去不再显示蓝色虚线框); focus forces white too (click keeps the
+   pointer over the button). */
+.m-btn.m-add:hover { background: var(--dsw-alias-interactive-bg-hover); border-color: #FFFFFF; color: #FFFFFF; }
 .m-btn.m-add:focus { border-color: #FFFFFF; color: #FFFFFF; }
 /* provider row card (dsh ModelsSection.rowCard) */
 .row-card {
