@@ -905,12 +905,14 @@ function renderGrouped(list) {
     head.className = "group-head";
     head.draggable = true;
     const open = wsOpenState(g.key);
-    // dsh ProjectRowItem folderActive: the workspace that owns the current
-    // session shows a business-blue folder icon while its group is expanded.
-    const folderActive = g.ws && open && g.ids.includes(currentID);
+    // dsh ProjectRowItem folderActive: the group owning the current session
+    // shows a business-blue folder icon while expanded — the ungrouped bucket
+    // is a first-class group too (dsh containsCurrent falls back to
+    // UNGROUPED_KEY), and its folder swaps open/close like any workspace.
+    const folderActive = open && g.ids.includes(currentID);
     head.innerHTML = `
       <span class="gh-chevron" aria-hidden="true">${PA_ICONS.triangleright}</span>
-      <span class="gh-folder${folderActive ? " active" : ""}" aria-hidden="true">${g.ws ? (open ? PA_ICONS.folderopen16 : PA_ICONS.folderclose16) : PA_ICONS.folderclose16}</span>
+      <span class="gh-folder${folderActive ? " active" : ""}" aria-hidden="true">${open ? PA_ICONS.folderopen16 : PA_ICONS.folderclose16}</span>
       <span class="gh-title">${esc(g.title)}</span>
       <span class="gh-count">${g.ids.length}</span>
       ${g.ws ? `<span class="gh-actions">
@@ -922,10 +924,8 @@ function renderGrouped(list) {
       const next = !wsOpenState(g.key);
       setWsOpen(g.key, next);
       wrap.classList.toggle("closed", !next);
-      head.querySelector(".gh-folder").innerHTML = g.ws
-        ? (next ? PA_ICONS.folderopen16 : PA_ICONS.folderclose16)
-        : PA_ICONS.folderclose16;
-      head.querySelector(".gh-folder").classList.toggle("active", g.ws && next && g.ids.includes(currentID));
+      head.querySelector(".gh-folder").innerHTML = next ? PA_ICONS.folderopen16 : PA_ICONS.folderclose16;
+      head.querySelector(".gh-folder").classList.toggle("active", next && g.ids.includes(currentID));
     });
     if (g.ws) {
       head.querySelector(".gh-add").addEventListener("click", async (e) => {
