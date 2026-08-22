@@ -115,9 +115,11 @@
         </nav>
       </section>
 
-      <!-- Center column: topbar + message stream + composer. -->
+      <!-- Center column: topbar + message stream + composer. The whole header
+           is hidden while the session is blank (dsh headerHidden: no status row
+           on 新会话; only a session with content shows it). -->
       <main class="col-center" aria-label="对话" data-phase="">
-        <header class="topbar">
+        <header id="topbar" class="topbar">
           <span id="cur-session" class="cur-session" title="当前会话"></span>
           <span id="mode-badge" class="mode-badge hidden" title="会话模式：改 config.yaml 重启生效"></span>
           <span class="spacer"></span>
@@ -140,7 +142,6 @@
               <div id="runs-jobs" class="runs-body" aria-live="polite"></div>
             </div>
           </div>
-          <span id="model-label" class="muted"></span>
           <a id="settings-link" class="btn-icon" href="#/settings" title="设置">⚙</a>
           <button id="theme-toggle" class="btn-icon" title="切换主题">☀️</button>
         </header>

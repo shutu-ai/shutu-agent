@@ -36,7 +36,8 @@ const $ = (id) => document.getElementById(id);
 const loginEl = $("login"), loginForm = $("login-form"), loginMsg = $("login-msg");
 const workspaceEl = $("workspace"), frameEl = $("frame");
 const sessionList = $("session-list"), newSessionBtn = $("new-session");
-const curSessionEl = $("cur-session"), modeBadgeEl = $("mode-badge"), modelLabelEl = $("model-label");
+const curSessionEl = $("cur-session"), modeBadgeEl = $("mode-badge");
+const topbarEl = $("topbar"); // hidden while the session is blank (dsh headerHidden)
 const messagesEl = $("messages"), heroEl = $("hero");
 const colCenterEl = document.querySelector(".col-center");
 const composerText = $("composer-text"), composerBox = $("composer"), sendBtn = $("composer-send");
@@ -642,8 +643,10 @@ async function loadSessions() {
   }
   list.sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at));
   // Persist the active session's workspace (dsh recentWorkspaceId) so the next
-  // 新会话 lands in the same workspace even without an active session.
+  // 新会话 lands in the same workspace even without an active session; the
+  // topbar title follows the freshly derived session title.
   rememberRecentWorkspace(list);
+  syncSessionTitle();
   // A live query switches to the remote body-text search view (P6.3, dsh
   // searchAcrossSessions); nothing else is drawn while searching.
   if (searchQuery) { doSearch(searchQuery); return; }
@@ -2345,11 +2348,22 @@ function syncHeroMenuPosition() {
 // row; active → the transcript scrolls and the composer docks at the bottom.
 // The hero phase holds for a BLANK session too (create → first message), not
 // only when there is no session, so the composer moves down only after the
-// first submit.
+// first submit. The topbar status row follows the same rule (dsh
+// ConversationSessionHeader headerHidden: a blank session shows no
+// title/mode/runs chrome; only a session with content gets the header).
 function setHeroPhase() {
   heroActive = !currentID || sessionEmpty;
   if (colCenterEl) colCenterEl.dataset.phase = heroActive ? "hero" : "active";
   heroEl.classList.toggle("hidden", !heroActive);
+  if (topbarEl) topbarEl.classList.toggle("hidden", heroActive);
+}
+// syncSessionTitle fills the topbar title with the session's derived title
+// (dsh breadcrumb displayTitle); falls back to the raw id while the list is
+// stale.
+function syncSessionTitle() {
+  if (!currentID) { curSessionEl.textContent = ""; return; }
+  const s = lastSessionList.find((x) => x.id === currentID);
+  curSessionEl.textContent = (s && s.title) ? s.title : currentID;
 }
 
 function openSession(id) {
@@ -2361,7 +2375,7 @@ function openSession(id) {
   turnRunning = false;
   syncSendButton();
   messagesEl.querySelector(".messages-inner")?.remove();
-  curSessionEl.textContent = id || "";
+  syncSessionTitle();
   toolMeta = {};
   sessionEmpty = !id;
   heroEl.classList.toggle("hidden", !!id);
@@ -2680,9 +2694,10 @@ composerText.addEventListener("keydown", (e) => {
 sendBtn.addEventListener("click", () => { if (turnRunning) stopTurn(); else sendMessage(); });
 
 // ---- topbar / config ----------------------------------------------------------
-// loadConfigLabels fills the topbar model/mode badges from the cached config.
+// loadConfigLabels fills the topbar mode badge + the composer seats from the
+// cached config. The topbar carries no model caption — dsh shows the model
+// only in the composer ModelSelect seat.
 function loadConfigLabels() {
-  modelLabelEl.textContent = (config.model || "") + (config.llm_provider ? " · " + config.llm_provider : "");
   syncModeBadge();
   syncModelSeat();
   // The hero chip defaults to the runtime mode until the persisted agent_preset
