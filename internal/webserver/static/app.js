@@ -749,16 +749,21 @@ function appendSessionItem(container, s) {
   li.dataset.idle = state === "idle" ? "1" : "";
   li.draggable = true;
   li.setAttribute("aria-label", (title + " " + statusLabel(s)).trim());
+  // dsh SessionNodeItem row contract: a blank (no prompt yet) session shows
+  // the New Session label and NO trailing cells — no timestamp, no row verbs
+  // (rename/fork/archive); the status dot follows the dsh rule (idle = no
+  // visible dot, the fixed slot keeps alignment).
   li.innerHTML = `
     <span class="si-dot" data-state="${state}"></span>
     <span class="si-title${s.blank ? " empty" : ""}">${esc(title)}</span>
     ${s.blank ? "" : `<span class="si-time">${fmtShort(s.updated_at)}</span>`}
-    <button class="si-menu" title="会话操作">${PA_ICONS.ellipsis}</button>`;
+    ${s.blank ? "" : `<button class="si-menu" title="会话操作">${PA_ICONS.ellipsis}</button>`}`;
   li.addEventListener("click", (e) => {
     if (e.target.closest(".si-menu")) return;
     switchSession(s.id);
   });
-  li.querySelector(".si-menu").addEventListener("click", (e) => {
+  const menuBtn = li.querySelector(".si-menu");
+  if (menuBtn) menuBtn.addEventListener("click", (e) => {
     e.stopPropagation();
     openMenu(li, s);
   });
@@ -880,10 +885,10 @@ function renderFlat(list) {
 }
 
 // renderGrouped draws the dsh grouped tree: a workspace header row per group
-// (folder + title + count + hover add/menu) then its session rows; a group
-// collapses to its header, and more than GROUP_SESSION_LIMIT rows collapse to
-// a 5-row run plus an "expand all" button. The ungrouped bucket keeps its
-// sessions but has no workspace actions.
+// (folder + title + hover add/menu, dsh ProjectRowItem) then its session
+// rows; a group collapses to its header, and more than GROUP_SESSION_LIMIT
+// rows collapse to a 5-row run plus an "expand all" button. The ungrouped
+// bucket keeps its sessions but has no workspace actions.
 function renderGrouped(list) {
   const byId = new Map(list.map((s) => [s.id, s]));
   const groups = [];
@@ -914,11 +919,12 @@ function renderGrouped(list) {
     // is a first-class group too (dsh containsCurrent falls back to
     // UNGROUPED_KEY), and its folder swaps open/close like any workspace.
     const folderActive = open && g.ids.includes(currentID);
+    // dsh ProjectRowItem: folder + title + hover actions — NO session count
+    // (dsh renders the count nowhere in the tree rows).
     head.innerHTML = `
       <span class="gh-chevron" aria-hidden="true">${PA_ICONS.triangleright}</span>
       <span class="gh-folder${folderActive ? " active" : ""}" aria-hidden="true">${open ? PA_ICONS.folderopen16 : PA_ICONS.folderclose16}</span>
       <span class="gh-title">${esc(g.title)}</span>
-      <span class="gh-count">${g.ids.length}</span>
       ${g.ws ? `<span class="gh-actions">
         <span class="gh-act gh-add" title="在此新建会话">${PA_ICONS.plus}</span>
         <span class="gh-act gh-menu" title="工作区操作">${PA_ICONS.ellipsis}</span>
