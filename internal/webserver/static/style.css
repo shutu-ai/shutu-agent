@@ -1306,6 +1306,18 @@ body[data-ds-dark-theme="false"] .nav-cell.active { background: #EBEEF2; }
 .row-select:disabled { color: var(--dsw-alias-label-tertiary); cursor: default; }
 /* Focus frame = white (设置对齐: 编辑框聚焦白框线). */
 .row-select:focus { outline: 1px solid #FFFFFF; outline-offset: -1px; }
+/* 设置对齐: 设置页所有控件 (含子界面的弹层) 聚焦框线一律白色 — 文本输入/选择
+   框走各自的 border 白框线, 其余控件 (按钮/胶囊/复选框/单选/导航项) 把浏览器
+   默认聚焦环 (蓝) 覆盖为白色. 覆盖设置页两个容器 (导航栏 + 内容区) 与从设置
+   打开的弹层 (模型探测 / 技能). */
+#settings *:focus,
+#settings *:focus-visible,
+.probe-overlay *:focus,
+.probe-overlay *:focus-visible,
+.sk-overlay *:focus,
+.sk-overlay *:focus-visible {
+  outline-color: #FFFFFF;
+}
 /* capability badge */
 .cap-badge {
   font-size: 12px; line-height: 20px; padding: 0 10px; border-radius: 14px;
