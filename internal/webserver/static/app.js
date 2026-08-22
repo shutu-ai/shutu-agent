@@ -576,6 +576,7 @@ let groupBy = localStorage.getItem("pa_groupby") || "workspace";
 let orderBy = localStorage.getItem("pa_orderby") || "manual";
 let wsGroups = [];      // [{id,title,session_ids}]
 let wsUngrouped = [];   // ungrouped session ids
+let lastSessionList = []; // most recent /api/sessions payload (workspace_id per session)
 let wsGroupOpen = {};
 // wsOpenState reads a group's expansion. Default COLLAPSED (dsh
 // groupExpansion: {} — the current session's group auto-expands instead,
@@ -1421,33 +1422,38 @@ async function deleteSession(id) {
   loadSessions();
 }
 
-// currentWorkspaceId returns the workspace that owns the active session (dsh
-// startSession: the current Session's Workspace). "" when none — the session
-// may be ungrouped.
-function currentWorkspaceId() {
+// currentGroupKey returns the group owning the active session: the workspace
+// id, the UNGROUPED sentinel when the session has no workspace, or "" when
+// there is no active session (dsh currentGroup: workspace ?? UNGROUPED_KEY).
+const UNGROUPED = "__ungrouped__";
+function currentGroupKey() {
   if (!currentID) return "";
   for (const w of wsGroups) if (w.session_ids.includes(currentID)) return w.id;
+  const s = lastSessionList.find((x) => x.id === currentID);
+  if (s && !s.workspace_id) return UNGROUPED;
   return "";
 }
 // rememberRecentWorkspace persists the active session's workspace (dsh
 // recentWorkspaceId) so 新会话 lands there even without an active session.
 function rememberRecentWorkspace(list) {
-  if (!currentID || !Array.isArray(list)) return;
-  const s = list.find((x) => x.id === currentID);
+  lastSessionList = Array.isArray(list) ? list : lastSessionList;
+  if (!currentID) return;
+  const s = lastSessionList.find((x) => x.id === currentID);
   if (s && s.workspace_id) localStorage.setItem(KEY_RECENT_WS, s.workspace_id);
 }
 function recentWorkspaceId() {
   return localStorage.getItem(KEY_RECENT_WS) || "";
 }
-// newSession starts a session in the current workspace (dsh startSession):
-// the target is the current session's workspace, else the recent workspace,
-// else the hero-picked workspace; with no workspace at all it lands on the
-// choose-workspace hero (dsh: no Workspace → clear into the New Session view
-// state). The created blank session shows as 新会话 in the sidebar.
+// newSession starts a session in the current group (dsh startSession): the
+// target is the current session's workspace — the ungrouped bucket included —
+// else the recent workspace, else the hero-picked workspace; with no target
+// at all it lands on the choose-workspace hero. The created blank session
+// shows as 新会话 in the sidebar.
 async function newSession() {
-  const target = currentWorkspaceId() || recentWorkspaceId() || heroWorkspace;
-  if (!target) { showNewSessionHero(); return; }
-  await createSessionInWorkspace(target);
+  const group = currentGroupKey();
+  const target = group !== "" ? group : (recentWorkspaceId() || heroWorkspace || "");
+  if (target === "") { showNewSessionHero(); return; }
+  await createSessionInWorkspace(target === UNGROUPED ? "" : target);
 }
 // showNewSessionHero is the no-workspace fallback of newSession (dsh New
 // Session hero): no session is created until the user picks a workspace
