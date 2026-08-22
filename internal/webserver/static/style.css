@@ -1304,6 +1304,8 @@ body[data-ds-dark-theme="false"] .nav-cell.active { background: #EBEEF2; }
 }
 .row-select:hover { background-color: var(--dsw-alias-interactive-bg-hover); }
 .row-select:disabled { color: var(--dsw-alias-label-tertiary); cursor: default; }
+/* Focus frame = white (设置对齐: 编辑框聚焦白框线). */
+.row-select:focus { outline: 1px solid #FFFFFF; outline-offset: -1px; }
 /* capability badge */
 .cap-badge {
   font-size: 12px; line-height: 20px; padding: 0 10px; border-radius: 14px;
@@ -1366,7 +1368,7 @@ body[data-ds-dark-theme="false"] .nav-cell.active { background: #EBEEF2; }
   border-radius: 18px; background: var(--dsw-alias-bg-base); color: var(--dsw-alias-label-primary);
   font: inherit; font-size: 14px;
 }
-.m-input:focus { outline: none; border-color: var(--dsw-alias-state-business-primary); }
+.m-input:focus { outline: none; border-color: #FFFFFF; }
 .m-fieldvalue { font-size: 13px; line-height: 20px; color: var(--dsw-alias-label-secondary); font-family: var(--dsw-font-code); word-break: break-all; }
 .m-notice { margin: 0; font-size: 12px; line-height: 18px; color: var(--dsw-alias-state-warn-label); }
 .m-editoractions { display: flex; justify-content: flex-end; gap: 8px; align-items: center; }
@@ -1424,7 +1426,7 @@ body[data-ds-dark-theme="false"] .nav-cell.active { background: #EBEEF2; }
   background-size: 5px 5px; background-repeat: no-repeat;
   padding-right: 32px;
 }
-.m-input.m-select:focus { outline: none; border-color: var(--dsw-alias-state-business-primary); }
+.m-input.m-select:focus { outline: none; border-color: #FFFFFF; }
 .m-rowtag.custom { color: var(--dsw-alias-state-business-primary); border-color: var(--dsw-alias-state-business-tertiary); }
 .m-btn.m-danger { color: var(--dsw-alias-state-error-primary); border-color: var(--dsw-alias-state-error-secondary); }
 .m-btn.m-danger:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover-danger); }
@@ -1562,6 +1564,15 @@ body[data-ds-dark-theme="false"] .nav-cell.active { background: #EBEEF2; }
   background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary);
   font: inherit; font-size: 13px; line-height: 34px; outline: none;
 }
+/* Focus frame = white (设置对齐: 编辑框聚焦白框线). */
+.sk-search input:focus { border-color: #FFFFFF; }
+/* 分组名称 input in the group-editor overlay: styled like the search field. */
+#sk-groupname {
+  border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; outline: none;
+  background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary);
+  font: inherit; font-size: 13px;
+}
+#sk-groupname:focus { border-color: #FFFFFF; }
 .sk-search .sk-search-icon { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); color: var(--dsw-alias-label-tertiary); pointer-events: none; }
 .sk-chipbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 12px; }
 .sk-chip {
