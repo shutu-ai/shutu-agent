@@ -2699,11 +2699,13 @@ async function loadConfig() {
 
 // ---- settings page (P3: dsh SettingsRoot two-column panel, read-only) -------
 // Section registry: general / model / caps / skills. Every control is read-only
-// (ADR D-WEB2-D: no runtime editing — config changes need a restart).
+// (ADR D-WEB2-D: no runtime editing — config changes need a restart). Icons are
+// uniform 16px SVGs (dsh SettingsRoot navIcon: models → data outline, unknown →
+// settings gear), so every nav glyph renders at the same size.
 const SETTINGS_SECTIONS = [
-  { id: "general", label: "通用设置", icon: "⚙" },
-  { id: "model", label: "模型", icon: "◈" },
-  { id: "caps", label: "能力开关", icon: PA_ICONS.caps },
+  { id: "general", label: "通用设置", icon: PA_ICONS.settings },
+  { id: "model", label: "模型", icon: PA_ICONS.data },
+  { id: "caps", label: "能力开关", icon: PA_ICONS.personalization },
   { id: "skills", label: "技能", icon: PA_ICONS.skills },
 ];
 const CAPABILITY_NAMES = {
