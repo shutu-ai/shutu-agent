@@ -1016,15 +1016,19 @@ mark {
   max-height: 336px; overflow-y: auto; width: 100%;
 }
 .mirror { visibility: hidden; white-space: pre-wrap; word-wrap: break-word; }
+/* Primary send (dsh InputBar .primary): 34px circle, info-fill blue, white
+   glyph. The RUNNING state keeps the same blue circle (dsh primaryStops — the
+   stop square is white on the same fill); an empty draft disables at 0.4
+   opacity instead of turning gray. */
 .send-btn {
-  width: 34px; height: 34px; border: none; border-radius: 50%;
+  width: 34px; height: 34px; padding: 0; border: none; border-radius: 50%;
   background: var(--dsw-alias-button-info-fill); color: #fff;
-  font-size: 14px; flex: none;
+  font-size: 14px; flex: none; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
 }
+.send-btn svg { display: block; }
 .send-btn:hover { background: var(--dsw-alias-button-info-hover); }
-.send-btn:disabled { background: var(--dsw-alias-label-dimmed); cursor: not-allowed; }
-.send-btn.running { background: var(--dsw-specific-input-major); border: 1px solid var(--dsw-alias-border-l2); color: var(--dsw-alias-label-primary); }
-.send-btn.running:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 
 /* composer toolbar row (dsh InputBar tools / trailing), now INSIDE the capsule */
 .composer-tools {

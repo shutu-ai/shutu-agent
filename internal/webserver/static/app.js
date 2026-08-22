@@ -2023,11 +2023,14 @@ function fmtTokens(n) {
   return scaled(n / 1000000) + "M";
 }
 // The send button doubles as the run stop (dsh InputBar primaryStops): while a
-// turn is in flight it shows ■ and aborts; otherwise it is the send arrow.
+// turn is in flight it shows the white stop square (dsh ic_stop: 16px rounded
+// rect) on the SAME blue circle; otherwise the dsh send arrow (ic_send_outline_14).
+const SEND_GLYPH = '<svg viewBox="0 0 14 14" width="14" height="14" aria-hidden="true"><path d="M7.24707 1.01771C7.52897 1.07653 7.77619 1.19694 8.00391 1.38001C8.19202 1.53136 8.39884 1.73784 8.61914 1.95814L12.6396 5.9806L11.6299 6.99134L7.71484 3.0763V13.0001H6.28516V3.0763L2.36914 6.99134L1.35938 5.9806L5.38086 1.95814C5.60116 1.73784 5.80798 1.53136 5.99609 1.38001C6.19476 1.22027 6.4385 1.06739 6.75195 1.01771C6.91296 0.992304 7.07471 0.997504 7.24707 1.01771Z" fill="currentColor"/></svg>';
+const STOP_GLYPH = '<svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="3" fill="currentColor"></rect></svg>';
 function syncSendButton() {
   if (!sendBtn) return;
   sendBtn.classList.toggle("running", turnRunning);
-  sendBtn.textContent = turnRunning ? "■" : "➤";
+  sendBtn.innerHTML = turnRunning ? STOP_GLYPH : SEND_GLYPH;
   sendBtn.title = turnRunning ? "停止" : "发送";
   sendBtn.setAttribute("aria-label", turnRunning ? "停止" : "发送");
 }
