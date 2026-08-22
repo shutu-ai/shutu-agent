@@ -1452,6 +1452,9 @@ body[data-ds-dark-theme="false"] .nav-cell.active { background: #EBEEF2; }
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
 }
 .m-btn.m-add:hover { background: var(--dsw-alias-interactive-bg-hover); border-color: var(--dsw-alias-state-business-primary); color: var(--dsw-alias-state-business-primary); }
+/* Focus frame = white (设置对齐): clicking keeps the pointer over the button,
+   so the hover accent would otherwise read as a blue focus frame. */
+.m-btn.m-add:focus { border-color: #FFFFFF; color: #FFFFFF; }
 /* provider row card (dsh ModelsSection.rowCard) */
 .row-card {
   display: flex; flex-direction: column; gap: 12px;
