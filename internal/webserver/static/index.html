@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>数驼 AI Agent</title>
   <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" type="image/png" href="/static/big_logo_1.png">
 </head>
 <body>
   <!-- Login view (public shell): only shown when the backend actually answers
@@ -33,7 +34,7 @@
         <div class="logo-row">
           <button id="brand" class="brand" title="新建会话" type="button">
             <span class="brand-mark" aria-hidden="true">
-              <img id="brand-logo" alt="" width="24" height="24" src="/static/logo_b.png">
+              <img id="brand-logo" alt="" width="24" height="24" src="/static/big_logo_1.png">
             </span>
             <span class="brand-name">数驼 AI&nbsp;<em class="brand-agent">AGENT</em></span>
           </button>
@@ -41,7 +42,7 @@
             <!-- dsh rail behavior: resting rail shows the brand mark; hovering
                  swaps in the panel (expand) icon; expanded always shows it. -->
             <span class="toggle-mark" aria-hidden="true">
-              <img id="toggle-logo" alt="" width="24" height="24" src="/static/logo_b.png">
+              <img id="toggle-logo" alt="" width="24" height="24" src="/static/big_logo_1.png">
             </span>
             <span class="toggle-panel" data-icon="panelleft" aria-hidden="true"></span>
           </button>
@@ -117,33 +118,50 @@
 
       <!-- Center column: topbar + message stream + composer. The whole header
            is hidden while the session is blank (dsh headerHidden: no status row
-           on 新会话; only a session with content shows it). -->
+           on 新会话; only a session with content shows it). dsh
+           ConversationSessionHeader structure: title row = [crumbs + header
+           actions] on the left, header utilities on the right. -->
       <main class="col-center" aria-label="对话" data-phase="">
         <header id="topbar" class="topbar">
-          <span id="cur-session" class="cur-session" title="当前会话"></span>
-          <span id="mode-badge" class="mode-badge hidden" title="会话模式：改 config.yaml 重启生效"></span>
-          <span class="spacer"></span>
-          <button id="runs-tab" class="header-trigger hidden" type="button" aria-haspopup="menu" aria-expanded="false" title="运行状态">
-            <span class="ht-dot" data-state="idle" aria-hidden="true"></span>
-            <span class="ht-label">运行状态</span>
-            <span class="ht-caret" data-icon="caretdown" aria-hidden="true"></span>
-          </button>
-          <div id="runs-panel" class="header-pop hidden" role="menu">
-            <div class="runs-head">
-              <span class="runs-title">运行状态</span>
-              <button id="runs-refresh" class="runs-refresh" title="刷新">↻</button>
+          <div class="title-row">
+            <div class="title-cluster">
+              <nav class="crumbs" aria-label="会话层级">
+                <!-- Single crumb: shutu sessions carry no parent chain metadata
+                     (dsh ancestry), so the current session is always the last
+                     (crumb-current) segment. -->
+                <span id="cur-session" class="crumb crumb-current" title="当前会话"></span>
+              </nav>
+              <!-- dsh AgentPresetLabel: read-only mode badge beside the title. -->
+              <span id="mode-badge" class="preset-label hidden" title="会话模式：改 config.yaml 重启生效"></span>
+              <!-- dsh conversation.session.header.actions: subagent catalog +
+                   background jobs, each a count trigger with its own menu;
+                   hidden until the session actually has entries. -->
+              <div class="header-actions">
+                <div id="subs-root" class="hd-root">
+                  <button id="subs-trigger" class="hd-action hidden" type="button" aria-haspopup="menu" aria-expanded="false" title="子代理">
+                    <span class="hd-slot" aria-hidden="true"><span class="hd-dot" data-state="idle"></span></span>
+                    <span id="subs-count" class="hd-count">0 个子代理</span>
+                    <span class="hd-caret" data-icon="caretdown" aria-hidden="true"></span>
+                  </button>
+                  <div id="subs-menu" class="hd-menu hidden" role="menu" aria-label="子代理"></div>
+                </div>
+                <div id="jobs-root" class="hd-root">
+                  <button id="jobs-trigger" class="hd-action hidden" type="button" aria-haspopup="menu" aria-expanded="false" title="后台任务">
+                    <span class="hd-slot" aria-hidden="true"><span class="hd-dot" data-state="idle"></span></span>
+                    <span id="jobs-count" class="hd-count">0 个后台任务</span>
+                    <span class="hd-caret" data-icon="caretdown" aria-hidden="true"></span>
+                  </button>
+                  <div id="jobs-menu" class="hd-menu hidden" role="menu" aria-label="后台任务"></div>
+                </div>
+              </div>
             </div>
-            <div class="runs-section">
-              <div class="runs-sec-title">子代理</div>
-              <div id="runs-subs" class="runs-body" aria-live="polite"></div>
-            </div>
-            <div class="runs-section">
-              <div class="runs-sec-title">后台任务</div>
-              <div id="runs-jobs" class="runs-body" aria-live="polite"></div>
+            <!-- dsh conversation.session.header.utilities: right-edge controls
+                 (shutu: settings page + theme toggle). -->
+            <div class="header-utilities">
+              <a id="settings-link" class="btn-icon" href="#/settings" title="设置">⚙</a>
+              <button id="theme-toggle" class="btn-icon" title="切换主题">☀️</button>
             </div>
           </div>
-          <a id="settings-link" class="btn-icon" href="#/settings" title="设置">⚙</a>
-          <button id="theme-toggle" class="btn-icon" title="切换主题">☀️</button>
         </header>
         <!-- The milieu is the centered/docked stage: in the hero phase it centers
              the headline + workspace/mode row + composer together (dsh
@@ -161,8 +179,10 @@
           <div id="hero" class="hero hidden">
             <div class="hero-inner">
               <div class="hero-headline">
-                <span class="hero-fish" data-icon="fishlogo" aria-hidden="true"></span>
-                <h1 class="hero-title">探索未至之境</h1>
+                <!-- The brand mark is the sidebar logo PNG (black on light,
+                     white on dark, swapped in applyTheme — same as brand-logo). -->
+                <img id="hero-logo" class="hero-logo" alt="" width="32" height="32" src="/static/big_logo_1.png">
+                <h1 class="hero-title">稳行数据荒漠</h1>
                 <span class="hero-preview">预览版</span>
               </div>
               <div class="hero-ws-row">

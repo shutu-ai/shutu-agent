@@ -256,6 +256,7 @@ func New(st store.Store, token, addr string) (*Server, error) {
 	// no data. Every /api route sits behind the bearer middleware.
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", s.handleIndex)
+	mux.HandleFunc("GET /favicon.ico", s.handleFavicon)
 	mux.HandleFunc("GET /static/{file...}", s.handleStatic)
 	mux.Handle("GET /api/health", s.requireAuth(http.HandlerFunc(s.handleHealth)))
 	mux.Handle("GET /api/stats", s.requireAuth(http.HandlerFunc(s.handleStats)))
@@ -511,6 +512,21 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// handleFavicon serves the browser favicon: the user's black brand logo
+// (big_logo_1.png). index.html declares it via <link rel="icon">; this route
+// catches direct /favicon.ico requests so they never 404 (dsh: favicon = the
+// brand mark).
+func (s *Server) handleFavicon(w http.ResponseWriter, r *http.Request) {
+	b, err := staticFS.ReadFile("static/big_logo_1.png")
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = w.Write(b)
 }
 
 // handleIndex serves the embedded single-page shell. In the ServeMux the

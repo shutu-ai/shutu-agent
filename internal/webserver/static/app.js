@@ -142,13 +142,15 @@ function applyTheme() {
   // Brand logo: the user's monochrome PNG — white mark on dark, black on light.
   // The rail toggle's brand mark follows the same theme (dsh brand mark slot).
   const logo = $("brand-logo");
-  if (logo) logo.src = dark ? "/static/logo_w.png" : "/static/logo_b.png";
+  if (logo) logo.src = dark ? "/static/big_logo_2.png" : "/static/big_logo_1.png";
+  const hlogo = $("hero-logo");
+  if (hlogo) hlogo.src = dark ? "/static/big_logo_2.png" : "/static/big_logo_1.png";
   const tlogo = $("toggle-logo");
-  if (tlogo) tlogo.src = dark ? "/static/logo_w.png" : "/static/logo_b.png";
+  if (tlogo) tlogo.src = dark ? "/static/big_logo_2.png" : "/static/big_logo_1.png";
   const icon = $("theme-toggle");
-  if (icon) icon.textContent = dark ? "☀️" : "🌙";
+  if (icon) icon.innerHTML = dark ? DSH_ICON_LIGHT : DSH_ICON_DARK;
   const icon2 = $("theme-toggle-settings");
-  if (icon2) icon2.textContent = dark ? "☀️" : "🌙";
+  if (icon2) icon2.innerHTML = dark ? DSH_ICON_LIGHT : DSH_ICON_DARK;
 }
 function toggleTheme() {
   const dark = currentDark();
@@ -458,6 +460,12 @@ const DSH_ICON_COPY = '<svg width="16" height="16" viewBox="0 0 16 16" fill="non
 const DSH_ICON_LIKE = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"> <path d="M8.27868 0.811572C8.81991 0.142194 9.79022 0.0421835 10.4538 0.557601L10.5823 0.669306L10.6066 0.693544L10.6097 0.695652L10.6392 0.725159C11.355 1.44679 11.6337 2.49468 11.3716 3.47669L11.3706 3.48091L11.3611 3.51674L11.3601 3.51885L10.889 5.22604C10.8796 5.25997 10.8707 5.29157 10.8627 5.32088C10.8934 5.32095 10.927 5.32194 10.9628 5.32194H11.9007C12.4264 5.32194 12.7831 5.319 13.0651 5.36725C14.8182 5.66719 15.9851 7.34568 15.6565 9.09357C15.6036 9.37487 15.477 9.7092 15.294 10.2022L14.3371 12.7798C14.1402 13.3104 13.9774 13.7518 13.8102 14.1024C13.6376 14.4645 13.4386 14.7793 13.1442 15.0424C12.9712 15.197 12.7802 15.3303 12.5751 15.4386C12.226 15.6231 11.8608 15.7 11.4612 15.7358C11.0743 15.7705 10.6035 15.7695 10.0375 15.7695H4.87377C4.08053 15.7695 3.42928 15.7702 2.90734 15.7137C2.37212 15.6557 1.88991 15.5311 1.46676 15.2237C1.22415 15.0474 1.01078 14.8339 0.834466 14.5914C0.527021 14.1682 0.401373 13.686 0.343384 13.1508C0.286822 12.6287 0.287531 11.9769 0.287531 11.1833V9.51405C0.287531 8.84778 0.281347 8.36714 0.399237 7.9565C0.671152 7.00935 1.41115 6.26832 2.35829 5.99638C2.76894 5.87849 3.24958 5.88573 3.91585 5.88573C4.11983 5.88573 4.14548 5.88319 4.16244 5.88046C4.23532 5.86863 4.30409 5.83663 4.35845 5.78667C4.3711 5.77504 4.38761 5.75604 4.51442 5.59488L8.25655 0.838972L8.2576 0.837918L8.27868 0.811572ZM1.69122 11.1833C1.69122 12.0082 1.69217 12.5711 1.73865 13.0001C1.78371 13.4157 1.86473 13.6221 1.96943 13.7662C2.0592 13.8898 2.16733 13.9989 2.29085 14.0887C2.43501 14.1934 2.64216 14.2744 3.05803 14.3195C3.45897 14.3629 3.97637 14.3656 4.7157 14.3659C4.30801 13.8053 4.06453 13.1171 4.06444 12.371V8.59406H5.46813V12.371C5.46838 13.4733 6.36166 14.3669 7.46407 14.3669H10.0375C10.6286 14.3669 11.0269 14.3663 11.3369 14.3385C11.6339 14.3118 11.7956 14.2638 11.9196 14.1983C12.0241 14.1431 12.1213 14.0747 12.2094 13.996C12.314 13.9025 12.4151 13.7678 12.5435 13.4986C12.6774 13.2176 12.8162 12.845 13.0219 12.2909L13.9788 9.71322C14.1848 9.15816 14.2531 8.96731 14.2781 8.83433C14.4618 7.85692 13.8093 6.91895 12.8291 6.75092C12.6957 6.7281 12.4928 6.72458 11.9007 6.72458H10.9628C10.7737 6.72458 10.5693 6.72657 10.4 6.70666C10.2211 6.68562 9.96702 6.63024 9.74771 6.43161C9.64454 6.33811 9.55957 6.2261 9.4969 6.10177C9.3639 5.83784 9.37799 5.57899 9.40521 5.40097C9.431 5.23261 9.48672 5.03616 9.53694 4.85404L10.008 3.14579L10.0175 3.11102C10.1488 2.61338 10.0078 2.08338 9.64654 1.71681L9.6086 1.67887L9.55064 1.64304C9.48795 1.62043 9.41425 1.63814 9.36938 1.69362L9.35779 1.70627L9.35884 1.70732L5.61672 6.46217C5.51822 6.58735 5.42237 6.7133 5.30689 6.81942C5.05075 7.05471 4.73126 7.20939 4.38796 7.26519C4.23315 7.29032 4.07513 7.28837 3.91585 7.28837C3.15356 7.28837 2.91916 7.2957 2.7461 7.34528C2.26364 7.48379 1.88564 7.86081 1.74708 8.34325C1.69738 8.51636 1.69122 8.7511 1.69122 9.51405V11.1833Z" fill="currentColor" /> </svg>';
 const DSH_ICON_DISLIKE = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"> <path d="M7.72451 15.1086C7.18929 15.7705 6.22975 15.8694 5.57357 15.3597L5.44643 15.2492L5.42247 15.2253L5.41934 15.2232L5.39016 15.194C4.68239 14.4804 4.40679 13.4441 4.66589 12.473L4.66693 12.4689L4.67631 12.4334L4.67735 12.4314L5.14318 10.7431C5.15243 10.7096 5.1613 10.6783 5.16923 10.6493C5.13878 10.6493 5.10558 10.6483 5.07023 10.6483H4.14274C3.62288 10.6483 3.27015 10.6512 2.9912 10.6035C1.25757 10.3069 0.103662 8.64702 0.42863 6.91854C0.480965 6.64037 0.606164 6.30975 0.787119 5.82223L1.73336 3.27321C1.92812 2.74852 2.08912 2.31209 2.25442 1.96535C2.42515 1.60724 2.62191 1.29594 2.91304 1.03578C3.08408 0.882951 3.273 0.751121 3.47579 0.643944C3.82102 0.461504 4.18214 0.38551 4.57731 0.350066C4.95993 0.315784 5.42553 0.316718 5.98521 0.316718H11.0916C11.876 0.316718 12.52 0.31607 13.0362 0.37195C13.5655 0.429293 14.0423 0.552534 14.4608 0.856536C14.7007 1.03085 14.9117 1.24193 15.086 1.48181C15.3901 1.90027 15.5143 2.37709 15.5717 2.90638C15.6276 3.42269 15.6269 4.06721 15.6269 4.85202V6.50274C15.6269 7.1616 15.633 7.6369 15.5164 8.04299C15.2475 8.97962 14.5158 9.71242 13.5791 9.98133C13.173 10.0979 12.6977 10.0908 12.0389 10.0908C11.8372 10.0908 11.8118 10.0933 11.795 10.096C11.723 10.1077 11.6549 10.1393 11.6012 10.1887C11.5887 10.2002 11.5724 10.219 11.447 10.3784L7.74639 15.0815L7.74535 15.0825L7.72451 15.1086ZM14.2388 4.85202C14.2388 4.03628 14.2379 3.47965 14.1919 3.05541C14.1473 2.64443 14.0672 2.4403 13.9637 2.29779C13.8749 2.17562 13.768 2.06769 13.6458 1.9789C13.5033 1.87532 13.2984 1.79523 12.8872 1.75067C12.4907 1.70773 11.979 1.70511 11.2479 1.70482C11.6511 2.25917 11.8918 2.93968 11.8919 3.67755V7.41251H10.5038V3.67755C10.5036 2.58745 9.62023 1.70378 8.53007 1.70378H5.98521C5.40065 1.70378 5.00679 1.70442 4.70028 1.73192C4.40651 1.7583 4.24662 1.80571 4.12399 1.87052C4.02069 1.92511 3.92452 1.99276 3.8374 2.07061C3.73401 2.16306 3.634 2.2962 3.50705 2.56249C3.37462 2.84027 3.23734 3.20873 3.03393 3.75675L2.08768 6.30578C1.88395 6.85467 1.81646 7.0434 1.79172 7.1749C1.61005 8.14146 2.25533 9.06902 3.22464 9.23517C3.35654 9.25774 3.55717 9.26123 4.14274 9.26123H5.07023C5.25717 9.26123 5.4593 9.25926 5.62672 9.27894C5.80364 9.29975 6.05492 9.35452 6.27179 9.55094C6.37381 9.6434 6.45784 9.75417 6.51982 9.87712C6.65133 10.1381 6.6374 10.3941 6.61048 10.5701C6.58498 10.7366 6.52988 10.9309 6.48022 11.111L6.01439 12.8003L6.00501 12.8347C5.87513 13.3268 6.01464 13.8509 6.37184 14.2134L6.40935 14.2509L6.46667 14.2863C6.52866 14.3087 6.60155 14.2912 6.64591 14.2363L6.65738 14.2238L6.65633 14.2228L10.3569 9.52072C10.4543 9.39693 10.5491 9.27238 10.6633 9.16744C10.9166 8.93476 11.2325 8.7818 11.572 8.72662C11.7251 8.70177 11.8814 8.70369 12.0389 8.70369C12.7927 8.70369 13.0245 8.69645 13.1956 8.64742C13.6727 8.51045 14.0465 8.13761 14.1836 7.66053C14.2327 7.48935 14.2388 7.25721 14.2388 6.50274V4.85202Z" fill="currentColor" /> </svg>';
 
+
+// Theme-toggle glyphs (dsh ui-primitives ic_ds_light_outline_16 /
+// ic_ds_dark_outline_16): monochrome currentColor, so the button renders white
+// on dark and black on light (the theme seat shows the target theme's icon).
+const DSH_ICON_LIGHT = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"> <path d="M11.3496 8C11.3496 6.14985 9.85015 4.65039 8 4.65039C6.14985 4.65039 4.65039 6.14985 4.65039 8C4.65039 9.85015 6.14985 11.3496 8 11.3496C9.85015 11.3496 11.3496 9.85015 11.3496 8ZM12.6504 8C12.6504 10.5681 10.5681 12.6504 8 12.6504C5.43188 12.6504 3.34961 10.5681 3.34961 8C3.34961 5.43188 5.43188 3.34961 8 3.34961C10.5681 3.34961 12.6504 5.43188 12.6504 8Z" fill="currentColor" /> <path d="M8.65039 0.5V2.5H7.34961V0.5H8.65039Z" fill="currentColor" /> <path d="M8.65039 13.5V15.5H7.34961V13.5H8.65039Z" fill="currentColor" /> <path d="M3.15808 2.24035L4.57229 3.65456L3.6525 4.57435L2.23829 3.16014L3.15808 2.24035Z" fill="currentColor" /> <path d="M12.3505 11.4327L13.7647 12.8469L12.8449 13.7667L11.4307 12.3525L12.3505 11.4327Z" fill="currentColor" /> <path d="M2.24537 12.8469L3.65958 11.4327L4.57937 12.3525L3.16516 13.7667L2.24537 12.8469Z" fill="currentColor" /> <path d="M11.4377 3.65455L12.852 2.24033L13.7718 3.16012L12.3575 4.57434L11.4377 3.65455Z" fill="currentColor" /> <path d="M0.5 7.35461H2.5V8.6554H0.5L0.5 7.35461Z" fill="currentColor" /> <path d="M13.5 7.35461H15.5V8.6554H13.5V7.35461Z" fill="currentColor" /> </svg>';
+const DSH_ICON_DARK = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"> <path d="M13.2764 9.52324C12.5607 9.97754 11.7177 10.242 10.7812 10.242C8.11386 10.2419 5.95042 8.07997 5.9502 5.41289C5.9502 4.48128 6.21453 3.61071 6.67188 2.87285C4.30332 3.4658 2.54992 5.60845 2.5498 8.16093C2.5498 11.1712 4.99103 13.6102 8 13.6102C10.5383 13.6102 12.6709 11.8724 13.2764 9.52324ZM7.05078 5.41289C7.051 7.47224 8.72116 9.1423 10.7812 9.14238C11.9248 9.14238 12.887 8.63397 13.5781 7.8084C13.7266 7.63106 13.9701 7.56547 14.1875 7.64433C14.4049 7.72329 14.5497 7.9297 14.5498 8.16093C14.5498 11.7766 11.6161 14.7098 8 14.7098C4.38402 14.7098 1.4502 11.7792 1.4502 8.16093C1.45033 4.54322 4.3812 1.61015 8 1.61015C8.23027 1.61015 8.43585 1.75352 8.51562 1.96953C8.59536 2.18554 8.53241 2.42829 8.35742 2.57793C7.55573 3.26311 7.05078 4.27876 7.05078 5.41289Z" fill="currentColor" /> </svg>';
 
 // Tool classification (dsh tool-call-model TOOL_VARIANTS): known tool name ->
 // row variant; unknown tools land on the generic "Tool call" row. The dsh
@@ -1997,7 +2005,7 @@ function showNewSessionHero() {
   syncHeroPickState();
   setHeroPhase();
   updatePlaceholder();
-  syncRunsTrigger();
+  syncHeaderActions();
   refreshContextMeter();
   syncGrow();
 }
@@ -2151,12 +2159,11 @@ function syncModeChip() {
   }
 }
 function syncModeBadge() {
+  // dsh AgentPresetLabel: read-only preset/mode name beside the title; the
+  // label hides when the runtime mode is unset.
   const rt = config.mode || "";
   modeBadgeEl.textContent = MODE_DISPLAY[rt] || rt;
   modeBadgeEl.classList.toggle("hidden", !modeBadgeEl.textContent);
-  modeBadgeEl.classList.remove("mode-minimal", "mode-code");
-  if (rt === "minimal") modeBadgeEl.classList.add("mode-minimal");
-  if (rt === "code") modeBadgeEl.classList.add("mode-code");
 }
 async function pickMode(id) {
   mode = id;
@@ -2903,7 +2910,7 @@ function openSession(id) {
   // picked workspace. (dsh: session → composer active, hero → choose-workspace.)
   setComposerDisabled(!id);
   updatePlaceholder();
-  syncRunsTrigger();
+  syncHeaderActions();
   if (!id) { sessionCfg = { model: "", permission: "" }; setHeroPhase(); if (contextMeter) { contextMeter.textContent = ""; cmOpen = false; } return; }
   loadSessionConfig(id);
   return Promise.all([loadEvents(id), connectStream(id)]);
@@ -4582,13 +4589,17 @@ async function route() {
 }
 window.addEventListener("hashchange", () => route());
 
-// ---- P4: runs panel (subagents + background jobs, dsh ui-subagent / ui-jobs)
-// The sidebar shortcut was removed on user request; the panel logic stays for
-// a future entry (runs-tab is gone, so the panel is currently unreachable).
+// ---- P4: header actions (dsh ui-subagent catalog + ui-jobs list) ----------
+// Two independent count triggers beside the session title, each with its own
+// popover list; a trigger stays hidden until its session actually has entries
+// (dsh: an ordinary conversation never grows a control for a capability it is
+// not using). Copy strings follow the dsh locales (ui-jobs / ui-subagent).
 // ----------------------------------------------------------------------------
-const runsPanel = $("runs-panel"), runsTab = $("runs-tab"),
-      runsSubs = $("runs-subs"), runsJobs = $("runs-jobs"), runsRefresh = $("runs-refresh");
-let runsOpen = false, runsPollTimer = null, runsClockTimer = null, runsBusy = false;
+const subsRoot = $("subs-root"), subsTrigger = $("subs-trigger"),
+      subsCount = $("subs-count"), subsMenu = $("subs-menu");
+const jobsRoot = $("jobs-root"), jobsTrigger = $("jobs-trigger"),
+      jobsCount = $("jobs-count"), jobsMenu = $("jobs-menu");
+let subsOpen = false, jobsOpen = false, runsPollTimer = null, runsClockTimer = null, runsBusy = false;
 
 const JOB_STATUS_WORDS = {
   running: "运行中", stopping: "正在停止", completed: "已完成", killed: "已取消", failed: "已失败",
@@ -4599,59 +4610,49 @@ function jobDotState(status) {
   if (status === "failed") return "error";
   return "done"; // completed / unknown
 }
+// dsh ui-jobs formatDuration copy strings: {hours}小时{minutes}分,
+// {minutes}分{seconds}秒 (seconds zero-padded), {seconds}秒.
 function fmtDuration(ms) {
   const s = Math.max(0, Math.floor(ms / 1000));
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
   if (h > 0) return `${h}小时${m}分`;
-  if (m > 0) return `${m}分${sec}秒`;
+  if (m > 0) return `${m}分${String(sec).padStart(2, "0")}秒`;
   return `${sec}秒`;
 }
 
-function toggleRuns(force) {
-  const next = force !== undefined ? force : !runsOpen;
-  if (next === runsOpen) return;
-  runsOpen = next;
-  runsPanel.classList.toggle("hidden", !runsOpen);
-  if (runsTab) {
-    runsTab.classList.toggle("active", runsOpen);
-    runsTab.setAttribute("aria-expanded", runsOpen ? "true" : "false");
-  }
-  if (runsOpen) {
-    loadRuns();
-    startRunsTimers();
-    positionRunsPop();
-  } else {
-    stopRunsTimers();
-  }
+function setMenuOpen(menu, trigger, open) {
+  menu.classList.toggle("hidden", !open);
+  trigger.setAttribute("aria-expanded", open ? "true" : "false");
 }
-// Anchor the popover under its trigger (dsh popover menus hang from the trigger).
-function positionRunsPop() {
-  const tr = runsTab, pop = runsPanel;
-  if (!tr || !pop) return;
-  const r = tr.getBoundingClientRect();
-  let left = r.right - 260;
-  if (left < 8) left = 8;
-  pop.style.left = left + "px";
-  pop.style.top = (r.bottom + 6) + "px";
+function toggleSubs(force) {
+  const next = force !== undefined ? force : !subsOpen;
+  if (next === subsOpen) return;
+  subsOpen = next;
+  setMenuOpen(subsMenu, subsTrigger, subsOpen);
+  if (subsOpen) { loadRuns(); startRunsTimers(); } else { stopRunsTimersIfIdle(); }
 }
-// The runs trigger only appears for an active session (dsh session-header
-// actions); switching to the hero / a blank session hides and closes it.
-function syncRunsTrigger() {
-  if (!runsTab) return;
-  const active = !!currentID;
-  runsTab.classList.toggle("hidden", !active);
-  if (!active) toggleRuns(false);
+function toggleJobs(force) {
+  const next = force !== undefined ? force : !jobsOpen;
+  if (next === jobsOpen) return;
+  jobsOpen = next;
+  setMenuOpen(jobsMenu, jobsTrigger, jobsOpen);
+  if (jobsOpen) { loadRuns(); startRunsTimers(); } else { stopRunsTimersIfIdle(); }
+}
+// Switching to the hero / a blank session closes both menus (dsh: header
+// actions belong to an active session).
+function syncHeaderActions() {
+  if (!currentID) { toggleSubs(false); toggleJobs(false); }
 }
 function startRunsTimers() {
   stopRunsTimers();
   // 1s live duration clock (only matters while a job is live; cheap enough)
   runsClockTimer = setInterval(() => {
-    document.querySelectorAll(".run-duration[data-live]").forEach((el) => {
+    document.querySelectorAll(".hd-duration[data-live]").forEach((el) => {
       const start = Number(el.dataset.start);
       if (start) el.textContent = fmtDuration(Date.now() - start);
     });
   }, 1000);
-  // 10s list refresh; paused while the tab is hidden
+  // 10s list refresh; paused while both menus are closed
   runsPollTimer = setInterval(() => {
     if (document.visibilityState !== "hidden") loadRuns();
   }, 10000);
@@ -4659,6 +4660,9 @@ function startRunsTimers() {
 function stopRunsTimers() {
   if (runsClockTimer) { clearInterval(runsClockTimer); runsClockTimer = null; }
   if (runsPollTimer) { clearInterval(runsPollTimer); runsPollTimer = null; }
+}
+function stopRunsTimersIfIdle() {
+  if (!subsOpen && !jobsOpen) stopRunsTimers();
 }
 
 // orderedJobs mirrors dsh ui-jobs ordered(): live (running/stopping) first by
@@ -4674,95 +4678,109 @@ function orderedJobs(jobs) {
   return live.concat(settled);
 }
 
+// renderSubagents fills the subagent menu and the trigger's count/visibility
+// (dsh SubagentCatalogAction: count label "N 个子代理" / "N 个子代理，正在运行"
+// with an ongoing dot; the action disappears when the session has none).
 function renderSubagents(list) {
-  if (!Array.isArray(list)) return;
-  runsSubs.textContent = "";
-  if (list.length === 0) {
-    runsSubs.innerHTML = `<div class="runs-empty">暂无子代理</div>`;
+  const arr = Array.isArray(list) ? list : [];
+  subsMenu.textContent = "";
+  const runningCount = arr.filter((s) => s.running).length;
+  subsTrigger.classList.toggle("hidden", arr.length === 0);
+  const dot = subsTrigger.querySelector(".hd-dot");
+  if (dot) dot.dataset.state = runningCount > 0 ? "running" : "idle";
+  subsCount.textContent = runningCount > 0
+    ? `${runningCount} 个子代理，正在运行`
+    : `${arr.length} 个子代理`;
+  subsTrigger.setAttribute("aria-label", subsCount.textContent);
+  if (arr.length === 0) {
+    subsMenu.innerHTML = `<div class="hd-empty">暂无子代理</div>`;
     return;
   }
-  const rows = [...list].sort((a, b) => (b.running ? 1 : 0) - (a.running ? 1 : 0));
+  const rows = [...arr].sort((a, b) => (b.running ? 1 : 0) - (a.running ? 1 : 0));
   for (const s of rows) {
     const row = document.createElement("div");
-    row.className = "run-row";
-    const state = s.running ? "running" : "done";
+    row.className = "hd-row";
     row.innerHTML = `
-      <span class="p4-dot" data-state="${state}"></span>
-      <span class="run-label" title="${esc(s.id || "")}">${esc(s.label || s.id || "")}</span>
-      <span class="run-sub">${s.running ? "正在运行" : "当前未运行"}</span>`;
-    runsSubs.appendChild(row);
+      <span class="p4-dot" data-state="${s.running ? "running" : "done"}"></span>
+      <span class="hd-label" title="${esc(s.id || "")}">${esc(s.label || s.id || "")}</span>
+      <span class="hd-status">${s.running ? "正在运行" : "当前未运行"}</span>`;
+    subsMenu.appendChild(row);
   }
 }
 
+// renderJobs fills the jobs menu and the trigger's count/visibility (dsh
+// JobListAction: count label "N 个后台任务" / "N 个后台任务运行中"; rows are
+// dot + kind badge + label + status/detail + duration, settled rows dimmed).
 function renderJobs(list) {
-  if (!Array.isArray(list)) return;
-  runsJobs.textContent = "";
-  if (list.length === 0) {
-    runsJobs.innerHTML = `<div class="runs-empty">暂无后台任务</div>`;
+  const arr = Array.isArray(list) ? list : [];
+  jobsMenu.textContent = "";
+  const liveCount = arr.filter((j) => j.status === "running" || j.status === "stopping").length;
+  jobsTrigger.classList.toggle("hidden", arr.length === 0);
+  const dot = jobsTrigger.querySelector(".hd-dot");
+  if (dot) dot.dataset.state = liveCount > 0 ? "running" : "idle";
+  jobsCount.textContent = liveCount > 0
+    ? `${liveCount} 个后台任务运行中`
+    : `${arr.length} 个后台任务`;
+  jobsTrigger.setAttribute("aria-label", jobsCount.textContent);
+  if (arr.length === 0) {
+    jobsMenu.innerHTML = `<div class="hd-empty">暂无后台任务</div>`;
     return;
   }
-  for (const j of orderedJobs(list)) {
+  for (const j of orderedJobs(arr)) {
     const isLive = j.status === "running" || j.status === "stopping";
     const start = new Date(j.started_at).getTime();
     const dur = isLive
       ? (start ? fmtDuration(Date.now() - start) : "")
       : (j.finished_at ? fmtDuration(new Date(j.finished_at) - start) : "");
     const row = document.createElement("div");
-    row.className = "run-row" + (isLive ? "" : " settled");
+    row.className = "hd-row" + (isLive ? "" : " settled");
     row.innerHTML = `
       <span class="p4-dot" data-state="${jobDotState(j.status)}"></span>
-      ${j.kind ? `<span class="run-kind">${esc(j.kind)}</span>` : ""}
-      <span class="run-label" title="${esc(j.label || j.id || "")}">${esc(j.label || j.id || "")}</span>
-      <span class="run-sub" title="${esc(j.detail || "")}">${esc(j.detail || JOB_STATUS_WORDS[j.status] || j.status)}</span>
-      <span class="run-duration"${isLive && start ? ` data-live data-start="${start}"` : ""}>${dur}</span>`;
-    runsJobs.appendChild(row);
+      ${j.kind ? `<span class="hd-kind">${esc(j.kind)}</span>` : ""}
+      <span class="hd-label" title="${esc(j.label || j.id || "")}">${esc(j.label || j.id || "")}</span>
+      <span class="hd-status" title="${esc(j.detail || "")}">${esc(j.detail || JOB_STATUS_WORDS[j.status] || j.status)}</span>
+      <span class="hd-duration"${isLive && start ? ` data-live data-start="${start}"` : ""}>${dur}</span>`;
+    jobsMenu.appendChild(row);
   }
 }
 
 async function loadRuns() {
   if (runsBusy) return;
   runsBusy = true;
-  runsRefresh.classList.add("spinning");
-  // Show loading placeholders on the first open only.
-  if (!runsSubs.dataset.loaded) { runsSubs.innerHTML = `<div class="runs-loading">正在加载子代理…</div>`; runsJobs.innerHTML = `<div class="runs-loading">正在加载任务…</div>`; }
   try {
     const q = currentID ? `?session_id=${encodeURIComponent(currentID)}` : "";
     const [subsRes, jobsRes] = await Promise.all([api("/api/subagents" + q), api("/api/jobs" + q)]);
     const subs = subsRes.status === 501 ? [] : await subsRes.json();
     const jobs = jobsRes.status === 501 ? [] : await jobsRes.json();
-    runsSubs.dataset.loaded = "1"; runsJobs.dataset.loaded = "1";
     renderSubagents(subs);
     renderJobs(jobs);
-    // Reflect a running subagent/job on the header trigger dot (dsh StateDot).
-    if (runsTab) {
-      const dot = runsTab.querySelector(".ht-dot");
-      const anyRunning = (Array.isArray(subs) && subs.some((s) => s.running))
-        || (Array.isArray(jobs) && jobs.some((j) => j.status === "running" || j.status === "stopping"));
-      if (dot) dot.dataset.state = anyRunning ? "running" : "idle";
-    }
   } catch (e) {
-    if (e.message === "unauthorized") { toggleRuns(false); }
+    if (e.message === "unauthorized") { toggleSubs(false); toggleJobs(false); return; }
     const msg = e.message || "未知错误";
-    if (!runsSubs.dataset.loaded) {
-      runsSubs.innerHTML = `<div class="runs-error">加载失败：${esc(msg)}<button class="runs-retry">重试</button></div>`;
-      runsSubs.querySelector(".runs-retry").addEventListener("click", () => loadRuns());
+    if (subsOpen && !subsTrigger.dataset.loaded) {
+      subsMenu.innerHTML = `<div class="hd-empty">加载失败：${esc(msg)}<button class="hd-retry">重试</button></div>`;
+      subsMenu.querySelector(".hd-retry").addEventListener("click", () => loadRuns());
     }
-    if (!runsJobs.dataset.loaded) {
-      runsJobs.innerHTML = `<div class="runs-error">加载失败：${esc(msg)}<button class="runs-retry">重试</button></div>`;
-      runsJobs.querySelector(".runs-retry").addEventListener("click", () => loadRuns());
+    if (jobsOpen && !jobsTrigger.dataset.loaded) {
+      jobsMenu.innerHTML = `<div class="hd-empty">加载失败：${esc(msg)}<button class="hd-retry">重试</button></div>`;
+      jobsMenu.querySelector(".hd-retry").addEventListener("click", () => loadRuns());
     }
   } finally {
     runsBusy = false;
-    runsRefresh.classList.remove("spinning");
   }
 }
 
-if (runsTab) runsTab.addEventListener("click", (e) => { e.stopPropagation(); toggleRuns(); });
-runsRefresh.addEventListener("click", (e) => { e.stopPropagation(); loadRuns(); });
-runsPanel.addEventListener("click", (e) => e.stopPropagation());
-document.addEventListener("click", (e) => { if (!e.target.closest("#runs-panel, #runs-tab")) toggleRuns(false); });document.addEventListener("visibilitychange", () => {
+subsTrigger.addEventListener("click", (e) => { e.stopPropagation(); toggleSubs(); });
+jobsTrigger.addEventListener("click", (e) => { e.stopPropagation(); toggleJobs(); });
+subsMenu.addEventListener("click", (e) => e.stopPropagation());
+jobsMenu.addEventListener("click", (e) => e.stopPropagation());
+document.addEventListener("click", (e) => {
+  if (!e.target.closest("#subs-root")) toggleSubs(false);
+  if (!e.target.closest("#jobs-root")) toggleJobs(false);
+});
+document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "hidden") stopRunsTimers();
-  else if (runsOpen) startRunsTimers();
+  else if (subsOpen || jobsOpen) startRunsTimers();
 });
 
 // ---- boot ------------------------------------------------------------------------

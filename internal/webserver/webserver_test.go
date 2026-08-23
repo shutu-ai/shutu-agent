@@ -199,6 +199,17 @@ func TestStaticServed(t *testing.T) {
 	}
 }
 
+func TestFavicon(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+	rec := doReq(t, srv.Handler(), "GET", "/favicon.ico", "tok")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /favicon.ico → %d, want 200 (never 404)", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "image/png" {
+		t.Fatalf("favicon Content-Type = %q, want image/png", ct)
+	}
+}
+
 func TestSummaryBound(t *testing.T) {
 	srv, st := newTestServer(t, "tok")
 	long := strings.Repeat("字", 500)
