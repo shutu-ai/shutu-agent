@@ -180,8 +180,9 @@ func ReadOnlyTools() []string { return append([]string(nil), defaultEnabledTools
 func MinimalTools() []string { return append([]string(nil), minimalEnabledTools...) }
 
 // minimalEnabledTools is the minimal preset's exact execution whitelist (ADR
-// 2026-08-20-mode-presets.md D-MODE-2): M1 基础只读 + 持久 shell (pwsh) + 文件
-// 编辑 (read/write/list/edit). 工具名须与各包常量一致 (tools.go/fs.go).
+// 2026-08-20-mode-presets.md D-MODE-2): M1 基础只读 + 命令 shell (pwsh, dsh
+// 对齐: 每次调用全新 pwsh 进程) + 文件编辑 (read/write/list/edit). 工具名须与
+// 各包常量一致 (tools.go/fs.go).
 var minimalEnabledTools = []string{
 	"get_time", "read",
 	"pwsh",
@@ -269,10 +270,11 @@ type LLMConfig struct {
 	Multimodal MultimodalConfig `yaml:"multimodal"`
 }
 
-// TerminalConfig is the persistent-shell terminal policy (dispatch-m9-2 §2 /
-// ADR 2026-08-20-m9-terminal.md). The capability is default off (D10): when
-// Enabled is false the composition root registers no terminal tools and no
-// /term command. The session subprocess inherits a scrubbed environment
+// TerminalConfig is the pwsh-tool + M9 /term REPL policy (ADR
+// 2026-08-23-pwsh-dsh-alignment.md / dispatch-m9-2 §2). Enabled gates both the
+// model-facing pwsh tool (dsh tool-pwsh: one fresh `pwsh -Command` process
+// per call — the remaining fields do not apply to it) and the /term REPL's
+// persistent session. The session subprocess inherits a scrubbed environment
 // (credential-bearing variables are dropped, 纪律 6) — see
 // internal/terminal/scrubbedEnv.
 type TerminalConfig struct {
@@ -630,9 +632,10 @@ type FsConfig struct {
 	Root string `yaml:"root"`
 }
 
-// FsSearchConfig is the file-content-search policy (D-GAP-1). The capability
-// is default off (D10): when Enabled is false the composition root registers
-// no fs_search tool. minimal 模式同样关闭 (D-MODE-2).
+// FsSearchConfig is the file-content-search policy (D-GAP-1, 对齐 dsh
+// tool-fs-search). The capability is default off (D10): when Enabled is false
+// the composition root registers no grep/glob tool. minimal 模式同样关闭
+// (D-MODE-2).
 type FsSearchConfig struct {
 	Enabled *bool `yaml:"enabled"` // default false (D10)
 }
@@ -1179,9 +1182,10 @@ func applyDefaults(cfg *Config) {
 	if cfg.Terminal.MaxConcurrentSessions <= 0 {
 		cfg.Terminal.MaxConcurrentSessions = DefaultTerminalMaxConcurrent
 	}
-	// Enabling terminal whitelists its five consumer tools as well, so the
-	// single terminal.enabled switch turns the whole capability on (provider +
-	// tools + /term); default off (D10, dispatch-m9-2 §2 — mirrors run_command).
+	// Enabling terminal whitelists its single consumer tool (pwsh), so the
+	// one terminal.enabled switch turns the whole capability on (the
+	// fresh-process pwsh tool + the /term REPL); default on (dsh 对齐 opt-out,
+	// dispatch-m9-2 §2 — mirrors run_command).
 	if Enabled(cfg.Terminal.Enabled) {
 		for _, name := range terminalToolNames {
 			if !contains(cfg.Tools.Enabled, name) {
@@ -1215,8 +1219,8 @@ func applyDefaults(cfg *Config) {
 		}
 	}
 	// D-GAP-1 fs-search defaults: off by default (D10). Enabling fs_search
-	// whitelists its single consumer tool fs_search, so the one fs_search.
-	// enabled switch turns the whole capability (search engine + tool) on
+	// whitelists its two consumer tools grep and glob, so the one fs_search.
+	// enabled switch turns the whole capability (search engine + tools) on
 	// (mirrors kb/jobs/subagent/skill/schedule/plan/spill/interact/code/mcp/
 	// fs/web/terminal/eval).
 	if Enabled(cfg.FsSearch.Enabled) {
@@ -1379,10 +1383,11 @@ var mcpToolNames = []string{"mcp_list", "mcp_call"}
 // shared by applyDefaults and the composition root.
 var fsToolNames = []string{"write", "list", "edit"}
 
-// fsSearchToolNames are the file-content-search consumer tools (D-GAP-1).
-// fs_search is registered and whitelisted only when fs_search is enabled;
-// keeping the name here makes the "fs_search.enabled ⇒ 工具自动白名单" rule a
-// single, tested fact shared by applyDefaults and the composition root.
+// fsSearchToolNames are the file-content-search consumer tools (D-GAP-1, 对齐
+// dsh tool-fs-search). They are registered and whitelisted only when
+// fs_search is enabled; keeping the names here makes the
+// "fs_search.enabled ⇒ 工具自动白名单" rule a single, tested fact shared by
+// applyDefaults and the composition root.
 var fsSearchToolNames = []string{"grep", "glob"}
 
 // ralphToolNames are the fresh-agent-loop consumer tools (D-GAP-3). ralph is
@@ -1403,10 +1408,11 @@ var workflowToolNames = []string{"workflow_run"}
 // applyDefaults and the composition root.
 var webToolNames = []string{"web_search", "web_fetch"}
 
-// terminalToolNames are the persistent-terminal consumer tools
-// (dispatch-m9-2 §4). They are registered and whitelisted only when terminal
-// is enabled; keeping the names here makes the "terminal.enabled ⇒ 工具自动白名单"
-// rule a single, tested fact shared by applyDefaults and the composition root.
+// terminalToolNames are the pwsh consumer tools (ADR
+// 2026-08-23-pwsh-dsh-alignment.md / dispatch-m9-2 §4). They are registered
+// and whitelisted only when terminal is enabled; keeping the names here makes
+// the "terminal.enabled ⇒ 工具自动白名单" rule a single, tested fact shared by
+// applyDefaults and the composition root.
 var terminalToolNames = []string{"pwsh"}
 
 // evalToolNames are the task-evaluation consumer tools (ADR

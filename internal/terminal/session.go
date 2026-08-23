@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,12 @@ import (
 	"sync"
 	"time"
 )
+
+// ErrNoActive reports that no terminal session exists for the current owner.
+// The /term REPL's accessor surfaces it to the user ("start one with /term
+// start"); the model-facing pwsh tool is a fresh process per call and never
+// depends on a session.
+var ErrNoActive = errors.New("no active terminal session")
 
 // WaitReason 描述一次 Write 在哪个条件下就绪返回。
 type WaitReason string

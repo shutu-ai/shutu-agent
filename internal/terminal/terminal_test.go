@@ -43,6 +43,25 @@ func TestNewSession(t *testing.T) {
 	}
 }
 
+// waitViewport polls the scrollback until text appears or d elapses. The
+// idle-based Write may return before a slow shell (cold cmd.exe under heavy
+// parallel test load) echoes anything — D-M9-4's readiness contract is
+// silence, not output — so viewport assertions poll before failing
+// (TestReadConsume's pattern).
+func waitViewport(s *Session, text string, d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	want := strings.ToLower(text)
+	for time.Now().Before(deadline) {
+		all, _ := s.Read(0, 999)
+		if strings.Contains(strings.ToLower(all), want) {
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	all, _ := s.Read(0, 999)
+	return strings.Contains(strings.ToLower(all), want)
+}
+
 func TestWriteEcho(t *testing.T) {
 	s, err := NewSession(testOpts())
 	if err != nil {
@@ -57,7 +76,7 @@ func TestWriteEcho(t *testing.T) {
 	if res.Wait != WaitStdinRead {
 		t.Errorf("Write().Wait = %q, want %q", res.Wait, WaitStdinRead)
 	}
-	if !strings.Contains(res.Viewport, "hello") {
+	if !strings.Contains(res.Viewport, "hello") && !waitViewport(s, "hello", 5*time.Second) {
 		t.Errorf("Viewport = %q, want contains %q", res.Viewport, "hello")
 	}
 }
@@ -85,7 +104,8 @@ func TestCwdPersists(t *testing.T) {
 	}
 
 	want := strings.ReplaceAll(dir, "/", "\\")
-	if !strings.Contains(strings.ToLower(res.Viewport), strings.ToLower(want)) {
+	if !strings.Contains(strings.ToLower(res.Viewport), strings.ToLower(want)) &&
+		!waitViewport(s, want, 5*time.Second) {
 		t.Errorf("Viewport = %q, want contains %q", res.Viewport, want)
 	}
 }

@@ -1,9 +1,10 @@
 // search_test.go — the D-GAP-1 search-engine tests (docs/dispatch-gap-1.md
-// §2). All ten cases build a throwaway tree with t.TempDir() and exercise
-// Search directly: substring hits and ordering, case sensitivity, regex, the
-// ignored-directory and binary skips, the MaxResults/MaxFiles caps (ErrLimit +
-// partial hits), FilePattern filtering, the MaxFileBytes skip, the error
-// paths (missing path / empty query) and context cancellation.
+// §2, 对齐 dsh tool-fs-search). The cases build a throwaway tree with
+// t.TempDir() and exercise Search directly: regex hits and ordering, the
+// case-sensitive default (ripgrep semantics), the ignored-directory and
+// binary skips, the MaxResults/MaxFiles caps (ErrLimit + partial hits), the
+// dsh-style Include glob, the MaxFileBytes skip, the error paths (missing
+// path / empty query / invalid regex) and context cancellation.
 package fssearch
 
 import (
@@ -26,11 +27,12 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
-// TestSearchSubstringHits covers the happy path (dispatch-gap-1 §2 #1): a
-// query matches across multiple files and lines, every Hit carries the
-// absolute path, the 1-based line number and the trimmed line, and the result
-// is ordered file-then-line (files in lexical walk order, lines ascending).
-func TestSearchSubstringHits(t *testing.T) {
+// TestSearchRegexHits covers the happy path (dispatch-gap-1 §2 #1): a query
+// (always a regular expression, dsh grep) matches across multiple files and
+// lines, every Hit carries the absolute path, the 1-based line number and the
+// trimmed line, and the result is ordered file-then-line (files in lexical
+// walk order, lines ascending).
+func TestSearchRegexHits(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "a.txt"), "hello world\nneedle one\ntail\nneedle two\n")
 	writeFile(t, filepath.Join(dir, "b.txt"), "no match\nneedle b\n")
@@ -59,60 +61,44 @@ func TestSearchSubstringHits(t *testing.T) {
 			t.Errorf("hit[%d].Path = %q, want absolute", i, hits[i].Path)
 		}
 	}
-}
 
-// TestSearchCaseSensitivity covers #2: the default match is case-insensitive,
-// while CaseSensitive distinguishes case.
-func TestSearchCaseSensitivity(t *testing.T) {
-	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "f.txt"), "Needle upper\nneedle lower\nneedle Exact\n")
-
-	// Default: case-insensitive, so an uppercase query hits every line.
-	hits, err := Search(context.Background(), "NEEDLE", Options{Path: dir})
-	if err != nil {
-		t.Fatalf("Search (default): %v", err)
-	}
-	if len(hits) != 3 {
-		t.Fatalf("case-insensitive hits = %d, want 3", len(hits))
-	}
-
-	// CaseSensitive: the uppercase query no longer matches the lowercase lines.
-	hits, err = Search(context.Background(), "NEEDLE", Options{Path: dir, CaseSensitive: true})
-	if err != nil {
-		t.Fatalf("Search (sensitive): %v", err)
-	}
-	if len(hits) != 0 {
-		t.Fatalf("case-sensitive hits = %d, want 0", len(hits))
-	}
-
-	// CaseSensitive: an exact-case query matches only its own line.
-	hits, err = Search(context.Background(), "Needle", Options{Path: dir, CaseSensitive: true})
-	if err != nil {
-		t.Fatalf("Search (sensitive exact): %v", err)
-	}
-	if len(hits) != 1 || hits[0].Line != 1 {
-		t.Fatalf("case-sensitive exact hits = %+v, want line 1 only", hits)
-	}
-}
-
-// TestSearchRegex covers #3: regex:true matches with a compiled regular
-// expression, and a malformed pattern fails closed with an error.
-func TestSearchRegex(t *testing.T) {
-	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "f.txt"), "apple pie\nbanana split\n")
-
-	hits, err := Search(context.Background(), `spl.+`, Options{Path: dir, Regex: true})
+	// A regex query matches by pattern, not substring (dsh: pattern is a
+	// regex).
+	hits, err = Search(context.Background(), `ne+dle \w+`, Options{Path: dir})
 	if err != nil {
 		t.Fatalf("Search (regex): %v", err)
 	}
-	if len(hits) != 1 || hits[0].Line != 2 || hits[0].Text != "banana split" {
-		t.Fatalf("regex hits = %+v, want line 2 \"banana split\"", hits)
+	if len(hits) != 3 {
+		t.Fatalf("regex hits = %d, want 3 (%v)", len(hits), hits)
 	}
+}
 
-	if _, err := Search(context.Background(), `(`, Options{Path: dir, Regex: true}); err == nil {
+// TestSearchCaseSensitiveDefault covers the ripgrep default: matching is
+// case-sensitive — an uppercase query matches only uppercase lines (dsh grep
+// has no case-insensitive switch).
+func TestSearchCaseSensitiveDefault(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "f.txt"), "NEEDLE upper\nneedle lower\n")
+
+	hits, err := Search(context.Background(), "NEEDLE", Options{Path: dir})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(hits) != 1 || hits[0].Line != 1 || hits[0].Text != "NEEDLE upper" {
+		t.Fatalf("hits = %+v, want the uppercase line only (case-sensitive default)", hits)
+	}
+}
+
+// TestSearchInvalidRegex verifies a malformed pattern fails closed with an
+// error, never a silent no-match.
+func TestSearchInvalidRegex(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "f.txt"), "apple pie\nbanana split\n")
+
+	if _, err := Search(context.Background(), `(`, Options{Path: dir}); err == nil {
 		t.Fatal("an invalid regex must error, not silently match nothing")
-	} else if !strings.Contains(err.Error(), "compile regex") {
-		t.Errorf("regex error = %v, want it to mention the regex compilation", err)
+	} else if !strings.Contains(err.Error(), "invalid pattern") {
+		t.Errorf("regex error = %v, want it to mention the invalid pattern", err)
 	}
 }
 
@@ -192,25 +178,47 @@ func TestSearchLimits(t *testing.T) {
 	}
 }
 
-// TestSearchFilePattern covers #7: FilePattern restricts scanning to files
-// whose base name matches the glob (filepath.Match).
-func TestSearchFilePattern(t *testing.T) {
+// TestSearchInclude covers the dsh-style Include glob: a pattern with no "/"
+// restricts by basename at ANY depth ("*.go" finds every .go file), a pattern
+// with "/" is anchored at the search root ("src/*.go"), and brace alternation
+// works.
+func TestSearchInclude(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "a.go"), "needle go\n")
 	writeFile(t, filepath.Join(dir, "a.txt"), "needle txt\n")
 	writeFile(t, filepath.Join(dir, "sub", "b.go"), "needle nested go\n")
+	writeFile(t, filepath.Join(dir, "src", "main.go"), "needle src go\n")
 
-	hits, err := Search(context.Background(), "needle", Options{Path: dir, FilePattern: "*.go"})
+	// No "/": basenames at any depth.
+	hits, err := Search(context.Background(), "needle", Options{Path: dir, Include: "*.go"})
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
-	if len(hits) != 2 {
-		t.Fatalf("hits = %v, want only the .go files", hits)
+	if len(hits) != 3 {
+		t.Fatalf("include *.go hits = %d, want 3 (%v)", len(hits), hits)
 	}
 	for _, h := range hits {
 		if filepath.Ext(h.Path) != ".go" {
-			t.Errorf("hit %+v filtered in despite pattern *.go", h)
+			t.Errorf("hit %+v filtered in despite include *.go", h)
 		}
+	}
+
+	// With "/": anchored at the search root.
+	hits, err = Search(context.Background(), "needle", Options{Path: dir, Include: "src/*.go"})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(hits) != 1 || !strings.Contains(hits[0].Path, "src"+string(filepath.Separator)+"main.go") {
+		t.Fatalf("include src/*.go hits = %v, want only src/main.go", hits)
+	}
+
+	// Brace alternation.
+	hits, err = Search(context.Background(), "needle", Options{Path: dir, Include: "*.{go,txt}"})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(hits) != 4 {
+		t.Fatalf("include *.{go,txt} hits = %d, want 4", len(hits))
 	}
 }
 
@@ -231,7 +239,9 @@ func TestSearchMaxFileBytes(t *testing.T) {
 	}
 }
 
-// TestSearchErrors covers #9: a missing path and an empty query both error.
+// TestSearchErrors covers #9: a missing path, an empty query and an invalid
+// regex all error. A whitespace-only pattern is a legitimate regex (dsh) and
+// runs.
 func TestSearchErrors(t *testing.T) {
 	if _, err := Search(context.Background(), "needle", Options{Path: filepath.Join(t.TempDir(), "nope")}); err == nil {
 		t.Fatal("a nonexistent path must error")
@@ -239,8 +249,14 @@ func TestSearchErrors(t *testing.T) {
 	if _, err := Search(context.Background(), "", Options{Path: t.TempDir()}); err == nil {
 		t.Fatal("an empty query must error")
 	}
-	if _, err := Search(context.Background(), "   ", Options{Path: t.TempDir()}); err == nil {
-		t.Fatal("a blank query must error")
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "f.txt"), "three spaces   here\n")
+	hits, err := Search(context.Background(), "   ", Options{Path: dir})
+	if err != nil {
+		t.Fatalf("a whitespace-only pattern is a legitimate regex and must run: %v", err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("whitespace-pattern hits = %d, want 1 (the line with three spaces)", len(hits))
 	}
 }
 

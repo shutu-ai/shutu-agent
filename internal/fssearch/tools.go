@@ -1,6 +1,13 @@
-// tools.go — the dsh-aligned search tools (D-GAP-1): grep searches file
-// contents under a directory tree, glob lists file paths matching a path
-// pattern. Both implement the tools.Tool method set structurally (Go
+// tools.go — the dsh-aligned search tools (D-GAP-1, 对齐 dsh tool-fs-search):
+// grep searches file contents with a REGULAR EXPRESSION and returns matches
+// grouped by file; glob lists file paths matching a path glob, sorted by
+// modification time. The model-facing contract mirrors dsh call-for-call:
+// grep takes pattern/path/include (pattern is always a regex, matched
+// case-sensitively like ripgrep; include is ONE positive glob filter — no
+// lists, no negation), glob takes pattern/path (a pattern with no "/" matches
+// basenames at any depth), and the result text uses dsh's shapes ("Found N
+// matches" + per-file "path\nLine N: text" blocks, "No matches found", "No
+// files found"). Both implement the tools.Tool method set structurally (Go
 // structural typing), so this package never imports the tools package — the
 // seam stays decoupled (D2). The composition root (cmd/pa) registers them
 // when fs_search.enabled, and config.applyDefaults auto-whitelists the names.
@@ -13,8 +20,9 @@ import (
 	"fmt"
 	"io/fs"
 	"path/filepath"
-	"regexp"
+	"sort"
 	"strings"
+	"time"
 )
 
 // Tool names — the dsh-aligned content/path search tools (whitelisted when
@@ -46,36 +54,27 @@ func NewGrepTool(cwd string) GrepTool {
 func (GrepTool) Name() string { return GrepToolName }
 
 func (GrepTool) Description() string {
-	return "search file contents under a directory tree (substring or regex); returns matching files and lines"
+	return "Search file contents with a regular expression. Returns matching lines with line numbers, grouped by file. " +
+		"Returns the first 250 matches inline; a capped result reports the limit. " +
+		"Use read on a matched file for surrounding context."
 }
 
 func (GrepTool) Schema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"path": map[string]any{
-				"type":        "string",
-				"description": "root directory to search; defaults to the agent working directory",
-			},
 			"pattern": map[string]any{
 				"type":        "string",
-				"description": "substring (or regular expression when regex:true) to search for in file contents",
+				"minLength":   1,
+				"description": "Regular expression to search for.",
 			},
-			"glob": map[string]any{
+			"path": map[string]any{
 				"type":        "string",
-				"description": "optional glob restricting files by base name, e.g. \"*.go\" (filepath.Match)",
+				"description": "File or directory to search. Defaults to the agent working directory; a relative path resolves against it.",
 			},
-			"regex": map[string]any{
-				"type":        "boolean",
-				"description": "treat pattern as a regular expression (default false: plain substring)",
-			},
-			"max_results": map[string]any{
-				"type":        "integer",
-				"description": "cap on total hits; <=0 means the default 50",
-			},
-			"case_sensitive": map[string]any{
-				"type":        "boolean",
-				"description": "case-sensitive match (default false: case-insensitive)",
+			"include": map[string]any{
+				"type":        "string",
+				"description": "One glob filter for which files to search (e.g. \"*.go\", \"*.{go,ts}\"). Not a list; negation is not supported.",
 			},
 		},
 		"required":             []string{"pattern"},
@@ -83,25 +82,29 @@ func (GrepTool) Schema() map[string]any {
 	}
 }
 
-// Execute runs a bounded file-content search and formats the hits as
-// "path:line: text" lines (path shown relative to the agent cwd when possible)
-// followed by the match count; a no-hit search reports the pattern and the
-// root, and a cap-hit search (ErrLimit) keeps the partial result with a
-// " (limit reached)" suffix. Read-only — never writes.
+// Execute runs a bounded regex search and formats the hits the dsh way: a
+// "Found N matches" header, per-file "path\nLine N: text" sections, and — when
+// a scan cap cut the result short — the could-not-save footer. A no-hit
+// search reports "No matches found". Read-only — never writes.
 func (t GrepTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var a struct {
-		Path          string `json:"path"`
-		Pattern       string `json:"pattern"`
-		Glob          string `json:"glob"`
-		Regex         bool   `json:"regex"`
-		MaxResults    int    `json:"max_results"`
-		CaseSensitive bool   `json:"case_sensitive"`
+		Pattern string `json:"pattern"`
+		Path    string `json:"path"`
+		Include string `json:"include"`
 	}
 	if err := json.Unmarshal(args, &a); err != nil {
 		return "", fmt.Errorf("grep: %w", err)
 	}
-	if strings.TrimSpace(a.Pattern) == "" {
-		return "", fmt.Errorf("grep: empty pattern")
+	if a.Pattern == "" {
+		return "", fmt.Errorf("grep: pattern must be a non-empty string")
+	}
+	if a.Path != "" && strings.TrimSpace(a.Path) == "" {
+		return "", fmt.Errorf("grep: path must be a non-empty string when given")
+	}
+	if a.Include != "" {
+		if err := validateInclude(a.Include); err != nil {
+			return "", fmt.Errorf("grep: %w", err)
+		}
 	}
 	root := a.Path
 	if strings.TrimSpace(root) == "" {
@@ -110,59 +113,111 @@ func (t GrepTool) Execute(ctx context.Context, args json.RawMessage) (string, er
 	if strings.TrimSpace(root) == "" {
 		return "", fmt.Errorf("grep: no search path (pass path or configure the agent working directory)")
 	}
-	maxResults := a.MaxResults
-	if maxResults <= 0 {
-		maxResults = DefaultMaxResults
-	}
 	hits, err := t.searchFn(ctx, a.Pattern, Options{
-		Path:          root,
-		FilePattern:   a.Glob,
-		Regex:         a.Regex,
-		MaxResults:    maxResults,
-		CaseSensitive: a.CaseSensitive,
+		Path:       root,
+		Include:    a.Include,
+		MaxResults: DefaultMaxResults,
 	})
 	if err != nil && !errors.Is(err, ErrLimit) {
 		return "", fmt.Errorf("grep: %w", err)
 	}
-	out := formatHits(t, hits, a.Pattern, root)
-	if errors.Is(err, ErrLimit) {
-		out += " (limit reached)"
-	}
-	return out, nil
+	return formatGrepOutput(hits, t.displayPath, errors.Is(err, ErrLimit)), nil
 }
 
-// formatHits renders hits as one "path:line: text" line each (path relative to
-// the agent cwd when possible) followed by "N matches"; a no-hit search
-// reports the pattern and the searched root.
-func formatHits(t GrepTool, hits []Hit, pattern, root string) string {
+// validateInclude rejects an include that is not ONE positive glob filter
+// (dsh validateInclude): blank strings, negated patterns, and comma-separated
+// lists; a comma inside a brace group is fine — "*.{ts,tsx}" is one glob with
+// alternation, not a list.
+func validateInclude(include string) error {
+	if strings.TrimSpace(include) == "" {
+		return errors.New("include must be a non-empty glob when given")
+	}
+	if strings.HasPrefix(include, "!") {
+		return errors.New(`include must be a positive glob filter; negated patterns ("!…") are not supported`)
+	}
+	depth := 0
+	for _, r := range include {
+		switch r {
+		case '{':
+			depth++
+		case '}':
+			if depth > 0 {
+				depth--
+			}
+		case ',':
+			if depth == 0 {
+				return errors.New("include must be one glob, not a comma-separated list (use {a,b} alternation instead)")
+			}
+		}
+	}
+	return nil
+}
+
+// formatGrepOutput renders the model-facing result (dsh formatGrepOutput): a
+// found-count header, the matches grouped by file, and — when capped — the
+// could-not-save footer.
+func formatGrepOutput(hits []Hit, display func(string) string, limited bool) string {
 	if len(hits) == 0 {
-		return fmt.Sprintf("no matches for %q in %s", pattern, root)
+		return "No matches found"
 	}
-	var sb strings.Builder
+	noun := "matches"
+	if len(hits) == 1 {
+		noun = "match"
+	}
+	header := fmt.Sprintf("Found %d %s", len(hits), noun)
+	if limited {
+		header += " (limit reached)"
+	}
+	body := formatGrepGrouped(hits, display)
+	if !limited {
+		return header + "\n\n" + body
+	}
+	return header + "\n\n" + body + "\n\n(The complete result could not be saved; narrow pattern, path, or include to see more.)"
+}
+
+// formatGrepGrouped groups flat hits by file (first-seen order) into the
+// model-facing body: each file's display path, then one "Line N: <text>" row
+// per match (dsh formatGrepMatches).
+func formatGrepGrouped(hits []Hit, display func(string) string) string {
+	byFile := map[string][]Hit{}
+	var order []string
 	for _, h := range hits {
-		fmt.Fprintf(&sb, "%s:%d: %s\n", t.displayPath(h.Path), h.Line, h.Text)
+		if _, ok := byFile[h.Path]; !ok {
+			order = append(order, h.Path)
+		}
+		byFile[h.Path] = append(byFile[h.Path], h)
 	}
-	fmt.Fprintf(&sb, "%d matches", len(hits))
-	return sb.String()
+	sections := make([]string, 0, len(order))
+	for _, p := range order {
+		lines := make([]string, 0, len(byFile[p]))
+		for _, h := range byFile[p] {
+			lines = append(lines, fmt.Sprintf("Line %d: %s", h.Line, h.Text))
+		}
+		sections = append(sections, display(p)+"\n"+strings.Join(lines, "\n"))
+	}
+	return strings.Join(sections, "\n\n")
 }
 
 // displayPath renders an absolute hit path relative to the agent cwd when it
-// lies under it (more readable for the model); anything else stays absolute.
+// lies under it (more readable for the model; follow-up-readable by read);
+// anything else stays absolute (dsh toWorkdirRelative).
 func (t GrepTool) displayPath(p string) string {
 	if t.cwd == "" {
 		return p
 	}
 	rel, err := filepath.Rel(t.cwd, p)
 	if err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return rel
+		return filepath.ToSlash(rel)
 	}
 	return p
 }
 
 // GlobTool lists file paths under a directory tree matching a path pattern
-// (dsh glob). The pattern supports '*' (within one segment), '?' and '**'
-// (any number of segments), e.g. "**/*.go" or "src/**". cwd is the default
-// root when the model omits path.
+// (dsh glob), sorted by modification time (newest first). The pattern is a
+// dsh-style path glob: "**/*.go" or "src/**" work as expected, and a pattern
+// with no "/" matches basenames at any depth ("*" and "*.go" both search the
+// whole tree). cwd is the default root when the model omits path and the
+// display base.
 type GlobTool struct {
 	cwd string
 }
@@ -175,7 +230,7 @@ func NewGlobTool(cwd string) GlobTool {
 func (GlobTool) Name() string { return GlobToolName }
 
 func (GlobTool) Description() string {
-	return "list file paths under a directory tree matching a path pattern ('*', '?', '**'); returns the matching paths"
+	return "Find files whose paths match a glob pattern. Returns matching file paths — never directories — including hidden files; VCS metadata directories are excluded."
 }
 
 func (GlobTool) Schema() map[string]any {
@@ -184,15 +239,12 @@ func (GlobTool) Schema() map[string]any {
 		"properties": map[string]any{
 			"pattern": map[string]any{
 				"type":        "string",
-				"description": "path glob relative to the search root, e.g. \"**/*.go\" or \"src/**/*.md\"",
+				"minLength":   1,
+				"description": "Glob pattern to match file paths against (e.g. \"**/*.go\", \"src/**/*.md\"). A pattern with no \"/\" matches the basename at any depth, so \"*\" and \"*.go\" both search the whole tree; include a separator to anchor the depth.",
 			},
 			"path": map[string]any{
 				"type":        "string",
-				"description": "root directory to search; defaults to the agent working directory",
-			},
-			"max_results": map[string]any{
-				"type":        "integer",
-				"description": "cap on returned paths; <=0 means the default 50",
+				"description": "Root directory to search. Defaults to the agent working directory; a relative path resolves against it.",
 			},
 		},
 		"required":             []string{"pattern"},
@@ -201,19 +253,27 @@ func (GlobTool) Schema() map[string]any {
 }
 
 // Execute walks the tree (skipping VCS/dependency directories and binary
-// files, bounded like grep) and returns the relative paths matching pattern,
-// one per line, followed by the match count.
+// files are not glob concerns — paths are files only) and returns the
+// matching paths, one per line, sorted by modification time (newest first).
+// No matches reports "No files found"; an over-cap result shows the first
+// page plus the dsh could-not-save footer.
 func (t GlobTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var a struct {
-		Pattern    string `json:"pattern"`
-		Path       string `json:"path"`
-		MaxResults int    `json:"max_results"`
+		Pattern string `json:"pattern"`
+		Path    string `json:"path"`
 	}
 	if err := json.Unmarshal(args, &a); err != nil {
 		return "", fmt.Errorf("glob: %w", err)
 	}
 	if strings.TrimSpace(a.Pattern) == "" {
-		return "", fmt.Errorf("glob: empty pattern")
+		return "", fmt.Errorf("glob: pattern must be a non-empty string")
+	}
+	if a.Path != "" && strings.TrimSpace(a.Path) == "" {
+		return "", fmt.Errorf("glob: path must be a non-empty string when given")
+	}
+	re, err := pathGlobRE(a.Pattern)
+	if err != nil {
+		return "", fmt.Errorf("glob: invalid pattern: %w", err)
 	}
 	root := a.Path
 	if strings.TrimSpace(root) == "" {
@@ -222,21 +282,13 @@ func (t GlobTool) Execute(ctx context.Context, args json.RawMessage) (string, er
 	if strings.TrimSpace(root) == "" {
 		return "", fmt.Errorf("glob: no search path (pass path or configure the agent working directory)")
 	}
-	re, err := globRegexp(a.Pattern)
-	if err != nil {
-		return "", fmt.Errorf("glob: invalid pattern: %w", err)
-	}
-	maxResults := a.MaxResults
-	if maxResults <= 0 {
-		maxResults = DefaultMaxResults
-	}
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return "", fmt.Errorf("glob: resolve %s: %w", root, err)
 	}
 	absRoot = filepath.Clean(absRoot)
 
-	var matches []string
+	matches := []globEntry{}
 	walk := func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return nil
@@ -254,65 +306,63 @@ func (t GlobTool) Execute(ctx context.Context, args json.RawMessage) (string, er
 		if relErr != nil {
 			return nil
 		}
-		if re.MatchString(filepath.ToSlash(rel)) {
-			matches = append(matches, filepath.ToSlash(rel))
-			if len(matches) >= maxResults {
-				return ErrLimit
-			}
+		if !re.MatchString(filepath.ToSlash(rel)) {
+			return nil
 		}
+		info, infoErr := d.Info()
+		if infoErr != nil {
+			return nil
+		}
+		matches = append(matches, globEntry{abs: path, rel: filepath.ToSlash(rel), modTime: info.ModTime()})
 		return nil
 	}
-	err = filepath.WalkDir(absRoot, walk)
-	if err != nil && !errors.Is(err, ErrLimit) {
+	if err := filepath.WalkDir(absRoot, walk); err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return "", ctxErr
 		}
 		return "", err
 	}
 	if len(matches) == 0 {
-		return fmt.Sprintf("no paths match %q in %s", a.Pattern, root), nil
+		return "No files found", nil
 	}
-	out := strings.Join(matches, "\n") + fmt.Sprintf("\n%d matches", len(matches))
-	if errors.Is(err, ErrLimit) {
-		out += " (limit reached)"
+	// dsh --sort=modified: newest first.
+	sort.SliceStable(matches, func(i, j int) bool { return matches[i].modTime.After(matches[j].modTime) })
+
+	seen := len(matches)
+	page := matches
+	if seen > DefaultGlobMaxResults {
+		page = matches[:DefaultGlobMaxResults]
 	}
-	return out, nil
+	lines := make([]string, 0, len(page))
+	for _, m := range page {
+		lines = append(lines, t.displayPath(m))
+	}
+	body := strings.Join(lines, "\n")
+	if seen <= DefaultGlobMaxResults {
+		return body, nil
+	}
+	return fmt.Sprintf("%s\n\n(Showing %d of %d paths. The complete result could not be saved; narrow pattern or path to see more.)", body, len(page), seen), nil
 }
 
-// globRegexp compiles a path glob into an anchored regexp: '*' and '?' match
-// within one path segment, '**' matches across segments (and "**/" also
-// matches zero segments, so "**/*.go" includes root-level files). Slashes are
-// the segment separator regardless of the host platform (paths are compared
-// slash-normalized).
-func globRegexp(pattern string) (*regexp.Regexp, error) {
-	var sb strings.Builder
-	sb.WriteString("^")
-	i := 0
-	for i < len(pattern) {
-		c := pattern[i]
-		switch c {
-		case '*':
-			if i+1 < len(pattern) && pattern[i+1] == '*' {
-				if i+2 < len(pattern) && pattern[i+2] == '/' {
-					// "**/" matches zero or more segments.
-					sb.WriteString("(?:.*/)?")
-					i += 3
-					continue
-				}
-				sb.WriteString(".*")
-				i += 2
-				continue
-			}
-			sb.WriteString("[^/]*")
-		case '?':
-			sb.WriteString("[^/]")
-		case '/':
-			sb.WriteString("/")
-		default:
-			sb.WriteString(regexp.QuoteMeta(string(c)))
-		}
-		i++
+// globEntry is one discovered file: the absolute path (display base), the
+// root-relative slash path (pattern matching), and the modification time
+// (sort key).
+type globEntry struct {
+	abs     string
+	rel     string
+	modTime time.Time
+}
+
+// displayPath renders a discovered path relative to the agent cwd when it
+// lies under it (dsh prints workdir-relative paths); anything else stays
+// relative to the search root.
+func (t GlobTool) displayPath(m globEntry) string {
+	if t.cwd == "" {
+		return m.rel
 	}
-	sb.WriteString("$")
-	return regexp.Compile(sb.String())
+	rel, err := filepath.Rel(t.cwd, m.abs)
+	if err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return filepath.ToSlash(rel)
+	}
+	return m.rel
 }

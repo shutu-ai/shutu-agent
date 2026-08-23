@@ -203,19 +203,45 @@ func TestSummaryBound(t *testing.T) {
 	srv, st := newTestServer(t, "tok")
 	long := strings.Repeat("字", 500)
 	seedSession(t, st, "s-1", []session.Event{
-		{Seq: 1, Type: "user/message", At: time.Now(), Version: 1, Data: mustData(t, map[string]any{"Text": long})},
+		{Seq: 1, Type: "tool/result", At: time.Now(), Version: 1, Data: mustData(t, map[string]any{"CallID": "c1", "Name": "get_time", "Output": long})},
 	})
 	rec := doReq(t, srv.Handler(), "GET", "/api/sessions/s-1/events", "tok")
 	var evs []eventView
 	if err := json.Unmarshal(rec.Body.Bytes(), &evs); err != nil {
 		t.Fatal(err)
 	}
+	prefix := "tool get_time → "
 	s := evs[0].Summary
-	if len([]rune(s)) != maxSummary+1 { // 200 runes + "…"
-		t.Fatalf("summary runes = %d, want %d+1 (bounded + ellipsis)", len([]rune(s)), maxSummary)
+	if len([]rune(s)) != len([]rune(prefix))+maxSummary+1 { // prefix + 200 runes + "…"
+		t.Fatalf("summary runes = %d, want %d (bounded + ellipsis)", len([]rune(s)), len([]rune(prefix))+maxSummary+1)
 	}
 	if !strings.HasSuffix(s, "…") {
 		t.Fatalf("summary %q should end with …", s)
+	}
+}
+
+// TestMessageSummaryFull: message bodies are NOT truncated — the frontend
+// renders user and assistant text whole (dsh behavior), so a long message
+// comes back intact instead of a 200-rune slice with "…".
+func TestMessageSummaryFull(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	long := strings.Repeat("字", 500)
+	seedSession(t, st, "s-1", []session.Event{
+		{Seq: 1, Type: "user/message", At: time.Now(), Version: 1, Data: mustData(t, map[string]any{"Text": long})},
+		{Seq: 2, Type: "assistant/message", At: time.Now(), Version: 1, Data: mustData(t, map[string]any{"Text": long})},
+	})
+	rec := doReq(t, srv.Handler(), "GET", "/api/sessions/s-1/events", "tok")
+	var evs []eventView
+	if err := json.Unmarshal(rec.Body.Bytes(), &evs); err != nil {
+		t.Fatal(err)
+	}
+	for i, ev := range evs {
+		if ev.Summary != long {
+			t.Fatalf("events[%d] (%s) summary = %d runes, want the full 500", i, ev.Type, len([]rune(ev.Summary)))
+		}
+		if strings.HasSuffix(ev.Summary, "…") {
+			t.Fatalf("events[%d] (%s) summary must not be truncated", i, ev.Type)
+		}
 	}
 }
 

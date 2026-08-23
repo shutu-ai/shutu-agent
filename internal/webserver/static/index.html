@@ -152,6 +152,10 @@
              phase attribute on the column drives both postures. -->
         <div class="milieu">
           <div id="messages" class="messages" aria-live="polite"></div>
+          <!-- Turn-level running indicator (dsh TurnStatus): a FIXED sibling of
+               the scrolling transcript, docked above the input panel's left edge
+               — it never scrolls away with the messages. -->
+          <div id="turn-status" class="turn-status hidden" aria-live="polite"></div>
           <!-- Empty-state hero (dsh ConversationRoot HeroShell: fish logo →
                headline → preview badge → workspace chip row). -->
           <div id="hero" class="hero hidden">

@@ -295,6 +295,45 @@ func TestSkillCatalogInjectorEmptyNoEvent(t *testing.T) {
 	}
 }
 
+// TestSkillCatalogEventDedupByVersion verifies the dsh digest semantics: the
+// skill/catalog event fires once per catalog — repeated turns with an
+// unchanged catalog log nothing (no per-turn 上下文注入 row), and a catalog
+// change fires exactly one replacement event. The catalog CONTEXT is still
+// injected every turn.
+func TestSkillCatalogEventDedupByVersion(t *testing.T) {
+	a, proj := skillFixture(t, true)
+	writeSkill(t, filepath.Join(proj, ".dsh", "skills"), "alpha", "alpha desc", "alpha body\n")
+	if err := a.registerSkills(); err != nil {
+		t.Fatalf("registerSkills: %v", err)
+	}
+	defer a.skills.Close()
+
+	inj := a.skillCatalogInjector()
+	for i := 0; i < 3; i++ {
+		if msgs := inj.Inject(context.Background(), "hi"); len(msgs) != 1 {
+			t.Fatalf("turn %d injected %+v, want the catalog message (context is injected every turn)", i, msgs)
+		}
+	}
+	if n := countEvent(a.log, session.EventSkillCatalog); n != 1 {
+		t.Fatalf("skill/catalog events after 3 unchanged turns = %d, want exactly 1", n)
+	}
+
+	// A catalog change (a second skill) fires the replacement event.
+	writeSkill(t, filepath.Join(proj, ".dsh", "skills"), "beta", "beta desc", "beta body\n")
+	if msgs := inj.Inject(context.Background(), "hi"); len(msgs) != 1 {
+		t.Fatalf("after change injected %+v, want the catalog message", msgs)
+	}
+	if n := countEvent(a.log, session.EventSkillCatalog); n != 2 {
+		t.Fatalf("skill/catalog events after a catalog change = %d, want exactly 2", n)
+	}
+	if msgs := inj.Inject(context.Background(), "hi"); len(msgs) != 1 {
+		t.Fatalf("post-change repeat injected %+v, want the catalog message", msgs)
+	}
+	if n := countEvent(a.log, session.EventSkillCatalog); n != 2 {
+		t.Fatalf("skill/catalog events after an unchanged repeat = %d, want still 2", n)
+	}
+}
+
 // TestSkillCatalogInjectorNilRegistryNoOp verifies the injector is inert when
 // the registry is absent (the disabled guard, D10).
 func TestSkillCatalogInjectorNilRegistryNoOp(t *testing.T) {

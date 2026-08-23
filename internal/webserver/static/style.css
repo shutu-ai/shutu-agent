@@ -801,6 +801,10 @@ mark {
 .markdown h1 { font-size: 24px; line-height: 34px; }
 .markdown h2 { font-size: 22px; line-height: 32px; }
 .markdown h3 { font-size: 20px; line-height: 30px; }
+/* dsh compact list display: tight item rows, no per-item paragraph gaps. */
+.markdown ul, .markdown ol { margin: 2px 0 8px; padding-left: 22px; }
+.markdown li { margin: 2px 0; }
+.markdown li > p { margin: 0; }
 .markdown code { background: var(--dsw-alias-markdown-inline-code); }
 .markdown pre {
   background: var(--dsw-alias-markdown-code-block); border-radius: var(--dsw-radius-m);
@@ -809,6 +813,21 @@ mark {
 }
 .markdown pre code { background: none; padding: 0; }
 .markdown ul, .markdown ol { margin: 4px 0 8px; padding-left: 22px; }
+
+/* dsh GFM table: bordered rows, tight cells, horizontal scroll when wide. */
+.markdown .md-table { margin: 0 0 8px; max-width: 100%; overflow-x: auto; }
+.markdown table { border-collapse: collapse; width: max-content; max-width: 100%; }
+.markdown th, .markdown td {
+  padding: 6px 12px; min-width: 100px; max-width: 320px;
+  vertical-align: top; word-break: break-word;
+}
+.markdown th {
+  text-align: start; font-weight: 600;
+  border-bottom: 1px solid var(--dsw-alias-border-l3);
+}
+.markdown td { border-bottom: 1px solid var(--dsw-alias-border-l2); }
+.markdown th:first-child, .markdown td:first-child { padding-left: 0; }
+.markdown th:last-child, .markdown td:last-child { padding-right: 0; }
 
 /* dsh tool/think row (figma 122:9479): 24px single line —
    [16 leading] gap6 [title 14/24] gap8 [2x2 dot] gap8 [summary FILL truncate]. */
@@ -839,6 +858,19 @@ mark {
 }
 .dsh-summary[data-follow-end] { text-overflow: clip; }
 .dsh-summary-err { color: var(--dsw-alias-state-error-primary); }
+
+/* dsh fileLink: single-file tool summaries (read/write/edit paths) render as
+   an underlined link-style label. */
+.dsh-filelink {
+  color: var(--dsw-alias-label-secondary);
+  text-decoration: underline;
+  text-decoration-color: var(--dsw-alias-label-quaternary);
+  text-underline-offset: 3px;
+}
+.msg.tool:hover .dsh-filelink {
+  color: var(--dsw-alias-label-primary);
+  text-decoration-color: currentColor;
+}
 .dsh-caret {
   flex: none; color: var(--dsw-alias-label-secondary); font-size: 10px;
   transition: transform 0.15s; opacity: 0;
@@ -890,6 +922,146 @@ mark {
   font-family: var(--dsw-font-code); font-size: 12px; line-height: 18px;
 }
 .msg.tool:not(.open) .dsh-io-card { display: none; }
+
+/* dsh TerminalBlock: the bash/pwsh card — prompt line (state dot + command)
+   above the monospace output, which never soft-wraps (horizontal scroll keeps
+   column-aligned output tidy) and scrolls vertically inside the card. */
+.dsh-term {
+  margin: 4px 0 4px 4px;
+  border: 1px solid var(--dsw-alias-border-l1); border-radius: 12px;
+  background: var(--dsw-alias-markdown-code-block);
+  overflow: hidden;
+}
+.msg.tool:not(.open) .dsh-term { display: none; }
+.dsh-term-prompt {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+  font-family: var(--dsw-font-code); font-size: 12px; line-height: 18px;
+  color: var(--dsw-alias-label-primary);
+  white-space: pre-wrap; word-break: break-all;
+}
+.dsh-term-dot {
+  flex: none; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--dsw-alias-state-success-primary);
+}
+.dsh-term-cmd { min-width: 0; }
+.dsh-term-out {
+  padding: 10px 12px;
+  font-family: var(--dsw-font-code); font-size: 12px; line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+  white-space: pre; overflow-x: auto;
+  max-height: 260px; overflow-y: auto;
+}
+.dsh-term-empty {
+  padding: 10px 12px;
+  font-size: 12px; line-height: 18px;
+  color: var(--dsw-alias-label-caption);
+}
+
+/* dsh ReadBlock: banner (path + count note + copy) over line-numbered rows. */
+.dsh-read {
+  margin: 4px 0 4px 4px;
+  border: 1px solid var(--dsw-alias-border-l1); border-radius: 12px;
+  background: var(--dsw-alias-markdown-code-block);
+  overflow: hidden;
+}
+.msg.tool:not(.open) .dsh-read { display: none; }
+.dsh-read-banner {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+  font-size: 12px; line-height: 18px;
+}
+.dsh-read-label {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--dsw-font-code);
+  color: var(--dsw-alias-label-primary);
+}
+.dsh-read-count { flex: none; color: var(--dsw-alias-label-caption); }
+.dsh-read-copy {
+  flex: none; border: none; background: none; cursor: pointer;
+  font-size: 12px; line-height: 18px;
+  color: var(--dsw-alias-label-tertiary);
+  padding: 0;
+}
+.dsh-read-copy:hover { color: var(--dsw-alias-label-primary); }
+.dsh-read-body {
+  max-height: 320px; overflow-y: auto;
+  font-family: var(--dsw-font-code); font-size: 12px; line-height: 18px;
+}
+.dsh-read-line { display: flex; align-items: baseline; }
+/* Head/tail cap: hide lines that are BOTH ≥10th from the start AND ≥9th from
+   the end — exactly the middle of a >16-line body; smaller bodies show all. */
+.dsh-read:not(.expanded) .dsh-read-line:nth-child(n+10):nth-last-child(n+9) { display: none; }
+.dsh-read-gutter {
+  flex: none; width: 44px; padding-right: 10px; text-align: right;
+  color: var(--dsw-alias-label-caption);
+  user-select: none;
+}
+.dsh-read-text { min-width: 0; white-space: pre-wrap; word-break: break-word; color: var(--dsw-alias-label-secondary); }
+.dsh-read-mid { padding: 4px 0 6px 54px; }
+.dsh-read.expanded .dsh-read-mid { display: none; }
+.dsh-read-expand {
+  border: none; background: none; cursor: pointer;
+  font-size: 12px; color: var(--dsw-alias-label-tertiary); padding: 0;
+}
+.dsh-read-expand:hover { color: var(--dsw-alias-label-primary); }
+
+/* dsh SearchBlock: one file header per matched file with indented match rows. */
+.dsh-search {
+  margin: 4px 0 4px 4px;
+  border: 1px solid var(--dsw-alias-border-l1); border-radius: 12px;
+  background: var(--dsw-alias-markdown-code-block);
+  overflow: hidden;
+  max-height: 320px; overflow-y: auto;
+  font-family: var(--dsw-font-code); font-size: 12px; line-height: 18px;
+}
+.msg.tool:not(.open) .dsh-search { display: none; }
+.dsh-search-file {
+  padding: 6px 12px 2px;
+  color: var(--dsw-alias-label-primary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.dsh-search-line { display: flex; align-items: baseline; padding: 0 12px 0 24px; }
+.dsh-search-gutter {
+  flex: none; width: 34px; padding-right: 8px; text-align: right;
+  color: var(--dsw-alias-label-caption);
+  user-select: none;
+}
+.dsh-search-text { min-width: 0; white-space: pre-wrap; word-break: break-word; color: var(--dsw-alias-label-secondary); }
+
+/* dsh WebBlock-style card for web_search: content on top, citation rows below
+   (label + underlined URL + meta). */
+.dsh-web {
+  margin: 4px 0 4px 4px;
+  border: 1px solid var(--dsw-alias-border-l1); border-radius: 12px;
+  background: var(--dsw-alias-markdown-code-block);
+  overflow: hidden;
+  max-height: 320px; overflow-y: auto;
+  font-size: 12px; line-height: 18px;
+}
+.msg.tool:not(.open) .dsh-web { display: none; }
+.dsh-web-content {
+  padding: 10px 12px;
+  white-space: pre-wrap; word-break: break-word;
+  color: var(--dsw-alias-label-secondary);
+}
+.dsh-web-cites { border-top: 1px solid var(--dsw-alias-border-l2); }
+.dsh-web-cite {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 6px 12px;
+}
+.dsh-web-cite + .dsh-web-cite { border-top: 1px solid var(--dsw-alias-border-l1); }
+.dsh-web-label { flex: none; color: var(--dsw-alias-label-primary); }
+.dsh-web-url {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--dsw-alias-state-business-primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.dsh-web-meta { flex: none; color: var(--dsw-alias-label-caption); }
 .dsh-io-sec {
   display: grid; grid-template-columns: max-content 1fr; column-gap: 14px;
   align-items: baseline; padding: 12px 16px;
@@ -927,16 +1099,39 @@ mark {
 }
 .msg.error .error-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--dsw-alias-state-error-primary); margin-top: 8px; }
 
-/* running indicator */
-.msg.running .running-text {
+/* Turn-level running indicator (dsh TurnStatus): a FIXED seat above the input
+   panel, a sibling of the scrolling transcript — it never scrolls away. The
+   shimmer text rides the composer column: the seat spans the full width with
+   the same 28px side padding as the composer card, and the text row itself is
+   max-width 780px centered — so its left edge lines up exactly with the input
+   panel's left edge (the message column is 748px and would sit 16px right).
+   The elapsed clock (dsh turnStatusClock) sits outside the shimmer with
+   caption color + tabular numerals, appearing once the turn has run 15s. */
+.turn-status {
+  position: relative; z-index: 1; /* above the composer-card fade gradient */
+  width: 100%; margin: 0;
+  padding: 0 28px; /* the composer card's side padding */
+  display: flex;
+}
+.turn-status.hidden { display: none; }
+.turn-status .running-text {
+  max-width: 780px; width: 100%; margin: 0 auto; /* dsh: same column as the composer */
   font-size: 14px; font-weight: 500; line-height: 26px;
   background: linear-gradient(90deg, #4D93F8, #A5C8FF, #4D93F8);
   background-size: 200% 100%; -webkit-background-clip: text; background-clip: text;
   -webkit-text-fill-color: transparent; color: transparent;
   animation: dsw-shimmer 1.8s linear infinite;
 }
+.turn-status .running-clock {
+  margin-left: 8px;
+  font-size: 13px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  color: var(--dsw-alias-label-caption);
+  -webkit-text-fill-color: var(--dsw-alias-label-caption);
+}
 @keyframes dsw-shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
-@media (prefers-reduced-motion: reduce) { .msg.running .running-text { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .turn-status .running-text { animation: none; } }
 
 /* copy button on messages */
 .msg .copy-btn {

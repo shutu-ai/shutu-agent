@@ -36,7 +36,10 @@ import (
 var staticFS embed.FS
 
 // maxSummary is the rune cap on the bounded per-event summary the events API
-// exposes (防超大载荷 / 防泄露完整日志正文, D-WEB-4).
+// exposes (防超大载荷 / 防泄露完整日志正文, D-WEB-4). Message bodies
+// (user/message, assistant/message) are the text the frontend must display in
+// full — dsh renders assistant markdown whole, so they are NOT truncated; the
+// cap applies to tool outputs, reasoning, snippets and injected text.
 const maxSummary = 200
 
 // Server is the M10 web portal: a net/http server over the read-only session
@@ -529,12 +532,16 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 
 // handleStatic serves embedded static assets under /static/ (StripPrefix
 // removes the route prefix so the FileServer resolves inside the static dir).
+// no-cache: every reload revalidates the embedded assets, so a rebuilt binary
+// (new app.js/style.css) is picked up by a plain refresh instead of the
+// browser's heuristic cache.
 func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
 	sub, err := fs.Sub(staticFS, "static")
 	if err != nil {
 		http.Error(w, "static missing", http.StatusInternalServerError)
 		return
 	}
+	w.Header().Set("Cache-Control", "no-cache")
 	http.StripPrefix("/static/", http.FileServer(http.FS(sub))).ServeHTTP(w, r)
 }
 
@@ -1933,18 +1940,20 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 
 // summarize extracts a bounded, safe one-line summary for an event by
 // unmarshalling only the leaf fields the known types carry (未知类型 → ""; 前端
-// 忽略空 summary). The raw Data blob is never exposed.
+// 忽略空 summary). The raw Data blob is never exposed. Message bodies are the
+// exception to the bound: user/assistant message text returns in full because
+// the frontend displays it whole (dsh behavior).
 func summarize(ev session.Event) string {
 	switch ev.Type {
 	case "user/message":
 		var d struct{ Text string }
 		if json.Unmarshal(ev.Data, &d) == nil {
-			return boundRunes(d.Text, maxSummary)
+			return d.Text
 		}
 	case "assistant/message":
 		var d struct{ Text string }
 		if json.Unmarshal(ev.Data, &d) == nil {
-			return boundRunes(d.Text, maxSummary)
+			return d.Text
 		}
 	case "tool/result":
 		var d struct {
@@ -1989,10 +1998,10 @@ func summarize(ev session.Event) string {
 		}
 	case "skill/catalog":
 		var d struct {
-			Count int `json:"count"`
+			EntryCount int `json:"entryCount"`
 		}
 		if json.Unmarshal(ev.Data, &d) == nil {
-			return fmt.Sprintf("上下文注入: 技能目录 (%d 个技能)", d.Count)
+			return fmt.Sprintf("上下文注入: 技能目录 (%d 个技能)", d.EntryCount)
 		}
 	case "compaction/summary":
 		var d struct {

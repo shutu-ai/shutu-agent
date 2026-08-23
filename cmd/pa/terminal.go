@@ -1,61 +1,58 @@
-// terminal.go — the M9-2b persistent-terminal seam (dispatch-m9-2 §4). This is
-// where the terminal capability is wired into the REPL: registerTerminal
-// builds the terminal.TerminalAccess over the app's single active session,
-// registers the single pwsh tool (dsh: the persistent shell runs commands in
-// the configured shell — Pwsh / Git Bash / WSL / Cmd), and wires the D3 event
-// sink so terminal/start and terminal/stop are appended to the active session
-// log. config.applyDefaults already whitelisted pwsh when terminal.enabled was
-// true. The single active session (D5) is closed at shutdown by main's
-// deferred cleanup. The loop's turn/step structure is untouched (D4): the
-// shell runs as a child process and is observed only through the serial tool
-// path.
+// terminal.go — the dsh-aligned pwsh tool + the M9 /term REPL seam
+// (dispatch-m9-2 §4). registerTerminal registers the FRESH-PROCESS pwsh tool
+// (dsh tool-pwsh: one `pwsh -NoLogo -NoProfile -NonInteractive -Command`
+// call per tool call — no state persists between calls; workdir/timeoutMs/
+// run_in_background follow dsh) and keeps the terminal.TerminalAccess over
+// the app's single active session for the /term REPL command (the M9
+// persistent session stays a user-driven interactive seam — the model tool
+// never touches it). config.applyDefaults already whitelisted pwsh when
+// terminal.enabled was true. The single active session (D5) is closed at
+// shutdown by main's deferred cleanup. The loop's turn/step structure is
+// untouched (D4): the pwsh subprocess is a child process observed only
+// through the serial tool path.
 package main
 
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/jabing/shutu-agent/internal/config"
 	"github.com/jabing/shutu-agent/internal/terminal"
+	"github.com/jabing/shutu-agent/internal/tools"
 )
 
-// registerTerminal wires the M9 persistent-terminal seam when terminal.enabled
-// (默认关 D10): it builds the terminal.TerminalAccess over the app's single
-// active session, registers the pwsh tool into the registry, and wires the D3
-// event sink so terminal/start and terminal/stop are appended to the active
-// session log. config.applyDefaults already whitelisted pwsh when
-// terminal.enabled was true. The single active session (D5) is closed at
-// shutdown by main's deferred cleanup. The loop's turn/step structure is
-// untouched (D4): the shell runs as a child process and is observed only
-// through the serial tool path.
+// registerTerminal wires the pwsh tool and the /term REPL seam when
+// terminal.enabled (默认开, dsh 对齐 opt-out): it registers the fresh-process
+// pwsh tool into the registry — background execution is available exactly
+// when jobs.enabled (the registry is passed through; run_in_background is
+// otherwise not advertised). The M9 session seam needs no wiring here: /term
+// builds the accessor inline over the app's single active session.
 func (a *app) registerTerminal() error {
 	if !config.Enabled(a.cfg.Terminal.Enabled) {
 		return nil
 	}
-	onEvent := func(typ string, data any) {
-		if _, err := a.log.Append(typ, data); err != nil {
-			fmt.Fprintln(os.Stderr, "pa: "+typ+" event:", err)
-		}
-	}
-	tt := terminal.NewTerminalTools(&terminalAccess{a: a}, onEvent)
-	a.termTools = tt
-	if err := a.reg.Register(tt.Pwsh()); err != nil {
-		return fmt.Errorf("pa: register %s: %w", tt.Pwsh().Name(), err)
+	pwsh := tools.NewPwsh(tools.PwshOpts{
+		Workdir: a.cfg.Terminal.Workdir, // default working dir (session workspace)
+		Jobs:    a.jobs,                 // nil when jobs disabled → no run_in_background
+		Owner:   func() string { return a.currentID },
+	})
+	if err := a.reg.Register(pwsh); err != nil {
+		return fmt.Errorf("pa: register %s: %w", pwsh.Name(), err)
 	}
 	return nil
 }
 
-// terminalAccess adapts the app to the terminal seam's accessor: it owns the
-// single active session (D5) and fences every access by owner session id.
+// terminalAccess adapts the app to the M9 session accessor used by /term: it
+// owns the single active session (D5) and fences every access by owner
+// session id.
 type terminalAccess struct{ a *app }
 
 func (ac *terminalAccess) Owner() string { return ac.a.currentID }
 
 func (ac *terminalAccess) GetActive() (*terminal.Session, error) {
 	if ac.a.termSess == nil {
-		return nil, fmt.Errorf("%w (start one with a pwsh call)", terminal.ErrNoActive)
+		return nil, fmt.Errorf("%w (start one with /term start)", terminal.ErrNoActive)
 	}
 	if ac.a.termOwner != ac.a.currentID {
 		return nil, fmt.Errorf("terminal session belongs to another session (owner=%s)", ac.a.termOwner)
@@ -97,10 +94,11 @@ func (ac *terminalAccess) Stop() error {
 	return err
 }
 
-// termCommand implements the /term REPL command group over the same accessor
-// the pwsh tool uses (single source of truth for the session semantics).
+// termCommand implements the /term REPL command group over the M9 session
+// accessor — the user-driven persistent shell (the model's pwsh tool runs a
+// fresh process per call and shares no state with it).
 func (a *app) termCommand(ctx context.Context, args []string) error {
-	if a.termTools == nil {
+	if !config.Enabled(a.cfg.Terminal.Enabled) {
 		return fmt.Errorf("terminal disabled (terminal.enabled=false)")
 	}
 	acc := &terminalAccess{a: a}

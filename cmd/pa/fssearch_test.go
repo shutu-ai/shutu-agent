@@ -85,11 +85,13 @@ func TestRegisterFsSearchEnabledRegistersAndSearches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("grep via registry: %v", err)
 	}
-	if !strings.Contains(res.Output, ":2: needle here") {
-		t.Fatalf("grep output = %q, want the :2: needle here hit", res.Output)
+	// dsh result shape: "Found 1 match" header + the "path\nLine N: text"
+	// section.
+	if !strings.Contains(res.Output, "seed.txt\nLine 2: needle here") {
+		t.Fatalf("grep output = %q, want the seed.txt Line 2 hit", res.Output)
 	}
-	if !strings.Contains(res.Output, "1 matches") {
-		t.Fatalf("grep output = %q, want the match count", res.Output)
+	if !strings.Contains(res.Output, "Found 1 match") {
+		t.Fatalf("grep output = %q, want the match header", res.Output)
 	}
 
 	gargs, err := json.Marshal(map[string]any{"path": root, "pattern": "*.txt"})

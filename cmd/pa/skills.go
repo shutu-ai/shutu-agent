@@ -81,11 +81,14 @@ func (a *app) skillCatalogInjector() loop.PreStepInjector {
 
 // skillCatalogPreStep is the "skill" pre-step injector body. It lists the
 // current skill catalog (re-read every turn — no file watching), formats the
-// sorted name + description list bounded to skill.catalog_max_chars, appends
-// the skill/catalog observation event (D3), and returns the catalog as a
-// context message. A disabled registry, an empty catalog or any failure
-// contributes no context (fail-open, the same contract as the kb recall
-// injector); the loop's per-injector budget is a second, larger bound.
+// sorted name + description list bounded to skill.catalog_max_chars, and
+// returns the catalog as a context message. The skill/catalog observation
+// event (D3) is appended ONLY when the catalog VERSION changed since the last
+// turn (dsh digestCatalogEntries semantics: the catalog is injected once and
+// updates are replacements) — so the UI shows the 上下文注入 row once per
+// catalog, not every turn. A disabled registry, an empty catalog or any
+// failure contributes no context (fail-open, the same contract as the kb
+// recall injector); the loop's per-injector budget is a second, larger bound.
 func (a *app) skillCatalogPreStep(ctx context.Context, _ string) []llm.Message {
 	if a.skills == nil {
 		return nil
@@ -102,8 +105,12 @@ func (a *app) skillCatalogPreStep(ctx context.Context, _ string) []llm.Message {
 	if text == "" {
 		return nil
 	}
-	if _, err := a.log.Append(session.EventSkillCatalog, session.NewSkillCatalog(len(cands), skillCatalogVersion(cands))); err != nil {
-		fmt.Fprintln(os.Stderr, "pa: skill/catalog event:", err)
+	version := skillCatalogVersion(cands)
+	if version != a.skillCatalogVersion {
+		a.skillCatalogVersion = version
+		if _, err := a.log.Append(session.EventSkillCatalog, session.NewSkillCatalog(len(cands), version)); err != nil {
+			fmt.Fprintln(os.Stderr, "pa: skill/catalog event:", err)
+		}
 	}
 	return []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text(text)}}}
 }

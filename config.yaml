@@ -366,14 +366,16 @@ fs:
   root: ""
 
 # File-content-search capability (D-GAP-1; ADR 2026-08-20-standard-gaps.md
-# D-GAP-1). Off by default (D10): when disabled the composition root registers
-# no fs_search tool and whitelists nothing (默认关闭，不初始化). When enabled,
-# fs_search recursively scans a directory tree for a substring (or a regular
-# expression when regex: true) and returns matching file:line results — a
-# read-only, bounded capability: VCS/dependency directories (.git, node_modules,
-# ...) and binary files are skipped, files over 1 MiB are skipped, and the scan
-# is capped (max_results default 50). The tool runs on the serial tool path
-# (D5).
+# D-GAP-1 / 2026-08-23-fs-search-dsh-alignment.md). Off by default (D10): when
+# disabled the composition root registers no grep/glob tool and whitelists
+# nothing (默认关闭，不初始化). When enabled, grep searches file contents with a
+# REGULAR EXPRESSION (dsh grep: pattern/path/include, case-sensitive, results
+# grouped by file, first 250 matches inline) and glob lists file paths
+# matching a path glob (dsh glob: no "/" in the pattern matches basenames at
+# any depth, sorted by modification time, first 100 paths inline) — both
+# read-only, bounded capabilities: VCS/dependency directories (.git,
+# node_modules, ...) and binary files are skipped, files over 1 MiB are
+# skipped, and the scan is capped. The tools run on the serial tool path (D5).
 fs_search:
   # Master switch. false ⇒ no fs_search tool is registered and nothing is
   # whitelisted (默认关闭 D10，不初始化).
@@ -432,13 +434,20 @@ web:
     # web_search server tool max_uses per request; 0/absent ⇒ 5.
     max_uses: 5
 
-# terminal: persistent-shell terminal (M9). Default off (D10); when enabled,
-# the session subprocess runs with a scrubbed environment (agent credentials
-# are never inherited).
-#   enabled: false            # master switch; false → no terminal tools, no /term
-#   shell: ""                 # platform default (cmd.exe on Windows)
+# terminal: gates the pwsh tool and the /term REPL (ADR
+# 2026-08-23-pwsh-dsh-alignment.md). The model-facing pwsh tool follows dsh
+# tool-pwsh: each call runs a FRESH `pwsh -NoLogo -NoProfile -NonInteractive
+# -Command` process — no state (cwd/variables/functions) persists between
+# calls, pass workdir instead of cd; non-zero exits are [exit code: N]
+# markers, credential-shaped env entries are scrubbed, and
+# run_in_background (jobs.enabled required) returns a job id. The /term REPL
+# keeps the M9 persistent session (interactive use only). Default on (dsh
+# 对齐 opt-out); when disabled: no pwsh tool, no /term. The session subprocess
+# runs with a scrubbed environment (agent credentials are never inherited).
+#   enabled: true            # master switch; false → no pwsh tool, no /term
+#   shell: ""                # /term session shell: platform default (cmd.exe on Windows)
 #   args: []
-#   workdir: ""               # inherit agent cwd
+#   workdir: ""              # default pwsh workdir (session workspace); empty → agent cwd
 #   scrollback_max_bytes: 65536
 #   scrollback_lines: 2000
 #   read_idle_ms: 500

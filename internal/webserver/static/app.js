@@ -85,7 +85,9 @@ let reasoningLive = false;      // thinking deltas of the current step already s
 let currentReasoningNode = null; // the live Think row being accumulated
 let lastReasoningSeq = 0;       // seq of the last rendered reasoning delta (step boundary)
 let renderedSeqs = new Set();   // event seqs rendered in the current view (replay dedup)
-let runningNode = null;         // "Deep diving..." element
+let runningNode = null;         // "Deep diving..." element (turn-level, dsh TurnStatus)
+let runningStart = 0;           // wall clock of the running turn's start (elapsed anchor)
+let runningTimer = null;        // 1s ticker for the elapsed clock
 let pollTimer = null;           // session-list refresh
 let config = {};                // cached GET /api/config view
 
@@ -308,30 +310,136 @@ function msgInner() {
 }
 
 // ---- lightweight markdown -------------------------------------------------
+// Renders escaped text into VALID, compact HTML (dsh display scheme): fenced
+// code blocks stay intact; consecutive "- "/"1. " lines merge into ONE
+// ul/ol (never wrapped in a <p>, which inflated the gaps between items);
+// headings and paragraphs are separate block elements with tight spacing.
+// GFM tables ("| a | b |" + "|---|---|" delimiter row, optional ":" column
+// alignment) render as real <table> markup, like the dsh markdown renderer.
 function renderMarkdown(text) {
   const t = esc(text);
-  const blocks = [];
-  let buf = "";
-  // crude fenced code split (keeps pre blocks intact)
   const parts = t.split(/(```[\s\S]*?```)/g);
+  const out = [];
+  const inline = (s) => s
+    .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+  // A table row starts with "|" and holds at least two cells ("| a | b |");
+  // the delimiter row contains only pipes, dashes, colons and spaces.
+  const isTableRow = (line) => /^\s*\|/.test(line) && line.split("|").length >= 3;
+  const isDelimRow = (line) => /^\s*\|?[\s|:-]+\|?\s*$/.test(line) && line.includes("|") && line.includes("-");
+  // Split one table row into trimmed cells; "\|" is an escaped literal pipe.
+  const splitCells = (line) => {
+    const escPipe = "\u0000";
+    let s = line.trim().replace(/\\\|/g, escPipe);
+    if (s.startsWith("|")) s = s.slice(1);
+    if (s.endsWith("|")) s = s.slice(0, -1);
+    return s.split("|").map((c) => c.trim().replace(/\u0000/g, "|"));
+  };
+  // Delimiter-cell alignment: ":---" left, "---:" right, ":---:" center.
+  const cellAlign = (cell) => {
+    if (!/^:?-+:?$/.test(cell.trim())) return null;
+    if (cell.startsWith(":") && cell.endsWith(":")) return "center";
+    if (cell.endsWith(":")) return "right";
+    if (cell.startsWith(":")) return "left";
+    return null;
+  };
+  const renderTable = (headCells, delimCells, rows) => {
+    const align = delimCells.map(cellAlign);
+    const cols = headCells.length;
+    const st = (i) => (align[i] ? ` style="text-align:${align[i]}"` : "");
+    let h = `<div class="md-table"><table><thead><tr>`;
+    for (let i = 0; i < cols; i++) h += `<th${st(i)}>${inline(headCells[i] || "")}</th>`;
+    h += `</tr></thead><tbody>`;
+    for (const row of rows) {
+      h += "<tr>";
+      for (let i = 0; i < cols; i++) h += `<td${st(i)}>${inline(row[i] || "")}</td>`;
+      h += "</tr>";
+    }
+    h += "</tbody></table></div>";
+    return h;
+  };
   for (const p of parts) {
     if (/^```/.test(p)) {
       const code = p.replace(/^```[^\n]*\n?/, "").replace(/```$/, "");
-      blocks.push(`<pre><code>${code}</code></pre>`);
-    } else if (p) {
-      let s = p.replace(/`([^`\n]+)`/g, "<code>$1</code>");
-      s = s.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
-      s = s.replace(/(^|\n)#{1,4} ([^\n]+)/g, "$1<h3>$2</h3>");
-      s = s.replace(/(^|\n)[-*] ([^\n]+)/g, "$1<li>$2</li>");
-      s = s.replace(/(^|\n)\d+\. ([^\n]+)/g, "$1<li>$2</li>");
-      if (/\n<li>/.test(s)) {
-        s = s.replace(/<li>([\s\S]*?)$/, "<ul><li>$1</ul>");
-      }
-      const paras = s.split(/\n{2,}/).filter((x) => x.trim());
-      blocks.push(paras.map((x) => `<p>${x.trim()}</p>`).join(""));
+      out.push(`<pre><code>${code}</code></pre>`);
+      continue;
     }
+    if (!p) continue;
+    let html = "";
+    let listTag = null; // "ul" | "ol" while inside a list
+    let para = [];
+    let pendingHead = null;  // a "| a | b |" line awaiting its delimiter row
+    let tblHead = null;      // collecting a table once the delimiter matched
+    let tblAlign = null;
+    let tblRows = null;
+    const flushPara = () => {
+      if (para.length > 0) {
+        html += `<p>${inline(para.join("\n"))}</p>`;
+        para = [];
+      }
+    };
+    const flushList = () => {
+      if (listTag !== null) { html += `</${listTag}>`; listTag = null; }
+    };
+    const closeTable = () => {
+      if (tblHead !== null) {
+        html += renderTable(tblHead, tblAlign, tblRows);
+        tblHead = null; tblAlign = null; tblRows = null;
+      }
+    };
+    for (const raw of p.split("\n")) {
+      const line = raw.trimEnd();
+      if (tblHead !== null) {
+        // A stray delimiter row inside the body means the table ended; the
+        // line then falls through as plain text (and may open a new table).
+        if (isDelimRow(line)) { closeTable(); }
+        else if (isTableRow(line)) { tblRows.push(splitCells(line)); continue; }
+        else { closeTable(); }
+      }
+      if (pendingHead !== null) {
+        if (isDelimRow(line)) {
+          tblHead = splitCells(pendingHead);
+          tblAlign = splitCells(line);
+          tblRows = [];
+          pendingHead = null;
+          continue;
+        }
+        // not a table after all: the header line is plain text
+        para.push(pendingHead);
+        pendingHead = null;
+      }
+      const ul = /^[-*] (.+)$/.exec(line);
+      const ol = /^\d+\. (.+)$/.exec(line);
+      const head = /^(#{1,4}) (.+)$/.exec(line);
+      if (isTableRow(line)) {
+        flushPara();
+        flushList();
+        pendingHead = line;
+        continue;
+      }
+      if (ul || ol) {
+        const tag = ul ? "ul" : "ol";
+        flushPara();
+        if (listTag !== tag) { flushList(); html += `<${tag}>`; listTag = tag; }
+        html += `<li>${inline((ul || ol)[1])}</li>`;
+        continue;
+      }
+      flushList();
+      if (head) {
+        flushPara();
+        html += `<h3>${inline(head[2])}</h3>`;
+        continue;
+      }
+      if (line.trim() === "") { flushPara(); continue; }
+      para.push(line);
+    }
+    closeTable();
+    if (pendingHead !== null) para.push(pendingHead);
+    flushPara();
+    flushList();
+    out.push(html);
   }
-  buf = blocks.join("");
+  const buf = out.join("");
   return buf || esc(text);
 }
 
@@ -517,23 +625,43 @@ function renderToolRow(ev) {
   const output = isErr ? (ev.summary || "") : (ev.tool_output || "");
   const failureLine = isErr ? firstLine(ev.summary || "") : "";
   const summary = failureLine || toolSummary(name, variant, ev.tool_args);
-  const expandable = !!(args || output);
+  // dsh: bash/pwsh rows expand into a TERMINAL card; read rows into a
+  // line-numbered READ card; grep into a grouped SEARCH card; code rows show
+  // the program as the IN body; everything else keeps the IN/OUT card.
+  const isBash = variant === "bash";
+  const isFileRead = variant === "read" && (name === "read" || name === "read_file" || name === "fs_read");
+  const isGrep = variant === "search" && (name === "grep" || name === "fs_search");
+  const isWebSearch = name === "web_search";
+  const expandable = isBash || isFileRead || isGrep || isWebSearch || !!(args || output);
   const wasOpen = node.classList.contains("open");
   toolMeta[seq] = { name: name || "Tool call", args: ev.tool_args || "", output: output, error: isErr };
+  const bodyHtml = isBash
+    ? `<div class="dsh-term">
+         <div class="dsh-term-prompt">
+           <span class="dsh-term-dot" aria-hidden></span>
+           <span class="dsh-term-cmd">${esc(summary)}</span>
+         </div>
+         ${output ? `<div class="dsh-term-out">${esc(output)}</div>` : `<div class="dsh-term-empty">（无输出）</div>`}
+       </div>`
+    : isFileRead && output
+      ? readCardHtml(output, summary)
+      : isGrep && output
+        ? (searchCardHtml(output) || `<div class="dsh-io-card">${ioCardSections(args, output, isErr)}</div>`)
+        : isWebSearch && output
+          ? (webCardHtml(output) || `<div class="dsh-io-card">${ioCardSections(args, output, isErr)}</div>`)
+          : `<div class="dsh-io-card">${ioCardSections(args, output, isErr, variant)}</div>`;
+  // dsh fileLink: single-file tools (read/write/edit) show the path as an
+  // underlined link-style summary.
+  const singleFile = !failureLine && (variant === "read" || variant === "write" || variant === "edit");
   node.innerHTML = `
     <div class="dsh-row" role="button" tabindex="0">
       <span class="dsh-leading">${isErr ? '<span class="dsh-statedot dsh-statedot-err"></span>' : VARIANT_ICONS[variant]}</span>
       <span class="dsh-title">${esc(toolRowTitle(name, variant))}</span>
       <span class="dsh-sep" aria-hidden></span>
-      <span class="dsh-summary${failureLine ? " dsh-summary-err" : ""}">${esc(summary)}</span>
+      <span class="dsh-summary${failureLine ? " dsh-summary-err" : ""}${singleFile ? " dsh-filelink" : ""}">${esc(summary)}</span>
       <span class="dsh-caret">▸</span>
     </div>
-    ${expandable ? `
-    <div class="dsh-io-card">
-      ${args ? `<div class="dsh-io-sec"><span class="dsh-io-label">IN</span><span class="dsh-io-text">${esc(args)}</span></div>` : ""}
-      ${args && output ? `<span class="dsh-io-divider" aria-hidden></span>` : ""}
-      ${output ? `<div class="dsh-io-sec"><span class="dsh-io-label">OUT</span><span class="dsh-io-text${isErr ? " dsh-io-err" : ""}">${esc(output)}</span></div>` : ""}
-    </div>` : ""}`;
+    ${expandable ? bodyHtml : ""}`;
   const row = node.querySelector(".dsh-row");
   const toggle = () => {
     if (!expandable) { openDetails(seq); return; }
@@ -545,8 +673,131 @@ function renderToolRow(ev) {
   row.addEventListener("keydown", (e) => {
     if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
   });
+  // Card chrome: the read card's copy control and its head/tail expand toggle.
+  node.querySelectorAll("[data-read-copy]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      navigator.clipboard?.writeText(btn.dataset.readCopy || "").catch(() => {});
+      const t = btn.textContent; btn.textContent = "复制成功";
+      setTimeout(() => { btn.textContent = t; }, 1000);
+    });
+  });
+  node.querySelectorAll(".dsh-read-expand").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      btn.closest(".dsh-read").classList.toggle("expanded");
+    });
+  });
   if (wasOpen && expandable) node.classList.add("open");
   scrollToBottom(true);
+}
+
+// ioCardSections renders the IN/OUT card sections (dsh ioCard 1249:35657). The
+// code variant shows the PROGRAM as the IN body (dsh deriveBody), not the JSON
+// envelope.
+function ioCardSections(args, output, isErr, variant) {
+  let inText = args;
+  if (variant === "code" && args) {
+    try {
+      const v = JSON.parse(args);
+      if (typeof v.code === "string" && v.code !== "") inText = v.code;
+    } catch (_) { /* fall back to the raw args */ }
+  }
+  return `
+    ${inText ? `<div class="dsh-io-sec"><span class="dsh-io-label">IN</span><span class="dsh-io-text">${esc(inText)}</span></div>` : ""}
+    ${inText && output ? `<span class="dsh-io-divider" aria-hidden></span>` : ""}
+    ${output ? `<div class="dsh-io-sec"><span class="dsh-io-label">OUT</span><span class="dsh-io-text${isErr ? " dsh-io-err" : ""}">${esc(output)}</span></div>` : ""}`;
+}
+
+// readCardHtml renders a dsh ReadBlock: banner (path + "显示 N / M 行" note +
+// copy) over line-numbered rows. All lines are in the DOM; the head/tail cap
+// (16 lines) and the expand toggle are pure CSS, so no slicing arithmetic can
+// drift from the rendering.
+function readCardHtml(text, label) {
+  const lines = text.split("\n");
+  const capped = lines.length > 16;
+  const row = (l, i) => `<div class="dsh-read-line"><span class="dsh-read-gutter" aria-hidden>${i + 1}</span><span class="dsh-read-text">${esc(l)}</span></div>`;
+  return `<div class="dsh-read"${capped ? "" : ' data-full="1"'}>
+    <div class="dsh-read-banner">
+      <span class="dsh-read-label">${esc(label)}</span>
+      <span class="dsh-read-count">${capped ? "显示 16 / " + lines.length + " 行" : lines.length + " 行"}</span>
+      <button type="button" class="dsh-read-copy" data-read-copy="${esc(text)}">复制</button>
+    </div>
+    <div class="dsh-read-body">
+      ${lines.map((l, i) => row(l, i)).join("")}
+    </div>
+    ${capped ? `<div class="dsh-read-mid"><button type="button" class="dsh-read-expand">… 其余 ${lines.length - 16} 行</button></div>` : ""}
+  </div>`;
+}
+
+// webCardHtml renders a dsh WebBlock-style card for web_search: the answer
+// content on top, then one citation row per "- [label](url) — meta" source
+// line (the URL underlined like dsh web links). Non-citation text (e.g. the
+// trailing "Cite the relevant URLs..." note) is dropped; returns null when
+// nothing parses, so the caller falls back to the plain OUT card.
+function webCardHtml(text) {
+  const citeRe = /^- \[([^\]]*)\]\(([^)]*)\)(.*)$/;
+  const content = [];
+  const cites = [];
+  let inSources = false;
+  for (const line of text.split("\n")) {
+    if (line === "Sources:") { inSources = true; continue; }
+    const m = citeRe.exec(line);
+    if (m) {
+      cites.push({ label: m[1], url: m[2], meta: m[3].replace(/^\s*\u2014\s*/, "") });
+      continue;
+    }
+    if (inSources) continue;
+    if (line.trim() !== "") content.push(line);
+  }
+  if (cites.length === 0) return null;
+  let html = `<div class="dsh-web">`;
+  if (content.length > 0) {
+    html += `<div class="dsh-web-content">${esc(content.join("\n"))}</div>`;
+  }
+  html += `<div class="dsh-web-cites">`;
+  for (const c of cites) {
+    html += `<div class="dsh-web-cite">
+      <span class="dsh-web-label">${esc(c.label)}</span>
+      <span class="dsh-web-url">${esc(c.url)}</span>
+      ${c.meta ? `<span class="dsh-web-meta">${esc(c.meta)}</span>` : ""}
+    </div>`;
+  }
+  html += `</div></div>`;
+  return html;
+}
+
+// searchCardHtml renders a dsh SearchBlock: one file header per matched file
+// with its indented match lines. Parses the dsh grep result format — per-file
+// "path\nLine N: text" sections with a "Found N matches" header and the
+// could-not-save footer — and drops lines that are not match rows (header,
+// footer, blank separators).
+function searchCardHtml(text) {
+  const lineRe = /^Line (\d+): (.*)$/;
+  const groups = new Map();
+  const order = [];
+  let current = null;
+  for (const line of text.split("\n")) {
+    const m = lineRe.exec(line);
+    if (m) {
+      if (current === null) { current = "?"; groups.set(current, []); order.push(current); }
+      groups.get(current).push({ n: m[1], t: m[2] });
+      continue;
+    }
+    if (line === "" || line.startsWith("Found ") || line.startsWith("(") || line === "No matches found") continue;
+    current = line;
+    if (!groups.has(current)) { groups.set(current, []); order.push(current); }
+  }
+  if (order.length === 0) return null;
+  let html = `<div class="dsh-search">`;
+  for (const p of order) {
+    html += `<div class="dsh-search-file">${esc(p)}</div>`;
+    for (const h of groups.get(p)) {
+      html += `<div class="dsh-search-line"><span class="dsh-search-gutter" aria-hidden>${esc(h.n)}</span><span class="dsh-search-text">${esc(h.t)}</span></div>`;
+    }
+  }
+  html += `</div>`;
+  return html;
 }
 
 
@@ -584,17 +835,51 @@ function addUserMsg(text, timeIso, images) {
   scrollToBottom(true);
 }
 
+// formatRunDuration renders a localized elapsed label (dsh
+// formatRunDuration): whole seconds under a minute, "M分SS秒" beyond.
+function formatRunDuration(ms) {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return minutes > 0 ? `${minutes}分${String(seconds).padStart(2, "0")}秒` : `${seconds}秒`;
+}
+
+// updateRunningClock refreshes the turn-level elapsed clock. Short turns keep
+// the plain label; the clock only appears once the turn has clearly been
+// running for a while (dsh: showClock after 15s).
+function updateRunningClock() {
+  if (!runningNode) return;
+  const clock = runningNode.querySelector(".running-clock");
+  if (!clock) return;
+  const elapsed = Date.now() - runningStart;
+  clock.textContent = elapsed >= 15000 ? formatRunDuration(elapsed) : "";
+}
+
+// addRunning shows the turn-level loading signal in the FIXED #turn-status
+// seat above the input panel (dsh TurnStatus — a sibling of the scrolling
+// transcript, so it never scrolls away). It is NOT removed per step: it rides
+// the whole running turn (first-token wait, tool execution, streaming) so it
+// never flickers between steps; the clock ticks once a second and appears
+// after 15s.
 function addRunning() {
   if (runningNode) return;
-  const inner = msgInner();
-  runningNode = document.createElement("div");
-  runningNode.className = "msg running";
-  runningNode.innerHTML = `<div class="running-text">Deep diving...</div>`;
-  inner.appendChild(runningNode);
-  scrollToBottom(true);
+  const el = document.getElementById("turn-status");
+  if (!el) return;
+  el.classList.remove("hidden");
+  el.innerHTML = `<div class="running-text" role="status">Deep diving...<span class="running-clock" aria-hidden></span></div>`;
+  runningNode = el;
+  runningStart = Date.now();
+  updateRunningClock();
+  runningTimer = setInterval(updateRunningClock, 1000);
+  scrollToBottom(true); // the turn's first events land below the last message
 }
 function removeRunning() {
-  if (runningNode) { runningNode.remove(); runningNode = null; }
+  if (runningTimer) { clearInterval(runningTimer); runningTimer = null; }
+  if (runningNode) {
+    runningNode.classList.add("hidden");
+    runningNode.innerHTML = "";
+    runningNode = null;
+  }
 }
 
 function addAssistant(text, timeIso, seq) {
@@ -642,7 +927,8 @@ function addAssistant(text, timeIso, seq) {
 function appendAssistantStreaming(chunk, seq) {
   let md = streamState && streamState.node;
   if (!md) {
-    removeRunning();
+    // The running indicator stays: it is turn-level (dsh TurnStatus) and only
+    // goes away when the turn settles (sendMessage's finally).
     const node = addAssistant("", null, seq);
     streamState = { node };
   }
@@ -650,7 +936,6 @@ function appendAssistantStreaming(chunk, seq) {
   scrollToBottom(true);
 }
 function finishAssistant(text, timeIso, seq) {
-  removeRunning();
   if (streamState && streamState.node) {
     if (text) {
       // replace accumulated DOM text with the final rendered markdown
@@ -1636,7 +1921,7 @@ async function deleteSession(id) {
   if (wasCurrent) {
     if (sseAbort) { sseAbort.abort(); sseAbort = null; }
     streamState = null;
-    runningNode = null;
+    removeRunning();
     clearDrafts();
     localStorage.removeItem(KEY_CURRENT);
     currentID = "";
@@ -1698,7 +1983,7 @@ function showNewSessionHero() {
   if (sseAbort) { sseAbort.abort(); sseAbort = null; }
   if (sseReconnect) { clearTimeout(sseReconnect); sseReconnect = null; }
   streamState = null;
-  runningNode = null;
+  removeRunning();
   streamActive = false;
   turnRunning = false;
   syncSendButton();
@@ -2604,7 +2889,7 @@ function openSession(id) {
   if (sseAbort) { sseAbort.abort(); sseAbort = null; }
   if (sseReconnect) { clearTimeout(sseReconnect); sseReconnect = null; }
   streamState = null;
-  runningNode = null;
+  removeRunning();
   streamActive = false;
   turnRunning = false;
   renderedSeqs = new Set(); // per-session rendered-event dedup
@@ -2626,8 +2911,23 @@ function openSession(id) {
 
 async function loadEvents(id) {
   try {
+    // openSession reset the rendered set before calling this, so any growth
+    // during the fetch means the SSE stream rendered events concurrently — a
+    // live turn (the user sent a message right after opening) or the replay.
+    // In that case the snapshot is stale by definition: wiping the container
+    // would destroy the in-flight round's already-rendered output and the
+    // stale set rebuild would lose its seqs forever. The stream owns the
+    // container then — render nothing, merge nothing.
+    const grewFrom = renderedSeqs.size;
     const res = await api(`/api/sessions/${encodeURIComponent(id)}/events`);
     const evs = await res.json();
+    if (renderedSeqs.size > grewFrom) {
+      sessionEmpty = evs.length === 0;
+      setHeroPhase();
+      if (!sessionEmpty) heroEl.classList.add("hidden");
+      refreshContextMeter();
+      return;
+    }
     const inner = msgInner();
     inner.textContent = "";
     let lastTime = "";
@@ -2761,8 +3061,13 @@ function handleStreamEvent(ev) {
 // its buffer is full). The rendered-seq SET — not a watermark — lets a dropped
 // event (a gap before later-rendered events) still be repaired here.
 // assistant/chunk and assistant/reasoning are skipped — the closing
-// assistant/message is authoritative for both text and reasoning — but their
-// seqs are still recorded so a later replay skips them.
+// assistant/message is authoritative for both text and reasoning — and so is
+// user/message: the POST settles while the turn's user/message SSE frame may
+// still be in flight, and re-rendering it at the END of the transcript would
+// show the round's own input as a ghost bubble below the answer. A user
+// message dropped by the hub is recovered by the reconnect replay (log order)
+// or the next session open. Their seqs are still recorded so a later replay
+// skips them.
 async function reconcileEvents() {
   try {
     const res = await api(`/api/sessions/${encodeURIComponent(currentID)}/events`);
@@ -2771,7 +3076,7 @@ async function reconcileEvents() {
     let advanced = false;
     for (const ev of evs) {
       if (ev.seq != null && renderedSeqs.has(ev.seq)) continue;
-      if (ev.type === "assistant/chunk" || ev.type === "assistant/reasoning") {
+      if (ev.type === "assistant/chunk" || ev.type === "assistant/reasoning" || ev.type === "user/message") {
         noteRendered(ev.seq);
         continue;
       }
@@ -2863,8 +3168,9 @@ async function sendMessage() {
     stopRequested = false;
     // The POST settles exactly when the turn settles (success or error): a
     // failed turn produces no assistant/message event, so finishAssistant
-    // never ran — reset the run state and refresh the ContextMeter here.
-    if (streamActive) { streamActive = false; turnRunning = false; syncSendButton(); loadSessions(); }
+    // never ran — reset the run state (including the turn-level Deep diving
+    // indicator) and refresh the ContextMeter here.
+    if (streamActive) { streamActive = false; turnRunning = false; syncSendButton(); loadSessions(); removeRunning(); }
     // The SSE hub may have dropped tail events (full subscriber buffer), which
     // would leave the last tool row / Think row sweeping forever. Reconcile
     // from the durable log, then park anything still running (cancelled turn).
@@ -3122,7 +3428,9 @@ function renderGeneral(c) {
       ${sel("permission-select", pp, [["readonly", "只读"], ["standard", "标准"], ["full", "全部"]])}
     </div>` +
     // Default terminal (dsh 通用设置): pick the shell (Powershell / Git Bash
-    // / WSL). Any choice except "关闭" enables the persistent terminal (M9).
+    // / WSL). Any choice except "关闭" enables the pwsh tool + /term (M9);
+    // the shell selection configures the /term persistent session only — the
+    // model's pwsh tool is a fresh pwsh process per call.
     `<div class="settings-row">
       <div class="row-text"><div class="row-title">默认终端</div><div class="row-desc">选择终端使用的 shell（PowerShell / Git Bash / WSL），重启后生效。</div></div>
       ${sel("terminal-select", ts, [["off", "关闭"], ["powershell", "PowerShell"], ["gitbash", "Git Bash"], ["wsl", "WSL"]])}

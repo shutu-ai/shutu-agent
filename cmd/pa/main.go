@@ -389,12 +389,12 @@ func main() {
 	if app.fs != nil {
 		defer app.fs.Close()
 	}
-	// D-GAP-1: wire the file-content-search seam 鈥?the fs_search tool 鈥?when
+	// D-GAP-1: wire the file-content-search seam 鈥?the grep/glob tools (dsh tool-fs-search contract) 鈥?when
 	// fs_search.enabled (榛樿鍏?D10). config.applyDefaults already whitelisted
-	// fs_search when fs_search.enabled was true. The tool is read-only and
+	// fs_search when fs_search.enabled was true. The tools are read-only and
 	// holds no resources, so there is no deferred Close; the default search
 	// root is the agent working directory (os.Getwd, like internal/code and
-	// internal/skill). It executes on the serial tool path (D5).
+	// internal/skill). They execute on the serial tool path (D5).
 	if err := app.registerFsSearch(); err != nil {
 		fmt.Fprintln(os.Stderr, "pa:", err)
 		os.Exit(1)
@@ -411,11 +411,12 @@ func main() {
 		fmt.Fprintln(os.Stderr, "pa:", err)
 		os.Exit(1)
 	}
-	// M9: wire the persistent-terminal seam 鈥?the single active session +
-	// the five terminal_* tools + the /term REPL + the D3 event sink 鈥?when
+	// M9/dsh: wire the pwsh seam 鈥?the fresh-process pwsh tool (dsh
+	// tool-pwsh: one `pwsh -Command` process per call, no state between
+	// calls) + the /term REPL over the M9 persistent session 鈥?when
 	// terminal.enabled (榛樿鍏?D10). config.applyDefaults already whitelisted
-	// the terminal_* names when terminal.enabled was true. The deferred
-	// cleanup closes the active session at shutdown so no child process leaks.
+	// pwsh when terminal.enabled was true. The deferred cleanup closes the
+	// active /term session at shutdown so no child process leaks.
 	if err := app.registerTerminal(); err != nil {
 		fmt.Fprintln(os.Stderr, "pa:", err)
 		os.Exit(1)
@@ -550,6 +551,10 @@ type app struct {
 
 	compaction compaction.Engine // nil when compaction disabled (D10)
 	skills     skill.Registry    // nil when skill disabled (D10)
+	// skillCatalogVersion is the digest of the last skill/catalog event logged
+	// (dsh digest semantics): the catalog event fires once per catalog, and
+	// again only when the catalog changes — never every turn.
+	skillCatalogVersion string
 	// skillManager is the web settings-page skill manager (dsh-skill-mcp-panel
 	// 瀵归綈). It is created whenever the web server runs 鈥?independent of
 	// skill.enabled 鈥?so the 鎶€鑳?settings page can list/enable/disable/delete/
@@ -598,12 +603,13 @@ type app struct {
 	// nil when eval disabled (D10).
 	evalEng eval.Engine
 
-	// M9 persistent terminal (dispatch-m9-2): the single active session and
-	// the shared terminal_* tool bundle. Nil when terminal disabled (D10) or
-	// no session started; termOwner fences access to the starting session.
+	// M9 persistent terminal (dispatch-m9-2): the single active session
+	// backing the /term REPL command. Nil when terminal disabled (D10) or no
+	// session started; termOwner fences access to the starting session. The
+	// model-facing pwsh tool is a fresh process per call and never touches
+	// this session.
 	termSess  *terminal.Session
 	termOwner string
-	termTools *terminal.TerminalTools
 
 	// approveInput feeds the sensitive-tool gate's y/n read (nil => os.Stdin).
 	// It exists so the wiring tests can inject canned approval answers; in the

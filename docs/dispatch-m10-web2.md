@@ -158,12 +158,12 @@ func (a *app) runTurn(ctx context.Context, text string, interactive bool) error 
   1. `W4a: 状态 API + events 扩展（/api/subagents、/api/jobs、reasoning/tool_name）`
   2. `W4b: dsh 式工作区前端大重构（思维链 + 会话模式 + 侧栏 tabs + 设置全功能 + 精致 UI）`
 - loop.go 零改动（D4）；认证已可选（token 空直开，D-WEB2-G——不要加回强制登录）；只动 internal/webserver、cmd/pa、static/；零新依赖、CGO-free、gofmt。
-- 状态 API 只读 + **脱敏**（D7）：不暴露密钥、会话事件正文、完整输出；只给 id/状态/时间/标签/摘要。
+- 状态 API 只读 + **脱敏**（D7）：不暴露密钥、会话事件正文、完整输出；只给 id/状态/时间/标签/摘要。例外：user/assistant 消息正文完整返回（前端整条渲染，dsh 行为）——消息文本是 UI 必显数据，不是日志正文泄露面。
 - 提交用 `git add` 明确列文件（config.yaml 保持 M 不动不提交）。
 
 ## 现状（实施时通读）
 - `internal/webserver/webserver.go`：`Server{store, tokenHash, authOn, addr, srv, msgFn, sessFn, evSrc, cfgFn}` + `New(store, token, addr)`（token 空 → authOn=false 直开）+ `requireAuth`（authOn false 放行，panicSafeWriter recover）+ `Handlers()` getter + 路由（sessions/events/stats/kb/message/resume/config/SSE）。
-- `eventView{Seq,Type,Time,Summary}`（events API 每事件视图）；`summarize(ev)`（有界文本）。
+- `eventView{Seq,Type,Time,Summary}`（events API 每事件视图）；`summarize(ev)`（有界文本；user/assistant 消息正文例外，完整返回）。
 - 事件 Data 的 JSON tag 是公开契约（session.go）：`assistantMessageData{Text, ToolCalls, FinishReason, Reasoning json:"reasoning,omitempty"}`、`toolResultData{CallID, Name, Output, Spill}`、`toolErrorData{...}`——webserver 可自建同构 struct Unmarshal 提取（不依赖 session 内部类型）。
 - `cmd/pa/main.go` app 字段：`jobs *jobs.Local`（nil 当 jobs 关）、`subagents subagent.Runtime`（nil 当 subagent 关）、`currentID`。
 - `internal/jobs`：`(*Local).List(ctx, callerSession) ([]JobSnapshot, error)`；`JobSnapshot{ID, Kind, Label, OwnerSession, Status, Detail, StartedAt, FinishedAt, OutputLimitBytes}`。

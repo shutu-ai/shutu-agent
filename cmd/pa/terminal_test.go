@@ -5,10 +5,11 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jabing/shutu-agent/internal/config"
+	"github.com/jabing/shutu-agent/internal/jobs"
 	"github.com/jabing/shutu-agent/internal/session"
-	"github.com/jabing/shutu-agent/internal/terminal"
 	"github.com/jabing/shutu-agent/internal/tools"
 )
 
@@ -27,162 +28,194 @@ func makeTermApp(enabled bool) *app {
 	}
 }
 
+// makeTermAppWithJobs adds the background-job registry the composed pwsh tool
+// uses for run_in_background (registerJobs wiring is not needed here — the
+// tool reads a.jobs directly).
+func makeTermAppWithJobs(enabled bool) *app {
+	app := makeTermApp(enabled)
+	app.jobs = jobs.NewLocal(jobs.LocalOpts{})
+	return app
+}
+
 // termPolicy whitelists pwsh, mirroring what config.applyDefaults does when
-// terminal.enabled is true. The wiring tests drive the tool object directly
-// (bypassing the registry), so this policy is only for cases that go through
-// reg.Execute.
+// terminal.enabled is true.
 func termPolicy() tools.Policy {
 	return tools.Policy{
-		Enabled: []string{terminal.ToolPwshName},
+		Enabled: []string{"pwsh"},
+		Timeout: time.Minute,
 	}
 }
 
-// execTerm executes the pwsh tool with JSON args — the same serial tool path
-// the model and /term share. It bypasses the registry policy on purpose.
-func execTerm(t *testing.T, tool tools.Tool, args map[string]any) (string, error) {
+// execTerm executes the composed pwsh tool through the registry's serial gate
+// — the same path the model uses.
+func execTerm(t *testing.T, app *app, args map[string]any) (tools.Result, error) {
 	t.Helper()
 	b, err := json.Marshal(args)
 	if err != nil {
 		t.Fatalf("marshal args: %v", err)
 	}
-	return tool.Execute(context.Background(), b)
+	return app.reg.Execute(context.Background(), "pwsh", b)
 }
 
-// TestRegisterTerminalDisabledRegistersNothing verifies the D10 gate: with
-// terminal.enabled=false registerTerminal builds no tool bundle and registers
-// no pwsh tool.
+// TestRegisterTerminalDisabledRegistersNothing verifies the gate: with
+// terminal.enabled=false registerTerminal registers no pwsh tool.
 func TestRegisterTerminalDisabledRegistersNothing(t *testing.T) {
 	app := makeTermApp(false)
 	if err := app.registerTerminal(); err != nil {
 		t.Fatalf("registerTerminal: %v", err)
 	}
-	if app.termTools != nil {
-		t.Fatal("termTools must stay nil when terminal.enabled=false")
-	}
-	if containsStr(specNames(app.reg), terminal.ToolPwshName) {
+	if containsStr(specNames(app.reg), "pwsh") {
 		t.Fatal("pwsh registered while terminal disabled")
 	}
 }
 
-// TestRegisterTerminalEnabledRegistersTools verifies the enabled path: the
-// tool bundle is built and the pwsh tool lands in the registry.
-func TestRegisterTerminalEnabledRegistersTools(t *testing.T) {
+// TestRegisterTerminalEnabledRegistersPwsh verifies the enabled path: the
+// fresh-process pwsh tool lands in the registry, and run_in_background is
+// advertised exactly when jobs is wired (app.jobs non-nil).
+func TestRegisterTerminalEnabledRegistersPwsh(t *testing.T) {
 	app := makeTermApp(true)
 	if err := app.registerTerminal(); err != nil {
 		t.Fatalf("registerTerminal: %v", err)
 	}
-	if app.termTools == nil {
-		t.Fatal("termTools must be created when terminal.enabled=true")
+	if !containsStr(specNames(app.reg), "pwsh") {
+		t.Fatalf("registered tools %v lack %q", specNames(app.reg), "pwsh")
 	}
-	if !containsStr(specNames(app.reg), terminal.ToolPwshName) {
-		t.Fatalf("registered tools %v lack %q", specNames(app.reg), terminal.ToolPwshName)
+	schema, _ := json.Marshal(toolSchema(app.reg, "pwsh"))
+	if strings.Contains(string(schema), "run_in_background") {
+		t.Fatalf("schema without jobs must not advertise run_in_background: %s", schema)
+	}
+
+	app = makeTermAppWithJobs(true)
+	if err := app.registerTerminal(); err != nil {
+		t.Fatalf("registerTerminal: %v", err)
+	}
+	schema, _ = json.Marshal(toolSchema(app.reg, "pwsh"))
+	if !strings.Contains(string(schema), "run_in_background") {
+		t.Fatalf("schema with jobs must advertise run_in_background: %s", schema)
 	}
 }
 
-// TestPwshLifecycleE2E drives a real shell session through the composed
-// pwsh tool: the first call starts the session implicitly (dsh) and runs the
-// command, a second call reuses it, stop via the accessor ends the session,
-// and a later call starts a fresh one. It also asserts the D3 event sink
-// appended terminal/start to the session log.
-func TestPwshLifecycleE2E(t *testing.T) {
+// toolSchema returns the registered pwsh schema (nil when not registered).
+func toolSchema(reg *tools.Registry, name string) map[string]any {
+	for _, spec := range reg.Specs() {
+		if spec.Name == name {
+			return spec.Parameters
+		}
+	}
+	return nil
+}
+
+// TestPwshFreshProcessNoSession drives the composed pwsh tool and verifies
+// the dsh contract end-to-end: each call is a fresh pwsh process, no state
+// persists between calls, and the M9 persistent session is never touched.
+func TestPwshFreshProcessNoSession(t *testing.T) {
 	app := makeTermApp(true)
+	app.reg.SetPolicy(termPolicy())
 	if err := app.registerTerminal(); err != nil {
 		t.Fatalf("registerTerminal: %v", err)
 	}
-	defer func() {
-		if app.termSess != nil {
-			app.termSess.Close()
-		}
-	}()
-
-	// First call: the session comes up on first use and runs the command.
-	out, err := execTerm(t, app.termTools.Pwsh(), map[string]any{"command": "echo hi"})
+	if _, err := execTerm(t, app, map[string]any{
+		"command":     `$env:PA_PWSH_STATE = "leak"`,
+		"description": "set a variable",
+	}); err != nil {
+		t.Fatalf("pwsh: %v", err)
+	}
+	if app.termSess != nil {
+		t.Fatal("the fresh-process pwsh tool must never start the M9 session")
+	}
+	res, err := execTerm(t, app, map[string]any{
+		"command":     `if ($env:PA_PWSH_STATE) { $env:PA_PWSH_STATE } else { "fresh" }`,
+		"description": "read the variable",
+	})
 	if err != nil {
 		t.Fatalf("pwsh: %v", err)
 	}
-	if !strings.Contains(out, "hi") {
-		t.Fatalf("pwsh output = %q, want contains %q", out, "hi")
+	if !strings.Contains(res.Output, "fresh") || strings.Contains(res.Output, "leak") {
+		t.Fatalf("output = %q, want a fresh process with no carried state", res.Output)
 	}
-	if app.termSess == nil {
-		t.Fatal("first pwsh call must leave an active session")
-	}
-	if !hasEvent(app.log, session.EventTerminalStart) {
-		t.Fatal("terminal/start event missing from the session log after first use")
-	}
-
-	// Second call reuses the session.
-	out, err = execTerm(t, app.termTools.Pwsh(), map[string]any{"command": "echo second"})
-	if err != nil {
-		t.Fatalf("pwsh second call: %v", err)
-	}
-	if !strings.Contains(out, "second") {
-		t.Fatalf("pwsh output = %q, want contains %q", out, "second")
-	}
-
-	// Stop ends the session; the next call starts a fresh one.
-	if err := (&terminalAccess{a: app}).Stop(); err != nil {
-		t.Fatalf("stop: %v", err)
-	}
-	out, err = execTerm(t, app.termTools.Pwsh(), map[string]any{"command": "echo fresh"})
-	if err != nil {
-		t.Fatalf("pwsh after stop: %v", err)
-	}
-	if !strings.Contains(out, "fresh") {
-		t.Fatalf("pwsh output = %q, want contains %q", out, "fresh")
+	if app.termSess != nil {
+		t.Fatal("the fresh-process pwsh tool must never start the M9 session")
 	}
 }
 
-// TestPwshRejectsEmptyCommand asserts an empty command is rejected before the
-// session is touched.
-func TestPwshRejectsEmptyCommand(t *testing.T) {
+// TestPwshRejectsInvalidArgs verifies invalid arguments error at the registry
+// gate (D7) before any process is spawned.
+func TestPwshRejectsInvalidArgs(t *testing.T) {
 	app := makeTermApp(true)
+	app.reg.SetPolicy(termPolicy())
 	if err := app.registerTerminal(); err != nil {
 		t.Fatalf("registerTerminal: %v", err)
 	}
-	if _, err := execTerm(t, app.termTools.Pwsh(), map[string]any{"command": ""}); err == nil {
-		t.Fatal("pwsh with an empty command must error")
-	}
-	if _, err := execTerm(t, app.termTools.Pwsh(), map[string]any{}); err == nil {
-		t.Fatal("pwsh with no command must error")
+	for _, args := range []map[string]any{
+		{"command": ""},
+		{},
+		{"command": "echo hi", "description": ""},
+	} {
+		if _, err := execTerm(t, app, args); err == nil {
+			t.Fatalf("pwsh with args %v must error", args)
+		}
 	}
 }
 
-// TestTerminalOwnerFence verifies the D5 owner fence: switching the current
-// session id makes the composed terminalAccess refuse access to a session the
-// new owner does not hold, and switching back restores access.
-func TestTerminalOwnerFence(t *testing.T) {
+// TestPwshExitCodeMarker verifies the composed tool reports a non-zero exit
+// as a normal result with the marker.
+func TestPwshExitCodeMarker(t *testing.T) {
 	app := makeTermApp(true)
+	app.reg.SetPolicy(termPolicy())
 	if err := app.registerTerminal(); err != nil {
 		t.Fatalf("registerTerminal: %v", err)
 	}
-	if _, err := execTerm(t, app.termTools.Pwsh(), map[string]any{"command": "echo ok"}); err != nil {
+	res, err := execTerm(t, app, map[string]any{
+		"command":     "exit 3",
+		"description": "fail with code 3",
+	})
+	if err != nil {
+		t.Fatalf("non-zero exit must not be a hard error: %v", err)
+	}
+	if !strings.Contains(res.Output, "[exit code: 3]") {
+		t.Fatalf("output = %q, want the exit-code marker", res.Output)
+	}
+}
+
+// TestPwshBackgroundE2E verifies the composed run_in_background path: the
+// acknowledgement carries the registry-issued job id and the job settles with
+// its output readable through the jobs registry.
+func TestPwshBackgroundE2E(t *testing.T) {
+	app := makeTermAppWithJobs(true)
+	app.reg.SetPolicy(termPolicy())
+	defer app.jobs.Close()
+	if err := app.registerTerminal(); err != nil {
+		t.Fatalf("registerTerminal: %v", err)
+	}
+	res, err := execTerm(t, app, map[string]any{
+		"command":           "Write-Output bg-composed",
+		"description":       "background echo",
+		"run_in_background": true,
+	})
+	if err != nil {
 		t.Fatalf("pwsh: %v", err)
 	}
-	defer func() {
-		if app.termSess != nil {
-			app.termSess.Close()
-		}
-	}()
-
-	app.currentID = "s-other"
-	if _, err := execTerm(t, app.termTools.Pwsh(), map[string]any{"command": "echo x"}); err == nil {
-		t.Fatal("pwsh from a non-owner session must fail")
-	} else if !strings.Contains(err.Error(), "another session") {
-		t.Fatalf("owner-fence error = %v, want contains %q", err, "another session")
+	if !strings.Contains(res.Output, "started background job pwsh-1") {
+		t.Fatalf("ack = %q, want the job id", res.Output)
 	}
-
-	app.currentID = "s-term"
-	out, err := execTerm(t, app.termTools.Pwsh(), map[string]any{"command": "echo ok"})
+	snap, err := app.jobs.Wait(context.Background(), "pwsh-1", "s-term", 10*time.Second)
 	if err != nil {
-		t.Fatalf("pwsh after restoring owner: %v", err)
+		t.Fatalf("wait: %v", err)
 	}
-	if !strings.Contains(out, "ok") {
-		t.Fatalf("pwsh output = %q, want contains %q", out, "ok")
+	if snap.Status != jobs.StatusCompleted {
+		t.Fatalf("status = %s, want completed", snap.Status)
+	}
+	got, _, err := app.jobs.Read(context.Background(), "pwsh-1", "s-term")
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !strings.Contains(got, "bg-composed") {
+		t.Fatalf("job output = %q, want the echo output", got)
 	}
 }
 
 // TestTermCommandDisabled verifies /term is unavailable when the terminal is
-// disabled: no tools were registered, so termCommand reports disabled.
+// disabled.
 func TestTermCommandDisabled(t *testing.T) {
 	app := makeTermApp(false)
 	if err := app.registerTerminal(); err != nil {
@@ -194,5 +227,35 @@ func TestTermCommandDisabled(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "disabled") {
 		t.Fatalf("err = %v, want contains %q", err, "disabled")
+	}
+}
+
+// TestTermCommandSmoke drives the M9 /term REPL seam over a real session:
+// start creates the single active session, write submits a command, and stop
+// closes it (the session stays independent of the fresh-process pwsh tool).
+func TestTermCommandSmoke(t *testing.T) {
+	app := makeTermApp(true)
+	if err := app.registerTerminal(); err != nil {
+		t.Fatalf("registerTerminal: %v", err)
+	}
+	defer func() {
+		if app.termSess != nil {
+			app.termSess.Close()
+		}
+	}()
+	if err := app.termCommand(context.Background(), []string{"start"}); err != nil {
+		t.Fatalf("/term start: %v", err)
+	}
+	if app.termSess == nil {
+		t.Fatal("/term start must create the active session")
+	}
+	if err := app.termCommand(context.Background(), []string{"write", "echo", "hello-term"}); err != nil {
+		t.Fatalf("/term write: %v", err)
+	}
+	if err := app.termCommand(context.Background(), []string{"stop"}); err != nil {
+		t.Fatalf("/term stop: %v", err)
+	}
+	if app.termSess != nil {
+		t.Fatal("/term stop must detach the active session")
 	}
 }
