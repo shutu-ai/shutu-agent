@@ -128,7 +128,7 @@ func TestLoadParsesToolsSection(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	content := `
 tools:
-  enabled: [read_file]
+  enabled: [read]
   timeout: 5s
   output_limit: 4096
   run_command:
@@ -143,7 +143,7 @@ tools:
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	want := append([]string{"read_file", "run_command"}, defaultOnCaps()...)
+	want := append([]string{"read", "bash"}, defaultOnCaps()...)
 	if !reflect.DeepEqual(cfg.Tools.Enabled, want) {
 		t.Errorf("enabled = %v", cfg.Tools.Enabled)
 	}
@@ -175,7 +175,7 @@ func TestLoadRunCommandEnabledAppendsToWhitelist(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	for _, name := range []string{"get_time", "read_file", "run_command"} {
+	for _, name := range []string{"get_time", "read", "bash"} {
 		if !contains(cfg.Tools.Enabled, name) {
 			t.Errorf("whitelist %v lacks %q", cfg.Tools.Enabled, name)
 		}
@@ -207,7 +207,7 @@ func TestLoadAcceptsEmptyRunCommandTimeoutMeansGlobal(t *testing.T) {
 	if cfg.Tools.Timeout.Duration != DefaultToolTimeout {
 		t.Errorf("global timeout = %v, want %v", cfg.Tools.Timeout, DefaultToolTimeout)
 	}
-	if !strings.Contains(strings.Join(cfg.Tools.Enabled, ","), "run_command") {
+	if !strings.Contains(strings.Join(cfg.Tools.Enabled, ","), "bash") {
 		t.Errorf("whitelist = %v, want run_command present", cfg.Tools.Enabled)
 	}
 }
@@ -1039,7 +1039,7 @@ func TestLoadInteractDefaultsWhenAbsent(t *testing.T) {
 // empty sensitive_tools stays empty (D10, dispatch-m6d-2 §2).
 func TestLoadInteractParsesSection(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte("interact:\n  enabled: true\n  sensitive_tools: [run_command, job_start]\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("interact:\n  enabled: true\n  sensitive_tools: [bash, job_start]\n"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	cfg, err := Load(path)
@@ -1049,8 +1049,8 @@ func TestLoadInteractParsesSection(t *testing.T) {
 	if !Enabled(cfg.Interact.Enabled) {
 		t.Error("interact.enabled should be true")
 	}
-	if len(cfg.Interact.SensitiveTools) != 2 || cfg.Interact.SensitiveTools[0] != "run_command" || cfg.Interact.SensitiveTools[1] != "job_start" {
-		t.Errorf("interact.sensitive_tools = %v, want [run_command job_start]", cfg.Interact.SensitiveTools)
+	if len(cfg.Interact.SensitiveTools) != 2 || cfg.Interact.SensitiveTools[0] != "bash" || cfg.Interact.SensitiveTools[1] != "job_start" {
+		t.Errorf("interact.sensitive_tools = %v, want [bash job_start]", cfg.Interact.SensitiveTools)
 	}
 
 	// Explicit enabled:false and an empty sensitive_tools stay verbatim.
@@ -1097,7 +1097,7 @@ func TestLoadInteractEnabledAppendsToolsToWhitelist(t *testing.T) {
 // M6e-2: an absent code section means the capability is off by default (D10),
 // the sandbox timeout defaults to 30s, the per-stream output cap to 65536,
 // sandbox_dir stays empty (provider default <project>/.sandbox), allow_network
-// stays false (declarative no-network boundary), and code_run is not
+// stays false (declarative no-network boundary), and run_code is not
 // whitelisted while disabled (dispatch-m6e-2 §2).
 func TestLoadCodeDefaultsWhenAbsent(t *testing.T) {
 	cfg, err := Load(filepath.Join(t.TempDir(), "nope.yaml"))
@@ -1172,7 +1172,7 @@ func TestLoadCodeParsesSectionAndFallsBack(t *testing.T) {
 }
 
 // M6e-2: code.enabled: true is the single switch that turns the whole
-// capability on — the code_run tool must also become whitelisted
+// capability on — the run_code tool must also become whitelisted
 // (dispatch-m6e-2 §2, mirrors kb/jobs/subagent/skill/schedule/plan/spill/
 // interact).
 func TestLoadCodeEnabledAppendsToolsToWhitelist(t *testing.T) {

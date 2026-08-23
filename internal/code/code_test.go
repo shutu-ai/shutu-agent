@@ -12,6 +12,20 @@ import (
 	"time"
 )
 
+// TestRunUTF8Output preserves Unicode output across the subprocess boundary.
+func TestRunUTF8Output(t *testing.T) {
+	p := NewLocalProvider()
+	defer p.Close()
+
+	res, err := p.Run(context.Background(), RunRequest{Code: utf8Command(), Cwd: testCwd(t)})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := strings.TrimSpace(res.Stdout); got != "你好，世界" {
+		t.Fatalf("Stdout = %q, want UTF-8 Chinese text", got)
+	}
+}
+
 // TestRunSuccess covers the happy path: a command that exits 0 and prints to
 // stdout, with no timeout or truncation markers and a positive duration.
 func TestRunSuccess(t *testing.T) {
@@ -274,6 +288,13 @@ func TestEngineClosed(t *testing.T) {
 // TestRunDefaultCwd exercises the default path, under a temp process cwd.
 func testCwd(t *testing.T) string {
 	return filepath.Join(t.TempDir(), "sandbox")
+}
+
+func utf8Command() string {
+	if runtime.GOOS == "windows" {
+		return "echo 你好，世界"
+	}
+	return "printf '你好，世界\\n'"
 }
 
 // failCommand returns a one-line command that exits 3 with "oops" on stderr.

@@ -55,7 +55,7 @@ func TestSessionStatusCompletedUnviewed(t *testing.T) {
 func TestSessionStatusPendingInteraction(t *testing.T) {
 	prov := interact.NewMemProvider()
 	eng := interact.NewEngine(prov)
-	if _, err := eng.Request(context.Background(), "allow run_command?", "run_command", "{}"); err != nil {
+	if _, err := eng.Request(context.Background(), "allow run_command?", "bash", "{}"); err != nil {
 		t.Fatal(err)
 	}
 	a := &app{interacts: eng}

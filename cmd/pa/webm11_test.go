@@ -215,12 +215,24 @@ func TestWebCustomProviderValidation(t *testing.T) {
 		edit func() error
 	}{
 		{"missing fields", func() error { return a.webSaveCustomProvider(context.Background(), "x", "", "", "", "", "", nil) }},
-		{"builtin shadow", func() error { return a.webSaveCustomProvider(context.Background(), "openai", "X", "http://x/v1", "m", "", "", nil) }},
-		{"invalid route", func() error { return a.webSaveCustomProvider(context.Background(), "Bad Route!", "X", "http://x/v1", "m", "", "", nil) }},
-		{"trailing dash", func() error { return a.webSaveCustomProvider(context.Background(), "bad-", "X", "http://x/v1", "m", "", "", nil) }},
-		{"doubled dash", func() error { return a.webSaveCustomProvider(context.Background(), "bad--route", "X", "http://x/v1", "m", "", "", nil) }},
-		{"digit leading", func() error { return a.webSaveCustomProvider(context.Background(), "1st-route", "X", "http://x/v1", "m", "", "", nil) }},
-		{"unknown protocol", func() error { return a.webSaveCustomProvider(context.Background(), "my-llm", "X", "http://x/v1", "m", "", "bogus-protocol", nil) }},
+		{"builtin shadow", func() error {
+			return a.webSaveCustomProvider(context.Background(), "openai", "X", "http://x/v1", "m", "", "", nil)
+		}},
+		{"invalid route", func() error {
+			return a.webSaveCustomProvider(context.Background(), "Bad Route!", "X", "http://x/v1", "m", "", "", nil)
+		}},
+		{"trailing dash", func() error {
+			return a.webSaveCustomProvider(context.Background(), "bad-", "X", "http://x/v1", "m", "", "", nil)
+		}},
+		{"doubled dash", func() error {
+			return a.webSaveCustomProvider(context.Background(), "bad--route", "X", "http://x/v1", "m", "", "", nil)
+		}},
+		{"digit leading", func() error {
+			return a.webSaveCustomProvider(context.Background(), "1st-route", "X", "http://x/v1", "m", "", "", nil)
+		}},
+		{"unknown protocol", func() error {
+			return a.webSaveCustomProvider(context.Background(), "my-llm", "X", "http://x/v1", "m", "", "bogus-protocol", nil)
+		}},
 		{"delete builtin", func() error { return a.webDeleteCustomProvider(context.Background(), "deepseek-official") }},
 		{"delete unknown", func() error { return a.webDeleteCustomProvider(context.Background(), "nope") }},
 	}
@@ -352,12 +364,12 @@ func TestWebProvidersRegisterByProtocol(t *testing.T) {
 // <UPPER>_API_KEY form).
 func TestProviderEnvSpecialCases(t *testing.T) {
 	cases := map[string]string{
-		"huggingface":      "HF_TOKEN",
-		"kimi-coding":      "KIMI_API_KEY",
+		"huggingface":       "HF_TOKEN",
+		"kimi-coding":       "KIMI_API_KEY",
 		"vercel-ai-gateway": "AI_GATEWAY_API_KEY",
-		"deepseek-official":         "DEEPSEEK_API_KEY",
-		"groq":             "GROQ_API_KEY",
-		"custom-route":     "CUSTOM_ROUTE_API_KEY",
+		"deepseek-official": "DEEPSEEK_API_KEY",
+		"groq":              "GROQ_API_KEY",
+		"custom-route":      "CUSTOM_ROUTE_API_KEY",
 	}
 	for id, want := range cases {
 		if got := providerEnv(id); got != want {

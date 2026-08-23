@@ -313,7 +313,7 @@ func TestWebConfigRedacts(t *testing.T) {
 				OpenAI:     config.OpenAIProviderConfig{Model: "gpt-4o"},
 				Multimodal: config.MultimodalConfig{Enabled: boolPtr(true)},
 			},
-			Tools:      config.ToolsConfig{Enabled: []string{"get_time", "read_file", "web_search"}},
+			Tools:      config.ToolsConfig{Enabled: []string{"get_time", "read", "web_search"}},
 			Web:        config.WebConfig{Enabled: config.Bool(true)},
 			KB:         config.KBConfig{Enabled: config.Bool(true)},
 			Compaction: config.CompactionConfig{Enabled: config.Bool(true)},

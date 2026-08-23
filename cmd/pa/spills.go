@@ -20,8 +20,8 @@ import (
 	"os"
 
 	"github.com/jabing/shutu-agent/internal/config"
-	"github.com/jabing/shutu-agent/internal/spill"
 	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/jabing/shutu-agent/internal/spill"
 	"github.com/jabing/shutu-agent/internal/tools"
 )
 
@@ -30,7 +30,7 @@ import (
 // spill is disabled it creates nothing and registers nothing (D10, mirrors
 // registerJobs/registerSchedules/registerPlans).
 func (a *app) registerSpills() error {
-		if !config.Enabled(a.cfg.Spill.Enabled) {
+	if !config.Enabled(a.cfg.Spill.Enabled) {
 		return nil
 	}
 	prov := spill.NewMemProvider()

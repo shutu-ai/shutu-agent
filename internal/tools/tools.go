@@ -159,7 +159,7 @@ func (r *Registry) Specs() []llm.ToolSchema {
 // exactly like runCommandName in run_command.go — so the Execute pipeline can
 // apply its per-tool timeout override without the tools package importing the
 // seam.
-const codeRunToolName = "code_run"
+const codeRunToolName = "run_code"
 
 // Execute is the single execution gate. In order it rejects unknown names,
 // enforces the M3 whitelist (未启用 ⇒ 拒绝执行), validates the arguments against

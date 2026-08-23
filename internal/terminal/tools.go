@@ -3,20 +3,22 @@ package terminal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"unicode/utf8"
 
 	"github.com/jabing/shutu-agent/internal/session"
 )
 
-// Tool name constants (config.terminalToolNames whitelist corresponds to these).
-const (
-	ToolStartName  = "terminal_start"
-	ToolWriteName  = "terminal_write"
-	ToolReadName   = "terminal_read"
-	ToolSignalName = "terminal_signal"
-	ToolStopName   = "terminal_stop"
-)
+// ToolPwshName is the persistent-shell tool name (dsh pwsh): one tool that
+// runs commands in the configured persistent shell (Pwsh / Git Bash / WSL /
+// Cmd). config.terminalToolNames whitelist corresponds to it.
+const ToolPwshName = "pwsh"
+
+// ErrNoActive reports that no terminal session exists for the current owner
+// (the pwsh tool auto-starts on this error; any other access error, e.g. the
+// owner fence, is surfaced to the model).
+var ErrNoActive = errors.New("no active terminal session")
 
 // toolViewportMax bounds every model-facing terminal text (dispatch-m9-2 §4).
 const toolViewportMax = 8000
@@ -36,7 +38,7 @@ type TerminalAccess interface {
 	Stop() error
 }
 
-// TerminalTools bundles the shared state of the five terminal_* tools.
+// TerminalTools bundles the shared state of the pwsh tool.
 type TerminalTools struct {
 	acc     TerminalAccess
 	onEvent func(typ string, data any)
@@ -48,11 +50,8 @@ func NewTerminalTools(acc TerminalAccess, onEvent func(typ string, data any)) *T
 	return &TerminalTools{acc: acc, onEvent: onEvent}
 }
 
-func (t *TerminalTools) Start() TerminalStartTool   { return TerminalStartTool{t: t} }
-func (t *TerminalTools) Write() TerminalWriteTool   { return TerminalWriteTool{t: t} }
-func (t *TerminalTools) Read() TerminalReadTool     { return TerminalReadTool{t: t} }
-func (t *TerminalTools) Signal() TerminalSignalTool { return TerminalSignalTool{t: t} }
-func (t *TerminalTools) Stop() TerminalStopTool     { return TerminalStopTool{t: t} }
+// Pwsh returns the pwsh tool.
+func (t *TerminalTools) Pwsh() PwshTool { return PwshTool{t: t} }
 
 // emit forwards a terminal lifecycle event to the registered callback.
 func (t *TerminalTools) emit(typ string, data any) {
@@ -61,105 +60,62 @@ func (t *TerminalTools) emit(typ string, data any) {
 	}
 }
 
-// TerminalStartTool starts a new terminal session.
-type TerminalStartTool struct {
+// PwshTool runs one command line in the persistent shell session (dsh pwsh).
+// The shell session is created on first use (the configured shell: Pwsh / Git
+// Bash / WSL / Cmd); every call writes the command, waits for the shell to go
+// idle (or the read timeout), and returns the accumulated viewport output.
+type PwshTool struct {
 	t *TerminalTools
 }
 
-func (x TerminalStartTool) Name() string { return ToolStartName }
+func (x PwshTool) Name() string { return ToolPwshName }
 
-func (x TerminalStartTool) Description() string {
-	return "Start a new terminal session; optionally run an initial command."
+func (x PwshTool) Description() string {
+	return "run a command line in the persistent shell session (created on first use); returns the command output"
 }
 
-func (x TerminalStartTool) Schema() map[string]any {
+func (x PwshTool) Schema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"command": map[string]any{
 				"type":        "string",
-				"description": "optional first command to run in the fresh session",
+				"minLength":   1,
+				"description": "the command line to run in the persistent shell",
 			},
 		},
+		"required":             []string{"command"},
 		"additionalProperties": false,
 	}
 }
 
-func (x TerminalStartTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (x PwshTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var a struct {
 		Command string `json:"command"`
 	}
-	if len(args) > 0 {
-		if err := json.Unmarshal(args, &a); err != nil {
-			return "", fmt.Errorf("terminal_start: %w", err)
-		}
-	}
-	sess, err := x.t.acc.Start(SessionOpts{})
-	if err != nil {
-		return "", fmt.Errorf("terminal_start: %w", err)
-	}
-	out := "started terminal session " + sess.ID()
-	if a.Command != "" {
-		res, err := sess.Write(a.Command, true)
-		if err != nil {
-			return "", fmt.Errorf("terminal_start: %w", err)
-		}
-		out += "\nviewport:\n" + truncateView(res.Viewport, toolViewportMax)
-	}
-	x.t.emit(session.EventTerminalStart, session.NewTerminalStart(sess.ID(), x.t.acc.Owner()))
-	return out, nil
-}
-
-// TerminalWriteTool writes text to the active terminal session.
-type TerminalWriteTool struct {
-	t *TerminalTools
-}
-
-func (x TerminalWriteTool) Name() string { return ToolWriteName }
-
-func (x TerminalWriteTool) Description() string {
-	return "Write text to the active terminal session, optionally submitting it."
-}
-
-func (x TerminalWriteTool) Schema() map[string]any {
-	return map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"text": map[string]any{
-				"type":      "string",
-				"minLength": 1,
-			},
-			"submit": map[string]any{
-				"type": "boolean",
-			},
-		},
-		"required":             []string{"text"},
-		"additionalProperties": false,
-	}
-}
-
-func (x TerminalWriteTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
-	var a struct {
-		Text   string `json:"text"`
-		Submit *bool  `json:"submit"`
-	}
 	if err := json.Unmarshal(args, &a); err != nil {
-		return "", fmt.Errorf("terminal_write: %w", err)
+		return "", fmt.Errorf("pwsh: %w", err)
 	}
-	if a.Text == "" {
-		return "", fmt.Errorf("terminal_write: text is required")
+	if a.Command == "" {
+		return "", fmt.Errorf("pwsh: command is required")
 	}
 	sess, err := x.t.acc.GetActive()
-	if err != nil {
-		return "", fmt.Errorf("terminal_write: %w", err)
+	if errors.Is(err, ErrNoActive) {
+		// No active session for the current owner: the persistent shell comes
+		// up on first use (dsh).
+		sess, err = x.t.acc.Start(SessionOpts{})
+		if err != nil {
+			return "", fmt.Errorf("pwsh: %w", err)
+		}
+		x.t.emit(session.EventTerminalStart, session.NewTerminalStart(sess.ID(), x.t.acc.Owner()))
+	} else if err != nil {
+		// An owner-fence or other access error is surfaced, never masked by an
+		// auto-start attempt.
+		return "", fmt.Errorf("pwsh: %w", err)
 	}
-	submit := true
-	if a.Submit != nil {
-		submit = *a.Submit
-	}
-	res, err := sess.Write(a.Text, submit)
+	res, err := sess.Write(a.Command, true)
 	if err != nil {
-		return "", fmt.Errorf("terminal_write: %w", err)
+		return "", fmt.Errorf("pwsh: %w", err)
 	}
 	out := fmt.Sprintf("wait=%s status=%s", res.Wait, res.Status.Kind)
 	out += "\nviewport:\n" + truncateView(res.Viewport, toolViewportMax)
@@ -167,126 +123,6 @@ func (x TerminalWriteTool) Execute(ctx context.Context, args json.RawMessage) (s
 		out += "\n[viewport truncated]"
 	}
 	return out, nil
-}
-
-// TerminalReadTool reads output from the active terminal session.
-type TerminalReadTool struct {
-	t *TerminalTools
-}
-
-func (x TerminalReadTool) Name() string { return ToolReadName }
-
-func (x TerminalReadTool) Description() string {
-	return "Read output from the active terminal session."
-}
-
-func (x TerminalReadTool) Schema() map[string]any {
-	return map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"offset": map[string]any{"type": "integer", "minimum": 0},
-			"count":  map[string]any{"type": "integer", "minimum": 1},
-		},
-		"additionalProperties": false,
-	}
-}
-
-func (x TerminalReadTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
-	var a struct {
-		Offset int `json:"offset"`
-		Count  int `json:"count"`
-	}
-	if len(args) > 0 {
-		if err := json.Unmarshal(args, &a); err != nil {
-			return "", fmt.Errorf("terminal_read: %w", err)
-		}
-	}
-	if a.Offset < 0 {
-		a.Offset = 0
-	}
-	if a.Count < 1 {
-		a.Count = 500
-	}
-	sess, err := x.t.acc.GetActive()
-	if err != nil {
-		return "", fmt.Errorf("terminal_read: %w", err)
-	}
-	text, _ := sess.Read(a.Offset, a.Count)
-	return truncateView(text, toolViewportMax), nil
-}
-
-// TerminalSignalTool sends a signal to the active terminal session.
-type TerminalSignalTool struct {
-	t *TerminalTools
-}
-
-func (x TerminalSignalTool) Name() string { return ToolSignalName }
-
-func (x TerminalSignalTool) Description() string {
-	return "Send a stop or interrupt signal to the active terminal session."
-}
-
-func (x TerminalSignalTool) Schema() map[string]any {
-	return map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"kind": map[string]any{
-				"type": "string",
-				"enum": []string{"stop", "interrupt"},
-			},
-		},
-		"required":             []string{"kind"},
-		"additionalProperties": false,
-	}
-}
-
-func (x TerminalSignalTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
-	var a struct {
-		Kind string `json:"kind"`
-	}
-	if err := json.Unmarshal(args, &a); err != nil {
-		return "", fmt.Errorf("terminal_signal: %w", err)
-	}
-	sess, err := x.t.acc.GetActive()
-	if err != nil {
-		return "", fmt.Errorf("terminal_signal: %w", err)
-	}
-	if err := sess.Signal(a.Kind); err != nil {
-		return "", fmt.Errorf("terminal_signal: %w", err)
-	}
-	return "delivered " + a.Kind, nil
-}
-
-// TerminalStopTool stops the active terminal session.
-type TerminalStopTool struct {
-	t *TerminalTools
-}
-
-func (x TerminalStopTool) Name() string { return ToolStopName }
-
-func (x TerminalStopTool) Description() string {
-	return "Stop and close the active terminal session."
-}
-
-func (x TerminalStopTool) Schema() map[string]any {
-	return map[string]any{
-		"type":                 "object",
-		"properties":           map[string]any{},
-		"additionalProperties": false,
-	}
-}
-
-func (x TerminalStopTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
-	sess, err := x.t.acc.GetActive()
-	if err != nil {
-		return "", fmt.Errorf("terminal_stop: %w", err)
-	}
-	id := sess.ID()
-	if err := x.t.acc.Stop(); err != nil {
-		return "", fmt.Errorf("terminal_stop: %w", err)
-	}
-	x.t.emit(session.EventTerminalStop, session.NewTerminalStop(id, "user"))
-	return "terminal session stopped", nil
 }
 
 const truncateNotice = "\n[terminal output truncated]"

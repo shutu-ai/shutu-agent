@@ -21,10 +21,10 @@ import "strings"
 type providerProtocol string
 
 const (
-	protocolCompletions providerProtocol = "openai-completions" // openai.New (deepseek-compatible SSE)
-	protocolMessages    providerProtocol = "anthropic-messages" // anthropic.New (Messages SSE)
+	protocolCompletions providerProtocol = "openai-completions"   // openai.New (deepseek-compatible SSE)
+	protocolMessages    providerProtocol = "anthropic-messages"   // anthropic.New (Messages SSE)
 	protocolGemini      providerProtocol = "google-generative-ai" // google.New (streamGenerateContent SSE)
-	protocolResponses   providerProtocol = "openai-responses"  // openairesponses.New (/responses SSE)
+	protocolResponses   providerProtocol = "openai-responses"     // openairesponses.New (/responses SSE)
 )
 
 // builtinProvider is one directory entry.

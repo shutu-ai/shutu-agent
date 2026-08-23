@@ -10,12 +10,14 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/jabing/shutu-agent/internal/config"
 	"github.com/jabing/shutu-agent/internal/llm"
 	"github.com/jabing/shutu-agent/internal/prompt"
+	"github.com/jabing/shutu-agent/internal/session"
 	"github.com/jabing/shutu-agent/internal/store"
 	"github.com/jabing/shutu-agent/internal/tools"
 )
@@ -58,6 +60,21 @@ func TestLLMForRouting(t *testing.T) {
 	a2 := &app{llm: global}
 	if got := a2.llmFor("openai"); got != global {
 		t.Fatalf("llmFor without registry = %v, want the global LLM", got)
+	}
+}
+
+func TestModeToolWhitelist(t *testing.T) {
+	standard := modeToolWhitelist(config.ModeStandard, []string{"read", "run_code", "read"})
+	if len(standard) != 2 || standard[0] != "read" || standard[1] != "read" {
+		t.Fatalf("standard tools = %#v, want run_code excluded", standard)
+	}
+	ptc := modeToolWhitelist(config.ModeCode, []string{"read", "run_code"})
+	if len(ptc) != 1 || ptc[0] != "run_code" {
+		t.Fatalf("PTC tools = %#v, want only run_code", ptc)
+	}
+	minimal := modeToolWhitelist(config.ModeMinimal, []string{"run_code"})
+	if len(minimal) == 0 || minimal[0] == "run_code" {
+		t.Fatalf("minimal tools = %#v, want fixed terminal/file tools", minimal)
 	}
 }
 
@@ -146,4 +163,147 @@ func TestApplySessionRuntime(t *testing.T) {
 		t.Fatalf("readonly tier should allow get_time: %v", err)
 	}
 	restore()
+}
+
+// stubCodeRun is a fake run_code tool so a test registry can exercise the
+// mode projection without the code seam.
+type stubCodeRun struct{}
+
+func (stubCodeRun) Name() string        { return "run_code" }
+func (stubCodeRun) Description() string { return "stub code sandbox" }
+func (stubCodeRun) Schema() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{}}
+}
+func (stubCodeRun) Execute(context.Context, json.RawMessage) (string, error) { return "ok", nil }
+
+// recordLLM captures the model-facing tool schemas of every request, so a test
+// can assert the session's mode projection on the wire.
+type recordLLM struct {
+	mu    sync.Mutex
+	calls [][]string // tool names per Stream call
+}
+
+func (l *recordLLM) Stream(_ context.Context, req llm.ChatRequest) (llm.StreamReader, error) {
+	l.mu.Lock()
+	names := make([]string, 0, len(req.Tools))
+	for _, t := range req.Tools {
+		names = append(names, t.Name)
+	}
+	l.calls = append(l.calls, names)
+	l.mu.Unlock()
+	return &turnReader{events: []llm.StreamEvent{{Kind: llm.StreamFinish, FinishReason: "stop"}}}, nil
+}
+
+func (l *recordLLM) lastTools() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.calls) == 0 {
+		return nil
+	}
+	return l.calls[len(l.calls)-1]
+}
+
+func hasName(names []string, want string) bool {
+	for _, n := range names {
+		if n == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestSessionModeWireSurface verifies the dsh mode contract end to end: a
+// session's agent preset (locked at creation) owns BOTH the model-facing tool
+// array sent on the wire AND the execution whitelist. Standard never sees or
+// executes run_code, PTC sees and executes only run_code, minimal only its
+// fixed seam.
+func TestSessionModeWireSurface(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "pa.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	rec := &recordLLM{}
+	a := &app{
+		cfg:    config.Config{Model: "m", Mode: config.ModeStandard, ReasoningEffort: "high"},
+		store:  st,
+		reg:    tools.New(),
+		llm:    rec,
+		prompt: prompt.New("You are a test agent."),
+		log:    session.New(),
+	}
+	for _, tt := range []tools.Tool{tools.GetTime{}, tools.ReadFile{}, stubCodeRun{}} {
+		if err := a.reg.Register(tt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a.basePolicy = tools.Policy{Enabled: []string{"get_time", "read", "run_code"}}
+	a.reg.SetPolicy(a.basePolicy)
+
+	mustSession := func(id, preset string) {
+		t.Helper()
+		if err := st.CreateSession(ctx, id, time.Now().UTC()); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.SetSessionConfig(ctx, id, store.SessionConfig{AgentPreset: preset}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// standard: native tools, run_code neither advertised nor executable.
+	mustSession("s-std", config.ModeStandard)
+	rt, restore := a.applySessionRuntime("s-std")
+	if err := a.newLoopFor(rt, false).Run(ctx, "hi"); err != nil {
+		t.Fatalf("standard turn: %v", err)
+	}
+	restore()
+	wire := rec.lastTools()
+	if hasName(wire, "run_code") {
+		t.Fatalf("standard wire tools = %v, must not contain run_code", wire)
+	}
+	if !hasName(wire, "get_time") || !hasName(wire, "read") {
+		t.Fatalf("standard wire tools = %v, want native read-only tools", wire)
+	}
+	_, restore = a.applySessionRuntime("s-std")
+	if _, err := a.reg.Execute(ctx, "run_code", json.RawMessage(`{}`)); err == nil {
+		t.Fatal("standard session must not execute run_code")
+	}
+	restore()
+
+	// PTC: only run_code is advertised and executable.
+	mustSession("s-ptc", config.ModeCode)
+	rt, restore = a.applySessionRuntime("s-ptc")
+	if err := a.newLoopFor(rt, false).Run(ctx, "hi"); err != nil {
+		t.Fatalf("PTC turn: %v", err)
+	}
+	restore()
+	wire = rec.lastTools()
+	if len(wire) != 1 || wire[0] != "run_code" {
+		t.Fatalf("PTC wire tools = %v, want exactly [run_code]", wire)
+	}
+	_, restore = a.applySessionRuntime("s-ptc")
+	if _, err := a.reg.Execute(ctx, "run_code", json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("PTC session must execute run_code: %v", err)
+	}
+	if _, err := a.reg.Execute(ctx, "read", json.RawMessage(`{"path":"x"}`)); err == nil {
+		t.Fatal("PTC session must not execute native tools directly")
+	}
+	restore()
+
+	// minimal: only the fixed seam (registered subset here: read-only pair).
+	mustSession("s-min", config.ModeMinimal)
+	rt, restore = a.applySessionRuntime("s-min")
+	if err := a.newLoopFor(rt, false).Run(ctx, "hi"); err != nil {
+		t.Fatalf("minimal turn: %v", err)
+	}
+	restore()
+	wire = rec.lastTools()
+	if hasName(wire, "run_code") {
+		t.Fatalf("minimal wire tools = %v, must not contain run_code", wire)
+	}
+	if !hasName(wire, "read") {
+		t.Fatalf("minimal wire tools = %v, want the file-editing seam", wire)
+	}
 }

@@ -168,6 +168,7 @@ func TestRunToolCallExecutesAndLogs(t *testing.T) {
 	want := []string{
 		session.EventUserMessage,
 		session.EventAssistantMessage,
+		session.EventToolStart,
 		session.EventToolResult,
 		session.EventAssistantChunk,
 		session.EventAssistantMessage,
@@ -179,7 +180,7 @@ func TestRunToolCallExecutesAndLogs(t *testing.T) {
 	}
 
 	// Tool result must reference the call id.
-	ev := events[2]
+	ev := events[3]
 	if !strings.Contains(string(ev.Data), "call_1") {
 		t.Fatalf("tool result data = %s", ev.Data)
 	}
@@ -222,8 +223,8 @@ func TestRunUnknownToolLogsErrorAndContinues(t *testing.T) {
 	for _, ev := range events {
 		types = append(types, ev.Type)
 	}
-	if len(types) < 3 || types[2] != session.EventToolError {
-		t.Fatalf("expected tool/error at index 2, got %v", types)
+	if len(types) < 4 || types[3] != session.EventToolError {
+		t.Fatalf("expected tool/error at index 3, got %v", types)
 	}
 }
 

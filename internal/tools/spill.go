@@ -12,7 +12,7 @@ import (
 // SpillStore writes full tool outputs that exceed the output limit to
 // data/spill/<session>-<seq>.txt and returns the absolute file path as the
 // model-facing locator (design.md §5 / dispatch-m3). The locator is an
-// absolute path so read_file can consume it directly.
+// absolute path so read can consume it directly.
 type SpillStore struct {
 	dir string
 }

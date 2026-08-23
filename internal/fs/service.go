@@ -76,7 +76,7 @@ type FileService interface {
 }
 
 // DefaultMaxReadSize is the Read content cap applied when maxSize <= 0 (1MiB).
-// It bounds what one fs_read returns to the model, keeping a large file from
+// It bounds what one read returns to the model, keeping a large file from
 // blowing the model context (dispatch-m6f-3 §1: 防读大文件爆上下文).
 const DefaultMaxReadSize = 1 * 1024 * 1024
 

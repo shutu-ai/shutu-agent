@@ -119,11 +119,11 @@ func TestBuildAppendsToolCatalog(t *testing.T) {
 	b.SetTools(func() []llm.ToolSchema {
 		return []llm.ToolSchema{
 			{Name: "get_time", Description: "current time"},
-			{Name: "read_file", Description: "read a file"},
+			{Name: "read", Description: "read a file"},
 		}
 	})
 	got := b.Build()
-	want := "persona body\n\nAvailable tools:\n- get_time: current time\n- read_file: read a file"
+	want := "persona body\n\nAvailable tools:\n- get_time: current time\n- read: read a file"
 	if got != want {
 		t.Fatalf("Build() = %q, want %q", got, want)
 	}

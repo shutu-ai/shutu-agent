@@ -1,5 +1,5 @@
-// Command pa is the personal agent REPL (M1→M3). It wires the thin core — llm,
-// session, tools, prompt, loop — plus the durable store (design.md D8) and
+// Command pa is the personal agent REPL (M1鈫扢3). It wires the thin core 鈥?llm,
+// session, tools, prompt, loop 鈥?plus the durable store (design.md D8) and
 // drives turns from stdin. Sessions persist to data_dir/pa.db and are resumed
 // across restarts; /new, /list and /resume manage multiple sessions. M3 adds
 // the tool-execution safety policy (whitelist, timeout, output truncation/spill)
@@ -72,7 +72,7 @@ func main() {
 	// Runtime General-settings rows (durable in the SQLite settings table,
 	// applied at startup; D-WEB2-D: config changes need a restart, no hot
 	// reload). agent_preset overrides the mode preset (D-MODE), and
-	// terminal_enabled the terminal switch — but a minimal preset keeps its
+	// terminal_enabled the terminal switch 鈥?but a minimal preset keeps its
 	// mandatory terminal (D-MODE-2). permission_preset is applied to the
 	// execution whitelist after registration (see below).
 	settings, err := st.GetSettings(context.Background())
@@ -112,12 +112,16 @@ func main() {
 		cfg.Terminal.Enabled = config.Bool(v == "true")
 	}
 
-	// M3: the Execute pipeline's safety policy — whitelist, deadline, output
-	// cap with spill to <data_dir>/spill (design.md §5).
+	// M3: the Execute pipeline's safety policy 鈥?whitelist, deadline, output
+	// cap with spill to <data_dir>/spill (design.md 搂5).
 	reg := tools.New()
 	pol := tools.PolicyFromConfig(cfg.Tools, cfg.DataDir)
-	// M6e-2: code.timeout is the outer per-tool deadline bound for code_run
-	// (mirrors tools.run_command.timeout) — the config value, after
+	// The base policy keeps the FULL registered whitelist (dsh: the deployment
+	// composition). Per-session agent presets (standard / PTC / minimal) are
+	// projected onto it by applySessionRuntime before every turn, so
+	// projecting here would destroy the base other sessions project from.
+	// M6e-2: code.timeout is the outer per-tool deadline bound for run_code
+	// (mirrors tools.run_command.timeout) 鈥?the config value, after
 	// applyDefaults, is authoritative for sandbox runs.
 	pol.CodeRun.Timeout = cfg.Code.Timeout.Duration
 	reg.SetPolicy(pol)
@@ -129,7 +133,7 @@ func main() {
 	}
 	// The read-only built-ins are always registered; the whitelist gates their
 	// execution. The execution-class tool is registered only when enabled
-	// (默认关闭, D10).
+	// (榛樿鍏抽棴, D10).
 	if err := reg.Register(tools.GetTime{}); err != nil {
 		fmt.Fprintln(os.Stderr, "pa:", err)
 		os.Exit(1)
@@ -150,16 +154,16 @@ func main() {
 		fmt.Fprintln(os.Stderr, "pa:", err)
 		os.Exit(1)
 	}
-	promptBuilder.SetTools(func() []llm.ToolSchema { return reg.Specs() })
+	promptBuilder.SetTools(func() []llm.ToolSchema { return toolSpecsForMode(cfg.Mode, reg.Specs()) })
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
 	app := &app{
-		cfg:    cfg,
-		store:  st,
-		reg:    reg,
-		prompt: promptBuilder,
+		cfg:        cfg,
+		store:      st,
+		reg:        reg,
+		prompt:     promptBuilder,
 		basePolicy: pol,
 		// M10 W1: the real-time event hub (ADR D-WEB2-B) exists for the whole
 		// process lifetime so attachSink can broadcast every persisted event to
@@ -172,7 +176,7 @@ func main() {
 	// M11: load the provider API-key overrides (llm.key.<id>) and custom
 	// OpenAI-compatible provider declarations (llm.custom.<route>) from the
 	// durable settings table before registerLLM builds the registry. A
-	// configured key wins over the env var (配置后以配置的为准, user 2026-09).
+	// configured key wins over the env var (閰嶇疆鍚庝互閰嶇疆鐨勪负鍑? user 2026-09).
 	for k, v := range settings {
 		if strings.HasPrefix(k, "llm.key.") {
 			if app.llmKeys == nil {
@@ -195,21 +199,19 @@ func main() {
 		}
 	}
 	// M8-2: registerLLM builds the provider registry and injects the selected
-	// provider into a.llm — the single llm.LLM the loop, compaction, subagent
+	// provider into a.llm 鈥?the single llm.LLM the loop, compaction, subagent
 	// and kb extraction all consume (D2). It must run before registerSubagent /
 	// registerCompaction / registerKB, which read a.llm at wiring time.
 	if err := app.registerLLM(); err != nil {
 		fmt.Fprintln(os.Stderr, "pa:", err)
 		os.Exit(1)
 	}
-	// M8-3: wire the image-attachment store — under <data_dir>/attachments/ —
-	// when llm.multimodal.enabled (默认关 D10). disabled ⇒ /attach unavailable.
+	// M8-3: wire the image-attachment store 鈥?under <data_dir>/attachments/ 鈥?	// when llm.multimodal.enabled (榛樿鍏?D10). disabled 鈬?/attach unavailable.
 	if err := app.registerAttachments(); err != nil {
 		fmt.Fprintln(os.Stderr, "pa:", err)
 		os.Exit(1)
 	}
-	// M4b: wire the knowledge base seam — provider + kb_* tools + catalog —
-	// when kb.enabled (默认关闭, D10). kb.registerKB appends the kb_* tool names
+	// M4b: wire the knowledge base seam 鈥?provider + kb_* tools + catalog 鈥?	// when kb.enabled (榛樿鍏抽棴, D10). kb.registerKB appends the kb_* tool names
 	// to nothing itself; config.applyDefaults already whitelisted them when
 	// kb.enabled was true.
 	if err := app.registerKB(); err != nil {
@@ -219,11 +221,11 @@ func main() {
 	if app.kb != nil {
 		defer app.kb.Close()
 	}
-	// M5a-2: wire the jobs seam — Local registry + the five job_* tools + the
-	// D3 event sink — when jobs.enabled (默认关闭, D10). config.applyDefaults
+	// M5a-2: wire the jobs seam 鈥?Local registry + the five job_* tools + the
+	// D3 event sink 鈥?when jobs.enabled (榛樿鍏抽棴, D10). config.applyDefaults
 	// already whitelisted the job_* names when jobs.enabled was true. The
 	// deferred Close cancels and awaits every live background job at shutdown
-	// so no goroutine leaks (lifecycle reversible, ADR 决策 ①).
+	// so no goroutine leaks (lifecycle reversible, ADR 鍐崇瓥 鈶?.
 	if err := app.registerJobs(); err != nil {
 		fmt.Fprintln(os.Stderr, "pa:", err)
 		os.Exit(1)
@@ -231,12 +233,12 @@ func main() {
 	if app.jobs != nil {
 		defer app.jobs.Close()
 	}
-	// M5b-2: wire the subagent seam — spawn provider + Runtime + the four
-	// subagent_* tools + the D3 event sink — when subagent.enabled (默认关闭,
+	// M5b-2: wire the subagent seam 鈥?spawn provider + Runtime + the four
+	// subagent_* tools + the D3 event sink 鈥?when subagent.enabled (榛樿鍏抽棴,
 	// D10). config.applyDefaults already whitelisted the subagent_* names when
 	// subagent.enabled was true. The deferred Close cancels and awaits every
 	// live child at shutdown so no background goroutine leaks (lifecycle
-	// reversible, ADR 决策 ②).
+	// reversible, ADR 鍐崇瓥 鈶?.
 	if err := app.registerSubagent(); err != nil {
 		fmt.Fprintln(os.Stderr, "pa:", err)
 		os.Exit(1)
@@ -245,8 +247,8 @@ func main() {
 		defer app.subagents.Close()
 	}
 	// GAP-2: wire the ralph fresh-agent loop seam (ADR
-	// 2026-08-20-standard-gaps.md D-GAP-3, 对齐 dsh tool-ralph) — the ralph
-	// tool — when ralph.enabled (默认关 D10). config.applyDefaults already
+	// 2026-08-20-standard-gaps.md D-GAP-3, 瀵归綈 dsh tool-ralph) 鈥?the ralph
+	// tool 鈥?when ralph.enabled (榛樿鍏?D10). config.applyDefaults already
 	// whitelisted ralph when ralph.enabled was true. registerRalph runs after
 	// registerSubagent because its spawn closure depends on a.subagents (the
 	// subagent Runtime); it holds no closable resources, so there is no deferred
@@ -257,8 +259,8 @@ func main() {
 		os.Exit(1)
 	}
 	// GAP-3: wire the task-DAG orchestration seam (ADR
-	// 2026-08-20-standard-gaps.md D-GAP-2, 用户拍板 JSON DAG 声明式编排) — the
-	// workflow_run tool — when workflow.enabled (默认关 D10). config.applyDefaults
+	// 2026-08-20-standard-gaps.md D-GAP-2, 鐢ㄦ埛鎷嶆澘 JSON DAG 澹版槑寮忕紪鎺? 鈥?the
+	// workflow_run tool 鈥?when workflow.enabled (榛樿鍏?D10). config.applyDefaults
 	// already whitelisted workflow_run when workflow.enabled was true.
 	// registerWorkflow runs after registerSubagent because its spawn closure
 	// depends on a.subagents (the subagent Runtime); it holds no closable
@@ -269,9 +271,9 @@ func main() {
 		fmt.Fprintln(os.Stderr, "pa:", err)
 		os.Exit(1)
 	}
-	// M5c-2b: wire the compaction seam — BasicEngine for the /compact command
-	// and the loop "compaction" pre-step injector — when compaction.enabled
-	// (默认关闭, D10). Compaction whitelists no consumer tools (it has none:
+	// M5c-2b: wire the compaction seam 鈥?BasicEngine for the /compact command
+	// and the loop "compaction" pre-step injector 鈥?when compaction.enabled
+	// (榛樿鍏抽棴, D10). Compaction whitelists no consumer tools (it has none:
 	// automatic triggering runs through the loop pre-step injector, manual
 	// through the /compact command), so config.applyDefaults already handled
 	// the whole gate. The engine shares the caller-owned LLM and holds no
@@ -280,12 +282,12 @@ func main() {
 		fmt.Fprintln(os.Stderr, "pa:", err)
 		os.Exit(1)
 	}
-	// M5d-2: wire the skill seam — filesystem provider + Registry + the
-	// skill_load tool + the "skill" pre-step catalog injector — when
-	// skill.enabled (默认关闭, D10). config.applyDefaults already whitelisted
+	// M5d-2: wire the skill seam 鈥?filesystem provider + Registry + the
+	// skill_load tool + the "skill" pre-step catalog injector 鈥?when
+	// skill.enabled (榛樿鍏抽棴, D10). config.applyDefaults already whitelisted
 	// skill_load when skill.enabled was true. The deferred Close releases the
 	// registry and its providers at shutdown (lifecycle reversible, ADR
-	// 决策 ④).
+	// 鍐崇瓥 鈶?.
 	if err := app.registerSkills(); err != nil {
 		fmt.Fprintln(os.Stderr, "pa:", err)
 		os.Exit(1)
@@ -293,12 +295,12 @@ func main() {
 	if app.skills != nil {
 		defer app.skills.Close()
 	}
-	// M6a-2: wire the schedule seam — in-memory Provider + Engine + the three
+	// M6a-2: wire the schedule seam 鈥?in-memory Provider + Engine + the three
 	// schedule_* tools + the D3 event sink + the "schedule" pre-step injector
-	// — when schedule.enabled (默认关闭, D10). config.applyDefaults already
+	// 鈥?when schedule.enabled (榛樿鍏抽棴, D10). config.applyDefaults already
 	// whitelisted the schedule_* names when schedule.enabled was true. The
 	// deferred Close releases the provider and rejects further operations at
-	// shutdown (lifecycle reversible, ADR 决策 M6a). There is no background
+	// shutdown (lifecycle reversible, ADR 鍐崇瓥 M6a). There is no background
 	// ticker: the loop's per-turn "schedule" pre-step injector advances the
 	// clock on the serial path (D5).
 	if err := app.registerSchedules(); err != nil {
@@ -308,12 +310,12 @@ func main() {
 	if app.schedules != nil {
 		defer app.schedules.Close()
 	}
-	// M6b-2: wire the plan seam — in-memory Provider + Engine + the six
-	// plan_* tools + the D3 event sink — when plan.enabled (默认关闭, D10).
+	// M6b-2: wire the plan seam 鈥?in-memory Provider + Engine + the six
+	// plan_* tools + the D3 event sink 鈥?when plan.enabled (榛樿鍏抽棴, D10).
 	// config.applyDefaults already whitelisted the plan_* names when
 	// plan.enabled was true. The deferred Close releases the provider and
 	// rejects further operations at shutdown (lifecycle reversible, ADR
-	// 决策 M6b). The plan tree is a planning model only — execution delegation
+	// 鍐崇瓥 M6b). The plan tree is a planning model only 鈥?execution delegation
 	// to subagents is deferred to M6c+.
 	if err := app.registerPlans(); err != nil {
 		fmt.Fprintln(os.Stderr, "pa:", err)
@@ -322,12 +324,12 @@ func main() {
 	if app.plans != nil {
 		defer app.plans.Close()
 	}
-	// M6c-2: wire the spill seam — in-memory Provider + Engine + the four
+	// M6c-2: wire the spill seam 鈥?in-memory Provider + Engine + the four
 	// spill_* tools + the D3 event sink + the turn-completion auto-sedimentation
-	// hook — when spill.enabled (默认关闭, D10). config.applyDefaults already
+	// hook 鈥?when spill.enabled (榛樿鍏抽棴, D10). config.applyDefaults already
 	// whitelisted the spill_* names when spill.enabled was true. The deferred
 	// Close releases the provider and rejects further operations at shutdown
-	// (lifecycle reversible, ADR 决策 M6c). AutoSpill runs on the serial
+	// (lifecycle reversible, ADR 鍐崇瓥 M6c). AutoSpill runs on the serial
 	// turn-completion path (after each completed turn in the REPL, D5); there
 	// is no background goroutine.
 	if err := app.registerSpills(); err != nil {
@@ -337,13 +339,13 @@ func main() {
 	if app.spills != nil {
 		defer app.spills.Close()
 	}
-	// M6e-2: wire the code seam — local subprocess Provider + Engine + the
-	// code_run tool + the D3 event sink — when code.enabled (默认关闭, D10).
-	// config.applyDefaults already whitelisted code_run when code.enabled was
+	// M6e-2: wire the code seam 鈥?local subprocess Provider + Engine + the
+	// run_code tool + the D3 event sink 鈥?when code.enabled (榛樿鍏抽棴, D10).
+	// config.applyDefaults already whitelisted run_code when code.enabled was
 	// true. registerCode runs before registerInteracts so the sensitive-tool
-	// gate can wrap code_run too. The deferred Close releases the provider and
-	// rejects further runs at shutdown (lifecycle reversible, ADR 决策 M6e).
-	// code_run executes on the serial tool path (D5) — no background goroutine.
+	// gate can wrap run_code too. The deferred Close releases the provider and
+	// rejects further runs at shutdown (lifecycle reversible, ADR 鍐崇瓥 M6e).
+	// run_code executes on the serial tool path (D5) 鈥?no background goroutine.
 	if err := app.registerCode(); err != nil {
 		fmt.Fprintln(os.Stderr, "pa:", err)
 		os.Exit(1)
@@ -351,15 +353,15 @@ func main() {
 	if app.code != nil {
 		defer app.code.Close()
 	}
-	// M6f-2: wire the MCP tool-ecosystem seam — stdio Factory + the
+	// M6f-2: wire the MCP tool-ecosystem seam 鈥?stdio Factory + the
 	// mcp_list/mcp_call tools + per-server tool bridging (mcp.<server>.<tool>)
-	// + the D3 event sink — when mcp.enabled (默认关闭, D10). config.
+	// + the D3 event sink 鈥?when mcp.enabled (榛樿鍏抽棴, D10). config.
 	// applyDefaults already whitelisted mcp_list/mcp_call when mcp.enabled was
 	// true; bridged names are whitelisted as each server tool is registered.
 	// registerMcps runs before registerInteracts so the sensitive-tool gate can
 	// wrap the mcp tools too. The deferred Close terminates every bridged
-	// server at shutdown (lifecycle reversible, ADR 决策 M6f). Bridging and the
-	// mcp_* tools execute on the serial tool path (D5) — no background
+	// server at shutdown (lifecycle reversible, ADR 鍐崇瓥 M6f). Bridging and the
+	// mcp_* tools execute on the serial tool path (D5) 鈥?no background
 	// goroutine.
 	if err := app.registerMcps(); err != nil {
 		fmt.Fprintln(os.Stderr, "pa:", err)
@@ -372,14 +374,14 @@ func main() {
 			}
 		}()
 	}
-	// M6f-3: wire the safe-file-operation seam — local FileService (root =
+	// M6f-3: wire the safe-file-operation seam 鈥?local FileService (root =
 	// fs.root, defaulting to <project>) + the three fs_* tools + the D3 event
-	// sink — when fs.enabled (默认关闭, D10). config.applyDefaults already
+	// sink 鈥?when fs.enabled (榛樿鍏抽棴, D10). config.applyDefaults already
 	// whitelisted the fs_* names when fs.enabled was true. registerFs runs
 	// before registerInteracts so the sensitive-tool gate can wrap the fs tools
 	// too. The deferred Close marks the service closed (idempotent, no OS
-	// resources) at shutdown (lifecycle reversible, ADR 决策 M6f). The fs_*
-	// tools execute on the serial tool path (D5) — no background goroutine.
+	// resources) at shutdown (lifecycle reversible, ADR 鍐崇瓥 M6f). The fs_*
+	// tools execute on the serial tool path (D5) 鈥?no background goroutine.
 	if err := app.registerFs(); err != nil {
 		fmt.Fprintln(os.Stderr, "pa:", err)
 		os.Exit(1)
@@ -387,8 +389,8 @@ func main() {
 	if app.fs != nil {
 		defer app.fs.Close()
 	}
-	// D-GAP-1: wire the file-content-search seam — the fs_search tool — when
-	// fs_search.enabled (默认关 D10). config.applyDefaults already whitelisted
+	// D-GAP-1: wire the file-content-search seam 鈥?the fs_search tool 鈥?when
+	// fs_search.enabled (榛樿鍏?D10). config.applyDefaults already whitelisted
 	// fs_search when fs_search.enabled was true. The tool is read-only and
 	// holds no resources, so there is no deferred Close; the default search
 	// root is the agent working directory (os.Getwd, like internal/code and
@@ -397,21 +399,21 @@ func main() {
 		fmt.Fprintln(os.Stderr, "pa:", err)
 		os.Exit(1)
 	}
-	// M7-2: wire the web seam — Engine + DeepSeek search provider (env key
-	// only) + HTTP fetch provider + the two web_* tools — when web.enabled
-	// (默认关闭, D10). config.applyDefaults already whitelisted web_search/
+	// M7-2: wire the web seam 鈥?Engine + DeepSeek search provider (env key
+	// only) + HTTP fetch provider + the two web_* tools 鈥?when web.enabled
+	// (榛樿鍏抽棴, D10). config.applyDefaults already whitelisted web_search/
 	// web_fetch when web.enabled was true. registerWeb runs before
 	// registerInteracts so the sensitive-tool gate can wrap the web tools too.
 	// The Engine holds no closable resources, so there is no deferred Close.
 	// web/search-request is logged by the provider's OnRequest (D3); the web_*
-	// tools execute on the serial tool path (D5) — no background goroutine.
+	// tools execute on the serial tool path (D5) 鈥?no background goroutine.
 	if err := app.registerWeb(); err != nil {
 		fmt.Fprintln(os.Stderr, "pa:", err)
 		os.Exit(1)
 	}
-	// M9: wire the persistent-terminal seam — the single active session +
-	// the five terminal_* tools + the /term REPL + the D3 event sink — when
-	// terminal.enabled (默认关 D10). config.applyDefaults already whitelisted
+	// M9: wire the persistent-terminal seam 鈥?the single active session +
+	// the five terminal_* tools + the /term REPL + the D3 event sink 鈥?when
+	// terminal.enabled (榛樿鍏?D10). config.applyDefaults already whitelisted
 	// the terminal_* names when terminal.enabled was true. The deferred
 	// cleanup closes the active session at shutdown so no child process leaks.
 	if err := app.registerTerminal(); err != nil {
@@ -423,15 +425,15 @@ func main() {
 			app.termSess.Close()
 		}
 	}()
-	// M6d-2: wire the interact seam — in-memory Provider + Engine + the two
-	// interact_* tools + the D3 event sink + the sensitive-tool gate — when
-	// interact.enabled (默认关闭, D10). config.applyDefaults already whitelisted
+	// M6d-2: wire the interact seam 鈥?in-memory Provider + Engine + the two
+	// interact_* tools + the D3 event sink + the sensitive-tool gate 鈥?when
+	// interact.enabled (榛樿鍏抽棴, D10). config.applyDefaults already whitelisted
 	// the interact_* names when interact.enabled was true. registerInteracts
 	// must run after every other register* so the sensitive-tool gate can wrap
 	// the full registered tool set. The deferred Close releases the provider
 	// and rejects further operations at shutdown (lifecycle reversible, ADR
-	// 决策 M6d). The gate reads the user's y/n answer on the CLI serial path
-	// (D5) — no background goroutine.
+	// 鍐崇瓥 M6d). The gate reads the user's y/n answer on the CLI serial path
+	// (D5) 鈥?no background goroutine.
 	if err := app.registerInteracts(); err != nil {
 		fmt.Fprintln(os.Stderr, "pa:", err)
 		os.Exit(1)
@@ -450,10 +452,9 @@ func main() {
 		pol.Enabled = all
 		reg.SetPolicy(pol)
 	}
-	// eval: wire the task-evaluation seam — the CompositeEvaluator (rule → LLM
-	// judge → human fallback) over a.llm/a.interacts + the three eval_* tools +
-	// the /eval-status command + the D3 event sink — when eval.enabled (默认关
-	// D10). config.applyDefaults already whitelisted the eval_* names when
+	// eval: wire the task-evaluation seam 鈥?the CompositeEvaluator (rule 鈫?LLM
+	// judge 鈫?human fallback) over a.llm/a.interacts + the three eval_* tools +
+	// the /eval-status command + the D3 event sink 鈥?when eval.enabled (榛樿鍏?	// D10). config.applyDefaults already whitelisted the eval_* names when
 	// eval.enabled was true. The engine is in-memory; Close is idempotent.
 	if err := app.registerEval(); err != nil {
 		fmt.Fprintln(os.Stderr, "pa:", err)
@@ -462,10 +463,9 @@ func main() {
 	if app.evalEng != nil {
 		defer app.evalEng.Close()
 	}
-	// M10a: wire the unified web portal (ADR 2026-08-20-m10-web-portal.md) —
-	// the bearer-authenticated net/http server over the read-only store
-	// (sessions/events browsing + static vanilla-JS frontend) — when
-	// web_server.enabled (默认关 D10, no listener at all). An empty token fails
+	// M10a: wire the unified web portal (ADR 2026-08-20-m10-web-portal.md) 鈥?	// the bearer-authenticated net/http server over the read-only store
+	// (sessions/events browsing + static vanilla-JS frontend) 鈥?when
+	// web_server.enabled (榛樿鍏?D10, no listener at all). An empty token fails
 	// closed at startup (no bare server). The deferred Close shuts the listener
 	// at shutdown so no port lingers.
 	if err := app.registerWebServer(); err != nil {
@@ -503,10 +503,9 @@ type app struct {
 	// preset). Per-session permission tiers swap a derived policy around a turn
 	// (turnMu serializes turns) and restore basePolicy afterwards.
 	basePolicy tools.Policy
-	// promptByMode caches a per-mode system-prompt builder (Phase 2: 按会话
-	// mode 锁定). Populated lazily on first use for a non-global session mode.
+	// promptByMode caches a per-mode system-prompt builder (Phase 2: 鎸変細璇?	// mode 閿佸畾). Populated lazily on first use for a non-global session mode.
 	promptByMode map[string]*prompt.Builder
-	llm    llm.LLM
+	llm          llm.LLM
 	// llmMu guards the llm/llmReg pointer swap during the live model switch
 	// (POST /api/config/model, P5.1): the switch holds turnMu (D5 serial, so no
 	// turn is in flight) and takes the write lock; consumers read the selected
@@ -515,18 +514,17 @@ type app struct {
 	// baseCtx is the process-lifetime context (the main signal context). It is
 	// the ctx the persist sink uses (attachSink), decoupled from any HTTP
 	// request ctx: webSessionManager/webMessage pass r.Context() into
-	// newSession/resumeSession, whose handler returns and cancels it — had the
+	// newSession/resumeSession, whose handler returns and cancels it 鈥?had the
 	// sink captured that, every later append would fail with "context canceled"
 	// (M10 W3 real-smoke catch). It also governs the web-only <-ctx.Done().
 	baseCtx context.Context
-	// llmReg is the M8-2 provider registry (dispatch-m8-2 §6): registerLLM
+	// llmReg is the M8-2 provider registry (dispatch-m8-2 搂6): registerLLM
 	// builds it and injects the selected provider into llm; /llm-status reads
 	// it. Non-nil only after registerLLM succeeds.
 	llmReg *llm.Registry
 	// llmKeys is the M11 provider API-key override map (settings rows
 	// llm.key.<providerId>), loaded at startup and updated by the Model-settings
-	// page's save endpoint. A configured key wins over the env var (配置后以配置的
-	// 为准, user 2026-09); providerKey consults it first. nil ⇒ env-only.
+	// page's save endpoint. A configured key wins over the env var (閰嶇疆鍚庝互閰嶇疆鐨?	// 涓哄噯, user 2026-09); providerKey consults it first. nil 鈬?env-only.
 	llmKeys map[string]string
 	// customProviders is the M11 custom OpenAI-compatible provider declarations
 	// (settings rows llm.custom.<route> = JSON customProviderProfile), loaded at
@@ -535,13 +533,13 @@ type app struct {
 	customProviders []customProviderProfile
 	// builtinProfiles is the per-built-in-provider override map (settings rows
 	// llm.profile.<id> = JSON builtinProviderProfile, dsh ProviderEditor
-	// 自定义设置 对齐): base URL / model / model-list overrides for the
+	// 鑷畾涔夎缃?瀵归綈): base URL / model / model-list overrides for the
 	// config-driven built-ins (deepseek-official). Loaded at startup and updated
 	// by the provider-save endpoint; registerLLM applies them over config.yaml.
 	builtinProfiles map[string]builtinProviderProfile
-	// attachStore is the M8-3 image-attachment store (dispatch-m8-3 §4): created
+	// attachStore is the M8-3 image-attachment store (dispatch-m8-3 搂4): created
 	// by registerAttachments only when llm.multimodal.enabled; nil when disabled
-	// (D10) — /attach then errors.
+	// (D10) 鈥?/attach then errors.
 	attachStore *attachment.Store
 	kb          kb.KB // nil when kb disabled (D10)
 
@@ -553,8 +551,8 @@ type app struct {
 	compaction compaction.Engine // nil when compaction disabled (D10)
 	skills     skill.Registry    // nil when skill disabled (D10)
 	// skillManager is the web settings-page skill manager (dsh-skill-mcp-panel
-	// 对齐). It is created whenever the web server runs — independent of
-	// skill.enabled — so the 技能 settings page can list/enable/disable/delete/
+	// 瀵归綈). It is created whenever the web server runs 鈥?independent of
+	// skill.enabled 鈥?so the 鎶€鑳?settings page can list/enable/disable/delete/
 	// add/migrate skill files even when the model-facing skill capability is off.
 	skillManager *skill.Manager
 	// titleMu guards titleDone, the per-process set of sessions whose
@@ -563,14 +561,14 @@ type app struct {
 	// so a failed run never re-fires on every later turn.
 	titleMu   sync.Mutex
 	titleDone map[string]bool
-	schedules    schedule.Engine // nil when schedule disabled (D10)
-	plans      plan.Engine       // nil when plan disabled (D10)
-	spills     spill.Engine      // nil when spill disabled (D10)
-	interacts  interact.Engine   // nil when interact disabled (D10)
-	code       code.Engine       // nil when code disabled (D10)
-	mcp        []mcp.Client      // nil when mcp disabled (D10); one live bridged client per configured server
-	fs         fs.FileService    // nil when fs disabled (D10)
-	web        *web.Engine       // nil when web disabled (D10)
+	schedules schedule.Engine // nil when schedule disabled (D10)
+	plans     plan.Engine     // nil when plan disabled (D10)
+	spills    spill.Engine    // nil when spill disabled (D10)
+	interacts interact.Engine // nil when interact disabled (D10)
+	code      code.Engine     // nil when code disabled (D10)
+	mcp       []mcp.Client    // nil when mcp disabled (D10); one live bridged client per configured server
+	fs        fs.FileService  // nil when fs disabled (D10)
+	web       *web.Engine     // nil when web disabled (D10)
 
 	// webserver is the M10a unified web portal (ADR 2026-08-20-m10-web-portal.md);
 	// nil when web_server disabled (D10).
@@ -580,7 +578,7 @@ type app struct {
 	// one loop, so at most one Run executes at any moment (M10 W1, D-WEB2-A).
 	turnMu sync.Mutex
 	// cancelMu + turnCancel let POST /api/sessions/{id}/stop abort the web turn
-	// (dsh 停止按钮) without holding turnMu: the web message handler registers its
+	// (dsh 鍋滄鎸夐挳) without holding turnMu: the web message handler registers its
 	// cancellable context here, and the stop handler calls the stored cancel.
 	cancelMu   sync.Mutex
 	turnCancel context.CancelFunc
@@ -650,7 +648,7 @@ func (a *app) startup(ctx context.Context) error {
 
 // pruneBlankCurrent removes the current session from the store when it holds no
 // events (nothing submitted). dsh discards a blank session once the user leaves
-// it — a new-session hero never accumulates empty rows in the sidebar. It is a
+// it 鈥?a new-session hero never accumulates empty rows in the sidebar. It is a
 // no-op when there is no current session or it already has content. Best-effort:
 // a blank session has no durable value to lose, so a delete failure is logged
 // rather than failing the switch.
@@ -711,15 +709,14 @@ func (a *app) resumeSession(ctx context.Context, id string) error {
 }
 
 // attachSink forwards every appended event to the durable store for the
-// current session (D8: append-on-write, replay at startup) and — when the
-// real-time hub exists — broadcasts it to the session's SSE subscribers
+// current session (D8: append-on-write, replay at startup) and 鈥?when the
+// real-time hub exists 鈥?broadcasts it to the session's SSE subscribers
 // (M10 W1, ADR D-WEB2-B). Publish is non-blocking and never fails, so the
 // store's error semantics are unchanged: a store error still rolls the event
 // back out of the log.
 // attachSink forwards every appended event to the durable store for the
 // current session (D8: append-on-write, replay at startup). The persist ctx is
-// a.baseCtx — the process-lifetime context, NOT the caller's request ctx —
-// because the sink outlives any single HTTP request (M10 W3): a request ctx
+// a.baseCtx 鈥?the process-lifetime context, NOT the caller's request ctx 鈥?// because the sink outlives any single HTTP request (M10 W3): a request ctx
 // is cancelled when its handler returns, which would fail every later append
 // with "context canceled" (real-smoke catch). The passed ctx is ignored for
 // persistence (kept in the signature for the call sites).
@@ -756,14 +753,14 @@ func (a *app) bindSpillOwner() {
 }
 
 // newLoop builds a Loop bound to the current session log. The Recall hook is
-// the M4b proactive-recall extension point (dispatch-m4b §2): it runs the
+// the M4b proactive-recall extension point (dispatch-m4b 搂2): it runs the
 // per-turn recall orchestration in cmd/pa; the loop's turn/step structure is
 // unchanged (D4).
 func (a *app) newLoop() *loop.Loop {
 	return a.buildLoop(
 		func(delta string) { fmt.Print(delta) },
 		func(err error) { fmt.Fprintln(os.Stderr, "\n[stream error]", err) },
-		"", a.cfg.Model, a.cfg.ReasoningEffort, a.prompt,
+		"", a.cfg.Model, a.cfg.ReasoningEffort, a.cfg.Mode, a.prompt,
 	)
 }
 
@@ -772,43 +769,50 @@ func (a *app) newLoop() *loop.Loop {
 // the SSE event flow (each chunk is already persisted by the loop), so nothing
 // may be printed to the REPL's stdout/stderr during a web turn.
 func (a *app) newLoopWeb() *loop.Loop {
-	return a.buildLoop(func(string) {}, func(error) {}, "", a.cfg.Model, a.cfg.ReasoningEffort, a.prompt)
+	return a.buildLoop(func(string) {}, func(error) {}, "", a.cfg.Model, a.cfg.ReasoningEffort, a.cfg.Mode, a.prompt)
 }
 
 // newLoopFor builds a Loop bound to the current session log using the resolved
 // per-session runtime (Phase 2: 按会话 model/mode; dsh ModelSelection 对齐:
-// the session's provider override routes its turns). interactive selects the
-// REPL or silent stream hooks.
+// the session's provider override routes its turns, and its mode preset owns
+// the model-facing tool surface). interactive selects the REPL or silent stream
+// hooks.
 func (a *app) newLoopFor(rt sessionRuntime, interactive bool) *loop.Loop {
 	if interactive {
 		return a.buildLoop(
 			func(delta string) { fmt.Print(delta) },
 			func(err error) { fmt.Fprintln(os.Stderr, "\n[stream error]", err) },
-			rt.provider, rt.model, rt.effort, rt.prompt,
+			rt.provider, rt.model, rt.effort, rt.mode, rt.prompt,
 		)
 	}
-	return a.buildLoop(func(string) {}, func(error) {}, rt.provider, rt.model, rt.effort, rt.prompt)
+	return a.buildLoop(func(string) {}, func(error) {}, rt.provider, rt.model, rt.effort, rt.mode, rt.prompt)
 }
 
 // buildLoop assembles a Loop bound to the current session log. onText/onError
 // are the streaming hooks: the REPL prints them, the web path is silent.
 // provider/model/effort override the globals when a per-session selection is
 // active (dsh ModelSelection: the session owns provider+model+effort); an
-// unknown provider id falls back to the global LLM (fail-open). pb overrides
-// the system prompt when a per-session mode is active.
-// effort is the thinking-effort selection ("" keeps the provider default).
-func (a *app) buildLoop(onText func(string), onError func(error), provider, model, effort string, pb *prompt.Builder) *loop.Loop {
+// unknown provider id falls back to the global LLM (fail-open). mode is the
+// session's agent preset (standard | code | minimal): it owns the model-facing
+// tool surface (loop.Config.ToolSpecs). pb overrides the system prompt when a
+// per-session mode is active. effort is the thinking-effort selection ("" keeps
+// the provider default).
+func (a *app) buildLoop(onText func(string), onError func(error), provider, model, effort, mode string, pb *prompt.Builder) *loop.Loop {
 	if model == "" {
 		model = a.cfg.Model
 	}
 	if pb == nil {
 		pb = a.prompt
 	}
+	if mode == "" {
+		mode = a.cfg.Mode
+	}
 	ll := a.llmFor(provider)
 	return loop.New(loop.Config{
 		LLM:             ll,
 		Log:             a.log,
 		Tools:           a.reg,
+		ToolSpecs:       func() []llm.ToolSchema { return toolSpecsForMode(mode, a.reg.Specs()) },
 		Prompt:          pb,
 		Model:           model,
 		ReasoningEffort: effort,
@@ -824,68 +828,128 @@ func (a *app) buildLoop(onText func(string), onError func(error), provider, mode
 }
 
 // sessionRuntime is the resolved per-turn runtime for one session: the
-// effective LLM provider, model, thinking effort and the system-prompt builder
-// (by mode). All fields are "" / nil when the session falls back to the
-// globals (dsh ModelSelection: provider+model+effort are one selection).
+// effective LLM provider, model, thinking effort, the mode preset and the
+// system-prompt builder (by mode). All fields are "" / nil when the session
+// falls back to the globals (dsh ModelSelection: provider+model+effort are one
+// selection; the mode defaults to the deployment preset).
 type sessionRuntime struct {
 	provider string
 	model    string
 	effort   string
+	mode     string
 	prompt   *prompt.Builder
 }
 
 // applySessionRuntime resolves one session's per-turn provider/model/effort /
 // mode-prompt / permission tier (session override ?? global) and swaps the
-// registry policy for the session's permission tier. runTurn holds turnMu while
-// it runs, so the policy swap is serialized with the turn; the returned restore
-// func reinstates the base policy. Fail-open: any store or builder error falls
-// back to the globals.
+// registry policy to the session's mode-projected whitelist. runTurn holds
+// turnMu while it runs, so the swap is serialized with the turn; the returned
+// restore func reinstates the base policy. Fail-open: any store or builder
+// error falls back to the globals.
 func (a *app) applySessionRuntime(id string) (sessionRuntime, func()) {
 	rt := sessionRuntime{model: a.cfg.Model, effort: a.cfg.ReasoningEffort, prompt: a.prompt}
 	perm := ""
-	if scs, ok := a.store.(store.SessionConfigStore); ok {
-		if id != "" {
-			if cfg, err := scs.GetSessionConfig(context.Background(), id); err == nil {
-				if cfg.Provider != "" {
-					rt.provider = cfg.Provider
-				}
-				if cfg.Model != "" {
-					rt.model = cfg.Model
-				}
-				if cfg.ReasoningEffort != "" {
-					rt.effort = cfg.ReasoningEffort
-				}
-				if cfg.AgentPreset != "" && cfg.AgentPreset != a.cfg.Mode {
-					rt.prompt = a.promptFor(cfg.AgentPreset)
-				}
-				perm = cfg.Permission
+	mode := a.cfg.Mode
+	if scs, ok := a.store.(store.SessionConfigStore); ok && id != "" {
+		if cfg, err := scs.GetSessionConfig(context.Background(), id); err == nil {
+			if cfg.Provider != "" {
+				rt.provider = cfg.Provider
+			}
+			if cfg.Model != "" {
+				rt.model = cfg.Model
+			}
+			if cfg.ReasoningEffort != "" {
+				rt.effort = cfg.ReasoningEffort
+			}
+			if cfg.AgentPreset != "" {
+				mode = cfg.AgentPreset // 会话创建时锁定的模式 (dsh agent preset)
+				rt.prompt = a.promptFor(mode)
+			}
+			perm = cfg.Permission
+		}
+	}
+	rt.mode = mode
+	// Every turn projects the session's mode onto the full base whitelist and
+	// swaps it in for the turn's duration (dsh: the executor honors the same
+	// presentation mode; standard never executes run_code, PTC only run_code,
+	// minimal only its fixed seam).
+	base := a.basePolicy
+	base.Enabled = modeToolWhitelist(mode, base.Enabled)
+	pol, _ := a.sessionPolicyFrom(base, perm, mode)
+	a.reg.SetPolicy(pol)
+	return rt, func() { a.reg.SetPolicy(a.basePolicy) }
+}
+
+func (a *app) sessionPolicyFrom(base tools.Policy, perm, mode string) (tools.Policy, bool) {
+	switch perm {
+	case "readonly":
+		base.Enabled = config.ReadOnlyTools()
+		return base, true
+	case "full":
+		base.Enabled = modeToolWhitelist(mode, a.allRegisteredToolNames())
+		return base, true
+	default:
+		return base, false
+	}
+}
+
+// modeToolWhitelist projects the model-facing tool surface for a mode. Native
+// standard keeps registered tools, PTC exposes only run_code, and minimal keeps
+// its fixed terminal/file seam. The executor receives the same projection, so a
+// session cannot call a tool hidden from its model surface.
+func modeToolWhitelist(mode string, enabled []string) []string {
+	switch mode {
+	case config.ModeCode:
+		return []string{"run_code"}
+	case config.ModeMinimal:
+		return config.MinimalTools()
+	default:
+		out := make([]string, 0, len(enabled))
+		for _, name := range enabled {
+			if name != "run_code" {
+				out = append(out, name)
+			}
+		}
+		return out
+	}
+}
+
+// toolSpecsForMode projects the model-facing tool schemas for a mode: PTC
+// sends only run_code, minimal only its fixed seam, standard every registered
+// tool except run_code. Both the wire tools array (loop.Config.ToolSpecs) and
+// the prompt catalog must agree on this projection, so the model can never
+// call a tool its mode hides.
+func toolSpecsForMode(mode string, specs []llm.ToolSchema) []llm.ToolSchema {
+	var allowed []string
+	switch mode {
+	case config.ModeCode:
+		allowed = []string{"run_code"}
+	case config.ModeMinimal:
+		allowed = config.MinimalTools()
+	default:
+		allowed = make([]string, 0, len(specs))
+		for _, spec := range specs {
+			if spec.Name != "run_code" {
+				allowed = append(allowed, spec.Name)
 			}
 		}
 	}
-	if pol, changed := a.sessionPolicy(perm); changed {
-		a.reg.SetPolicy(pol)
-		return rt, func() { a.reg.SetPolicy(a.basePolicy) }
+	out := make([]llm.ToolSchema, 0, len(allowed))
+	for _, spec := range specs {
+		if containsString(allowed, spec.Name) {
+			out = append(out, spec)
+		}
 	}
-	return rt, func() {}
+	return out
 }
 
-// sessionPolicy returns the Execute policy for a session's permission tier.
-// readonly narrows the whitelist to the read-only tools; full opens it to every
-// registered tool; standard (or empty) keeps the base policy. The second return
-// reports whether a swap is needed (false = leave the base policy in place).
-func (a *app) sessionPolicy(perm string) (tools.Policy, bool) {
-	switch perm {
-	case "readonly":
-		p := a.basePolicy
-		p.Enabled = config.ReadOnlyTools()
-		return p, true
-	case "full":
-		p := a.basePolicy
-		p.Enabled = a.allRegisteredToolNames()
-		return p, true
-	default:
-		return a.basePolicy, false
+func containsString(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
 	}
+	return false
 }
 
 // allRegisteredToolNames returns the names of every tool currently registered
@@ -900,7 +964,9 @@ func (a *app) allRegisteredToolNames() []string {
 }
 
 // promptFor returns the system-prompt builder for a non-global mode, building
-// and caching it on first use. Called under turnMu.
+// and caching it on first use. Called under turnMu. The minimal persona is
+// self-contained (fixed text, no appended catalog); the wire tool surface is
+// still mode-filtered through loop.Config.ToolSpecs.
 func (a *app) promptFor(mode string) *prompt.Builder {
 	if mode == "" || mode == a.cfg.Mode {
 		return a.prompt
@@ -912,7 +978,9 @@ func (a *app) promptFor(mode string) *prompt.Builder {
 		return b
 	}
 	if b, err := buildPrompt(mode, a.cfg.PromptsDir); err == nil {
-		b.SetTools(func() []llm.ToolSchema { return a.reg.Specs() })
+		if mode != config.ModeMinimal {
+			b.SetTools(func() []llm.ToolSchema { return toolSpecsForMode(mode, a.reg.Specs()) })
+		}
 		a.promptByMode[mode] = b
 		return b
 	}
@@ -921,8 +989,7 @@ func (a *app) promptFor(mode string) *prompt.Builder {
 
 // runTurn executes one turn under the global serial lock (D5: REPL and web
 // share one loop; at most one Run at a time). interactive=false suppresses the
-// stdout stream (the web renders from the SSE event stream instead — chunk 已
-// 落库).
+// stdout stream (the web renders from the SSE event stream instead 鈥?chunk 宸?// 钀藉簱).
 func (a *app) runTurn(ctx context.Context, text string, interactive bool) error {
 	a.turnMu.Lock()
 	defer a.turnMu.Unlock()
@@ -944,7 +1011,7 @@ func (a *app) runTurn(ctx context.Context, text string, interactive bool) error 
 // repl drives turns from stdin, handling the session commands.
 func (a *app) repl(ctx context.Context) {
 	scanner := bufio.NewScanner(os.Stdin)
-	fmt.Println("pa — personal agent REPL. Type /help for the command table.")
+	fmt.Println("pa 鈥?personal agent REPL. Type /help for the command table.")
 	for {
 		fmt.Print("\n> ")
 		if !scanner.Scan() {
@@ -1030,7 +1097,7 @@ func (a *app) command(ctx context.Context, line string) error {
 	return nil
 }
 
-// printHelp prints the complete command table (M3 CLI 完善; M4b adds kb).
+// printHelp prints the complete command table (M3 CLI 瀹屽杽; M4b adds kb).
 func (a *app) printHelp() {
 	fmt.Println(`commands:
   /new              start a new session
@@ -1086,7 +1153,7 @@ startup:  pa [--config <path>]   config defaults to config.yaml`)
 		fmt.Println("schedules: disabled (schedule.enabled=false)")
 	}
 	if config.Enabled(a.cfg.Plan.Enabled) {
-		fmt.Println("plans: enabled (goal → plan → todo planning tree)")
+		fmt.Println("plans: enabled (goal 鈫?plan 鈫?todo planning tree)")
 	} else {
 		fmt.Println("plans: disabled (plan.enabled=false)")
 	}
@@ -1099,7 +1166,7 @@ startup:  pa [--config <path>]   config defaults to config.yaml`)
 		if len(a.cfg.Interact.SensitiveTools) > 0 {
 			fmt.Printf("interact: enabled (sensitive_tools=%s)\n", strings.Join(a.cfg.Interact.SensitiveTools, ", "))
 		} else {
-			fmt.Println("interact: enabled (no sensitive_tools — interact_* tools only, no gating)")
+			fmt.Println("interact: enabled (no sensitive_tools 鈥?interact_* tools only, no gating)")
 		}
 	} else {
 		fmt.Println("interact: disabled (interact.enabled=false)")
@@ -1114,7 +1181,7 @@ startup:  pa [--config <path>]   config defaults to config.yaml`)
 		if len(a.cfg.Mcp.Servers) > 0 {
 			fmt.Printf("mcp: enabled (servers: %s)\n", mcpServerNames(a.cfg.Mcp.Servers))
 		} else {
-			fmt.Println("mcp: enabled (no servers — mcp_list/mcp_call only)")
+			fmt.Println("mcp: enabled (no servers 鈥?mcp_list/mcp_call only)")
 		}
 	} else {
 		fmt.Println("mcp: disabled (mcp.enabled=false)")
@@ -1159,7 +1226,7 @@ func (a *app) listSessions(ctx context.Context) error {
 		return err
 	}
 	if len(sessions) == 0 {
-		fmt.Println("no sessions yet — type /new to start one")
+		fmt.Println("no sessions yet 鈥?type /new to start one")
 		return nil
 	}
 	for _, s := range sessions {

@@ -2,7 +2,7 @@
 // D-MODE-3): standard 用 prompts_dir 目录加载 (现状); minimal 用固定 persona
 // (对齐 dsh minimal complete:true — 单 section, 不追加其他提示文本);
 // code (PTC) 在 standard 基础上注入「程序化操作 (Code Mode)」段, 提示模型
-// 优先用 code_run 把多步操作写成一段程序一次执行 (D-MODE-4 诚实近似: 无 TS
+// 优先用 run_code 把多步操作写成一段程序一次执行 (D-MODE-4 诚实近似: 无 TS
 // SDK, 行为层偏好). 工具目录由调用方 SetTools 安装, 这里不碰.
 package main
 
@@ -16,15 +16,15 @@ import (
 const minimalPersona = `You are a minimal personal agent (mode: minimal).
 
 You operate with exactly two tool families and nothing else:
-- persistent shell: terminal_start / terminal_write / terminal_read / terminal_signal / terminal_stop
-- file editing: fs_read / fs_write / fs_list
+- persistent shell: pwsh
+- file editing: read / write / list / edit
 
 Do not attempt tools outside these. Keep responses brief and factual.`
 
 // codeModeSection is the PTC preset's programmatic-operation section
-// (D-MODE-4): 提示模型把可批量的多步操作合并进一次 code_run 程序.
+// (D-MODE-4): 提示模型把可批量的多步操作合并进一次 run_code 程序.
 const codeModeSection = `## 程序化操作（Code Mode）
-当一次任务包含多个可批量的文件/命令操作时, 优先用 code_run 沙箱把它们写进
+当一次任务包含多个可批量的文件/命令操作时, 优先用 run_code 沙箱把它们写进
 一段程序一次执行（如遍历文件批量处理、循环调用、组合读取+写入），而不是逐个
 工具往返。仅当操作无法程序化、或单次操作依赖前一次的人工可观察结果时才逐个
 调用工具。`

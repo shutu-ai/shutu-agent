@@ -27,7 +27,7 @@ func newTestEngine(t *testing.T) *engine {
 func TestEngineRequestResolve(t *testing.T) {
 	e := newTestEngine(t)
 
-	r, err := e.Request(context.Background(), "Allow running: rm -rf /tmp/x", "run_command", `{"command":"rm -rf /tmp/x"}`)
+	r, err := e.Request(context.Background(), "Allow running: rm -rf /tmp/x", "bash", `{"command":"rm -rf /tmp/x"}`)
 	if err != nil {
 		t.Fatalf("Request: %v", err)
 	}
@@ -37,7 +37,7 @@ func TestEngineRequestResolve(t *testing.T) {
 	if r.Status != StatusPending {
 		t.Errorf("new request status = %q, want %q", r.Status, StatusPending)
 	}
-	if r.Prompt != "Allow running: rm -rf /tmp/x" || r.ToolName != "run_command" {
+	if r.Prompt != "Allow running: rm -rf /tmp/x" || r.ToolName != "bash" {
 		t.Errorf("request fields = prompt %q tool %q, want the given prompt/tool", r.Prompt, r.ToolName)
 	}
 	if r.Args != `{"command":"rm -rf /tmp/x"}` {

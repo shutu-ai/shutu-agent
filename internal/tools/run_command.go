@@ -13,7 +13,7 @@ import (
 // runCommandName is the single execution-class tool (design.md §5 / D10 落地).
 // It is registered only when tools.run_command.enabled is true (main.go), so
 // the model does not even see it by default.
-const runCommandName = "run_command"
+const runCommandName = "bash"
 
 // sensitiveEnvTokens are the credential-shaped substrings removed from the
 // environment before every run_command (mirrors dsh's scrubbedParentEnv, with
@@ -98,6 +98,7 @@ func (t RunCommand) Execute(ctx context.Context, args json.RawMessage) (string, 
 	if readErr != nil {
 		return "", fmt.Errorf("run_command: read output: %w", readErr)
 	}
+	out = []byte(strings.ToValidUTF8(string(out), "�"))
 	if waitErr != nil {
 		if ctx.Err() != nil {
 			return "", fmt.Errorf("run_command: interrupted: %w", waitErr)
@@ -114,7 +115,7 @@ func (t RunCommand) Execute(ctx context.Context, args json.RawMessage) (string, 
 func newCommand(command, workdir string, env []string) *exec.Cmd {
 	var argv []string
 	if runtime.GOOS == "windows" {
-		argv = []string{"cmd.exe", "/C", command}
+		argv = []string{"cmd.exe", "/C", "chcp 65001 >nul & " + command}
 	} else {
 		argv = []string{"/bin/sh", "-c", command}
 	}

@@ -82,8 +82,8 @@ func TestAutoSpillCandidatesExtraction(t *testing.T) {
 func TestAutoSpillSkipsToolCallFrames(t *testing.T) {
 	events := []session.Event{
 		testEvent(t, 1, session.EventUserMessage, session.NewUserMessage("read the file")),
-		testEvent(t, 2, session.EventAssistantMessage, session.NewAssistantMessage("", []llm.ToolCall{{ID: "call_1", Name: "read_file", Arguments: `{"path":"x"}`}}, "")),
-		testEvent(t, 3, session.EventToolResult, session.NewToolResult("call_1", "read_file", "file contents are short", nil)),
+		testEvent(t, 2, session.EventAssistantMessage, session.NewAssistantMessage("", []llm.ToolCall{{ID: "call_1", Name: "read", Arguments: `{"path":"x"}`}}, "")),
+		testEvent(t, 3, session.EventToolResult, session.NewToolResult("call_1", "read", "file contents are short", nil)),
 	}
 	// The tool-call frame is excluded and the short tool output is under the
 	// length threshold with no marker — nothing worth remembering.
@@ -124,7 +124,7 @@ func TestAutoSpillCountAndDedup(t *testing.T) {
 		testEvent(t, 1, session.EventUserMessage, session.NewUserMessage("hello")),
 		testEvent(t, 2, session.EventAssistantMessage, session.NewAssistantMessage("好的", nil, "stop")),              // chit-chat → filtered
 		testEvent(t, 3, session.EventAssistantMessage, session.NewAssistantMessage("记住：项目用 Go 编写。", nil, "stop")), // conclusive → spilled
-		testEvent(t, 4, session.EventToolResult, session.NewToolResult("call_1", "run_command", "The build passed all 42 tests.", nil)), // long → spilled
+		testEvent(t, 4, session.EventToolResult, session.NewToolResult("call_1", "bash", "The build passed all 42 tests.", nil)), // long → spilled
 	}
 
 	n, err := eng.AutoSpill(context.Background(), events)

@@ -28,10 +28,10 @@ func (b blockUntilCtxDone) Execute(ctx context.Context, args json.RawMessage) (s
 
 func TestDefaultPolicyIsReadOnlyWhitelist(t *testing.T) {
 	p := DefaultPolicy()
-	if !p.Allows("get_time") || !p.Allows("read_file") {
+	if !p.Allows("get_time") || !p.Allows("read") {
 		t.Fatalf("default whitelist must contain the read-only tools: %v", p.Enabled)
 	}
-	if p.Allows("run_command") {
+	if p.Allows("bash") {
 		t.Fatal("run_command must not be whitelisted by default")
 	}
 	if p.Timeout != DefaultTimeout {
@@ -48,7 +48,7 @@ func TestDefaultPolicyIsReadOnlyWhitelist(t *testing.T) {
 func TestExecuteNotEnabledToolRejected(t *testing.T) {
 	r := New()
 	r.Register(GetTime{})
-	r.SetPolicy(Policy{Enabled: []string{"read_file"}}) // get_time not enabled
+	r.SetPolicy(Policy{Enabled: []string{"read"}}) // get_time not enabled
 
 	_, err := r.Execute(context.Background(), "get_time", json.RawMessage(`{}`))
 	if err == nil {
@@ -153,7 +153,7 @@ func (w *waiterTool) Execute(ctx context.Context, args json.RawMessage) (string,
 
 func TestPolicyFromConfigMapsAndDefaults(t *testing.T) {
 	cfg := config.ToolsConfig{
-		Enabled:     []string{"get_time", "read_file", "run_command"},
+		Enabled:     []string{"get_time", "read", "bash"},
 		Timeout:     config.Duration{Duration: 7 * time.Second},
 		OutputLimit: 1024,
 		RunCommand: config.RunCommandConfig{
@@ -163,7 +163,7 @@ func TestPolicyFromConfigMapsAndDefaults(t *testing.T) {
 		},
 	}
 	p := PolicyFromConfig(cfg, "data")
-	if !p.Allows("run_command") {
+	if !p.Allows("bash") {
 		t.Fatal("run_command must be whitelisted")
 	}
 	if p.Timeout != 7*time.Second {

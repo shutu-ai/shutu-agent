@@ -91,13 +91,13 @@ func TestCodeRunToolExecutesAndEmits(t *testing.T) {
 	out, err := ct.Run().Execute(context.Background(), json.RawMessage(
 		`{"lang":"sh","code":"echo hello","cwd":`+jsonString(testCwd(t))+`}`))
 	if err != nil {
-		t.Fatalf("code_run: %v", err)
+		t.Fatalf("run_code: %v", err)
 	}
 	if !strings.Contains(out, "hello") {
-		t.Fatalf("code_run output = %q, want it to carry hello", out)
+		t.Fatalf("run_code output = %q, want it to carry hello", out)
 	}
 	if strings.Contains(out, "[exit code:") {
-		t.Fatalf("code_run output = %q, want no exit-code marker", out)
+		t.Fatalf("run_code output = %q, want no exit-code marker", out)
 	}
 	if got := eventTypes(*recs); len(got) != 1 || got[0] != "code/run" {
 		t.Fatalf("emitted types = %v, want [code/run]", got)
@@ -121,13 +121,13 @@ func TestCodeRunToolNonZeroExit(t *testing.T) {
 	out, err := ct.Run().Execute(context.Background(), json.RawMessage(
 		`{"lang":"sh","code":`+jsonString(failCommand())+`,"cwd":`+jsonString(testCwd(t))+`}`))
 	if err != nil {
-		t.Fatalf("code_run: %v", err)
+		t.Fatalf("run_code: %v", err)
 	}
 	if !strings.Contains(out, "[exit code: 3]") {
-		t.Fatalf("code_run output = %q, want [exit code: 3]", out)
+		t.Fatalf("run_code output = %q, want [exit code: 3]", out)
 	}
 	if !strings.Contains(out, "oops") {
-		t.Fatalf("code_run output = %q, want it to carry stderr oops", out)
+		t.Fatalf("run_code output = %q, want it to carry stderr oops", out)
 	}
 	d := decodeEvent[struct {
 		ExitCode int  `json:"exitCode"`
@@ -146,10 +146,10 @@ func TestCodeRunToolTimeout(t *testing.T) {
 	out, err := ct.Run().Execute(context.Background(), json.RawMessage(
 		`{"lang":"sh","code":`+jsonString(longSleep())+`,"timeout":0.3,"cwd":`+jsonString(testCwd(t))+`}`))
 	if err != nil {
-		t.Fatalf("code_run: %v", err)
+		t.Fatalf("run_code: %v", err)
 	}
 	if !strings.Contains(out, "[timed out") {
-		t.Fatalf("code_run output = %q, want a timeout marker", out)
+		t.Fatalf("run_code output = %q, want a timeout marker", out)
 	}
 	d := decodeEvent[struct {
 		ExitCode int  `json:"exitCode"`
@@ -169,10 +169,10 @@ func TestCodeRunToolTruncated(t *testing.T) {
 	out, err := ct.Run().Execute(context.Background(), json.RawMessage(
 		`{"lang":"sh","code":`+jsonString(bigOutput(70000))+`,"cwd":`+jsonString(testCwd(t))+`}`))
 	if err != nil {
-		t.Fatalf("code_run: %v", err)
+		t.Fatalf("run_code: %v", err)
 	}
 	if !strings.Contains(out, "[output truncated") {
-		t.Fatalf("code_run output = %q, want a truncation marker", out)
+		t.Fatalf("run_code output = %q, want a truncation marker", out)
 	}
 	d := decodeEvent[struct {
 		Truncated bool `json:"truncated"`
@@ -189,10 +189,10 @@ func TestCodeRunToolDefaults(t *testing.T) {
 	ct.DefaultCwd = testCwd(t)
 	out, err := ct.Run().Execute(context.Background(), json.RawMessage(`{"lang":"sh","code":`+jsonString(printCwdCommand())+`}`))
 	if err != nil {
-		t.Fatalf("code_run: %v", err)
+		t.Fatalf("run_code: %v", err)
 	}
 	if !samePath(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(out), "[stdout]")), ct.DefaultCwd) {
-		t.Fatalf("code_run cwd = %q, want %q (DefaultCwd applied)", strings.TrimSpace(out), ct.DefaultCwd)
+		t.Fatalf("run_code cwd = %q, want %q (DefaultCwd applied)", strings.TrimSpace(out), ct.DefaultCwd)
 	}
 }
 

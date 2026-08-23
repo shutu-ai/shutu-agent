@@ -2,7 +2,7 @@
 // ADR 2026-08-19-m6-agent-full.md 决策 M6e): a Provider + Engine seam for
 // executing code/commands in a controlled sandbox. An Engine (the seam's
 // Service) delegates to a Provider; the default Provider is the local
-// subprocess sandbox (local.go). Consumers (M6e-2's code_run tool and the
+// subprocess sandbox (local.go). Consumers (M6e-2's run_code tool and the
 // code/* event wiring) depend only on the seam's interfaces (D2), so swapping
 // the backend never touches consumer code.
 //

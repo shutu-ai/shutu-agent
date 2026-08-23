@@ -14,8 +14,11 @@ func shellCommand(opts SessionOpts) *exec.Cmd {
 	if shell == "" {
 		shell = "cmd.exe"
 	}
-	args := append(append([]string{}, opts.Args...), "/Q")
-	return exec.Command(shell, args...)
+	args := append(append([]string{}, opts.Args...), "/Q", "/K", "chcp 65001 >nul")
+	cmd := exec.Command(shell, args...)
+	// /Q suppresses command echo; /K initializes the persistent shell's code
+	// page before it accepts model commands.
+	return cmd
 }
 
 // killProcessTree 终止 cmd：Windows 无进程组，taskkill 不可用，直接

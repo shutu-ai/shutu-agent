@@ -496,7 +496,7 @@ func (a *app) webConfig() map[string]any {
 		"compaction_enabled": config.Enabled(a.cfg.Compaction.Enabled),
 		"multimodal_enabled": a.multimodalEnabled(),
 
-		"web_server_addr":     a.cfg.WebServer.Addr,
+		"web_server_addr": a.cfg.WebServer.Addr,
 	}
 }
 

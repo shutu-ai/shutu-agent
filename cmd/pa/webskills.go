@@ -66,10 +66,10 @@ func (a *app) webSkills(ctx context.Context, action string, req webserver.SkillR
 			view = append(view, skillEntryView(e))
 		}
 		return map[string]any{
-			"skills":   view,
-			"groups":   groupRowsView(groups),
-			"scopes":   scopes,
-			"enabled":  config.Enabled(a.cfg.Skill.Enabled),
+			"skills":  view,
+			"groups":  groupRowsView(groups),
+			"scopes":  scopes,
+			"enabled": config.Enabled(a.cfg.Skill.Enabled),
 		}, nil
 
 	case "content":
@@ -144,14 +144,14 @@ func (a *app) webSkills(ctx context.Context, action string, req webserver.SkillR
 // skillEntryView projects a ManageEntry to its wire map (leaf fields only).
 func skillEntryView(e skill.ManageEntry) map[string]any {
 	return map[string]any{
-		"name":           e.Name,
-		"description":    e.Description,
-		"when_to_use":    e.WhenToUse,
-		"enabled":        e.Enabled,
-		"kind":           e.Kind,
-		"source":         e.Source,
-		"scope":          e.Scope,
-		"rel":            e.Rel,
+		"name":            e.Name,
+		"description":     e.Description,
+		"when_to_use":     e.WhenToUse,
+		"enabled":         e.Enabled,
+		"kind":            e.Kind,
+		"source":          e.Source,
+		"scope":           e.Scope,
+		"rel":             e.Rel,
 		"model_invocable": e.ModelInvocable,
 		"user_invocable":  e.UserInvocable,
 	}

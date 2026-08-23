@@ -241,7 +241,7 @@ func TestStats(t *testing.T) {
 	})
 	seedSession(t, st, "s-2", []session.Event{
 		{Seq: 1, Type: "assistant/message", At: base.Add(30 * time.Minute), Version: 1, Data: mustData(t, map[string]any{"Text": "hi there"})},
-		{Seq: 2, Type: "tool/error", At: base.Add(31 * time.Minute), Version: 1, Data: mustData(t, map[string]any{"Name": "fs_read", "Err": "denied"})},
+		{Seq: 2, Type: "tool/error", At: base.Add(31 * time.Minute), Version: 1, Data: mustData(t, map[string]any{"Name": "read", "Err": "denied"})},
 		{Seq: 3, Type: "user/message", At: base.Add(32 * time.Minute), Version: 1, Data: mustData(t, map[string]any{"Text": "again"})},
 	})
 	// Auth: /api/stats without a token → 401 (same middleware as the rest).
@@ -909,7 +909,9 @@ func TestWorkspaceAPI(t *testing.T) {
 		t.Fatalf("create resp = %s", rec.Body.String())
 	}
 	rec = doReqBody(t, h, "POST", "/api/workspaces", "", `{"title":"日常"}`)
-	var w2 struct{ ID string `json:"id"` }
+	var w2 struct {
+		ID string `json:"id"`
+	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &w2); err != nil {
 		t.Fatalf("create w2: %v", err)
 	}
@@ -923,7 +925,7 @@ func TestWorkspaceAPI(t *testing.T) {
 
 	rec = doReq(t, h, "GET", "/api/workspaces", "")
 	var list struct {
-		Workspaces  []struct {
+		Workspaces []struct {
 			ID         string   `json:"id"`
 			Title      string   `json:"title"`
 			SessionIDs []string `json:"session_ids"`
@@ -985,7 +987,7 @@ func TestWorkspaceAPI(t *testing.T) {
 	}
 	rec = doReq(t, h, "GET", "/api/workspaces", "")
 	list = struct {
-		Workspaces  []struct {
+		Workspaces []struct {
 			ID         string   `json:"id"`
 			Title      string   `json:"title"`
 			SessionIDs []string `json:"session_ids"`
@@ -1023,7 +1025,9 @@ func TestSessionForkArchiveOrder(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("fork → %d: %s", rec.Code, rec.Body.String())
 	}
-	var fork struct{ ID string `json:"id"` }
+	var fork struct {
+		ID string `json:"id"`
+	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &fork); err != nil || fork.ID == "" {
 		t.Fatalf("fork resp = %s", rec.Body.String())
 	}
@@ -1044,7 +1048,9 @@ func TestSessionForkArchiveOrder(t *testing.T) {
 		t.Fatalf("archive → %d", rec.Code)
 	}
 	rec = doReq(t, h, "GET", "/api/sessions", "")
-	var sl []struct{ ID string `json:"id"` }
+	var sl []struct {
+		ID string `json:"id"`
+	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &sl); err != nil {
 		t.Fatalf("list decode: %v", err)
 	}

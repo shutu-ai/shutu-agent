@@ -41,16 +41,17 @@ type PreStepInjector struct {
 
 // Loop drives one conversation turn against the session log.
 type Loop struct {
-	llm     llm.LLM
-	log     *session.Log
-	tools   *tools.Registry
-	prompt  *prompt.Builder
-	model   string
-	effort  string
-	recall  func(context.Context, string) []llm.Message // M4b hook, kept as the first injector
-	preStep []PreStepInjector                           // additional injectors, in registration order
-	onText  func(string)                                // optional sink for streamed assistant text (REPL)
-	onError func(error)                                 // optional sink for stream errors (REPL)
+	llm       llm.LLM
+	log       *session.Log
+	tools     *tools.Registry
+	toolSpecs func() []llm.ToolSchema // per-session model-facing tool surface (dsh presentation mode)
+	prompt    *prompt.Builder
+	model     string
+	effort    string
+	recall    func(context.Context, string) []llm.Message // M4b hook, kept as the first injector
+	preStep   []PreStepInjector                           // additional injectors, in registration order
+	onText    func(string)                                // optional sink for streamed assistant text (REPL)
+	onError   func(error)                                 // optional sink for stream errors (REPL)
 }
 
 // Config wires the loop's dependencies. All fields are required except the
@@ -61,6 +62,11 @@ type Config struct {
 	Tools  *tools.Registry
 	Prompt *prompt.Builder
 	Model  string
+	// ToolSpecs, when set, is the session's model-facing tool surface (dsh
+	// presentation mode: standard = native tools minus run_code, PTC = only
+	// run_code, minimal = the fixed seam). It is called on every step; when
+	// nil the loop sends every registered tool schema.
+	ToolSpecs func() []llm.ToolSchema
 	// ReasoningEffort is the thinking-effort default applied to every model
 	// request of this loop (dsh 思考强度; "" keeps the provider default).
 	ReasoningEffort string
@@ -90,16 +96,17 @@ type Config struct {
 // New returns a Loop.
 func New(cfg Config) *Loop {
 	return &Loop{
-		llm:     cfg.LLM,
-		log:     cfg.Log,
-		tools:   cfg.Tools,
-		prompt:  cfg.Prompt,
-		model:   cfg.Model,
-		effort:  cfg.ReasoningEffort,
-		recall:  cfg.Recall,
-		preStep: append([]PreStepInjector(nil), cfg.PreStep...),
-		onText:  cfg.OnText,
-		onError: cfg.OnError,
+		llm:       cfg.LLM,
+		log:       cfg.Log,
+		tools:     cfg.Tools,
+		toolSpecs: cfg.ToolSpecs,
+		prompt:    cfg.Prompt,
+		model:     cfg.Model,
+		effort:    cfg.ReasoningEffort,
+		recall:    cfg.Recall,
+		preStep:   append([]PreStepInjector(nil), cfg.PreStep...),
+		onText:    cfg.OnText,
+		onError:   cfg.OnError,
 	}
 }
 
@@ -211,6 +218,12 @@ func truncateRunes(s string, max int) string {
 func (l *Loop) step(ctx context.Context, contextMsgs []llm.Message) (bool, error) {
 	history := l.log.DeriveHistory()
 	specs := l.tools.Specs()
+	if l.toolSpecs != nil {
+		// The session's presentation mode owns the model-facing surface: the
+		// wire tools array must match the mode exactly, never the full
+		// registry (dsh assembly: native | code | both).
+		specs = l.toolSpecs()
+	}
 	messages := make([]llm.Message, 0, len(history)+1+len(contextMsgs))
 	messages = append(messages, llm.Message{Role: llm.RoleSystem, Content: []llm.ContentBlock{llm.Text(l.prompt.Build())}})
 	messages = append(messages, contextMsgs...)
@@ -245,6 +258,15 @@ func (l *Loop) step(ctx context.Context, contextMsgs []llm.Message) (bool, error
 			if _, err := l.log.Append(session.EventAssistantChunk, session.NewAssistantChunk(ev.Text)); err != nil {
 				return false, err
 			}
+		case llm.StreamReasoningDelta:
+			// M8: reasoning deltas are logged as they arrive (dsh order:
+			// thinking before tool calls) so the UI can render the chain in
+			// place; DeriveHistory folds these rows away in favor of the
+			// joined reasoning on the closing assistant/message.
+			reasoning += ev.Text
+			if _, err := l.log.Append(session.EventAssistantReasoning, session.NewAssistantReasoning(ev.Text)); err != nil {
+				return false, err
+			}
 		case llm.StreamFinish:
 			calls = ev.ToolCalls
 			finishReason = ev.FinishReason
@@ -261,6 +283,11 @@ func (l *Loop) step(ctx context.Context, contextMsgs []llm.Message) (bool, error
 	for _, call := range calls {
 		if err := ctx.Err(); err != nil {
 			return false, fmt.Errorf("loop: cancelled: %w", err)
+		}
+		// tool/start: the call is dispatched — the UI shows the running row
+		// (dsh) while the tool executes; DeriveHistory folds this row away.
+		if _, aerr := l.log.Append(session.EventToolStart, session.NewToolStart(call.ID, call.Name, call.Arguments)); aerr != nil {
+			return false, aerr
 		}
 		res, err := l.tools.Execute(ctx, call.Name, []byte(call.Arguments))
 		if err != nil {

@@ -81,9 +81,27 @@ let selectedTool = null;            // {callId,name,args,output,error} shown in 
 let sseAbort = null;            // AbortController for the current session stream
 let sseReconnect = null;        // timer handle
 let streamState = null;         // {seq, node} for the assistant bubble being built
+let reasoningLive = false;      // thinking deltas of the current step already streamed
+let currentReasoningNode = null; // the live Think row being accumulated
+let lastReasoningSeq = 0;       // seq of the last rendered reasoning delta (step boundary)
+let renderedSeqs = new Set();   // event seqs rendered in the current view (replay dedup)
 let runningNode = null;         // "Deep diving..." element
 let pollTimer = null;           // session-list refresh
 let config = {};                // cached GET /api/config view
+
+// noteRendered records one rendered event seq. A Set — not a watermark — so a
+// gap event (dropped by the SSE hub) stays "not rendered" even when later
+// events advanced past it, and the post-turn reconcile can still repair it.
+const MAX_RENDERED_SEQS = 4000;
+function noteRendered(seq) {
+  if (seq == null) return;
+  renderedSeqs.add(seq);
+  if (renderedSeqs.size > MAX_RENDERED_SEQS) {
+    const oldest = [...renderedSeqs].sort((a, b) => a - b);
+    const cut = oldest.length - MAX_RENDERED_SEQS;
+    for (let i = 0; i < cut; i++) renderedSeqs.delete(oldest[i]);
+  }
+}
 
 // ---- token / api ---------------------------------------------------------
 function token() { return localStorage.getItem(KEY_TOKEN) || ""; }
@@ -317,9 +335,226 @@ function renderMarkdown(text) {
   return buf || esc(text);
 }
 
+// ---- dsh tool-row presentation (labels / icons / Think streaming) --------
+// Glyphs extracted from @deepseek-ai/dsh-client-ui-primitives (ic_ds_* set);
+// every glyph renders at 14px inside the 16px leading slot.
+const DSH_ICON_SEARCH = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"> <path d="M11.894845 6.647401C11.894845 3.725463 9.534486 1.356779 6.623219 1.35657C3.711786 1.35657 1.351635 3.725338 1.351635 6.647401C1.351843 9.569296 3.711911 11.938273 6.623219 11.938273C9.534361 11.938064 11.894637 9.569171 11.894845 6.647401ZM13.245462 6.647401C13.245254 10.317935 10.280401 13.293613 6.623219 13.293821C2.965871 13.293821 0.000204 10.31806 0 6.647401C0 2.976574 2.965746 0 6.623219 0C10.280526 0.000205 13.245462 2.9767 13.245462 6.647401Z" fill="currentColor" /> <path d="M16.000417 15.041079L15.044449 16.000433L11.530434 12.473588L12.486298 11.514234L16.000417 15.041079Z" fill="currentColor" /> </svg>';
+const DSH_ICON_BROWSE = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"> <path d="M11.2426 4.80473V6.10551H4.75819V4.80473H11.2426Z" fill="currentColor" /> <path d="M9.40858 7.84478V9.14557H4.75819V7.84478H9.40858Z" fill="currentColor" /> <path d="M9.23438 0.546389C10.1941 0.546389 10.9683 0.544914 11.5859 0.611819C12.2161 0.680096 12.7634 0.825745 13.2393 1.17139C13.5172 1.3733 13.7619 1.61812 13.9639 1.896C14.3096 2.37183 14.4551 2.91922 14.5234 3.54932C14.5903 4.16686 14.5889 4.94133 14.5889 5.90088V10.0981C14.5889 11.0576 14.5903 11.8321 14.5234 12.4497C14.4552 13.0798 14.3094 13.6272 13.9639 14.103C13.7619 14.381 13.5172 14.6257 13.2393 14.8276C12.7633 15.1734 12.2163 15.3189 11.5859 15.3872C10.9683 15.4541 10.1942 15.4536 9.23438 15.4536H6.76563C5.80591 15.4536 5.03168 15.4541 4.41407 15.3872C3.78385 15.3189 3.23665 15.1734 2.76074 14.8276C2.48291 14.6257 2.23802 14.3809 2.03614 14.103C1.69066 13.6272 1.54483 13.0798 1.47657 12.4497C1.40973 11.8321 1.41114 11.0576 1.41114 10.0981V5.90088C1.41113 4.94132 1.40966 4.16686 1.47657 3.54932C1.54488 2.91921 1.69042 2.37184 2.03614 1.896C2.2381 1.61807 2.4828 1.37333 2.76074 1.17139C3.23665 0.825682 3.78386 0.680109 4.41407 0.611819C5.03168 0.544905 5.80591 0.546389 6.76563 0.546389H9.23438ZM6.76563 1.896C5.77586 1.896 5.0876 1.89738 4.55957 1.95459C4.0443 2.01043 3.76214 2.11349 3.55469 2.26416C3.39135 2.38284 3.24761 2.52662 3.12891 2.68994C2.97821 2.89736 2.8752 3.17967 2.81934 3.69483C2.76214 4.22279 2.76075 4.91131 2.76074 5.90088V10.0981C2.76074 11.0876 2.76221 11.7762 2.81934 12.3042C2.87516 12.8194 2.97829 13.1026 3.12891 13.3101C3.24754 13.4733 3.39147 13.6172 3.55469 13.7358C3.76213 13.8865 4.04438 13.9896 4.55957 14.0454C5.0876 14.1026 5.77586 14.103 6.76563 14.103H9.23438C10.2242 14.103 10.9124 14.1026 11.4404 14.0454C11.9556 13.9896 12.2379 13.8865 12.4453 13.7358C12.6086 13.6172 12.7525 13.4733 12.8711 13.3101C13.0217 13.1026 13.1248 12.8195 13.1807 12.3042C13.2378 11.7762 13.2393 11.0876 13.2393 10.0981V5.90088C13.2393 4.91131 13.2379 4.22279 13.1807 3.69483C13.1248 3.17969 13.0218 2.89736 12.8711 2.68994C12.7524 2.52667 12.6086 2.38281 12.4453 2.26416C12.2379 2.11355 11.9556 2.01041 11.4404 1.95459C10.9124 1.8974 10.2241 1.896 9.23438 1.896H6.76563Z" fill="currentColor" /> </svg>';
+const DSH_ICON_API = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"> <path transform="translate(0.6689 1.073)" d="M11.4818 5.57813C11.4818 4.45301 11.4807 3.66237 11.4075 3.05908C11.3359 2.46953 11.2024 2.13852 10.9939 1.89441C10.9247 1.81341 10.8493 1.73801 10.7683 1.66882C10.5242 1.46033 10.1932 1.32686 9.60364 1.25525C9.00034 1.18198 8.20974 1.18091 7.0846 1.18091L5.57813 1.18091C4.45301 1.18091 3.66238 1.18198 3.05908 1.25525C2.46953 1.32686 2.13852 1.46033 1.89441 1.66882C1.81341 1.73801 1.73801 1.81341 1.66882 1.89441C1.46033 2.13852 1.32686 2.46953 1.25525 3.05908C1.18198 3.66238 1.18091 4.45301 1.18091 5.57813L1.18091 6.2771C1.18091 7.40218 1.18197 8.19288 1.25525 8.79614C1.32687 9.38553 1.46036 9.71674 1.66882 9.96082C1.73797 10.0417 1.81347 10.1173 1.89441 10.1864C2.13851 10.3948 2.46965 10.5275 3.05908 10.5991C3.66238 10.6724 4.45298 10.6735 5.57813 10.6735L7.0846 10.6735C8.20977 10.6735 9.00033 10.6724 9.60364 10.5991C10.1931 10.5275 10.5242 10.3948 10.7683 10.1864C10.8493 10.1173 10.9247 10.0417 10.9939 9.96082C11.2024 9.71674 11.3358 9.38553 11.4075 8.79614C11.4808 8.19288 11.4818 7.40218 11.4818 6.2771L11.4818 5.57813ZM12.6627 6.2771C12.6627 7.37222 12.6637 8.247 12.5798 8.93799C12.4942 9.64284 12.3133 10.2359 11.8928 10.7282C11.7834 10.8562 11.6637 10.9751 11.5356 11.0845C11.0434 11.5049 10.4511 11.6867 9.74634 11.7723C9.05525 11.8563 8.17999 11.8552 7.0846 11.8552L5.57813 11.8552C4.48273 11.8552 3.60747 11.8563 2.91638 11.7723C2.21157 11.6867 1.61933 11.5049 1.12708 11.0845C0.99901 10.9751 0.879281 10.8562 0.769898 10.7282C0.349454 10.2359 0.168506 9.64284 0.0828864 8.93799C-0.00101964 8.247 4.88512e-07 7.37222 6.47206e-07 6.2771L6.47206e-07 5.57813C6.47206e-07 4.48273 -0.00106163 3.60747 0.0828864 2.91638C0.168502 2.21168 0.349594 1.61928 0.769898 1.12708C0.879302 0.998981 0.998981 0.879302 1.12708 0.769898C1.61928 0.349594 2.21168 0.168502 2.91638 0.0828864C3.60747 -0.00106163 4.48273 6.47206e-07 5.57813 6.47206e-07L7.0846 6.47206e-07C8.17999 6.47206e-07 9.05525 -0.00106163 9.74634 0.0828864C10.451 0.168505 11.0434 0.349587 11.5356 0.769898C11.6637 0.879302 11.7834 0.998981 11.8928 1.12708C12.3131 1.61928 12.4942 2.21169 12.5798 2.91638C12.6638 3.60747 12.6627 4.48273 12.6627 5.57813L12.6627 6.2771Z" fill="currentColor"/> <path transform="translate(0.6689 1.073)" d="M6.02607 5.50955L6.44306 5.9274L3.84284 8.52762L3.425 8.11063L3.00715 7.69278L4.77253 5.9274L3.00715 4.16202L3.84284 3.32633L6.02607 5.50955Z" fill="currentColor"/> <path transform="translate(0.6689 1.073)" d="M9.23789 7.35397L9.23789 8.53488L6.96238 8.53488L6.96238 7.35397L9.23789 7.35397Z" fill="currentColor"/> </svg>';
+const DSH_ICON_EDIT = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"> <path d="M9.94076 1.34942C10.7047 0.90231 11.6503 0.902415 12.4143 1.34942C12.7061 1.52015 12.9688 1.79118 13.3104 2.13284C13.6521 2.47448 13.9231 2.73721 14.0939 3.02894C14.5408 3.79294 14.5409 4.73856 14.0939 5.50251C13.9231 5.79415 13.652 6.05704 13.3104 6.39861L6.65932 13.0497C6.28068 13.4284 6.00695 13.7108 5.66543 13.9097C5.32391 14.1085 4.94315 14.2074 4.42705 14.3498L3.24394 14.6761C2.77527 14.8054 2.34538 14.9262 2.00131 14.9684C1.65196 15.0112 1.17964 15.0013 0.810764 14.6325C0.441921 14.2637 0.432107 13.7913 0.47486 13.442C0.517035 13.0979 0.6379 12.668 0.767181 12.1993L1.09352 11.0162C1.23588 10.5001 1.33481 10.1193 1.5336 9.77784C1.7325 9.43632 2.0149 9.1626 2.39355 8.78395L9.04466 2.13284C9.38625 1.79126 9.64911 1.52016 9.94076 1.34942ZM15.5427 14.8398H7.55223L8.96707 13.425H15.5427V14.8398ZM3.39382 9.78422C2.965 10.213 2.84244 10.3436 2.75709 10.49C2.67183 10.6366 2.61862 10.8079 2.45733 11.3925L2.13099 12.5756C2.00183 13.0439 1.92194 13.3419 1.88863 13.5536C2.10041 13.5204 2.39872 13.4416 2.86764 13.3123L4.05075 12.9859C4.63544 12.8246 4.80669 12.7715 4.95323 12.6862C5.09968 12.6008 5.23022 12.4783 5.65905 12.0494L10.721 6.98644L8.45577 4.72121L3.39382 9.78422ZM11.7 2.57079C11.3774 2.38198 10.9777 2.38198 10.6551 2.57079C10.5602 2.62647 10.4487 2.72931 10.0449 3.13311L9.45604 3.72094L11.7213 5.98617L12.3102 5.39833C12.7139 4.99457 12.8168 4.88307 12.8725 4.78818C13.0613 4.46561 13.0612 4.06585 12.8725 3.74326C12.8169 3.64827 12.7146 3.53752 12.3102 3.13311C11.9057 2.72863 11.795 2.6264 11.7 2.57079Z" fill="currentColor" /> </svg>';
+const DSH_ICON_CODE = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"> <path fillRule="evenodd" clipRule="evenodd" d="M12.3368 1.53569L11.931 4.43172H14.8086V5.79673H11.7404L11.1962 9.67859H14.2839V11.0436H11.0056L10.4994 14.6529L9.14873 14.4643L9.62731 11.0436H5.75876L5.25252 14.6529L3.90186 14.4643L4.38043 11.0436H1.69141V9.67859H4.57104L5.11417 5.79673H2.21609V4.43172H5.30581L5.73724 1.34713L7.08995 1.53569L6.68414 4.43172H10.5527L10.9841 1.34713L12.3368 1.53569ZM5.94937 9.67859H9.81791L10.361 5.79673H6.49353L5.94937 9.67859Z" fill="currentColor" /> </svg>';
+const DSH_ICON_SPARKLE = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"> <path d="M6.1 3.1Q6.6 7.8 11.3 8.3Q6.6 8.8 6.1 13.5Q5.6 8.8 0.9 8.3Q5.6 7.8 6.1 3.1Z" fill="currentColor" /> <path d="M11.9 1Q12.2 3.7 14.9 4Q12.2 4.3 11.9 7Q11.6 4.3 8.9 4Q11.6 3.7 11.9 1Z" fill="currentColor" /> <path d="M12.5 9.4Q12.7 11.4 14.7 11.6Q12.7 11.8 12.5 13.8Q12.3 11.8 10.3 11.6Q12.3 11.4 12.5 9.4Z" fill="currentColor" /> </svg>';
+const DSH_ICON_THINK = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg"> <path d="M7.06431 5.93342C7.68763 5.93342 8.19307 6.43904 8.19322 7.06233C8.19322 7.68573 7.68772 8.19123 7.06431 8.19123C6.44099 8.19113 5.9354 7.68567 5.9354 7.06233C5.93555 6.43911 6.44108 5.93353 7.06431 5.93342Z" fill="currentColor" /> <path fillRule="evenodd" clipRule="evenodd" d="M8.6815 0.963693C10.1169 0.447019 11.6266 0.374829 12.5633 1.31135C13.5 2.24805 13.4277 3.75776 12.911 5.19319C12.7126 5.74431 12.4386 6.31796 12.0965 6.89729C12.4969 7.54638 12.8141 8.19018 13.036 8.80647C13.5527 10.2419 13.6251 11.7516 12.6883 12.6883C11.7516 13.625 10.242 13.5527 8.8065 13.036C8.19022 12.8141 7.54641 12.4969 6.89732 12.0965C6.31797 12.4386 5.74435 12.7125 5.19322 12.911C3.75777 13.4276 2.2481 13.5 1.31138 12.5633C0.374859 11.6266 0.447049 10.1168 0.963724 8.68147C1.17185 8.10338 1.46321 7.50063 1.82896 6.8924C1.52182 6.35711 1.27235 5.82825 1.08872 5.31819C0.572068 3.88278 0.499714 2.37306 1.43638 1.43635C2.37308 0.499655 3.8828 0.572044 5.31822 1.08869C5.82828 1.27232 6.35715 1.5218 6.89243 1.82893C7.50066 1.46318 8.10341 1.17181 8.6815 0.963693ZM11.3573 8.01154C10.9083 8.62253 10.3901 9.22873 9.80943 9.8094C9.22877 10.3901 8.62255 10.9083 8.01158 11.3572C8.4257 11.5841 8.8287 11.7688 9.21275 11.9071C10.5456 12.3868 11.4246 12.2547 11.8397 11.8397C12.2548 11.4246 12.3869 10.5456 11.9071 9.21272C11.7688 8.82866 11.5841 8.42568 11.3573 8.01154ZM2.56529 8.02912C2.37344 8.39322 2.21495 8.74796 2.09263 9.08772C1.61291 10.4204 1.74512 11.2995 2.16001 11.7147C2.57505 12.1297 3.45415 12.2618 4.78697 11.7821C5.11057 11.6656 5.44786 11.5164 5.7938 11.3367C5.249 10.9223 4.70922 10.4533 4.19029 9.9344C3.57578 9.31987 3.03169 8.67633 2.56529 8.02912ZM6.90708 3.2469C6.24065 3.70479 5.5646 4.26321 4.91392 4.91389C4.26325 5.56456 3.70482 6.24063 3.24693 6.90705C3.72674 7.63325 4.32777 8.37459 5.03892 9.08576C5.64943 9.69627 6.28183 10.2265 6.90806 10.6678C7.59368 10.2025 8.2908 9.63076 8.96079 8.96076C9.6308 8.29075 10.2025 7.59366 10.6678 6.90803C10.2265 6.2818 9.69631 5.6494 9.08579 5.03889C8.37462 4.32773 7.63328 3.72672 6.90708 3.2469ZM11.7147 2.15998C11.2996 1.74509 10.4204 1.61288 9.08775 2.0926C8.74835 2.21479 8.39382 2.37271 8.03013 2.56428C8.67728 3.03065 9.31995 3.5758 9.93443 4.19026C10.4534 4.7092 10.9223 5.24896 11.3368 5.79377C11.5164 5.44785 11.6656 5.11052 11.7821 4.78694C12.2618 3.45416 12.1297 2.57502 11.7147 2.15998ZM4.91197 2.2176C3.57922 1.73788 2.70004 1.86995 2.28501 2.28498C1.87001 2.70003 1.73791 3.5792 2.21763 4.91194C2.31709 5.18822 2.44112 5.47427 2.58677 5.7674C3.01931 5.1887 3.51474 4.6158 4.06529 4.06526C4.61584 3.5147 5.18872 3.01928 5.76743 2.58674C5.47431 2.4411 5.18824 2.31706 4.91197 2.2176Z" fill="currentColor" /> </svg>';
+
+const DSH_ICON_COPY = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"> <path d="M6.14929 4.02032C7.11197 4.02032 7.87983 4.02016 8.49597 4.07598C9.12128 4.13269 9.65792 4.25188 10.1415 4.53106C10.7202 4.8653 11.2008 5.3459 11.535 5.92462C11.8142 6.40818 11.9334 6.94481 11.9901 7.57012C12.0459 8.18625 12.0458 8.95419 12.0458 9.9168C12.0458 10.8795 12.0459 11.6473 11.9901 12.2635C11.9334 12.8888 11.8142 13.4254 11.535 13.909C11.2008 14.4877 10.7202 14.9683 10.1415 15.3025C9.65792 15.5817 9.12128 15.7009 8.49597 15.7576C7.87984 15.8134 7.11196 15.8133 6.14929 15.8133C5.18667 15.8133 4.41874 15.8134 3.80261 15.7576C3.1773 15.7009 2.64067 15.5817 2.1571 15.3025C1.5784 14.9683 1.09778 14.4877 0.76355 13.909C0.484366 13.4254 0.365184 12.8888 0.308472 12.2635C0.252649 11.6473 0.252808 10.8795 0.252808 9.9168C0.252808 8.95418 0.252664 8.18625 0.308472 7.57012C0.365184 6.94481 0.484366 6.40818 0.76355 5.92462C1.09777 5.34589 1.57839 4.86529 2.1571 4.53106C2.64067 4.25188 3.1773 4.13269 3.80261 4.07598C4.41874 4.02017 5.18666 4.02032 6.14929 4.02032ZM6.14929 5.37774C5.16181 5.37774 4.46634 5.37761 3.92566 5.42657C3.39434 5.47472 3.07859 5.56574 2.83582 5.70587C2.4632 5.92106 2.15354 6.2307 1.93835 6.60333C1.79823 6.8461 1.70721 7.16185 1.65906 7.69317C1.6101 8.23385 1.61023 8.92933 1.61023 9.9168C1.61023 10.9043 1.61009 11.5998 1.65906 12.1404C1.70721 12.6717 1.79823 12.9875 1.93835 13.2303C2.15356 13.6029 2.46321 13.9126 2.83582 14.1277C3.07859 14.2679 3.39434 14.3589 3.92566 14.407C4.46634 14.456 5.16182 14.4559 6.14929 14.4559C7.13682 14.4559 7.83224 14.456 8.37292 14.407C8.90425 14.3589 9.21999 14.2679 9.46277 14.1277C9.83535 13.9126 10.145 13.6029 10.3602 13.2303C10.5004 12.9875 10.5914 12.6717 10.6395 12.1404C10.6885 11.5998 10.6884 10.9043 10.6884 9.9168C10.6884 8.92934 10.6885 8.23384 10.6395 7.69317C10.5914 7.16185 10.5004 6.8461 10.3602 6.60333C10.1451 6.23071 9.83536 5.92107 9.46277 5.70587C9.21999 5.56574 8.90424 5.47472 8.37292 5.42657C7.83224 5.3776 7.13682 5.37774 6.14929 5.37774ZM9.80164 0.367975C10.7638 0.367975 11.5314 0.36788 12.1473 0.423639C12.7726 0.480307 13.3093 0.598759 13.7928 0.877741C14.3717 1.21192 14.8521 1.69355 15.1864 2.27227C15.4655 2.75574 15.5857 3.29164 15.6425 3.9168C15.6983 4.53301 15.6971 5.3016 15.6971 6.26446V7.82989C15.6971 8.29264 15.6989 8.58993 15.6649 8.84844C15.4668 10.3525 14.401 11.5738 12.9833 11.9988V10.5467C13.6973 10.1903 14.2105 9.49662 14.3192 8.67169C14.3387 8.52347 14.3407 8.3358 14.3407 7.82989V6.26446C14.3407 5.27706 14.3398 4.58149 14.2909 4.04083C14.2428 3.50968 14.1526 3.19372 14.0126 2.95098C13.7974 2.57849 13.4876 2.26869 13.1151 2.05352C12.8724 1.91347 12.5564 1.82237 12.0253 1.77423C11.4847 1.72528 10.7888 1.7254 9.80164 1.7254H7.71472C6.7562 1.72558 5.92665 2.27697 5.52332 3.07891H4.07019C4.54221 1.51132 5.9932 0.368186 7.71472 0.367975H9.80164Z" fill="currentColor" /> </svg>';
+const DSH_ICON_LIKE = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"> <path d="M8.27868 0.811572C8.81991 0.142194 9.79022 0.0421835 10.4538 0.557601L10.5823 0.669306L10.6066 0.693544L10.6097 0.695652L10.6392 0.725159C11.355 1.44679 11.6337 2.49468 11.3716 3.47669L11.3706 3.48091L11.3611 3.51674L11.3601 3.51885L10.889 5.22604C10.8796 5.25997 10.8707 5.29157 10.8627 5.32088C10.8934 5.32095 10.927 5.32194 10.9628 5.32194H11.9007C12.4264 5.32194 12.7831 5.319 13.0651 5.36725C14.8182 5.66719 15.9851 7.34568 15.6565 9.09357C15.6036 9.37487 15.477 9.7092 15.294 10.2022L14.3371 12.7798C14.1402 13.3104 13.9774 13.7518 13.8102 14.1024C13.6376 14.4645 13.4386 14.7793 13.1442 15.0424C12.9712 15.197 12.7802 15.3303 12.5751 15.4386C12.226 15.6231 11.8608 15.7 11.4612 15.7358C11.0743 15.7705 10.6035 15.7695 10.0375 15.7695H4.87377C4.08053 15.7695 3.42928 15.7702 2.90734 15.7137C2.37212 15.6557 1.88991 15.5311 1.46676 15.2237C1.22415 15.0474 1.01078 14.8339 0.834466 14.5914C0.527021 14.1682 0.401373 13.686 0.343384 13.1508C0.286822 12.6287 0.287531 11.9769 0.287531 11.1833V9.51405C0.287531 8.84778 0.281347 8.36714 0.399237 7.9565C0.671152 7.00935 1.41115 6.26832 2.35829 5.99638C2.76894 5.87849 3.24958 5.88573 3.91585 5.88573C4.11983 5.88573 4.14548 5.88319 4.16244 5.88046C4.23532 5.86863 4.30409 5.83663 4.35845 5.78667C4.3711 5.77504 4.38761 5.75604 4.51442 5.59488L8.25655 0.838972L8.2576 0.837918L8.27868 0.811572ZM1.69122 11.1833C1.69122 12.0082 1.69217 12.5711 1.73865 13.0001C1.78371 13.4157 1.86473 13.6221 1.96943 13.7662C2.0592 13.8898 2.16733 13.9989 2.29085 14.0887C2.43501 14.1934 2.64216 14.2744 3.05803 14.3195C3.45897 14.3629 3.97637 14.3656 4.7157 14.3659C4.30801 13.8053 4.06453 13.1171 4.06444 12.371V8.59406H5.46813V12.371C5.46838 13.4733 6.36166 14.3669 7.46407 14.3669H10.0375C10.6286 14.3669 11.0269 14.3663 11.3369 14.3385C11.6339 14.3118 11.7956 14.2638 11.9196 14.1983C12.0241 14.1431 12.1213 14.0747 12.2094 13.996C12.314 13.9025 12.4151 13.7678 12.5435 13.4986C12.6774 13.2176 12.8162 12.845 13.0219 12.2909L13.9788 9.71322C14.1848 9.15816 14.2531 8.96731 14.2781 8.83433C14.4618 7.85692 13.8093 6.91895 12.8291 6.75092C12.6957 6.7281 12.4928 6.72458 11.9007 6.72458H10.9628C10.7737 6.72458 10.5693 6.72657 10.4 6.70666C10.2211 6.68562 9.96702 6.63024 9.74771 6.43161C9.64454 6.33811 9.55957 6.2261 9.4969 6.10177C9.3639 5.83784 9.37799 5.57899 9.40521 5.40097C9.431 5.23261 9.48672 5.03616 9.53694 4.85404L10.008 3.14579L10.0175 3.11102C10.1488 2.61338 10.0078 2.08338 9.64654 1.71681L9.6086 1.67887L9.55064 1.64304C9.48795 1.62043 9.41425 1.63814 9.36938 1.69362L9.35779 1.70627L9.35884 1.70732L5.61672 6.46217C5.51822 6.58735 5.42237 6.7133 5.30689 6.81942C5.05075 7.05471 4.73126 7.20939 4.38796 7.26519C4.23315 7.29032 4.07513 7.28837 3.91585 7.28837C3.15356 7.28837 2.91916 7.2957 2.7461 7.34528C2.26364 7.48379 1.88564 7.86081 1.74708 8.34325C1.69738 8.51636 1.69122 8.7511 1.69122 9.51405V11.1833Z" fill="currentColor" /> </svg>';
+const DSH_ICON_DISLIKE = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"> <path d="M7.72451 15.1086C7.18929 15.7705 6.22975 15.8694 5.57357 15.3597L5.44643 15.2492L5.42247 15.2253L5.41934 15.2232L5.39016 15.194C4.68239 14.4804 4.40679 13.4441 4.66589 12.473L4.66693 12.4689L4.67631 12.4334L4.67735 12.4314L5.14318 10.7431C5.15243 10.7096 5.1613 10.6783 5.16923 10.6493C5.13878 10.6493 5.10558 10.6483 5.07023 10.6483H4.14274C3.62288 10.6483 3.27015 10.6512 2.9912 10.6035C1.25757 10.3069 0.103662 8.64702 0.42863 6.91854C0.480965 6.64037 0.606164 6.30975 0.787119 5.82223L1.73336 3.27321C1.92812 2.74852 2.08912 2.31209 2.25442 1.96535C2.42515 1.60724 2.62191 1.29594 2.91304 1.03578C3.08408 0.882951 3.273 0.751121 3.47579 0.643944C3.82102 0.461504 4.18214 0.38551 4.57731 0.350066C4.95993 0.315784 5.42553 0.316718 5.98521 0.316718H11.0916C11.876 0.316718 12.52 0.31607 13.0362 0.37195C13.5655 0.429293 14.0423 0.552534 14.4608 0.856536C14.7007 1.03085 14.9117 1.24193 15.086 1.48181C15.3901 1.90027 15.5143 2.37709 15.5717 2.90638C15.6276 3.42269 15.6269 4.06721 15.6269 4.85202V6.50274C15.6269 7.1616 15.633 7.6369 15.5164 8.04299C15.2475 8.97962 14.5158 9.71242 13.5791 9.98133C13.173 10.0979 12.6977 10.0908 12.0389 10.0908C11.8372 10.0908 11.8118 10.0933 11.795 10.096C11.723 10.1077 11.6549 10.1393 11.6012 10.1887C11.5887 10.2002 11.5724 10.219 11.447 10.3784L7.74639 15.0815L7.74535 15.0825L7.72451 15.1086ZM14.2388 4.85202C14.2388 4.03628 14.2379 3.47965 14.1919 3.05541C14.1473 2.64443 14.0672 2.4403 13.9637 2.29779C13.8749 2.17562 13.768 2.06769 13.6458 1.9789C13.5033 1.87532 13.2984 1.79523 12.8872 1.75067C12.4907 1.70773 11.979 1.70511 11.2479 1.70482C11.6511 2.25917 11.8918 2.93968 11.8919 3.67755V7.41251H10.5038V3.67755C10.5036 2.58745 9.62023 1.70378 8.53007 1.70378H5.98521C5.40065 1.70378 5.00679 1.70442 4.70028 1.73192C4.40651 1.7583 4.24662 1.80571 4.12399 1.87052C4.02069 1.92511 3.92452 1.99276 3.8374 2.07061C3.73401 2.16306 3.634 2.2962 3.50705 2.56249C3.37462 2.84027 3.23734 3.20873 3.03393 3.75675L2.08768 6.30578C1.88395 6.85467 1.81646 7.0434 1.79172 7.1749C1.61005 8.14146 2.25533 9.06902 3.22464 9.23517C3.35654 9.25774 3.55717 9.26123 4.14274 9.26123H5.07023C5.25717 9.26123 5.4593 9.25926 5.62672 9.27894C5.80364 9.29975 6.05492 9.35452 6.27179 9.55094C6.37381 9.6434 6.45784 9.75417 6.51982 9.87712C6.65133 10.1381 6.6374 10.3941 6.61048 10.5701C6.58498 10.7366 6.52988 10.9309 6.48022 11.111L6.01439 12.8003L6.00501 12.8347C5.87513 13.3268 6.01464 13.8509 6.37184 14.2134L6.40935 14.2509L6.46667 14.2863C6.52866 14.3087 6.60155 14.2912 6.64591 14.2363L6.65738 14.2238L6.65633 14.2228L10.3569 9.52072C10.4543 9.39693 10.5491 9.27238 10.6633 9.16744C10.9166 8.93476 11.2325 8.7818 11.572 8.72662C11.7251 8.70177 11.8814 8.70369 12.0389 8.70369C12.7927 8.70369 13.0245 8.69645 13.1956 8.64742C13.6727 8.51045 14.0465 8.13761 14.1836 7.66053C14.2327 7.48935 14.2388 7.25721 14.2388 6.50274V4.85202Z" fill="currentColor" /> </svg>';
+
+
+// Tool classification (dsh tool-call-model TOOL_VARIANTS): known tool name ->
+// row variant; unknown tools land on the generic "Tool call" row. The dsh
+// tool names are canonical; the shutu legacy names (pre-alignment) stay mapped
+// so old sessions still classify the same rows.
+const TOOL_VARIANTS = {
+  bash: "bash", pwsh: "bash", run_command: "bash",
+  terminal_start: "bash", terminal_write: "bash", terminal_read: "bash",
+  terminal_signal: "bash", terminal_stop: "bash",
+  read: "read", web_fetch: "read", read_file: "read", fs_read: "read",
+  web_search: "search", grep: "search", glob: "search", fs_search: "search",
+  write: "write", fs_write: "write", edit: "edit",
+  run_code: "code", code_run: "code",
+  list: "others", fs_list: "others",
+};
+
+// Tool-owned titles that refine a generic row variant without replacing it
+// (dsh TOOL_TITLES): pwsh keeps its bash-row family with its own title.
+const TOOL_TITLES = { pwsh: "Pwsh" };
+// Figma row titles per variant (dsh design literals, not translatable copy).
+const VARIANT_TITLES = { search: "Search", read: "Read", bash: "Bash", write: "Write", edit: "Edit", code: "Code", others: "Tool call" };
+const VARIANT_ICONS = {
+  search: DSH_ICON_SEARCH, read: DSH_ICON_BROWSE, bash: DSH_ICON_API,
+  write: DSH_ICON_EDIT, edit: DSH_ICON_EDIT, code: DSH_ICON_CODE, others: DSH_ICON_SPARKLE,
+};
+// The persistent-shell row carries the shell's display name (dsh pwsh row);
+// refined from the settings terminal_shell row when settings load.
+const SHELL_TITLES = { powershell: "Pwsh", gitbash: "Git Bash", wsl: "WSL", cmd: "Cmd", off: "Terminal" };
+let termShellTitle = "Pwsh";
+
+function toolVariant(name) { return TOOL_VARIANTS[name] || "others"; }
+function toolRowTitle(name, variant) {
+  // dsh: tool-owned title first (pwsh → "Pwsh"); shutu's persistent terminal
+  // rows carry the configured shell's display name (Pwsh / Git Bash / WSL).
+  if (variant === "bash" && name && name.startsWith("terminal_")) return termShellTitle;
+  if (TOOL_TITLES[name]) return TOOL_TITLES[name];
+  return VARIANT_TITLES[variant] || "Tool call";
+}
+function firstLine(text) { const i = text.indexOf("\n"); return i === -1 ? text : text.slice(0, i); }
+function latestLine(text) { const v = text.trimEnd(); const i = v.lastIndexOf("\n"); return i === -1 ? v : v.slice(i + 1); }
+function parseToolArgs(raw) {
+  try { const v = JSON.parse(raw || "{}"); return v && typeof v === "object" ? v : {}; } catch { return {}; }
+}
+function prettyToolArgs(raw) {
+  try { return JSON.stringify(JSON.parse(raw || "{}"), null, 2); } catch { return raw || ""; }
+}
+// Summary key preference per variant (dsh SUMMARY_KEYS): the collapsed row
+// shows the meaningful arg (command / path / query / description). The search
+// variant joins the queries array (dsh), falling back to query/pattern.
+function toolSummary(name, variant, raw) {
+  const args = parseToolArgs(raw);
+  const pick = (keys) => { for (const k of keys) { const v = args[k]; if (typeof v === "string" && v !== "") return firstLine(v); } return ""; };
+  let s = "";
+  if (variant === "bash") s = pick(["description", "command", "text"]);
+  else if (variant === "read") s = pick(["path", "file_path", "url"]);
+  else if (variant === "search") {
+    if (Array.isArray(args.queries)) {
+      const qs = args.queries.filter((q) => typeof q === "string" && q !== "");
+      if (qs.length > 0) s = qs.map(firstLine).join(", ");
+    }
+    if (s === "") s = pick(["query", "pattern", "url"]);
+  }
+  else if (variant === "write" || variant === "edit") s = pick(["path", "file_path"]);
+  else if (variant === "code") s = pick(["description"]);
+  if (s === "") {
+    for (const v of Object.values(args)) { if (typeof v === "string" && v !== "") { s = firstLine(v); break; } }
+  }
+  return s === "" ? (name || "Tool call") : s;
+}
+
+// addReasoning renders (or appends to) the in-place Think disclosure row
+// (dsh ReasoningRow): while reasoning streams, the collapsed summary follows
+// the LATEST line with the running sweep; once the step settles it shows the
+// FIRST line. The body is the full reasoning text. evSeq detects the step
+// boundary: a delta whose seq jumps past an assistant/message (and its tool
+// events) starts a FRESH Think row, exactly one per assistant step (dsh).
+function addReasoning(reasoningText, timeIso, evSeq) {
+  const inner = msgInner();
+  const newStep = currentReasoningNode === null
+    || (evSeq != null && lastReasoningSeq !== 0 && evSeq > lastReasoningSeq + 1);
+  if (newStep) currentReasoningNode = null;
+  let node = currentReasoningNode;
+  if (!node) {
+    node = document.createElement("div");
+    node.className = "msg reasoning";
+    node.dataset.state = "running";
+    node.innerHTML = `
+      <div class="dsh-row" role="button" tabindex="0">
+        <span class="dsh-leading">${DSH_ICON_THINK}</span>
+        <span class="dsh-title">Think</span>
+        <span class="dsh-sep" aria-hidden></span>
+        <span class="dsh-summary" data-follow-end="1"></span>
+        <span class="dsh-caret">▸</span>
+      </div>
+      <div class="dsh-think-body"></div>`;
+    const row = node.querySelector(".dsh-row");
+    const toggle = () => { node.classList.toggle("open"); scrollToBottom(); };
+    row.addEventListener("click", toggle);
+    row.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
+    });
+    inner.appendChild(node);
+    currentReasoningNode = node;
+  }
+  if (evSeq != null) lastReasoningSeq = evSeq;
+  const body = node.querySelector(".dsh-think-body");
+  body.textContent = (body.textContent || "") + reasoningText;
+  node.querySelector(".dsh-summary").textContent = latestLine(body.textContent);
+  node.dataset.state = "running";
+  scrollToBottom(true);
+}
+
+// settleReasoning flips every open Think row to its settled look: the
+// collapsed summary becomes the reasoning's first line and the sweep stops.
+// It settles ALL running rows so a cancelled or failed step can never leave a
+// row sweeping forever.
+function settleReasoning() {
+  const inner = msgInner();
+  const rows = inner.querySelectorAll(":scope > .msg.reasoning[data-state='running']");
+  for (const node of rows) {
+    node.dataset.state = "ok";
+    const body = node.querySelector(".dsh-think-body");
+    const summary = node.querySelector(".dsh-summary");
+    if (summary) {
+      summary.textContent = body ? firstLine(body.textContent) : "";
+      summary.removeAttribute("data-follow-end");
+    }
+  }
+  if (currentReasoningNode && currentReasoningNode.dataset.state === "running") {
+    currentReasoningNode.dataset.state = "ok";
+  }
+  currentReasoningNode = null;
+}
+
+// renderToolRow draws one dsh tool row (figma 122:9479): 24px single line —
+// [16 leading icon] title · 2x2 separator · FILL-truncated summary — with the
+// state semantics (running sweep / ok icon / error red dot + failure line).
+// tool/start creates the running row; tool/result and tool/error settle the
+// same row in place (paired by call_id). Expanding shows the IN/OUT card.
+function renderToolRow(ev) {
+  const inner = msgInner();
+  const name = ev.tool_name || "";
+  const variant = toolVariant(name);
+  const isStart = ev.type === "tool/start";
+  const isErr = ev.type === "tool/error";
+  const state = isStart ? "running" : (isErr ? "error" : "ok");
+  const callID = ev.call_id || "";
+  let node = null;
+  if (callID) {
+    // Reuse the row of the same call whenever one exists: a reconnect replay
+    // may deliver tool/start again, and result/error must settle the exact
+    // running row — never leave an orphaned duplicate sweeping (yellow dot).
+    node = inner.querySelector(`.msg.tool[data-call="${String(callID).replace(/"/g, "\\\"")}"]`);
+  }
+  if (!node) {
+    node = document.createElement("div");
+    node.className = "msg tool";
+    if (callID) node.dataset.call = String(callID);
+    inner.appendChild(node);
+  }
+  const seq = ev.seq == null ? "" : String(ev.seq);
+  node.dataset.state = state;
+  node.dataset.seq = seq;
+  const args = prettyToolArgs(ev.tool_args);
+  const output = isErr ? (ev.summary || "") : (ev.tool_output || "");
+  const failureLine = isErr ? firstLine(ev.summary || "") : "";
+  const summary = failureLine || toolSummary(name, variant, ev.tool_args);
+  const expandable = !!(args || output);
+  const wasOpen = node.classList.contains("open");
+  toolMeta[seq] = { name: name || "Tool call", args: ev.tool_args || "", output: output, error: isErr };
+  node.innerHTML = `
+    <div class="dsh-row" role="button" tabindex="0">
+      <span class="dsh-leading">${isErr ? '<span class="dsh-statedot dsh-statedot-err"></span>' : VARIANT_ICONS[variant]}</span>
+      <span class="dsh-title">${esc(toolRowTitle(name, variant))}</span>
+      <span class="dsh-sep" aria-hidden></span>
+      <span class="dsh-summary${failureLine ? " dsh-summary-err" : ""}">${esc(summary)}</span>
+      <span class="dsh-caret">▸</span>
+    </div>
+    ${expandable ? `
+    <div class="dsh-io-card">
+      ${args ? `<div class="dsh-io-sec"><span class="dsh-io-label">IN</span><span class="dsh-io-text">${esc(args)}</span></div>` : ""}
+      ${args && output ? `<span class="dsh-io-divider" aria-hidden></span>` : ""}
+      ${output ? `<div class="dsh-io-sec"><span class="dsh-io-label">OUT</span><span class="dsh-io-text${isErr ? " dsh-io-err" : ""}">${esc(output)}</span></div>` : ""}
+    </div>` : ""}`;
+  const row = node.querySelector(".dsh-row");
+  const toggle = () => {
+    if (!expandable) { openDetails(seq); return; }
+    node.classList.toggle("open");
+    openDetails(seq);
+    scrollToBottom();
+  };
+  row.addEventListener("click", toggle);
+  row.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
+  });
+  if (wasOpen && expandable) node.classList.add("open");
+  scrollToBottom(true);
+}
+
+
 // ---- message stream --------------------------------------------------------
 // addUserMsg renders a user bubble; images (P5) is an optional list of
-// {src, id} thumbnails shown above the text.
+// {src, id} thumbnails shown above the text. The actions row (copy + clock)
+// sits BELOW the bubble and is hover-revealed, exactly like dsh
+// (UserStyleBubble + MessageIconActions with data-time-hover-root).
 function addUserMsg(text, timeIso, images) {
   const inner = msgInner();
   const node = document.createElement("div");
@@ -329,7 +564,14 @@ function addUserMsg(text, timeIso, images) {
     const cls = images.length === 1 ? "single" : "multi";
     imgs = `<div class="msg-images ${cls}">${images.map((im) => `<img class="msg-image" src="${esc(im.src)}" alt="图片" loading="lazy">`).join("")}</div>`;
   }
-  node.innerHTML = `<div class="msg-time">${fmtTime(timeIso)}</div>${imgs}<div class="bubble">${esc(text)}</div>`;
+  node.innerHTML = `${imgs}<div class="bubble">${esc(text)}</div>
+    <div class="actions-row">
+      <button class="act-btn" data-act="copy" title="复制" aria-label="复制">${DSH_ICON_COPY}</button>
+      <span class="act-time">${fmtTime(timeIso)}</span>
+    </div>`;
+  node.querySelector('[data-act="copy"]').addEventListener("click", () => {
+    navigator.clipboard?.writeText(text || "").catch(() => {});
+  });
   // failed history images retry once with a cache-busting query
   node.querySelectorAll(".msg-image").forEach((img) => {
     img.addEventListener("error", () => {
@@ -355,34 +597,20 @@ function removeRunning() {
   if (runningNode) { runningNode.remove(); runningNode = null; }
 }
 
-function addReasoning(reasoningText, timeIso) {
-  const inner = msgInner();
-  const node = document.createElement("div");
-  node.className = "msg reasoning";
-  const summary = reasoningText.length > 60 ? reasoningText.slice(0, 60) + "…" : reasoningText;
-  node.innerHTML = `
-    <div class="reasoning-row"><span class="reasoning-caret">▶</span>💭 思考过程
-      <span class="reasoning-summary">${esc(summary)}</span></div>
-    <div class="reasoning-body">${esc(reasoningText)}</div>`;
-  node.querySelector(".reasoning-row").addEventListener("click", () => {
-    node.classList.toggle("open");
-    scrollToBottom();
-  });
-  inner.appendChild(node);
-}
-
 function addAssistant(text, timeIso, seq) {
   const inner = msgInner();
   const node = document.createElement("div");
   node.className = "msg assistant";
+  // dsh IconActions chrome: monochrome (currentColor) SVG glyphs for copy /
+  // like / dislike — no emoji, no colored thumbs.
   const fb = seq != null
-    ? `<button class="act-btn" data-act="up" title="好">👍</button>
-       <button class="act-btn" data-act="down" title="差">👎</button>`
+    ? `<button class="act-btn" data-act="up" title="好" aria-label="好">${DSH_ICON_LIKE}</button>
+       <button class="act-btn" data-act="down" title="差" aria-label="差">${DSH_ICON_DISLIKE}</button>`
     : "";
   node.innerHTML = `
     <div class="markdown">${text ? renderMarkdown(text) : "<p></p>"}</div>
     <div class="actions-row">
-      <button class="act-btn" data-act="copy" title="复制">⧉</button>
+      <button class="act-btn" data-act="copy" title="复制" aria-label="复制">${DSH_ICON_COPY}</button>
       ${fb}
       <span class="act-time">${fmtTime(timeIso)}</span>
     </div>`;
@@ -424,41 +652,24 @@ function appendAssistantStreaming(chunk, seq) {
 function finishAssistant(text, timeIso, seq) {
   removeRunning();
   if (streamState && streamState.node) {
-    // replace accumulated DOM text with the final rendered markdown
-    streamState.node.innerHTML = text ? renderMarkdown(text) : "<p></p>";
+    if (text) {
+      // replace accumulated DOM text with the final rendered markdown
+      streamState.node.innerHTML = renderMarkdown(text);
+    } else {
+      // Reasoning-only step (empty final text, e.g. the model only thought and
+      // called tools): drop the empty bubble — the Think row is the step's
+      // visible content (dsh), so no stray copy button / timestamp shows.
+      streamState.node.remove();
+    }
     streamState = null;
   } else if (text) {
     // replay path (snapshot with no streaming chunks): render the bubble fresh
     addAssistant(text, timeIso, seq);
   }
-  if (streamActive) { streamActive = false; turnRunning = false; syncSendButton(); loadSessions(); refreshContextMeter(); }
-  scrollToBottom(true);
-}
-
-function addToolEvent(ev) {
-  const inner = msgInner();
-  const node = document.createElement("div");
-  const isErr = ev.type === "tool/error";
-  node.className = "msg tool" + (isErr ? " error" : "");
-  const body = isErr ? ev.summary : ev.tool_output || ev.summary || "（无输出）";
-  const seq = ev.seq == null ? "" : String(ev.seq);
-  node.dataset.seq = seq;
-  toolMeta[seq] = { name: ev.tool_name || "Tool call", args: ev.tool_args || "", output: body, error: isErr };
-  node.innerHTML = `
-    <div class="tool-card">
-      <span class="tool-icon">🔧</span>
-      <span class="tool-title">${esc(ev.tool_name || "Tool call")}</span>
-      <span class="tool-summary">${esc(ev.summary || "")}</span>
-      <span class="tool-status-${isErr ? "err" : "ok"}">${isErr ? "✕" : "✓"}</span>
-      <span class="tool-caret">▶</span>
-    </div>
-    <div class="tool-body${isErr ? " error" : ""}">${esc(body)}</div>`;
-  node.querySelector(".tool-card").addEventListener("click", () => {
-    node.classList.add("open");
-    openDetails(seq);
-    scrollToBottom();
-  });
-  inner.appendChild(node);
+  // The running/stop state is NOT reset here: in a multi-step turn this fires
+  // once per step while tool calls and further steps still execute. The turn
+  // state is cleared when the POST /message settles (sendMessage's finally),
+  // so the composer keeps the STOP affordance for the whole turn (dsh).
   scrollToBottom(true);
 }
 
@@ -467,6 +678,18 @@ function addErrorRow(ev) {
   const node = document.createElement("div");
   node.className = "msg error";
   node.innerHTML = `<div class="error-row"><span class="error-dot"></span><span>本轮运行失败：${esc(ev.summary || "")}</span></div>`;
+  inner.appendChild(node);
+  scrollToBottom(true);
+}
+
+// addContextInjection renders one context-injection step (dsh 上下文注入):
+// recall hits, skill catalog, compaction summary — logged before the turn's
+// first model request.
+function addContextInjection(ev) {
+  const inner = msgInner();
+  const node = document.createElement("div");
+  node.className = "msg context";
+  node.innerHTML = `<div class="context-row"><span class="context-dot"></span><span>${esc(ev.summary || "上下文注入")}</span></div>`;
   inner.appendChild(node);
   scrollToBottom(true);
 }
@@ -2034,8 +2257,10 @@ function syncSendButton() {
   sendBtn.title = turnRunning ? "停止" : "发送";
   sendBtn.setAttribute("aria-label", turnRunning ? "停止" : "发送");
 }
+let stopRequested = false; // the user pressed STOP; the turn's error is expected
 async function stopTurn() {
   if (!currentID) return;
+  stopRequested = true;
   try {
     await api(`/api/sessions/${encodeURIComponent(currentID)}/stop`, { method: "POST" });
   } catch (e) { if (e.message !== "unauthorized") console.error("stop", e); }
@@ -2382,6 +2607,7 @@ function openSession(id) {
   runningNode = null;
   streamActive = false;
   turnRunning = false;
+  renderedSeqs = new Set(); // per-session rendered-event dedup
   syncSendButton();
   messagesEl.querySelector(".messages-inner")?.remove();
   syncSessionTitle();
@@ -2414,6 +2640,10 @@ async function loadEvents(id) {
     sessionEmpty = evs.length === 0;
     setHeroPhase();
     if (!sessionEmpty) heroEl.classList.add("hidden");
+    // The SSE stream (re)connect replays the same stored events; everything
+    // rendered here is deduped from the stream by rendered seq.
+    renderedSeqs = new Set();
+    for (const ev of evs) if (ev.seq != null) renderedSeqs.add(ev.seq);
     refreshContextMeter();
     scrollToBottom(true);
   } catch (e) { if (e.message !== "unauthorized") console.error(e); }
@@ -2430,16 +2660,33 @@ function renderEvent(ev, replay) {
         id: iv.id,
       }));
       addUserMsg(ev.summary || "", ev.time, imgs.length ? imgs : null);
+      reasoningLive = false; // a new turn starts its own thinking card
       break;
     }
-    case "assistant/message":
-      if (ev.reasoning) addReasoning(ev.reasoning, ev.time);
-      finishAssistant(ev.summary || "", ev.time, ev.Seq);
+    case "assistant/reasoning":
+      // Streamed thinking delta: accumulate into the in-place Think row so it
+      // sits above the step's tool calls (dsh order: 思考 → 工具调用 → 文本).
+      reasoningLive = true;
+      addReasoning(ev.reasoning || "", ev.time, ev.seq);
       break;
+    case "assistant/message":
+      // The joined reasoning already streamed as assistant/reasoning deltas;
+      // only legacy logs (reasoning without deltas) add the card here.
+      if (ev.reasoning && !reasoningLive) addReasoning(ev.reasoning, ev.time);
+      if (ev.reasoning || reasoningLive) settleReasoning();
+      reasoningLive = false;
+      finishAssistant(ev.summary || "", ev.time, ev.seq);
+      break;
+    case "tool/start":
     case "tool/result":
     case "tool/error":
       if (ev.type === "tool/error" && !ev.tool_name) addErrorRow(ev);
-      else addToolEvent(ev);
+      else renderToolRow(ev);
+      break;
+    case "kb/recall":
+    case "skill/catalog":
+    case "compaction/summary":
+      addContextInjection(ev);
       break;
     default: break;
   }
@@ -2492,12 +2739,48 @@ async function connectStream(id) {
 
 function handleStreamEvent(ev) {
   if (!currentID) return;
+  // The stream replays the stored history on every (re)connect; events already
+  // rendered (from loadEvents or a previous connection) must not render again —
+  // otherwise every reconnect duplicates messages and re-flashes settled rows.
+  // The SSE field is lowercase `seq` (eventView json tag).
+  if (ev.seq != null) {
+    if (renderedSeqs.has(ev.seq)) return;
+  }
   if (ev.type === "assistant/chunk") {
-    appendAssistantStreaming(ev.summary || "", ev.Seq);
+    appendAssistantStreaming(ev.summary || "", ev.seq);
+    noteRendered(ev.seq);
     return;
   }
   renderEvent(ev, false);
+  noteRendered(ev.seq);
   if (ev.type === "assistant/message") { streamState = null; }
+}
+
+// reconcileEvents re-fetches the session log and renders only events the SSE
+// stream never delivered (the hub drops a slow subscriber's tail events when
+// its buffer is full). The rendered-seq SET — not a watermark — lets a dropped
+// event (a gap before later-rendered events) still be repaired here.
+// assistant/chunk and assistant/reasoning are skipped — the closing
+// assistant/message is authoritative for both text and reasoning — but their
+// seqs are still recorded so a later replay skips them.
+async function reconcileEvents() {
+  try {
+    const res = await api(`/api/sessions/${encodeURIComponent(currentID)}/events`);
+    if (!res.ok) return;
+    const evs = await res.json();
+    let advanced = false;
+    for (const ev of evs) {
+      if (ev.seq != null && renderedSeqs.has(ev.seq)) continue;
+      if (ev.type === "assistant/chunk" || ev.type === "assistant/reasoning") {
+        noteRendered(ev.seq);
+        continue;
+      }
+      renderEvent(ev, true);
+      noteRendered(ev.seq);
+      advanced = true;
+    }
+    if (advanced) scrollToBottom(false);
+  } catch (e) { if (e.message !== "unauthorized") console.error("reconcile", e); }
 }
 
 // ---- composer ---------------------------------------------------------------
@@ -2508,7 +2791,9 @@ function syncGrow() {
 }
 function setComposerDisabled(disabled) {
   composerBox.classList.toggle("disabled", disabled);
-  sendBtn.disabled = disabled;
+  // The send seat becomes the STOP control while a turn runs (dsh): it must
+  // stay clickable in the running state even though the composer is locked.
+  sendBtn.disabled = disabled && !turnRunning;
   composerText.disabled = disabled;
   // The toolbar controls follow the same lock (dsh: the model seat stays live
   // only while a session exists; here the whole toolbar locks while inert).
@@ -2532,7 +2817,8 @@ async function sendMessage() {
   if ((!text && drafts.length === 0) || !currentID) return;
   setComposerDisabled(true);
   try {
-    addUserMsg(text, new Date().toISOString(), drafts.length ? drafts.map((d) => ({ src: d.url })) : null);
+    // No optimistic bubble: the backend appends user/message and streams it
+    // back over SSE, so an optimistic render would duplicate the message.
     // Submitting the first message moves the composer from the centered hero
     // down to the docked slot (dsh: 第一次输入提交后输入条下移).
     if (sessionEmpty) { sessionEmpty = false; setHeroPhase(); }
@@ -2540,6 +2826,7 @@ async function sendMessage() {
     streamActive = true;
     turnRunning = true;
     syncSendButton();
+    sendBtn.disabled = false; // running → the button is the STOP control (dsh)
     loadSessions(); // blue running dot on the current row
     let images = [];
     if (drafts.length) {
@@ -2562,16 +2849,44 @@ async function sendMessage() {
     }
   } catch (e) {
     if (e.message !== "unauthorized") {
-      removeRunning();
-      addErrorRow({ summary: e.message });
-      console.error(e);
+      // A user-initiated stop aborts the turn — the POST settles with an
+      // error, but that is the expected outcome, not a failed round.
+      if (stopRequested) { stopRequested = false; removeRunning(); }
+      else {
+        removeRunning();
+        addErrorRow({ summary: e.message });
+        console.error(e);
+      }
     }
   } finally {
     setComposerDisabled(false);
+    stopRequested = false;
     // The POST settles exactly when the turn settles (success or error): a
     // failed turn produces no assistant/message event, so finishAssistant
     // never ran — reset the run state and refresh the ContextMeter here.
-    if (streamActive) { streamActive = false; turnRunning = false; syncSendButton(); }
+    if (streamActive) { streamActive = false; turnRunning = false; syncSendButton(); loadSessions(); }
+    // The SSE hub may have dropped tail events (full subscriber buffer), which
+    // would leave the last tool row / Think row sweeping forever. Reconcile
+    // from the durable log, then park anything still running (cancelled turn).
+    reconcileEvents().then(() => {
+      settleReasoning();
+      const inner = msgInner();
+      const running = [...inner.querySelectorAll(".msg.tool[data-state='running']")];
+      for (const n of running) {
+        const c = n.dataset.call;
+        if (c) {
+          // An orphaned duplicate (same call settled in another row, e.g. from
+          // a pre-fix replay): remove it instead of parking it yellow.
+          const escC = String(c).replace(/"/g, "\\\"");
+          const settled = inner.querySelector(
+            `.msg.tool[data-call="${escC}"][data-state='ok'], .msg.tool[data-call="${escC}"][data-state='error']`);
+          if (settled) { n.remove(); continue; }
+        }
+        n.dataset.state = "stopped";
+        const lead = n.querySelector(".dsh-leading");
+        if (lead) lead.innerHTML = '<span class="dsh-statedot dsh-statedot-warn"></span>';
+      }
+    });
     refreshContextMeter();
   }
 }
@@ -2853,6 +3168,9 @@ function renderGeneral(c) {
       if (d.agent_preset && sec.querySelector("#agent-preset-select")) sec.querySelector("#agent-preset-select").value = d.agent_preset;
       if (d.permission_preset && sec.querySelector("#permission-select")) sec.querySelector("#permission-select").value = d.permission_preset;
       if (d.terminal_shell && sec.querySelector("#terminal-select")) sec.querySelector("#terminal-select").value = d.terminal_shell;
+      // The persistent-shell tool row carries the chosen shell's name (dsh
+      // pwsh / Git Bash / WSL rows).
+      if (d.terminal_shell && SHELL_TITLES[d.terminal_shell]) termShellTitle = SHELL_TITLES[d.terminal_shell];
     } catch (e) { if (e.message !== "unauthorized") console.error("load settings", e); }
   })();
 }

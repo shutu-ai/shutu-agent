@@ -1,50 +1,53 @@
-// tools_test.go — the D-GAP-1 fs_search tool tests (docs/dispatch-gap-1.md
+// tools_test.go — the dsh-aligned grep/glob tool tests (docs/dispatch-gap-1.md
 // §3). A fake searchFn substitutes the engine so the Execute output format is
 // asserted without touching the disk: hit lines ("path:line: text" relative to
 // cwd), the match count, the no-match report, the ErrLimit "(limit reached)"
-// suffix, and the empty-query rejection.
+// suffix, and the empty-pattern rejection. Glob tests exercise the real
+// matcher over a temp tree.
 package fssearch
 
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// fakeSearcher records the query and Options it was handed and returns canned
-// hits/error, so Execute's argument mapping and formatting are observable.
+// fakeSearcher records the pattern and Options it was handed and returns
+// canned hits/error, so Execute's argument mapping and formatting are
+// observable.
 type fakeSearcher struct {
-	fn    SearchFunc
-	query string
-	opts  Options
+	fn      SearchFunc
+	pattern string
+	opts    Options
 }
 
-func (f *fakeSearcher) call(ctx context.Context, query string, opts Options) ([]Hit, error) {
-	f.query = query
+func (f *fakeSearcher) call(ctx context.Context, pattern string, opts Options) ([]Hit, error) {
+	f.pattern = pattern
 	f.opts = opts
-	return f.fn(ctx, query, opts)
+	return f.fn(ctx, pattern, opts)
 }
 
-// newFakeTool returns an FsSearchTool whose searchFn records calls and returns
-// the given fn result.
-func newFakeTool(cwd string, fn SearchFunc) (*FsSearchTool, *fakeSearcher) {
+// newFakeTool returns a GrepTool whose searchFn records calls and returns the
+// given fn result.
+func newFakeTool(cwd string, fn SearchFunc) (*GrepTool, *fakeSearcher) {
 	f := &fakeSearcher{fn: fn}
-	return &FsSearchTool{cwd: cwd, searchFn: f.call}, f
+	return &GrepTool{cwd: cwd, searchFn: f.call}, f
 }
 
-// TestFsSearchExecuteFormatsHits asserts the hit output shape: each hit as
+// TestGrepExecuteFormatsHits asserts the hit output shape: each hit as
 // "path:line: text" (relative to cwd), the trailing "N matches" line, and the
 // defaulted root/max_results mapping.
-func TestFsSearchExecuteFormatsHits(t *testing.T) {
-	tool, f := newFakeTool(`C:\work`, func(ctx context.Context, query string, opts Options) ([]Hit, error) {
+func TestGrepExecuteFormatsHits(t *testing.T) {
+	tool, f := newFakeTool(`C:\work`, func(ctx context.Context, pattern string, opts Options) ([]Hit, error) {
 		return []Hit{
 			{Path: `C:\work\a.txt`, Line: 2, Text: "needle one"},
 			{Path: `C:\work\sub\b.go`, Line: 5, Text: "needle two"},
 		}, nil
 	})
-	out, err := tool.Execute(context.Background(), json.RawMessage(`{"query":"needle"}`))
+	out, err := tool.Execute(context.Background(), json.RawMessage(`{"pattern":"needle"}`))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -56,8 +59,8 @@ func TestFsSearchExecuteFormatsHits(t *testing.T) {
 	}
 	// No path argument → the search ran against the tool's cwd with the
 	// default result cap.
-	if f.query != "needle" {
-		t.Errorf("query = %q, want needle", f.query)
+	if f.pattern != "needle" {
+		t.Errorf("pattern = %q, want needle", f.pattern)
 	}
 	if f.opts.Path != `C:\work` {
 		t.Errorf("opts.Path = %q, want the tool cwd", f.opts.Path)
@@ -67,13 +70,13 @@ func TestFsSearchExecuteFormatsHits(t *testing.T) {
 	}
 }
 
-// TestFsSearchExecuteHonorsExplicitPathAndMaxResults verifies the explicit
+// TestGrepExecuteHonorsExplicitPathAndMaxResults verifies the explicit
 // path and max_results arguments are forwarded to the search.
-func TestFsSearchExecuteHonorsExplicitPathAndMaxResults(t *testing.T) {
-	tool, f := newFakeTool(`C:\work`, func(ctx context.Context, query string, opts Options) ([]Hit, error) {
+func TestGrepExecuteHonorsExplicitPathAndMaxResults(t *testing.T) {
+	tool, f := newFakeTool(`C:\work`, func(ctx context.Context, pattern string, opts Options) ([]Hit, error) {
 		return nil, nil
 	})
-	if _, err := tool.Execute(context.Background(), json.RawMessage(`{"path":"C:\\tree","query":"x","max_results":7}`)); err != nil {
+	if _, err := tool.Execute(context.Background(), json.RawMessage(`{"path":"C:\\tree","pattern":"x","max_results":7}`)); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 	if f.opts.Path != `C:\tree` || f.opts.MaxResults != 7 {
@@ -81,12 +84,12 @@ func TestFsSearchExecuteHonorsExplicitPathAndMaxResults(t *testing.T) {
 	}
 }
 
-// TestFsSearchExecuteNoMatches asserts the no-match report format.
-func TestFsSearchExecuteNoMatches(t *testing.T) {
-	tool, _ := newFakeTool(`C:\work`, func(ctx context.Context, query string, opts Options) ([]Hit, error) {
+// TestGrepExecuteNoMatches asserts the no-match report format.
+func TestGrepExecuteNoMatches(t *testing.T) {
+	tool, _ := newFakeTool(`C:\work`, func(ctx context.Context, pattern string, opts Options) ([]Hit, error) {
 		return nil, nil
 	})
-	out, err := tool.Execute(context.Background(), json.RawMessage(`{"query":"needle","path":"C:\\tree"}`))
+	out, err := tool.Execute(context.Background(), json.RawMessage(`{"pattern":"needle","path":"C:\\tree"}`))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -95,13 +98,12 @@ func TestFsSearchExecuteNoMatches(t *testing.T) {
 	}
 }
 
-// TestFsSearchExecuteLimitReached asserts the ErrLimit suffix on a partial
-// result.
-func TestFsSearchExecuteLimitReached(t *testing.T) {
-	tool, _ := newFakeTool(`C:\work`, func(ctx context.Context, query string, opts Options) ([]Hit, error) {
+// TestGrepExecuteLimitReached asserts the ErrLimit suffix on a partial result.
+func TestGrepExecuteLimitReached(t *testing.T) {
+	tool, _ := newFakeTool(`C:\work`, func(ctx context.Context, pattern string, opts Options) ([]Hit, error) {
 		return []Hit{{Path: `C:\work\a.txt`, Line: 1, Text: "needle"}}, ErrLimit
 	})
-	out, err := tool.Execute(context.Background(), json.RawMessage(`{"query":"needle"}`))
+	out, err := tool.Execute(context.Background(), json.RawMessage(`{"pattern":"needle"}`))
 	if err != nil {
 		t.Fatalf("Execute must not surface ErrLimit as an error: %v", err)
 	}
@@ -110,32 +112,95 @@ func TestFsSearchExecuteLimitReached(t *testing.T) {
 	}
 }
 
-// TestFsSearchExecuteRejectsEmptyQuery asserts an empty/blank query is
-// rejected before the search runs (the registry D7 gate also rejects a missing
-// query; the tool checks again so a direct call can never bypass it).
-func TestFsSearchExecuteRejectsEmptyQuery(t *testing.T) {
+// TestGrepExecuteRejectsEmptyPattern asserts an empty/blank pattern is
+// rejected before the search runs.
+func TestGrepExecuteRejectsEmptyPattern(t *testing.T) {
 	ran := false
-	tool, _ := newFakeTool(`C:\work`, func(ctx context.Context, query string, opts Options) ([]Hit, error) {
+	tool, _ := newFakeTool(`C:\work`, func(ctx context.Context, pattern string, opts Options) ([]Hit, error) {
 		ran = true
 		return nil, nil
 	})
-	for _, args := range []string{`{}`, `{"query":""}`, `{"query":"   "}`} {
+	for _, args := range []string{`{}`, `{"pattern":""}`, `{"pattern":"   "}`} {
 		if _, err := tool.Execute(context.Background(), json.RawMessage(args)); err == nil {
 			t.Errorf("Execute with args %s must error", args)
 		}
 	}
 	if ran {
-		t.Fatal("the search must not run for an empty query")
+		t.Fatal("the search must not run for an empty pattern")
 	}
 }
 
-// TestFsSearchExecuteRejectsEmptyPath asserts a call with no path and no tool
-// cwd fails closed.
-func TestFsSearchExecuteRejectsEmptyPath(t *testing.T) {
-	tool, _ := newFakeTool("", func(ctx context.Context, query string, opts Options) ([]Hit, error) {
+// TestGrepExecuteRejectsEmptyPath asserts a call with no path and no tool cwd
+// fails closed.
+func TestGrepExecuteRejectsEmptyPath(t *testing.T) {
+	tool, _ := newFakeTool("", func(ctx context.Context, pattern string, opts Options) ([]Hit, error) {
 		return nil, nil
 	})
-	if _, err := tool.Execute(context.Background(), json.RawMessage(`{"query":"needle"}`)); err == nil {
+	if _, err := tool.Execute(context.Background(), json.RawMessage(`{"pattern":"needle"}`)); err == nil {
 		t.Fatal("Execute with no path and no cwd must error")
+	}
+}
+
+// TestGlobMatchesPathPatterns exercises the real glob matcher over a temp
+// tree: "**/*.go" matches nested Go files, "*.md" only the root level, and
+// "src/**" the subtree.
+func TestGlobMatchesPathPatterns(t *testing.T) {
+	root := t.TempDir()
+	mk := func(rel string) {
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("a.go")
+	mk("sub/b.go")
+	mk("sub/deep/c.go")
+	mk("README.md")
+	mk("src/main.go")
+
+	tool := NewGlobTool(root)
+	ctx := context.Background()
+
+	out, err := tool.Execute(ctx, json.RawMessage(`{"pattern":"**/*.go"}`))
+	if err != nil {
+		t.Fatalf("glob **/*.go: %v", err)
+	}
+	for _, want := range []string{"a.go", "sub/b.go", "sub/deep/c.go", "src/main.go"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("glob **/*.go output missing %q: %q", want, out)
+		}
+	}
+	if !strings.Contains(out, "4 matches") {
+		t.Errorf("glob **/*.go output = %q, want 4 matches", out)
+	}
+
+	out, err = tool.Execute(ctx, json.RawMessage(`{"pattern":"*.md"}`))
+	if err != nil {
+		t.Fatalf("glob *.md: %v", err)
+	}
+	if !strings.Contains(out, "README.md") || strings.Contains(out, "sub/") {
+		t.Errorf("glob *.md output = %q, want only the root-level README.md", out)
+	}
+
+	out, err = tool.Execute(ctx, json.RawMessage(`{"pattern":"src/**"}`))
+	if err != nil {
+		t.Fatalf("glob src/**: %v", err)
+	}
+	if !strings.Contains(out, "src/main.go") {
+		t.Errorf("glob src/** output = %q, want src/main.go", out)
+	}
+}
+
+// TestGlobRejectsEmptyPattern asserts glob fails closed on an empty pattern.
+func TestGlobRejectsEmptyPattern(t *testing.T) {
+	tool := NewGlobTool(t.TempDir())
+	if _, err := tool.Execute(context.Background(), json.RawMessage(`{}`)); err == nil {
+		t.Fatal("glob with no pattern must error")
+	}
+	if _, err := tool.Execute(context.Background(), json.RawMessage(`{"pattern":"   "}`)); err == nil {
+		t.Fatal("glob with a blank pattern must error")
 	}
 }

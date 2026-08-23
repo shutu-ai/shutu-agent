@@ -130,14 +130,14 @@ type Server struct {
 // (M11-pi-ai ModelListEditor 对齐); an empty list falls back to the single
 // Model field.
 type ProviderEdit struct {
-	ID       string           `json:"id"`
-	Name     string           `json:"name"`
-	BaseURL  string           `json:"base_url"`
-	Model    string           `json:"model"`
-	APIKey   string           `json:"api_key"`
-	Protocol string           `json:"protocol"`
-	Models   []ProviderModel  `json:"models"`
-	Custom   bool             `json:"custom"`
+	ID       string          `json:"id"`
+	Name     string          `json:"name"`
+	BaseURL  string          `json:"base_url"`
+	Model    string          `json:"model"`
+	APIKey   string          `json:"api_key"`
+	Protocol string          `json:"protocol"`
+	Models   []ProviderModel `json:"models"`
+	Custom   bool            `json:"custom"`
 }
 
 // ProviderModel is one custom-provider model row (id + optional name /
@@ -231,6 +231,7 @@ func (s *Server) SetProviderManager(fn func(ctx context.Context, action string, 
 func (s *Server) SetProviderDiscover(fn func(ctx context.Context, request ProviderDiscover) ([]ProviderModel, error)) {
 	s.setDiscoverFn = fn
 }
+
 // empty opens the portal to the local machine (dsh-style, no login); a token
 // turns on bearer auth and only its SHA-256 digest is retained. addr defaults
 // to "127.0.0.1:8080".
@@ -653,16 +654,16 @@ type SessionStatus struct {
 // title (first user message, bounded) and blank (no events yet). P6 adds
 // workspace_id for the grouped sidebar view; P6.2 adds archived and sort.
 type sessionView struct {
-	ID          string       `json:"id"`
-	CreatedAt   time.Time    `json:"created_at"`
-	UpdatedAt   time.Time    `json:"updated_at"`
-	EventCount  int          `json:"event_count"`
-	Title       string       `json:"title,omitempty"`
-	Blank       bool         `json:"blank"`
-	WorkspaceID string       `json:"workspace_id,omitempty"`
-	Archived    bool         `json:"archived,omitempty"`
-	Sort        int          `json:"sort,omitempty"`
-	FlatSort    int          `json:"flat_sort,omitempty"`
+	ID          string        `json:"id"`
+	CreatedAt   time.Time     `json:"created_at"`
+	UpdatedAt   time.Time     `json:"updated_at"`
+	EventCount  int           `json:"event_count"`
+	Title       string        `json:"title,omitempty"`
+	Blank       bool          `json:"blank"`
+	WorkspaceID string        `json:"workspace_id,omitempty"`
+	Archived    bool          `json:"archived,omitempty"`
+	Sort        int           `json:"sort,omitempty"`
+	FlatSort    int           `json:"flat_sort,omitempty"`
 	Status      SessionStatus `json:"status,omitempty"`
 }
 
@@ -820,9 +821,10 @@ type eventView struct {
 	Time       time.Time   `json:"time"`
 	Summary    string      `json:"summary"`
 	Reasoning  string      `json:"reasoning,omitempty"`   // assistant/message 的思维链（有界）
-	ToolName   string      `json:"tool_name,omitempty"`   // tool/result、tool/error 的工具名
+	ToolName   string      `json:"tool_name,omitempty"`   // tool/start、tool/result、tool/error 的工具名
 	ToolOutput string      `json:"tool_output,omitempty"` // tool/result 的有界输出
 	ToolArgs   string      `json:"tool_args,omitempty"`   // 该调用名对应的工具入参（来自 assistant 的 toolCall；只读展示用）
+	CallID     string      `json:"call_id,omitempty"`     // 工具调用关联 id（tool/start → tool/result/error 配对）
 	Images     []imageView `json:"images,omitempty"`      // P5: 该消息携带的图片引用
 }
 
@@ -832,6 +834,7 @@ func toEventView(ev session.Event) eventView {
 	v := eventView{Seq: ev.Seq, Type: ev.Type, Time: ev.At, Summary: summarize(ev)}
 	v.Reasoning, v.ToolName, v.ToolOutput = extraFields(ev)
 	v.Images = extractImages(ev)
+	v.CallID = callIDOf(ev)
 	return v
 }
 
@@ -876,6 +879,24 @@ func extraFields(ev session.Event) (reasoning, toolName, toolOutput string) {
 		if json.Unmarshal(ev.Data, &d) == nil {
 			reasoning = boundRunes(d.Reasoning, maxSummary)
 		}
+	case "assistant/reasoning":
+		// One streamed reasoning delta: the frontend accumulates these into
+		// the in-place thinking card (before the tool calls of the step).
+		var d struct {
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(ev.Data, &d) == nil {
+			reasoning = d.Text
+		}
+	case "tool/start":
+		// One dispatched tool call (dsh running row): name rides tool_name,
+		// args ride tool_args; no summary text.
+		var d struct {
+			Name string `json:"name"`
+		}
+		if json.Unmarshal(ev.Data, &d) == nil {
+			toolName = d.Name
+		}
 	case "tool/result":
 		var d struct {
 			Name   string `json:"name"`
@@ -887,10 +908,12 @@ func extraFields(ev session.Event) (reasoning, toolName, toolOutput string) {
 		}
 	case "tool/error":
 		var d struct {
-			Name string `json:"name"`
+			Name  string `json:"name"`
+			Error string `json:"error"`
 		}
 		if json.Unmarshal(ev.Data, &d) == nil {
 			toolName = d.Name
+			toolOutput = boundRunes(d.Error, maxSummary)
 		}
 	}
 	return reasoning, toolName, toolOutput
@@ -920,12 +943,14 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// callIDOf returns the correlation id of a tool/result or tool/error event;
-// empty otherwise. It unmarshals only the leaf callId key.
+// callIDOf returns the correlation id of a tool/start, tool/result or
+// tool/error event; empty otherwise. It unmarshals only the leaf callId key.
 func callIDOf(ev session.Event) string {
 	switch ev.Type {
-	case "tool/result":
-		var d struct{ CallID string `json:"callId"` }
+	case "tool/start", "tool/result":
+		var d struct {
+			CallID string `json:"callId"`
+		}
 		if json.Unmarshal(ev.Data, &d) == nil {
 			return d.CallID
 		}
@@ -1178,6 +1203,14 @@ func (s *Server) handleSessionFork(w http.ResponseWriter, r *http.Request) {
 	}
 	if srcWorkspace != "" {
 		_ = s.store.SetSessionWorkspace(r.Context(), forkID, srcWorkspace)
+	}
+	// The fork inherits the source's per-session overrides (dsh fork: the
+	// clone keeps the parent's agent preset / model / permission), so the
+	// diverging copy starts from the same mode.
+	if scs, ok := s.store.(store.SessionConfigStore); ok {
+		if cfg, err := scs.GetSessionConfig(r.Context(), id); err == nil {
+			_ = scs.SetSessionConfig(r.Context(), forkID, cfg)
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": forkID})
 }
@@ -1922,6 +1955,14 @@ func summarize(ev session.Event) string {
 		if json.Unmarshal(ev.Data, &d) == nil {
 			return "tool " + d.Name + " → " + boundRunes(d.Output, maxSummary)
 		}
+	case "tool/start":
+		var d struct {
+			CallID string
+			Name   string
+		}
+		if json.Unmarshal(ev.Data, &d) == nil {
+			return "tool " + d.Name + " …"
+		}
 	case "tool/error":
 		var d struct {
 			CallID string
@@ -1930,6 +1971,35 @@ func summarize(ev session.Event) string {
 		}
 		if json.Unmarshal(ev.Data, &d) == nil {
 			return "tool " + d.Name + " error → " + boundRunes(d.Err, maxSummary)
+		}
+	case "kb/recall":
+		// dsh 上下文注入: 跨会话召回卡片 (query + hit count).
+		var d struct {
+			Query string `json:"query"`
+			Hits  []struct {
+				Title string `json:"title"`
+			} `json:"hits"`
+		}
+		if json.Unmarshal(ev.Data, &d) == nil {
+			s := "跨会话召回: " + boundRunes(d.Query, maxSummary)
+			if len(d.Hits) > 0 {
+				s += fmt.Sprintf(" (%d 条)", len(d.Hits))
+			}
+			return s
+		}
+	case "skill/catalog":
+		var d struct {
+			Count int `json:"count"`
+		}
+		if json.Unmarshal(ev.Data, &d) == nil {
+			return fmt.Sprintf("上下文注入: 技能目录 (%d 个技能)", d.Count)
+		}
+	case "compaction/summary":
+		var d struct {
+			Summary string `json:"summary"`
+		}
+		if json.Unmarshal(ev.Data, &d) == nil && d.Summary != "" {
+			return "上下文压缩: " + boundRunes(d.Summary, maxSummary)
 		}
 	}
 	return ""

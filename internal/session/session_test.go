@@ -73,9 +73,9 @@ func TestDeriveHistoryToolRoundTrip(t *testing.T) {
 	l := New()
 	l.Append(EventUserMessage, NewUserMessage("read the file"))
 	l.Append(EventAssistantMessage, NewAssistantMessage("", []llm.ToolCall{
-		{ID: "call_1", Name: "read_file", Arguments: `{"path":"/tmp/x"}`},
+		{ID: "call_1", Name: "read", Arguments: `{"path":"/tmp/x"}`},
 	}, "tool_calls"))
-	l.Append(EventToolResult, NewToolResult("call_1", "read_file", "file contents", nil))
+	l.Append(EventToolResult, NewToolResult("call_1", "read", "file contents", nil))
 
 	msgs := l.DeriveHistory()
 	if len(msgs) != 3 {
@@ -85,7 +85,7 @@ func TestDeriveHistoryToolRoundTrip(t *testing.T) {
 	if asst.Role != llm.RoleAssistant || len(asst.ToolCalls) != 1 {
 		t.Fatalf("assistant msg = %+v", asst)
 	}
-	if asst.ToolCalls[0].ID != "call_1" || asst.ToolCalls[0].Name != "read_file" {
+	if asst.ToolCalls[0].ID != "call_1" || asst.ToolCalls[0].Name != "read" {
 		t.Fatalf("tool call = %+v", asst.ToolCalls[0])
 	}
 	tool := msgs[2]
@@ -98,9 +98,9 @@ func TestDeriveHistoryToolErrorBecomesToolMessage(t *testing.T) {
 	l := New()
 	l.Append(EventUserMessage, NewUserMessage("do it"))
 	l.Append(EventAssistantMessage, NewAssistantMessage("", []llm.ToolCall{
-		{ID: "call_2", Name: "read_file", Arguments: `{"path":"/nope"}`},
+		{ID: "call_2", Name: "read", Arguments: `{"path":"/nope"}`},
 	}, "tool_calls"))
-	l.Append(EventToolError, NewToolError("call_2", "read_file", "no such file"))
+	l.Append(EventToolError, NewToolError("call_2", "read", "no such file"))
 
 	msgs := l.DeriveHistory()
 	if len(msgs) != 3 {
@@ -366,9 +366,9 @@ func TestToolResultSpillRecordsLocator(t *testing.T) {
 	l := New()
 	l.Append(EventUserMessage, NewUserMessage("read it"))
 	l.Append(EventAssistantMessage, NewAssistantMessage("", []llm.ToolCall{
-		{ID: "call_9", Name: "read_file", Arguments: `{"path":"/big"}`},
+		{ID: "call_9", Name: "read", Arguments: `{"path":"/big"}`},
 	}, "tool_calls"))
-	l.Append(EventToolResult, NewToolResult("call_9", "read_file", "head...[truncated; see spill]", &SpillRef{
+	l.Append(EventToolResult, NewToolResult("call_9", "read", "head...[truncated; see spill]", &SpillRef{
 		Locator: `D:\data\spill\s-x-7.txt`,
 		Bytes:   100000,
 	}))
@@ -911,13 +911,13 @@ func TestDeriveHistoryReplaceShadowingMixedEvents(t *testing.T) {
 	// Shadowed range spans user, assistant (with a tool call) and tool/result.
 	l.Append(EventUserMessage, NewUserMessage("read the file")) // 1
 	l.Append(EventAssistantMessage, NewAssistantMessage("", []llm.ToolCall{
-		{ID: "call_1", Name: "read_file", Arguments: `{"path":"/tmp/x"}`},
+		{ID: "call_1", Name: "read", Arguments: `{"path":"/tmp/x"}`},
 	}, "tool_calls")) // 2
-	l.Append(EventToolResult, NewToolResult("call_1", "read_file", "file contents", nil)) // 3
-	l.Append(EventAssistantMessage, NewAssistantMessage("Here it is", nil, "stop"))       // 4
-	l.Append(EventUserMessage, NewUserMessageReplace("compacted 1-4", 1, 4))              // 5
-	l.Append(EventUserMessage, NewUserMessage("continue"))                                // 6
-	l.Append(EventAssistantMessage, NewAssistantMessage("continuing", nil, "stop"))       // 7
+	l.Append(EventToolResult, NewToolResult("call_1", "read", "file contents", nil)) // 3
+	l.Append(EventAssistantMessage, NewAssistantMessage("Here it is", nil, "stop"))  // 4
+	l.Append(EventUserMessage, NewUserMessageReplace("compacted 1-4", 1, 4))         // 5
+	l.Append(EventUserMessage, NewUserMessage("continue"))                           // 6
+	l.Append(EventAssistantMessage, NewAssistantMessage("continuing", nil, "stop"))  // 7
 
 	msgs := l.DeriveHistory()
 	if len(msgs) != 3 {
@@ -1264,7 +1264,7 @@ func TestInteractEventsAppendAndReplay(t *testing.T) {
 		persisted = append(persisted, ev)
 		return nil
 	})
-	if _, err := l.Append(EventInteractRequest, NewInteractRequest("req-1", "run_command")); err != nil {
+	if _, err := l.Append(EventInteractRequest, NewInteractRequest("req-1", "bash")); err != nil {
 		t.Fatalf("append interact/request: %v", err)
 	}
 	if _, err := l.Append(EventInteractResolve, NewInteractResolve("req-1", true)); err != nil {
@@ -1294,7 +1294,7 @@ func TestInteractEventsAppendAndReplay(t *testing.T) {
 	if err := json.Unmarshal(events[0].Data, &ir); err != nil {
 		t.Fatalf("unmarshal interact/request: %v", err)
 	}
-	if ir.ID != "req-1" || ir.ToolName != "run_command" {
+	if ir.ID != "req-1" || ir.ToolName != "bash" {
 		t.Fatalf("interact/request payload = %+v", ir)
 	}
 	var iv interactResolveData
@@ -1345,7 +1345,7 @@ func TestInteractEventsAppendAndReplay(t *testing.T) {
 func TestInteractEventsMixedWithConversationDeriveOnlyConversation(t *testing.T) {
 	l := New()
 	l.Append(EventUserMessage, NewUserMessage("run the report"))
-	l.Append(EventInteractRequest, NewInteractRequest("req-1", "run_command"))
+	l.Append(EventInteractRequest, NewInteractRequest("req-1", "bash"))
 	l.Append(EventAssistantMessage, NewAssistantMessage("Done.", nil, "stop"))
 	l.Append(EventInteractDeny, NewInteractDeny("req-1"))
 	msgs := l.DeriveHistory()
@@ -1368,7 +1368,7 @@ func TestInteractEventsMixedWithConversationDeriveOnlyConversation(t *testing.T)
 // (dispatch-m6e-2 §1 / D3): it appends with the next Seq/version, round-trips
 // its payload through the durable sink, survives a restart replay, and never
 // derives into model messages (log-only — the model sees the run outcome
-// through code_run's tool/result).
+// through run_code's tool/result).
 func TestCodeRunEventAppendsAndReplays(t *testing.T) {
 	var persisted []Event
 	l := New()

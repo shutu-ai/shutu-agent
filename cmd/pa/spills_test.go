@@ -101,17 +101,17 @@ func TestRegisterSpillsEnabledRegistersAndValidates(t *testing.T) {
 		name string
 		args string
 	}{
-		{"spill_write", `{}`},                                   // missing required content
-		{"spill_write", `{"content":123}`},                      // content must be a string
-		{"spill_write", `{"content":"x","extra":1}`},            // additional properties rejected
-		{"spill_recall", `{}`},                                  // missing required query
-		{"spill_recall", `{"query":"x","limit":"5"}`},           // limit must be an integer
-		{"spill_recall", `{"query":"x","limit":0}`},             // limit below the minimum
-		{"spill_recall", `{"query":"x","extra":1}`},             // additional properties rejected
-		{"spill_list", `{"extra":1}`},                           // list takes no arguments
-		{"spill_delete", `{}`},                                  // missing required id
-		{"spill_delete", `{"id":123}`},                          // id must be a string
-		{"spill_delete", `{"id":"x","extra":1}`},                // additional properties rejected
+		{"spill_write", `{}`},                         // missing required content
+		{"spill_write", `{"content":123}`},            // content must be a string
+		{"spill_write", `{"content":"x","extra":1}`},  // additional properties rejected
+		{"spill_recall", `{}`},                        // missing required query
+		{"spill_recall", `{"query":"x","limit":"5"}`}, // limit must be an integer
+		{"spill_recall", `{"query":"x","limit":0}`},   // limit below the minimum
+		{"spill_recall", `{"query":"x","extra":1}`},   // additional properties rejected
+		{"spill_list", `{"extra":1}`},                 // list takes no arguments
+		{"spill_delete", `{}`},                        // missing required id
+		{"spill_delete", `{"id":123}`},                // id must be a string
+		{"spill_delete", `{"id":"x","extra":1}`},      // additional properties rejected
 	} {
 		if _, err := a.reg.Execute(context.Background(), tc.name, json.RawMessage(tc.args)); err == nil {
 			t.Errorf("%s with args %s must be rejected (D7)", tc.name, tc.args)

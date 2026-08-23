@@ -42,7 +42,7 @@ type Policy struct {
 	SpillDir string
 	// RunCommand is the policy for the sole execution-class tool.
 	RunCommand RunCommandPolicy
-	// CodeRun is the code_run sandbox tool policy (M6e-2, ADR 决策 M6e).
+	// CodeRun is the run_code sandbox tool policy (M6e-2, ADR 决策 M6e).
 	CodeRun CodeRunPolicy
 }
 
@@ -58,15 +58,15 @@ type RunCommandPolicy struct {
 	Workdir string
 }
 
-// CodeRunPolicy is the code_run sandbox tool policy (ADR 决策 M6e /
+// CodeRunPolicy is the run_code sandbox tool policy (ADR 决策 M6e /
 // dispatch-m6e-2 §3). Unlike RunCommandPolicy there is no Enabled flag here —
-// code.enabled gates registration at the composition root and code_run is
+// code.enabled gates registration at the composition root and run_code is
 // whitelisted by config.applyDefaults; this carries only the outer per-tool
 // deadline bound (code.timeout). The sandbox applies its own execution timeout
 // internally (RunRequest.Timeout); this is the outer bound the Execute
 // pipeline enforces, mirroring RunCommand.Timeout.
 type CodeRunPolicy struct {
-	// Timeout overrides Policy.Timeout for code_run when positive (the config
+	// Timeout overrides Policy.Timeout for run_code when positive (the config
 	// code.timeout value, supplied by the composition root).
 	Timeout time.Duration
 }
@@ -75,7 +75,7 @@ type CodeRunPolicy struct {
 // whitelisted, a 30s deadline, a 64KB output cap, and spill to DefaultSpillDir.
 func DefaultPolicy() Policy {
 	return Policy{
-		Enabled:     []string{"get_time", "read_file"},
+		Enabled:     []string{"get_time", "read"},
 		Timeout:     DefaultTimeout,
 		OutputLimit: DefaultOutputLimit,
 		SpillDir:    DefaultSpillDir,

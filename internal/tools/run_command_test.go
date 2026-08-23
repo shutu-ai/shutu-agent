@@ -46,11 +46,11 @@ func TestScrubEnvRemovesCredentialShapedEntries(t *testing.T) {
 // it as unknown (dispatch-m3: 默认关闭).
 func TestRunCommandNotRegisteredByDefault(t *testing.T) {
 	r := New() // default policy: read-only whitelist, no run_command registered
-	if _, err := r.Execute(context.Background(), "run_command", json.RawMessage(`{"command":"echo hi"}`)); err == nil {
+	if _, err := r.Execute(context.Background(), "bash", json.RawMessage(`{"command":"echo hi"}`)); err == nil {
 		t.Fatal("run_command must not execute by default")
 	}
 	for _, spec := range r.Specs() {
-		if spec.Name == "run_command" {
+		if spec.Name == "bash" {
 			t.Fatal("run_command must not be advertised to the model by default")
 		}
 	}
@@ -62,13 +62,13 @@ func TestRunCommandRegisteredAndExecutes(t *testing.T) {
 	r := New()
 	r.Register(NewRunCommand(""))
 	r.SetPolicy(Policy{
-		Enabled: []string{"run_command"},
+		Enabled: []string{"bash"},
 		Timeout: time.Hour,
 		RunCommand: RunCommandPolicy{
 			Enabled: true,
 		},
 	})
-	res, err := r.Execute(context.Background(), "run_command", json.RawMessage(`{"command":"echo hi"}`))
+	res, err := r.Execute(context.Background(), "bash", json.RawMessage(`{"command":"echo hi"}`))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -83,13 +83,13 @@ func TestRunCommandNonZeroExit(t *testing.T) {
 	r := New()
 	r.Register(NewRunCommand(""))
 	r.SetPolicy(Policy{
-		Enabled: []string{"run_command"},
+		Enabled: []string{"bash"},
 		Timeout: time.Hour,
 		RunCommand: RunCommandPolicy{
 			Enabled: true,
 		},
 	})
-	res, err := r.Execute(context.Background(), "run_command", json.RawMessage(`{"command":"exit 3"}`))
+	res, err := r.Execute(context.Background(), "bash", json.RawMessage(`{"command":"exit 3"}`))
 	if err != nil {
 		t.Fatalf("non-zero exit must not be a hard error: %v", err)
 	}
@@ -111,13 +111,13 @@ func TestRunCommandScrubbedEnv(t *testing.T) {
 	r := New()
 	r.Register(NewRunCommand(""))
 	r.SetPolicy(Policy{
-		Enabled: []string{"run_command"},
+		Enabled: []string{"bash"},
 		Timeout: time.Hour,
 		RunCommand: RunCommandPolicy{
 			Enabled: true,
 		},
 	})
-	res, err := r.Execute(context.Background(), "run_command", json.RawMessage(`{"command":"`+echo+`"}`))
+	res, err := r.Execute(context.Background(), "bash", json.RawMessage(`{"command":"`+echo+`"}`))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestRunCommandTimeout(t *testing.T) {
 	r := New()
 	r.Register(NewRunCommand(""))
 	r.SetPolicy(Policy{
-		Enabled: []string{"run_command"},
+		Enabled: []string{"bash"},
 		Timeout: 0, // global deadline disabled; the override below governs
 		RunCommand: RunCommandPolicy{
 			Enabled: true,
@@ -141,7 +141,7 @@ func TestRunCommandTimeout(t *testing.T) {
 		},
 	})
 	start := time.Now()
-	_, err := r.Execute(context.Background(), "run_command", json.RawMessage(`{"command":"`+sleepCommand(10)+`"}`))
+	_, err := r.Execute(context.Background(), "bash", json.RawMessage(`{"command":"`+sleepCommand(10)+`"}`))
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}
@@ -160,7 +160,7 @@ func TestRunCommandCancelled(t *testing.T) {
 	r := New()
 	r.Register(NewRunCommand(""))
 	r.SetPolicy(Policy{
-		Enabled: []string{"run_command"},
+		Enabled: []string{"bash"},
 		Timeout: time.Hour,
 		RunCommand: RunCommandPolicy{
 			Enabled: true,
@@ -172,7 +172,7 @@ func TestRunCommandCancelled(t *testing.T) {
 	var err error
 	done := make(chan struct{})
 	go func() {
-		_, err = r.Execute(ctx, "run_command", args)
+		_, err = r.Execute(ctx, "bash", args)
 		close(done)
 	}()
 	time.Sleep(150 * time.Millisecond) // let the command start

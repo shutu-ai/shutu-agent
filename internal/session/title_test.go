@@ -7,9 +7,9 @@ import (
 
 func TestNormalizeTitleStripsControlsAndCollapsesWhitespace(t *testing.T) {
 	cases := []struct {
-		name  string
-		in    string
-		want  string
+		name string
+		in   string
+		want string
 	}{
 		{"plain", "写一首诗", "写一首诗"},
 		{"collapse whitespace", "   hello \n\t   world  ", "hello world"},

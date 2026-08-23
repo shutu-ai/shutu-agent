@@ -34,10 +34,10 @@ const discoverMaxResponseBytes = 4 * 1024 * 1024
 // discoverRequest is the wire probe payload (the form as it currently shows:
 // base URL + protocol + a key typed but not yet saved).
 type discoverRequest struct {
-	Provider string `json:"provider"`  // optional: a directory route answers from its catalog
-	BaseURL  string `json:"base_url"`  // endpoint as the form shows it
-	Protocol string `json:"protocol"`  // wire protocol; empty = openai-completions
-	APIKey   string `json:"api_key"`   // key typed into the form, not yet stored
+	Provider string `json:"provider"` // optional: a directory route answers from its catalog
+	BaseURL  string `json:"base_url"` // endpoint as the form shows it
+	Protocol string `json:"protocol"` // wire protocol; empty = openai-completions
+	APIKey   string `json:"api_key"`  // key typed into the form, not yet stored
 }
 
 // webDiscoverModels answers "which models does this endpoint serve?" for the

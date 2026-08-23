@@ -131,7 +131,7 @@ func TestRegisterMcpsDisabledRegistersNothing(t *testing.T) {
 func TestRegisterMcpsEnabledRegistersAndBridges(t *testing.T) {
 	f := newFakeMcpFactory()
 	fsSchema := map[string]any{"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}}, "required": []any{"path"}}
-	f.toolsByCmd["fake-fs"] = []mcp.Tool{{Name: "read_file", Description: "Read a file from the server workspace", InputSchema: fsSchema}}
+	f.toolsByCmd["fake-fs"] = []mcp.Tool{{Name: "read", Description: "Read a file from the server workspace", InputSchema: fsSchema}}
 	f.toolsByCmd["fake-echo"] = []mcp.Tool{{Name: "echo", Description: "Echo text back", InputSchema: map[string]any{"type": "object", "properties": map[string]any{"text": map[string]any{"type": "string"}}}}}
 	f.callByCmd["fake-fs"] = func(name string, args map[string]any) (mcp.CallResult, error) {
 		return mcp.CallResult{Content: []any{map[string]any{"type": "text", "text": "fs:" + name}}}, nil
@@ -158,36 +158,36 @@ func TestRegisterMcpsEnabledRegistersAndBridges(t *testing.T) {
 	for _, s := range a.reg.Specs() {
 		specs[s.Name] = s
 	}
-	for _, want := range []string{"mcp_list", "mcp_call", "mcp.fs.read_file", "mcp.echo.echo"} {
+	for _, want := range []string{"mcp_list", "mcp_call", "mcp.fs.read", "mcp.echo.echo"} {
 		if _, ok := specs[want]; !ok {
 			t.Fatalf("registered specs lack %q (have %v)", want, specNames(a.reg))
 		}
 	}
 	// Schema passthrough: the bridged tool's parameters are the server's
 	// inputSchema (verbatim properties + the object type guard).
-	bridged := specs["mcp.fs.read_file"]
+	bridged := specs["mcp.fs.read"]
 	props, _ := bridged.Parameters["properties"].(map[string]any)
 	if len(props) != 1 || props["path"] == nil {
-		t.Fatalf("mcp.fs.read_file parameters = %v, want the server's path property passed through", bridged.Parameters)
+		t.Fatalf("mcp.fs.read parameters = %v, want the server's path property passed through", bridged.Parameters)
 	}
 	if bridged.Parameters["type"] != "object" {
-		t.Fatalf("mcp.fs.read_file parameters type = %v, want object", bridged.Parameters["type"])
+		t.Fatalf("mcp.fs.read parameters type = %v, want object", bridged.Parameters["type"])
 	}
 	if !strings.HasPrefix(bridged.Description, "Read a file") {
-		t.Fatalf("mcp.fs.read_file description = %q, want the server description", bridged.Description)
+		t.Fatalf("mcp.fs.read description = %q, want the server description", bridged.Description)
 	}
 
 	// The bridged name is whitelisted at runtime (reg.Allow), so the registry
 	// Execute gate runs it; D7 validates against the passed-through schema.
-	res, err := a.reg.Execute(context.Background(), "mcp.fs.read_file", json.RawMessage(`{"path":"/x"}`))
+	res, err := a.reg.Execute(context.Background(), "mcp.fs.read", json.RawMessage(`{"path":"/x"}`))
 	if err != nil {
-		t.Fatalf("execute bridged mcp.fs.read_file: %v", err)
+		t.Fatalf("execute bridged mcp.fs.read: %v", err)
 	}
-	if res.Output != "fs:read_file" {
-		t.Fatalf("bridged output = %q, want fs:read_file", res.Output)
+	if res.Output != "fs:read" {
+		t.Fatalf("bridged output = %q, want fs:read", res.Output)
 	}
-	if _, err := a.reg.Execute(context.Background(), "mcp.fs.read_file", json.RawMessage(`{}`)); err == nil {
-		t.Fatal("bridged mcp.fs.read_file must reject args missing the required path (D7)")
+	if _, err := a.reg.Execute(context.Background(), "mcp.fs.read", json.RawMessage(`{}`)); err == nil {
+		t.Fatal("bridged mcp.fs.read must reject args missing the required path (D7)")
 	}
 	// Call delegation: the stored bridged client received the exact tool name
 	// and the model's args passed through.
@@ -195,8 +195,8 @@ func TestRegisterMcpsEnabledRegistersAndBridges(t *testing.T) {
 	if !ok {
 		t.Fatalf("a.mcp[0] = %T, want *fakeMcpClient", a.mcp[0])
 	}
-	if bc.lastTool != "read_file" || !reflect.DeepEqual(bc.lastArgs, map[string]any{"path": "/x"}) {
-		t.Fatalf("bridged call = %q %v, want read_file with {path:/x}", bc.lastTool, bc.lastArgs)
+	if bc.lastTool != "read" || !reflect.DeepEqual(bc.lastArgs, map[string]any{"path": "/x"}) {
+		t.Fatalf("bridged call = %q %v, want read with {path:/x}", bc.lastTool, bc.lastArgs)
 	}
 
 	// mcp_call via the registry: a fresh client per call, the result is

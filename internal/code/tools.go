@@ -1,5 +1,5 @@
 // tools.go — the M6e-2 Consumer half of the code-sandbox seam (design.md §8
-// Consumer / D2, dispatch-m6e-2 §3): code_run is registered into the
+// Consumer / D2, dispatch-m6e-2 §3): run_code is registered into the
 // tools.Registry by the composition root (cmd/pa) when code.enabled, and
 // auto-whitelisted by config.applyDefaults the same way the job_*/subagent_*/
 // skill_*/schedule_*/plan_*/spill_*/interact_* tools are. It implements the
@@ -13,7 +13,7 @@
 // call can never bypass them.
 //
 // D3 event logging follows the M5a-2 tool-layer decision (ADR 决策 M6e /
-// dispatch-m6e-2 §3): code_run emits code/run on a completed sandbox
+// dispatch-m6e-2 §3): run_code emits code/run on a completed sandbox
 // execution — zero or non-zero exit, with or without a timeout/truncation
 // marker — through the injected onEvent sink (the composition root wires it to
 // the session log), inside a tool Execute on the serial main-loop path (D5). A
@@ -22,7 +22,7 @@
 // surfaces it as tool/error.
 //
 // The tool is the sandboxed sibling of M3's run_command (ADR 决策 M6e):
-// run_command stays available; code_run adds the controlled-sandbox semantics
+// run_command stays available; run_code adds the controlled-sandbox semantics
 // (a hard-kill timeout, per-stream output quotas, and an isolated sandbox cwd)
 // on top. A non-zero exit code and a timeout are normal sandbox outcomes
 // returned to the model, never a panic (dispatch-m6e-2 §3: 超时/非零退出码返回
@@ -41,9 +41,9 @@ import (
 
 // ToolRunName is the code-sandbox tool (whitelisted when code.enabled; see
 // config.codeToolNames).
-const ToolRunName = "code_run"
+const ToolRunName = "run_code"
 
-// CodeTools bundles the shared state of the code_run tool: the Engine service,
+// CodeTools bundles the shared state of the run_code tool: the Engine service,
 // the event sink, and the config-derived sandbox policy knobs the composition
 // root supplies (code.timeout / code.max_output / code.sandbox_dir). Keeping
 // the knobs as fields — set by the wiring after NewCodeTools — keeps the
@@ -67,14 +67,14 @@ type CodeTools struct {
 	DefaultCwd string
 }
 
-// NewCodeTools returns the code_run tool bundle bound to an Engine. onEvent,
+// NewCodeTools returns the run_code tool bundle bound to an Engine. onEvent,
 // when non-nil, receives the code/* event payloads; the composition root wires
 // it to the session log (D3).
 func NewCodeTools(e Engine, onEvent func(typ string, data any)) *CodeTools {
 	return &CodeTools{e: e, onEvent: onEvent}
 }
 
-// Run returns the code_run tool.
+// Run returns the run_code tool.
 func (t *CodeTools) Run() CodeRunTool { return CodeRunTool{t: t} }
 
 // emit forwards one code/* event payload to the injected sink (D3).
@@ -137,20 +137,20 @@ func (t CodeRunTool) Execute(ctx context.Context, args json.RawMessage) (string,
 		Cwd     string  `json:"cwd"`
 	}
 	if err := json.Unmarshal(args, &a); err != nil {
-		return "", fmt.Errorf("code_run: %w", err)
+		return "", fmt.Errorf("run_code: %w", err)
 	}
 	lang := a.Lang
 	if lang == "" {
 		lang = langSh
 	}
 	if lang != langSh {
-		return "", fmt.Errorf("code_run: unsupported lang %q (only %q)", a.Lang, langSh)
+		return "", fmt.Errorf("run_code: unsupported lang %q (only %q)", a.Lang, langSh)
 	}
 	if strings.TrimSpace(a.Code) == "" {
-		return "", fmt.Errorf("code_run: empty code")
+		return "", fmt.Errorf("run_code: empty code")
 	}
 	if err := ctx.Err(); err != nil {
-		return "", fmt.Errorf("code_run: cancelled: %w", err)
+		return "", fmt.Errorf("run_code: cancelled: %w", err)
 	}
 	req := RunRequest{
 		Lang:      lang,
@@ -168,7 +168,7 @@ func (t CodeRunTool) Execute(ctx context.Context, args json.RawMessage) (string,
 	}
 	res, err := t.t.e.Run(ctx, req)
 	if err != nil {
-		return "", fmt.Errorf("code_run: %w", err)
+		return "", fmt.Errorf("run_code: %w", err)
 	}
 	// code/run is a log-only fact (D3) carrying the language and the outcome
 	// markers; the full stdout/stderr live in the tool/result the loop logs.

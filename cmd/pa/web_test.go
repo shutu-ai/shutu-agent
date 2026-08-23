@@ -71,14 +71,14 @@ func TestRegisterWebEnabledRegistersAndValidates(t *testing.T) {
 
 	// D7: bad arguments are rejected before any tool code runs.
 	for _, tc := range []struct{ name, args string }{
-		{"web_search", `{}`},                             // missing required queries
-		{"web_search", `{"queries":[]}`},                 // minItems: 1
+		{"web_search", `{}`},                                // missing required queries
+		{"web_search", `{"queries":[]}`},                    // minItems: 1
 		{"web_search", `{"queries":["a","b","c","d","e"]}`}, // maxItems: 4 (default)
-		{"web_search", `{"queries":["a"],"extra":1}`},    // additional properties rejected
-		{"web_search", `{"queries":[1]}`},                // items must be strings
-		{"web_fetch", `{}`},                              // missing required url
-		{"web_fetch", `{"url":1}`},                       // url must be a string
-		{"web_fetch", `{"url":"https://x","extra":1}`},   // additional properties rejected
+		{"web_search", `{"queries":["a"],"extra":1}`},       // additional properties rejected
+		{"web_search", `{"queries":[1]}`},                   // items must be strings
+		{"web_fetch", `{}`},                                 // missing required url
+		{"web_fetch", `{"url":1}`},                          // url must be a string
+		{"web_fetch", `{"url":"https://x","extra":1}`},      // additional properties rejected
 	} {
 		if _, err := a.reg.Execute(context.Background(), tc.name, json.RawMessage(tc.args)); err == nil {
 			t.Errorf("%s with args %s must be rejected (D7)", tc.name, tc.args)

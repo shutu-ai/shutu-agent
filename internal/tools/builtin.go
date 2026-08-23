@@ -31,7 +31,7 @@ func (GetTime) Execute(ctx context.Context, args json.RawMessage) (string, error
 // execution-class tools (bash etc.) arrive with the M3 safety whitelist (D10).
 type ReadFile struct{}
 
-func (ReadFile) Name() string { return "read_file" }
+func (ReadFile) Name() string { return "read" }
 
 func (ReadFile) Description() string { return "read a text file from the local filesystem (read-only)" }
 
@@ -54,11 +54,11 @@ func (ReadFile) Execute(ctx context.Context, args json.RawMessage) (string, erro
 		Path string `json:"path"`
 	}
 	if err := json.Unmarshal(args, &a); err != nil {
-		return "", fmt.Errorf("read_file: %w", err)
+		return "", fmt.Errorf("read: %w", err)
 	}
 	b, err := os.ReadFile(a.Path)
 	if err != nil {
-		return "", fmt.Errorf("read_file: %w", err)
+		return "", fmt.Errorf("read: %w", err)
 	}
 	return string(b), nil
 }

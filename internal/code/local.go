@@ -150,6 +150,11 @@ func (p *localProvider) exec(ctx context.Context, code, cwd string, timeout time
 	if readErr != nil {
 		return Result{Duration: duration, TimedOut: timedOut}, fmt.Errorf("code: read stderr: %w", readErr)
 	}
+	// Every subprocess result crosses the model/session boundary as UTF-8. On
+	// Windows shellCommand selects code page 65001; this final guard also keeps
+	// malformed third-party bytes from becoming invalid Go strings.
+	stdout = []byte(strings.ToValidUTF8(string(stdout), "�"))
+	stderr = []byte(strings.ToValidUTF8(string(stderr), "�"))
 
 	truncated := false
 	if len(stdout) > maxOut {
@@ -197,7 +202,9 @@ func (p *localProvider) exec(ctx context.Context, code, cwd string, timeout time
 // language "sh": cmd /C on Windows, /bin/sh -c elsewhere.
 func shellCommand(code string) []string {
 	if runtime.GOOS == "windows" {
-		return []string{"cmd.exe", "/C", code}
+		// cmd.exe otherwise uses the active OEM code page (CP936 on many
+		// Chinese Windows installations), while tool results are UTF-8.
+		return []string{"cmd.exe", "/C", "chcp 65001 >nul & " + code}
 	}
 	return []string{"/bin/sh", "-c", code}
 }

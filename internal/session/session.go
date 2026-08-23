@@ -14,11 +14,13 @@ import (
 
 // Event type discriminators (v1 vocabulary, see design.md §3).
 const (
-	EventUserMessage      = "user/message"
-	EventAssistantChunk   = "assistant/chunk"
-	EventAssistantMessage = "assistant/message"
-	EventToolResult       = "tool/result"
-	EventToolError        = "tool/error"
+	EventUserMessage        = "user/message"
+	EventAssistantChunk     = "assistant/chunk"
+	EventAssistantReasoning = "assistant/reasoning" // M8: one streamed reasoning delta
+	EventAssistantMessage   = "assistant/message"
+	EventToolStart          = "tool/start" // tool call dispatched (dsh running row)
+	EventToolResult         = "tool/result"
+	EventToolError          = "tool/error"
 
 	// M4 knowledge-base events (design.md §3): kb/recall lands with the M4a
 	// kernel so the D3 logging mechanism exists before any orchestration;
@@ -190,11 +192,11 @@ const (
 	EventInteractStatus  = "interact/status"
 
 	// M6e-2 code-sandbox events (design.md §3 / ADR 2026-08-19-m6-agent-full.md
-	// 决策 M6e / dispatch-m6e-2 §1): code/run lands when code_run completes a
+	// 决策 M6e / dispatch-m6e-2 §1): code/run lands when run_code completes a
 	// sandbox execution (a run that happened — zero or non-zero exit, with or
 	// without a timeout/truncation marker; a run that failed to happen at all
 	// surfaces as tool/error instead). It is log-only (D3): the model sees the
-	// run outcome through code_run's tool/result, and DeriveHistory treats this
+	// run outcome through run_code's tool/result, and DeriveHistory treats this
 	// type as opaque data, so adding it never changes the turn/step structure
 	// (D4). The payload is a pure data projection — the session package never
 	// imports the code package.
@@ -214,9 +216,9 @@ const (
 	EventMcpCall = "mcp/call"
 
 	// M6f-3 fs events (design.md §3 / ADR 2026-08-19-m6-agent-full.md
-	// 决策 M6f / dispatch-m6f-3 §2): fs/read lands when fs_read returns a
+	// 决策 M6f / dispatch-m6f-3 §2): fs/read lands when read returns a
 	// file (carrying the path and the returned byte size), fs/write when
-	// fs_write creates or overwrites a file (path), fs/list when fs_list
+	// write creates or overwrites a file (path), fs/list when list
 	// lists a directory (dir + entry count). They are log-only (D3): the
 	// model sees the file content / write outcome / listing through the fs_*
 	// tools' tool/result events, and DeriveHistory treats these types as
@@ -470,6 +472,15 @@ type assistantChunkData struct {
 	Text string `json:"text"`
 }
 
+// assistantReasoningData is the assistant/reasoning payload: one streamed
+// reasoning delta (the model's thinking text, M8). It is a streaming-fidelity
+// record parallel to assistant/chunk; the authoritative assistant/message row
+// closes the step and carries the joined reasoning, and DeriveHistory folds
+// the deltas away in favor of that row.
+type assistantReasoningData struct {
+	Text string `json:"text"`
+}
+
 type assistantMessageData struct {
 	Text         string         `json:"text"`
 	Reasoning    string         `json:"reasoning,omitempty"` // assistant reasoning (M8, D3): folded to a reasoning block on derive
@@ -482,6 +493,17 @@ type toolResultData struct {
 	Name   string    `json:"name"`
 	Output string    `json:"output"`
 	Spill  *SpillRef `json:"spill,omitempty"` // set when the output was truncated and spilled
+}
+
+// toolStartData is the tool/start payload: a tool call dispatched, before its
+// execution settles. It is a streaming-fidelity record (dsh shows the running
+// row the moment the call dispatches); DeriveHistory folds it away — the
+// pairing with the model's tool call lives on the assistant/message row and
+// the outcome on tool/result / tool/error.
+type toolStartData struct {
+	CallID string `json:"callId"`
+	Name   string `json:"name"`
+	Args   string `json:"args"`
 }
 
 // SpillRef is recorded on a tool/result event when the tool output exceeded
@@ -527,6 +549,12 @@ func NewUserMessageReplace(text string, start, end int64) any {
 // NewAssistantChunk builds one assistant/chunk payload (streaming fidelity).
 func NewAssistantChunk(text string) any { return assistantChunkData{Text: text} }
 
+// NewAssistantReasoning builds one assistant/reasoning payload: a streamed
+// reasoning delta (M8, D3). The model's thinking is logged as it arrives so
+// the UI can show it in order (thinking before tool calls); DeriveHistory
+// ignores these rows and uses the joined reasoning on assistant/message.
+func NewAssistantReasoning(text string) any { return assistantReasoningData{Text: text} }
+
 // NewAssistantMessage builds the authoritative assistant/message payload that
 // closes a step. reasoning is optional (M8): when non-empty it is logged as the
 // assistant's reasoning text (D3) and folded back into a reasoning block by
@@ -538,6 +566,12 @@ func NewAssistantMessage(text string, toolCalls []llm.ToolCall, finishReason str
 		r = reasoning[0]
 	}
 	return assistantMessageData{Text: text, ToolCalls: toolCalls, FinishReason: finishReason, Reasoning: r}
+}
+
+// NewToolStart builds the tool/start payload logged the moment a tool call
+// dispatches (dsh: the row appears running before it settles).
+func NewToolStart(callID, name, args string) any {
+	return toolStartData{CallID: callID, Name: name, Args: args}
 }
 
 // NewToolResult builds one successful tool/result payload. spill is the
@@ -1161,7 +1195,7 @@ type codeRunData struct {
 	Truncated bool   `json:"truncated"`
 }
 
-// NewCodeRun builds the code/run payload recorded when code_run completes a
+// NewCodeRun builds the code/run payload recorded when run_code completes a
 // sandbox execution (dispatch-m6e-2 §1 / D3).
 func NewCodeRun(lang string, exitCode int, timedOut, truncated bool) any {
 	return codeRunData{Lang: lang, ExitCode: exitCode, TimedOut: timedOut, Truncated: truncated}
@@ -1217,19 +1251,19 @@ type fsListData struct {
 	Count int    `json:"count"`
 }
 
-// NewFsRead builds the fs/read payload recorded when fs_read returns a file
+// NewFsRead builds the fs/read payload recorded when read returns a file
 // (dispatch-m6f-3 §2 / D3).
 func NewFsRead(path string, size int) any {
 	return fsReadData{Path: path, Size: size}
 }
 
-// NewFsWrite builds the fs/write payload recorded when fs_write creates or
+// NewFsWrite builds the fs/write payload recorded when write creates or
 // overwrites a file (dispatch-m6f-3 §2 / D3).
 func NewFsWrite(path string) any {
 	return fsWriteData{Path: path}
 }
 
-// NewFsList builds the fs/list payload recorded when fs_list lists a directory
+// NewFsList builds the fs/list payload recorded when list lists a directory
 // (dispatch-m6f-3 §2 / D3).
 func NewFsList(dir string, count int) any {
 	return fsListData{Dir: dir, Count: count}

@@ -26,11 +26,11 @@ func makeCodeApp(codeEnabled bool) *app {
 	}
 }
 
-// codePolicy whitelists code_run so the registry Execute gate can run it (in
+// codePolicy whitelists run_code so the registry Execute gate can run it (in
 // production config.applyDefaults + PolicyFromConfig do this).
 func codePolicy() tools.Policy {
 	return tools.Policy{
-		Enabled:     []string{"code_run"},
+		Enabled:     []string{"run_code"},
 		Timeout:     0,
 		OutputLimit: 0,
 	}
@@ -38,7 +38,7 @@ func codePolicy() tools.Policy {
 
 // TestRegisterCodeDisabledRegistersNothing verifies the D10 gate: with
 // code.enabled=false the composition root creates no Engine and registers no
-// code_run tool (dispatch-m6e-2 §4).
+// run_code tool (dispatch-m6e-2 §4).
 func TestRegisterCodeDisabledRegistersNothing(t *testing.T) {
 	a := makeCodeApp(false)
 	if err := a.registerCode(); err != nil {
@@ -48,14 +48,14 @@ func TestRegisterCodeDisabledRegistersNothing(t *testing.T) {
 		t.Fatal("code engine must be nil when code.enabled=false")
 	}
 	for _, spec := range a.reg.Specs() {
-		if spec.Name == "code_run" {
-			t.Fatalf("code_run registered while code disabled")
+		if spec.Name == "run_code" {
+			t.Fatalf("run_code registered while code disabled")
 		}
 	}
 }
 
 // TestRegisterCodeEnabledRegistersAndValidates verifies the enabled path: the
-// local Provider + Engine are created, code_run is registered, D7 rejects bad
+// local Provider + Engine are created, run_code is registered, D7 rejects bad
 // arguments at the Execute gate, a valid run flows through and lands code/run
 // in the session log (D3) without deriving into history (log-only), and a
 // non-zero exit is returned to the model.
@@ -71,23 +71,23 @@ func TestRegisterCodeEnabledRegistersAndValidates(t *testing.T) {
 	}
 	found := false
 	for _, s := range a.reg.Specs() {
-		if s.Name == "code_run" {
+		if s.Name == "run_code" {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatal("code_run not registered when code.enabled=true")
+		t.Fatal("run_code not registered when code.enabled=true")
 	}
 
 	cwd := t.TempDir()
 	// D7: bad arguments are rejected before any tool code runs.
 	for _, tc := range []struct{ name, args string }{
-		{"code_run", `{}`},                                       // missing required lang/code
-		{"code_run", `{"lang":"python","code":"x"}`},             // lang outside the enum
-		{"code_run", `{"lang":"sh","code":"x","extra":1}`},       // additional properties rejected
-		{"code_run", `{"lang":"sh","code":123}`},                 // code must be a string
-		{"code_run", `{"lang":"sh","code":"x","timeout":"5"}`},   // timeout must be a number
-		{"code_run", `{"lang":"sh","code":"x","timeout":-1}`},    // timeout must be >= 0
+		{"run_code", `{}`},                                     // missing required lang/code
+		{"run_code", `{"lang":"python","code":"x"}`},           // lang outside the enum
+		{"run_code", `{"lang":"sh","code":"x","extra":1}`},     // additional properties rejected
+		{"run_code", `{"lang":"sh","code":123}`},               // code must be a string
+		{"run_code", `{"lang":"sh","code":"x","timeout":"5"}`}, // timeout must be a number
+		{"run_code", `{"lang":"sh","code":"x","timeout":-1}`},  // timeout must be >= 0
 	} {
 		if _, err := a.reg.Execute(context.Background(), tc.name, json.RawMessage(tc.args)); err == nil {
 			t.Errorf("%s with args %s must be rejected (D7)", tc.name, tc.args)
@@ -96,15 +96,15 @@ func TestRegisterCodeEnabledRegistersAndValidates(t *testing.T) {
 
 	// A valid run works and lands the code/run event (D3).
 	good := fmt.Sprintf(`{"lang":"sh","code":"echo hi","cwd":%s}`, jsonString(cwd))
-	res, err := a.reg.Execute(context.Background(), "code_run", json.RawMessage(good))
+	res, err := a.reg.Execute(context.Background(), "run_code", json.RawMessage(good))
 	if err != nil {
-		t.Fatalf("code_run via registry: %v", err)
+		t.Fatalf("run_code via registry: %v", err)
 	}
 	if !strings.Contains(res.Output, "hi") {
-		t.Fatalf("code_run output = %q, want it to carry hi", res.Output)
+		t.Fatalf("run_code output = %q, want it to carry hi", res.Output)
 	}
 	if !hasEvent(a.log, session.EventCodeRun) {
-		t.Fatal("code/run event missing from the session log after code_run")
+		t.Fatal("code/run event missing from the session log after run_code")
 	}
 	if msgs := a.log.DeriveHistory(); len(msgs) != 0 {
 		t.Fatalf("code/run events must not derive into messages: %+v", msgs)
@@ -113,17 +113,17 @@ func TestRegisterCodeEnabledRegistersAndValidates(t *testing.T) {
 	// A non-zero exit is returned to the model as a normal result (tool/result,
 	// not tool/error) and still lands code/run.
 	fail := fmt.Sprintf(`{"lang":"sh","code":%s,"cwd":%s}`, jsonString(failCommandString()), jsonString(cwd))
-	res2, err := a.reg.Execute(context.Background(), "code_run", json.RawMessage(fail))
+	res2, err := a.reg.Execute(context.Background(), "run_code", json.RawMessage(fail))
 	if err != nil {
-		t.Fatalf("non-zero exit code_run via registry must be a normal result: %v", err)
+		t.Fatalf("non-zero exit run_code via registry must be a normal result: %v", err)
 	}
 	if !strings.Contains(res2.Output, "[exit code: 3]") {
-		t.Fatalf("code_run output = %q, want [exit code: 3]", res2.Output)
+		t.Fatalf("run_code output = %q, want [exit code: 3]", res2.Output)
 	}
 }
 
 // TestRegisterCodePolicyDeadlineBoundsSandboxRun verifies code.timeout is the
-// outer per-tool deadline for code_run (mirrors run_command): a sandbox run
+// outer per-tool deadline for run_code (mirrors run_command): a sandbox run
 // that would outlive the config bound is cut at the Execute gate even when the
 // model requests a longer per-call timeout, and the cut surfaces as a normal
 // sandbox timeout result (the model sees the "[timed out]" marker, not an
@@ -140,12 +140,12 @@ func TestRegisterCodePolicyDeadlineBoundsSandboxRun(t *testing.T) {
 	cwd := t.TempDir()
 	args := fmt.Sprintf(`{"lang":"sh","code":%s,"timeout":30,"cwd":%s}`,
 		jsonString(longRunningCommand()), jsonString(cwd))
-	res, err := a.reg.Execute(context.Background(), "code_run", json.RawMessage(args))
+	res, err := a.reg.Execute(context.Background(), "run_code", json.RawMessage(args))
 	if err != nil {
-		t.Fatalf("code_run after the policy deadline must be a normal timeout result, not an error: %v", err)
+		t.Fatalf("run_code after the policy deadline must be a normal timeout result, not an error: %v", err)
 	}
 	if !strings.Contains(res.Output, "[timed out") {
-		t.Fatalf("code_run output = %q, want a timeout marker (the code.timeout bound cut the run)", res.Output)
+		t.Fatalf("run_code output = %q, want a timeout marker (the code.timeout bound cut the run)", res.Output)
 	}
 }
 

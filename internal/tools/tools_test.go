@@ -125,19 +125,19 @@ func TestReadFile(t *testing.T) {
 	r := New()
 	r.Register(ReadFile{})
 	args, _ := json.Marshal(map[string]string{"path": path})
-	res, err := r.Execute(context.Background(), "read_file", args)
+	res, err := r.Execute(context.Background(), "read", args)
 	if err != nil {
-		t.Fatalf("read_file: %v", err)
+		t.Fatalf("read: %v", err)
 	}
 	if res.Output != "hello agent" {
-		t.Fatalf("read_file out = %q", res.Output)
+		t.Fatalf("read out = %q", res.Output)
 	}
 }
 
 func TestReadFileMissing(t *testing.T) {
 	r := New()
 	r.Register(ReadFile{})
-	if _, err := r.Execute(context.Background(), "read_file", json.RawMessage(`{"path":"/definitely/not/here"}`)); err == nil {
+	if _, err := r.Execute(context.Background(), "read", json.RawMessage(`{"path":"/definitely/not/here"}`)); err == nil {
 		t.Fatal("missing file should fail")
 	}
 }

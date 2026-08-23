@@ -71,12 +71,12 @@ func TestRegisterInteractsDisabledRegistersNothing(t *testing.T) {
 	// No gate installed: a whitelisted tool runs without any approval read.
 	// approveInput would block or feed junk if a gate existed; here the tool
 	// executes untouched.
-	ft := &fakeSensitiveTool{name: "run_command"}
+	ft := &fakeSensitiveTool{name: "bash"}
 	if err := a.reg.Register(ft); err != nil {
 		t.Fatalf("register fake: %v", err)
 	}
-	a.reg.SetPolicy(interactPolicy("run_command"))
-	if _, err := a.reg.Execute(context.Background(), "run_command", json.RawMessage(`{}`)); err != nil {
+	a.reg.SetPolicy(interactPolicy("bash"))
+	if _, err := a.reg.Execute(context.Background(), "bash", json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("run_command with interact disabled: %v", err)
 	}
 	if !ft.executed {
@@ -161,10 +161,10 @@ func TestRegisterInteractsEnabledRegistersToolsAndEvents(t *testing.T) {
 // serial path, records the decision (interact/resolve), and only then executes
 // the underlying tool — whose output is returned.
 func TestSensitiveGateApprovedRuns(t *testing.T) {
-	a := makeInteractApp(true, []string{"run_command"})
+	a := makeInteractApp(true, []string{"bash"})
 	a.approveInput = strings.NewReader("y\n")
-	a.reg.SetPolicy(interactPolicy("run_command"))
-	ft := &fakeSensitiveTool{name: "run_command"}
+	a.reg.SetPolicy(interactPolicy("bash"))
+	ft := &fakeSensitiveTool{name: "bash"}
 	if err := a.reg.Register(ft); err != nil {
 		t.Fatalf("register fake: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestSensitiveGateApprovedRuns(t *testing.T) {
 	}
 	defer a.interacts.Close()
 
-	res, err := a.reg.Execute(context.Background(), "run_command", json.RawMessage(`{"command":"ls"}`))
+	res, err := a.reg.Execute(context.Background(), "bash", json.RawMessage(`{"command":"ls"}`))
 	if err != nil {
 		t.Fatalf("run_command through the approved gate: %v", err)
 	}
@@ -193,10 +193,10 @@ func TestSensitiveGateApprovedRuns(t *testing.T) {
 // n answer records the decision, appends interact/deny, and the gate returns a
 // denial to the model — the underlying tool never executes.
 func TestSensitiveGateRejectedReturnsDenial(t *testing.T) {
-	a := makeInteractApp(true, []string{"run_command"})
+	a := makeInteractApp(true, []string{"bash"})
 	a.approveInput = strings.NewReader("n\n")
-	a.reg.SetPolicy(interactPolicy("run_command"))
-	ft := &fakeSensitiveTool{name: "run_command"}
+	a.reg.SetPolicy(interactPolicy("bash"))
+	ft := &fakeSensitiveTool{name: "bash"}
 	if err := a.reg.Register(ft); err != nil {
 		t.Fatalf("register fake: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestSensitiveGateRejectedReturnsDenial(t *testing.T) {
 	}
 	defer a.interacts.Close()
 
-	_, err := a.reg.Execute(context.Background(), "run_command", json.RawMessage(`{"command":"ls"}`))
+	_, err := a.reg.Execute(context.Background(), "bash", json.RawMessage(`{"command":"ls"}`))
 	if err == nil {
 		t.Fatal("run_command through a rejected gate must return a denial")
 	}
@@ -226,9 +226,9 @@ func TestSensitiveGateRejectedReturnsDenial(t *testing.T) {
 // NOT listed in sensitive_tools passes through untouched: it executes with no
 // approval request, no events and no terminal read.
 func TestSensitiveGateMissedDoesNotIntercept(t *testing.T) {
-	a := makeInteractApp(true, []string{"run_command"})
-	a.reg.SetPolicy(interactPolicy("read_file"))
-	ft := &fakeSensitiveTool{name: "read_file"}
+	a := makeInteractApp(true, []string{"bash"})
+	a.reg.SetPolicy(interactPolicy("read"))
+	ft := &fakeSensitiveTool{name: "read"}
 	if err := a.reg.Register(ft); err != nil {
 		t.Fatalf("register fake: %v", err)
 	}
@@ -237,9 +237,9 @@ func TestSensitiveGateMissedDoesNotIntercept(t *testing.T) {
 	}
 	defer a.interacts.Close()
 
-	res, err := a.reg.Execute(context.Background(), "read_file", json.RawMessage(`{"path":"x"}`))
+	res, err := a.reg.Execute(context.Background(), "read", json.RawMessage(`{"path":"x"}`))
 	if err != nil {
-		t.Fatalf("non-sensitive read_file: %v", err)
+		t.Fatalf("non-sensitive read: %v", err)
 	}
 	if res.Output != "ran" || !ft.executed {
 		t.Fatalf("out=%q executed=%v, want ran/true (no interception)", res.Output, ft.executed)
@@ -254,8 +254,8 @@ func TestSensitiveGateMissedDoesNotIntercept(t *testing.T) {
 // (dispatch-m6d-2 §2/§5): a whitelisted tool runs with no approval.
 func TestSensitiveGateEmptyListNoGate(t *testing.T) {
 	a := makeInteractApp(true, nil)
-	a.reg.SetPolicy(interactPolicy("run_command"))
-	ft := &fakeSensitiveTool{name: "run_command"}
+	a.reg.SetPolicy(interactPolicy("bash"))
+	ft := &fakeSensitiveTool{name: "bash"}
 	if err := a.reg.Register(ft); err != nil {
 		t.Fatalf("register fake: %v", err)
 	}
@@ -264,7 +264,7 @@ func TestSensitiveGateEmptyListNoGate(t *testing.T) {
 	}
 	defer a.interacts.Close()
 
-	res, err := a.reg.Execute(context.Background(), "run_command", json.RawMessage(`{}`))
+	res, err := a.reg.Execute(context.Background(), "bash", json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("run_command with an empty sensitive list: %v", err)
 	}

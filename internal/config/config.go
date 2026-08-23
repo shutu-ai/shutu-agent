@@ -166,22 +166,26 @@ const (
 	ModeCode     = "code"
 )
 
-// defaultEnabledTools is the whitelist applied when tools.enabled is absent.
-// It intentionally contains only the read-only tools (D10: 白名单先行).
-var defaultEnabledTools = []string{"get_time", "read_file"}
+// defaultEnabledTools is the native standard-mode whitelist applied when
+// tools.enabled is absent. PTC adds run_code only through its mode projection;
+// minimal replaces the list with its fixed terminal/file seam.
+var defaultEnabledTools = []string{"get_time", "read"}
 
 // ReadOnlyTools returns the read-only execution whitelist (D10): the tools
 // that are always safe to expose. The General-settings "permission" preset's
 // readonly tier whitelists exactly these (the composition root applies it).
 func ReadOnlyTools() []string { return append([]string(nil), defaultEnabledTools...) }
 
+// MinimalTools returns the exact tool whitelist for the minimal session preset.
+func MinimalTools() []string { return append([]string(nil), minimalEnabledTools...) }
+
 // minimalEnabledTools is the minimal preset's exact execution whitelist (ADR
-// 2026-08-20-mode-presets.md D-MODE-2): M1 基础只读 + 持久 shell (terminal_*)
-// + 文件编辑 (fs_*). 工具名须与各包常量一致 (terminal.go/fs.go).
+// 2026-08-20-mode-presets.md D-MODE-2): M1 基础只读 + 持久 shell (pwsh) + 文件
+// 编辑 (read/write/list/edit). 工具名须与各包常量一致 (tools.go/fs.go).
 var minimalEnabledTools = []string{
-	"get_time", "read_file",
-	"terminal_start", "terminal_write", "terminal_read", "terminal_signal", "terminal_stop",
-	"fs_read", "fs_write", "fs_list",
+	"get_time", "read",
+	"pwsh",
+	"write", "list", "edit",
 }
 
 // Bool returns a pointer to b, for assigning an explicit *bool flag where the
@@ -202,35 +206,35 @@ func Enabled(b *bool) bool { return b == nil || *b }
 // config.yaml; Load fills defaults for empty values, so callers never branch
 // on field presence.
 type Config struct {
-	Model      string           `yaml:"model"`       // chat model; default deepseek-v4-flash
-	BaseURL    string           `yaml:"base_url"`    // optional OpenAI-compatible base URL; empty means the provider default
-	DataDir    string           `yaml:"data_dir"`    // directory for pa.db (and runtime data); default "data"
-	PromptsDir string           `yaml:"prompts_dir"` // directory of prompt section files; default "config/prompts"
+	Model      string `yaml:"model"`       // chat model; default deepseek-v4-flash
+	BaseURL    string `yaml:"base_url"`    // optional OpenAI-compatible base URL; empty means the provider default
+	DataDir    string `yaml:"data_dir"`    // directory for pa.db (and runtime data); default "data"
+	PromptsDir string `yaml:"prompts_dir"` // directory of prompt section files; default "config/prompts"
 	// ReasoningEffort is the runtime thinking-effort selection (dsh 思考强度,
 	// ModelSelect effort): "" | "off" | "low" | "high" | "max". Runtime-only
 	// (like the live model switch) — it never enters config.yaml.
-	ReasoningEffort string           `yaml:"-"` // runtime selection; empty keeps provider default
-	Tools           ToolsConfig      `yaml:"tools"`       // tool-execution policy (M3)
-	KB         KBConfig         `yaml:"kb"`          // knowledge-base policy (M4a kernel)
-	Jobs       JobsConfig       `yaml:"jobs"`        // background-job policy (M5a)
-	Subagent   SubagentConfig   `yaml:"subagent"`    // subagent policy (M5b)
-	Compaction CompactionConfig `yaml:"compaction"`  // context-compaction policy (M5c)
-	Skill      SkillConfig      `yaml:"skill"`       // skill policy (M5d)
-	Schedule   ScheduleConfig   `yaml:"schedule"`    // schedule policy (M6a)
-	Plan       PlanConfig       `yaml:"plan"`        // task-planning policy (M6b)
-	Spill      SpillConfig      `yaml:"spill"`       // long-term-memory policy (M6c)
-	Interact   InteractConfig   `yaml:"interact"`    // human-approval policy (M6d)
-	Code       CodeConfig       `yaml:"code"`        // code-sandbox policy (M6e)
-	Mcp        McpConfig        `yaml:"mcp"`         // MCP tool-ecosystem policy (M6f)
-	Fs         FsConfig         `yaml:"fs"`          // safe-file-operation policy (M6f)
-	Web        WebConfig        `yaml:"web"`         // web search/fetch policy (M7)
-	LLM        LLMConfig        `yaml:"llm"`         // LLM provider selection (M8-2)
-	Terminal   TerminalConfig   `yaml:"terminal"`    // persistent-shell terminal (M9)
-	Eval       EvalConfig       `yaml:"eval"`        // task-evaluation seam (eval)
-	Ralph      RalphConfig      `yaml:"ralph"`       // fresh-agent loop (D-GAP-3)
-	Workflow   WorkflowConfig   `yaml:"workflow"`    // task-DAG orchestration (D-GAP-2)
-	FsSearch   FsSearchConfig   `yaml:"fs_search"`   // file-content-search policy (D-GAP-1)
-	WebServer  WebServerConfig  `yaml:"web_server"`  // unified web portal (M10a)
+	ReasoningEffort string           `yaml:"-"`          // runtime selection; empty keeps provider default
+	Tools           ToolsConfig      `yaml:"tools"`      // tool-execution policy (M3)
+	KB              KBConfig         `yaml:"kb"`         // knowledge-base policy (M4a kernel)
+	Jobs            JobsConfig       `yaml:"jobs"`       // background-job policy (M5a)
+	Subagent        SubagentConfig   `yaml:"subagent"`   // subagent policy (M5b)
+	Compaction      CompactionConfig `yaml:"compaction"` // context-compaction policy (M5c)
+	Skill           SkillConfig      `yaml:"skill"`      // skill policy (M5d)
+	Schedule        ScheduleConfig   `yaml:"schedule"`   // schedule policy (M6a)
+	Plan            PlanConfig       `yaml:"plan"`       // task-planning policy (M6b)
+	Spill           SpillConfig      `yaml:"spill"`      // long-term-memory policy (M6c)
+	Interact        InteractConfig   `yaml:"interact"`   // human-approval policy (M6d)
+	Code            CodeConfig       `yaml:"code"`       // code-sandbox policy (M6e)
+	Mcp             McpConfig        `yaml:"mcp"`        // MCP tool-ecosystem policy (M6f)
+	Fs              FsConfig         `yaml:"fs"`         // safe-file-operation policy (M6f)
+	Web             WebConfig        `yaml:"web"`        // web search/fetch policy (M7)
+	LLM             LLMConfig        `yaml:"llm"`        // LLM provider selection (M8-2)
+	Terminal        TerminalConfig   `yaml:"terminal"`   // persistent-shell terminal (M9)
+	Eval            EvalConfig       `yaml:"eval"`       // task-evaluation seam (eval)
+	Ralph           RalphConfig      `yaml:"ralph"`      // fresh-agent loop (D-GAP-3)
+	Workflow        WorkflowConfig   `yaml:"workflow"`   // task-DAG orchestration (D-GAP-2)
+	FsSearch        FsSearchConfig   `yaml:"fs_search"`  // file-content-search policy (D-GAP-1)
+	WebServer       WebServerConfig  `yaml:"web_server"` // unified web portal (M10a)
 
 	// Mode selects the agent capability preset (D-MODE-1): minimal | standard
 	// | code; default standard. minimal is preset-first (D-MODE-6): 能力开关
@@ -557,17 +561,17 @@ type InteractConfig struct {
 // CodeConfig is the code-sandbox policy (dispatch-m6e-2 §2 / ADR
 // 2026-08-19-m6-agent-full.md 决策 M6e). The code sandbox is off by default
 // (D10): when disabled the composition root neither creates a local Provider /
-// Engine nor registers or whitelists the code_run tool. It is controlled
+// Engine nor registers or whitelists the run_code tool. It is controlled
 // isolation, not strong isolation (process boundary + timeout + output quota +
 // default no network; Windows has no network namespace — see the internal/code
 // package comment for the exact boundary).
 type CodeConfig struct {
 	// Enabled gates the whole capability: when false, no local Provider/Engine
-	// is created and code_run is neither registered nor whitelisted (D10).
+	// is created and run_code is neither registered nor whitelisted (D10).
 	Enabled *bool `yaml:"enabled"`
-	// Timeout is the sandbox execution deadline code_run applies when the model
+	// Timeout is the sandbox execution deadline run_code applies when the model
 	// omits the per-call timeout (and the outer per-tool deadline bound for
-	// code_run, mirroring tools.run_command.timeout); <= 0 means the default 30s.
+	// run_code, mirroring tools.run_command.timeout); <= 0 means the default 30s.
 	Timeout Duration `yaml:"timeout"`
 	// MaxOutput is the per-stream output cap of a sandbox run (the model cannot
 	// override it); <= 0 means the default 65536 bytes.
@@ -856,8 +860,8 @@ func applyDefaults(cfg *Config) {
 	// Enabling run_command makes it whitelisted too, so the single
 	// tools.run_command.enabled switch is what turns the execution tool on
 	// (design.md §5 / D10).
-	if cfg.Tools.RunCommand.Enabled && !contains(cfg.Tools.Enabled, "run_command") {
-		cfg.Tools.Enabled = append(cfg.Tools.Enabled, "run_command")
+	if cfg.Tools.RunCommand.Enabled && !contains(cfg.Tools.Enabled, "bash") {
+		cfg.Tools.Enabled = append(cfg.Tools.Enabled, "bash")
 	}
 	// Enabling kb whitelists its three consumer tools as well, so the single
 	// kb.enabled switch turns the whole capability (provider + tools + recall)
@@ -1019,7 +1023,7 @@ func applyDefaults(cfg *Config) {
 	// M6e-2 code defaults: off by default (D10); the sandbox timeout is 30s,
 	// the per-stream output cap 65536 bytes, and sandbox_dir empty (the
 	// provider default <project>/.sandbox). Enabling code whitelists its single
-	// consumer tool code_run, so the one code.enabled switch turns the whole
+	// consumer tool run_code, so the one code.enabled switch turns the whole
 	// capability (Provider + Engine + tool + event logging) on (mirrors
 	// kb/jobs/subagent/skill/schedule/plan/spill/interact). Non-positive bounds
 	// are clamped to the defaults (校验非负: a negative configured value can
@@ -1262,24 +1266,30 @@ func applyDefaults(cfg *Config) {
 	// 与白名单面自动收敛。standard/code 不触碰 (现状). 必须放在所有既有
 	// append 之后, 否则后续 append 会把用户开启的其余工具加回白名单.
 	ApplyModePreset(cfg)
+	if cfg.Mode == ModeCode && !contains(cfg.Tools.Enabled, "run_code") {
+		cfg.Tools.Enabled = append(cfg.Tools.Enabled, "run_code")
+	}
 }
 
 // ApplyModePreset applies the D-MODE mode preset to cfg (ADR
-// 2026-08-20-mode-presets.md): minimal is preset-first and resets every
-// capability switch plus the whole execution whitelist; standard/code leave the
-// switches untouched. Exported so the composition root can re-apply a mode
-// chosen at runtime (the General-settings Agent-preset row, which is durable
-// and takes effect after restart).
+// 2026-08-20-mode-presets.md). Minimal is preset-first and resets every
+// capability switch plus the whole execution whitelist. Standard and PTC are
+// selected per session; the composition root keeps their registered capability
+// set available and the session runtime narrows the visible/executable tools.
 func ApplyModePreset(cfg *Config) {
+	if cfg.Mode == ModeCode {
+		cfg.Code.Enabled = Bool(true)
+		return
+	}
 	if cfg.Mode != ModeMinimal {
 		return
 	}
 	cfg.Terminal.Enabled = Bool(true) // minimal 只保留持久 shell + 文件编辑 (D-MODE-2)
 	cfg.Fs.Enabled = Bool(true)
-	cfg.FsSearch.Enabled = Bool(false)  // minimal 不含搜索 (D-MODE-2)
-	cfg.Ralph.Enabled = Bool(false)     // minimal 不含 fresh-agent 循环 (D-MODE-2)
-	cfg.Workflow.Enabled = Bool(false)  // minimal 不含 workflow DAG 编排 (D-MODE-2)
-	cfg.WebServer.Enabled = false       // minimal 不含 web 门户 (D-MODE-2)
+	cfg.FsSearch.Enabled = Bool(false) // minimal 不含搜索 (D-MODE-2)
+	cfg.Ralph.Enabled = Bool(false)    // minimal 不含 fresh-agent 循环 (D-MODE-2)
+	cfg.Workflow.Enabled = Bool(false) // minimal 不含 workflow DAG 编排 (D-MODE-2)
+	cfg.WebServer.Enabled = false      // minimal 不含 web 门户 (D-MODE-2)
 	cfg.KB.Enabled = Bool(false)
 	cfg.Jobs.Enabled = Bool(false)
 	cfg.Subagent.Enabled = Bool(false)
@@ -1350,10 +1360,10 @@ var spillToolNames = []string{"spill_write", "spill_recall", "spill_list", "spil
 var interactToolNames = []string{"interact_ask", "interact_status"}
 
 // codeToolNames are the code-sandbox consumer tools (dispatch-m6e-2 §2).
-// code_run is registered and whitelisted only when code is enabled; keeping the
+// run_code is registered and whitelisted only when code is enabled; keeping the
 // name here makes the "code.enabled ⇒ 工具自动白名单" rule a single, tested fact
 // shared by applyDefaults and the composition root.
-var codeToolNames = []string{"code_run"}
+var codeToolNames = []string{"run_code"}
 
 // mcpToolNames are the MCP consumer tools (dispatch-m6f-2 §2). mcp_list and
 // mcp_call are registered and whitelisted only when mcp is enabled; keeping the
@@ -1367,13 +1377,13 @@ var mcpToolNames = []string{"mcp_list", "mcp_call"}
 // They are registered and whitelisted only when fs is enabled; keeping the
 // names here makes the "fs.enabled ⇒ 工具自动白名单" rule a single, tested fact
 // shared by applyDefaults and the composition root.
-var fsToolNames = []string{"fs_read", "fs_write", "fs_list"}
+var fsToolNames = []string{"write", "list", "edit"}
 
 // fsSearchToolNames are the file-content-search consumer tools (D-GAP-1).
 // fs_search is registered and whitelisted only when fs_search is enabled;
 // keeping the name here makes the "fs_search.enabled ⇒ 工具自动白名单" rule a
 // single, tested fact shared by applyDefaults and the composition root.
-var fsSearchToolNames = []string{"fs_search"}
+var fsSearchToolNames = []string{"grep", "glob"}
 
 // ralphToolNames are the fresh-agent-loop consumer tools (D-GAP-3). ralph is
 // registered and whitelisted only when ralph is enabled; keeping the name here
@@ -1397,7 +1407,7 @@ var webToolNames = []string{"web_search", "web_fetch"}
 // (dispatch-m9-2 §4). They are registered and whitelisted only when terminal
 // is enabled; keeping the names here makes the "terminal.enabled ⇒ 工具自动白名单"
 // rule a single, tested fact shared by applyDefaults and the composition root.
-var terminalToolNames = []string{"terminal_start", "terminal_write", "terminal_read", "terminal_signal", "terminal_stop"}
+var terminalToolNames = []string{"pwsh"}
 
 // evalToolNames are the task-evaluation consumer tools (ADR
 // 2026-08-20-eval-seam.md D-EVAL-6). They are registered and whitelisted only

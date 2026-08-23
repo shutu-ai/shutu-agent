@@ -50,6 +50,7 @@ func runCommandLine(command string) func(ctx context.Context) (JobOutcome, error
 		if readErr != nil {
 			return JobOutcome{}, fmt.Errorf("job: read output: %w", readErr)
 		}
+		out = []byte(strings.ToValidUTF8(string(out), "�"))
 		if waitErr != nil {
 			if ctx.Err() != nil {
 				return JobOutcome{Status: StatusKilled, Detail: "cancelled"}, nil
@@ -67,7 +68,7 @@ func runCommandLine(command string) func(ctx context.Context) (JobOutcome, error
 func newShellCommand(command, workdir string, env []string) *exec.Cmd {
 	var argv []string
 	if runtime.GOOS == "windows" {
-		argv = []string{"cmd.exe", "/C", command}
+		argv = []string{"cmd.exe", "/C", "chcp 65001 >nul & " + command}
 	} else {
 		argv = []string{"/bin/sh", "-c", command}
 	}

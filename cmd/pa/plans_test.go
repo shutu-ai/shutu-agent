@@ -84,18 +84,18 @@ func TestRegisterPlansEnabledRegistersAndValidates(t *testing.T) {
 		name string
 		args string
 	}{
-		{"plan_goal", `{}`},                                 // missing required title
-		{"plan_goal", `{"title":"x","extra":1}`},            // additional properties rejected
-		{"plan_plan", `{"title":"P"}`},                      // missing required goal_id
-		{"plan_plan", `{"goal_id":"g","title":123}`},        // title must be a string
-		{"plan_todo", `{}`},                                 // missing required plan_id/title
-		{"plan_todo", `{"plan_id":"p","title":"t","x":1}`},  // additional properties rejected
-		{"plan_status", `{}`},                               // missing required scope/id/status
-		{"plan_status", `{"scope":"goal","id":"g","status":"bogus"}`}, // status outside the enum
+		{"plan_goal", `{}`},                                               // missing required title
+		{"plan_goal", `{"title":"x","extra":1}`},                          // additional properties rejected
+		{"plan_plan", `{"title":"P"}`},                                    // missing required goal_id
+		{"plan_plan", `{"goal_id":"g","title":123}`},                      // title must be a string
+		{"plan_todo", `{}`},                                               // missing required plan_id/title
+		{"plan_todo", `{"plan_id":"p","title":"t","x":1}`},                // additional properties rejected
+		{"plan_status", `{}`},                                             // missing required scope/id/status
+		{"plan_status", `{"scope":"goal","id":"g","status":"bogus"}`},     // status outside the enum
 		{"plan_status", `{"scope":"widget","id":"g","status":"pending"}`}, // scope outside the enum
-		{"plan_list", `{"extra":1}`},                        // list takes no arguments
-		{"plan_remove", `{"id":"g"}`},                       // missing required scope
-		{"plan_remove", `{"scope":"goal","id":123}`},        // id must be a string
+		{"plan_list", `{"extra":1}`},                                      // list takes no arguments
+		{"plan_remove", `{"id":"g"}`},                                     // missing required scope
+		{"plan_remove", `{"scope":"goal","id":123}`},                      // id must be a string
 	} {
 		if _, err := a.reg.Execute(context.Background(), tc.name, json.RawMessage(tc.args)); err == nil {
 			t.Errorf("%s with args %s must be rejected (D7)", tc.name, tc.args)

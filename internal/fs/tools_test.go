@@ -54,74 +54,42 @@ func eventTypes(recs []eventRec) []string {
 
 // TestFsToolSchemas verifies the D7 shapes the registry compiles and sends to
 // the model (dispatch-m6f-3 §4): additionalProperties false and the required
-// fields for each fs_* tool.
+// fields for each tool.
 func TestFsToolSchemas(t *testing.T) {
 	_, ft, _ := newToolsWithEvents(t)
-	read := ft.Read().Schema()
-	if read["type"] != "object" || read["additionalProperties"] != false {
-		t.Fatalf("fs_read schema = %+v, want type object / additionalProperties false", read)
-	}
-	req, _ := read["required"].([]string)
-	if len(req) != 1 || req[0] != "path" {
-		t.Fatalf("fs_read required = %v, want [path]", req)
-	}
-	props, _ := read["properties"].(map[string]any)
-	if _, ok := props["path"]; !ok {
-		t.Fatal("fs_read path property missing")
-	}
-
 	write := ft.Write().Schema()
 	if write["type"] != "object" || write["additionalProperties"] != false {
-		t.Fatalf("fs_write schema = %+v, want type object / additionalProperties false", write)
+		t.Fatalf("write schema = %+v, want type object / additionalProperties false", write)
 	}
 	wreq, _ := write["required"].([]string)
 	if len(wreq) != 2 || wreq[0] != "path" || wreq[1] != "content" {
-		t.Fatalf("fs_write required = %v, want [path content]", wreq)
+		t.Fatalf("write required = %v, want [path content]", wreq)
 	}
 	wprops, _ := write["properties"].(map[string]any)
 	if _, ok := wprops["content"]; !ok {
-		t.Fatal("fs_write content property missing")
+		t.Fatal("write content property missing")
 	}
 
 	list := ft.List().Schema()
 	if list["type"] != "object" || list["additionalProperties"] != false {
-		t.Fatalf("fs_list schema = %+v, want type object / additionalProperties false", list)
+		t.Fatalf("list schema = %+v, want type object / additionalProperties false", list)
 	}
 	lreq, _ := list["required"].([]string)
 	if len(lreq) != 1 || lreq[0] != "dir" {
-		t.Fatalf("fs_list required = %v, want [dir]", lreq)
+		t.Fatalf("list required = %v, want [dir]", lreq)
+	}
+
+	edit := ft.Edit().Schema()
+	if edit["type"] != "object" || edit["additionalProperties"] != false {
+		t.Fatalf("edit schema = %+v, want type object / additionalProperties false", edit)
+	}
+	ereq, _ := edit["required"].([]string)
+	if len(ereq) != 3 || ereq[0] != "path" || ereq[1] != "old_string" || ereq[2] != "new_string" {
+		t.Fatalf("edit required = %v, want [path old_string new_string]", ereq)
 	}
 }
 
-// TestFsReadToolReadsAndEmits covers the happy path: fs_read returns the file
-// content and lands fs/read (path + byte size) through the event sink
-// (dispatch-m6f-3 §4).
-func TestFsReadToolReadsAndEmits(t *testing.T) {
-	svc, ft, recs := newToolsWithEvents(t)
-	ctx := context.Background()
-	if err := svc.Write(ctx, "notes.txt", "hello fs"); err != nil {
-		t.Fatalf("seed notes.txt: %v", err)
-	}
-	out, err := ft.Read().Execute(ctx, json.RawMessage(`{"path":"notes.txt"}`))
-	if err != nil {
-		t.Fatalf("fs_read: %v", err)
-	}
-	if out != "hello fs" {
-		t.Fatalf("fs_read output = %q, want hello fs", out)
-	}
-	if got := eventTypes(*recs); len(got) != 1 || got[0] != session.EventFsRead {
-		t.Fatalf("emitted types = %v, want [fs/read]", got)
-	}
-	d := decodeEvent[struct {
-		Path string `json:"path"`
-		Size int    `json:"size"`
-	}](t, (*recs)[0])
-	if d.Path != "notes.txt" || d.Size != len("hello fs") {
-		t.Fatalf("fs/read payload = %+v, want path notes.txt / size %d", d, len("hello fs"))
-	}
-}
-
-// TestFsWriteToolWritesAndEmits covers the happy path: fs_write creates the
+// TestFsWriteToolWritesAndEmits covers the happy path: write creates the
 // file (and its missing parents), returns the written path, and lands fs/write
 // through the event sink.
 func TestFsWriteToolWritesAndEmits(t *testing.T) {
@@ -129,10 +97,10 @@ func TestFsWriteToolWritesAndEmits(t *testing.T) {
 	ctx := context.Background()
 	out, err := ft.Write().Execute(ctx, json.RawMessage(`{"path":"a/b/deep.txt","content":"deep"}`))
 	if err != nil {
-		t.Fatalf("fs_write: %v", err)
+		t.Fatalf("write: %v", err)
 	}
 	if !strings.Contains(out, "a/b/deep.txt") {
-		t.Fatalf("fs_write output = %q, want it to carry the written path", out)
+		t.Fatalf("write output = %q, want it to carry the written path", out)
 	}
 	got, err := svc.Read(ctx, "a/b/deep.txt", 0)
 	if err != nil || got != "deep" {
@@ -149,7 +117,7 @@ func TestFsWriteToolWritesAndEmits(t *testing.T) {
 	}
 }
 
-// TestFsListToolListsAndEmits covers the happy path: fs_list returns the
+// TestFsListToolListsAndEmits covers the happy path: list returns the
 // formatted table and lands fs/list (dir + count) through the event sink.
 func TestFsListToolListsAndEmits(t *testing.T) {
 	svc, ft, recs := newToolsWithEvents(t)
@@ -162,10 +130,10 @@ func TestFsListToolListsAndEmits(t *testing.T) {
 	}
 	out, err := ft.List().Execute(ctx, json.RawMessage(`{"dir":"."}`))
 	if err != nil {
-		t.Fatalf("fs_list: %v", err)
+		t.Fatalf("list: %v", err)
 	}
 	if !strings.Contains(out, "[.] 2 entries") || !strings.Contains(out, "notes.txt") || !strings.Contains(out, "d  dir") {
-		t.Fatalf("fs_list output = %q, want the header and both entries", out)
+		t.Fatalf("list output = %q, want the header and both entries", out)
 	}
 	if types := eventTypes(*recs); len(types) != 1 || types[0] != session.EventFsList {
 		t.Fatalf("emitted types = %v, want [fs/list]", types)
@@ -179,29 +147,90 @@ func TestFsListToolListsAndEmits(t *testing.T) {
 	}
 }
 
+// TestFsEditToolReplacesAndEmits covers the dsh edit semantics: the FIRST
+// occurrence is replaced (replace_all replaces every one), the file is written
+// back, and fs/write is emitted. An absent old_string errors and leaves the
+// file untouched.
+func TestFsEditToolReplacesAndEmits(t *testing.T) {
+	svc, ft, recs := newToolsWithEvents(t)
+	ctx := context.Background()
+	if err := svc.Write(ctx, "notes.txt", "alpha beta alpha"); err != nil {
+		t.Fatalf("seed notes.txt: %v", err)
+	}
+	out, err := ft.Edit().Execute(ctx, json.RawMessage(`{"path":"notes.txt","old_string":"alpha","new_string":"gamma"}`))
+	if err != nil {
+		t.Fatalf("edit: %v", err)
+	}
+	if !strings.Contains(out, "notes.txt") {
+		t.Fatalf("edit output = %q, want the edited path", out)
+	}
+	got, err := svc.Read(ctx, "notes.txt", 0)
+	if err != nil || got != "gamma beta alpha" {
+		t.Fatalf("after first-occurrence edit = %q, %v, want gamma beta alpha", got, err)
+	}
+	if types := eventTypes(*recs); len(types) != 1 || types[0] != session.EventFsWrite {
+		t.Fatalf("emitted types = %v, want [fs/write]", types)
+	}
+
+	// replace_all replaces every occurrence.
+	_, err = ft.Edit().Execute(ctx, json.RawMessage(`{"path":"notes.txt","old_string":"alpha","new_string":"x","replace_all":true}`))
+	if err != nil {
+		t.Fatalf("edit all: %v", err)
+	}
+	got, err = svc.Read(ctx, "notes.txt", 0)
+	if err != nil || got != "gamma beta x" {
+		t.Fatalf("after replace-all edit = %q, %v, want gamma beta x", got, err)
+	}
+}
+
+// TestFsEditToolMissingOldStringErrors verifies an absent old_string is an
+// error and the file is left untouched.
+func TestFsEditToolMissingOldStringErrors(t *testing.T) {
+	svc, ft, recs := newToolsWithEvents(t)
+	ctx := context.Background()
+	if err := svc.Write(ctx, "notes.txt", "hello"); err != nil {
+		t.Fatalf("seed notes.txt: %v", err)
+	}
+	if _, err := ft.Edit().Execute(ctx, json.RawMessage(`{"path":"notes.txt","old_string":"nope","new_string":"x"}`)); err == nil {
+		t.Fatal("edit with an absent old_string must error")
+	} else if !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("edit error = %v, want a not-found message", err)
+	}
+	got, err := svc.Read(ctx, "notes.txt", 0)
+	if err != nil || got != "hello" {
+		t.Fatalf("file must stay untouched, got %q, %v", got, err)
+	}
+	if len(*recs) != 0 {
+		t.Fatalf("no event may be emitted on a failed edit, got %v", eventTypes(*recs))
+	}
+}
+
 // TestFsToolsRejectBadArgs verifies the tools' own argument checks (the
-// registry enforces the same via D7): empty path/dir and empty content errors
+// registry enforces the same via D7): empty path/dir/content/old_string errors
 // are returned, and no fs/* event may be emitted on a failed call.
 func TestFsToolsRejectBadArgs(t *testing.T) {
 	_, ft, recs := newToolsWithEvents(t)
 	ctx := context.Background()
-	if _, err := ft.Read().Execute(ctx, json.RawMessage(`{"path":""}`)); err == nil {
-		t.Fatal("fs_read with an empty path must error")
-	}
-	if _, err := ft.Read().Execute(ctx, json.RawMessage(`{}`)); err == nil {
-		t.Fatal("fs_read with no path must error")
-	}
 	if _, err := ft.Write().Execute(ctx, json.RawMessage(`{"path":"","content":"x"}`)); err == nil {
-		t.Fatal("fs_write with an empty path must error")
+		t.Fatal("write with an empty path must error")
 	}
 	if _, err := ft.Write().Execute(ctx, json.RawMessage(`{"path":"x.txt"}`)); err == nil {
-		t.Fatal("fs_write with no content must error")
+		t.Fatal("write with no content must error")
 	}
 	if _, err := ft.List().Execute(ctx, json.RawMessage(`{"dir":""}`)); err == nil {
-		t.Fatal("fs_list with an empty dir must error")
+		t.Fatal("list with an empty dir must error")
 	}
 	if _, err := ft.List().Execute(ctx, json.RawMessage(`{}`)); err == nil {
-		t.Fatal("fs_list with no dir must error")
+		t.Fatal("list with no dir must error")
+	}
+	if _, err := ft.Edit().Execute(ctx, json.RawMessage(`{"path":"","old_string":"a","new_string":"b"}`)); err == nil {
+		t.Fatal("edit with an empty path must error")
+	}
+	if _, err := ft.Edit().Execute(ctx, json.RawMessage(`{"path":"x.txt","old_string":"","new_string":"b"}`)); err == nil {
+		t.Fatal("edit with an empty old_string must error")
+	}
+	if _, err := ft.Edit().Execute(ctx, json.RawMessage(`{"path":"x.txt","old_string":"a"}`)); err == nil {
+		t.Fatal("edit with no new_string must error")
 	}
 	if len(*recs) != 0 {
 		t.Fatalf("no event may be emitted on a failed call, got %v", eventTypes(*recs))
@@ -214,22 +243,22 @@ func TestFsToolsRejectBadArgs(t *testing.T) {
 func TestFsToolsReturnErrorNotPanicOnBoundaryAndMissing(t *testing.T) {
 	_, ft, recs := newToolsWithEvents(t)
 	ctx := context.Background()
-	if _, err := ft.Read().Execute(ctx, json.RawMessage(`{"path":"../escape.txt"}`)); err == nil {
-		t.Fatal("fs_read of an escaping path must error")
-	} else if !strings.Contains(err.Error(), "fs_read:") || strings.Contains(err.Error(), "panic") {
-		t.Fatalf("fs_read error = %v, want a normal fs_read: error", err)
-	}
-	if _, err := ft.Read().Execute(ctx, json.RawMessage(`{"path":"nope.txt"}`)); err == nil {
-		t.Fatal("fs_read of a missing file must error")
-	}
 	if _, err := ft.Write().Execute(ctx, json.RawMessage(`{"path":"../../x","content":"x"}`)); err == nil {
-		t.Fatal("fs_write of an escaping path must error")
+		t.Fatal("write of an escaping path must error")
+	} else if strings.Contains(err.Error(), "panic") {
+		t.Fatalf("write error = %v, must not be a panic", err)
+	}
+	if _, err := ft.Edit().Execute(ctx, json.RawMessage(`{"path":"../../x","old_string":"a","new_string":"b"}`)); err == nil {
+		t.Fatal("edit of an escaping path must error")
 	}
 	if _, err := ft.List().Execute(ctx, json.RawMessage(`{"dir":"../.."}`)); err == nil {
-		t.Fatal("fs_list of an escaping dir must error")
+		t.Fatal("list of an escaping dir must error")
 	}
 	if _, err := ft.List().Execute(ctx, json.RawMessage(`{"dir":"missing"}`)); err == nil {
-		t.Fatal("fs_list of a missing dir must error")
+		t.Fatal("list of a missing dir must error")
+	}
+	if _, err := ft.Edit().Execute(ctx, json.RawMessage(`{"path":"nope.txt","old_string":"a","new_string":"b"}`)); err == nil {
+		t.Fatal("edit of a missing file must error")
 	}
 	if len(*recs) != 0 {
 		t.Fatalf("no event may be emitted on a failed call, got %v", eventTypes(*recs))
