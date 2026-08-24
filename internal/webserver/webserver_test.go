@@ -1204,6 +1204,25 @@ func TestWorkspaceDirectoryBrowserAPI(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("invalid directory name = %d, want 400", rec.Code)
 	}
+
+	// An empty path starts at the configured default workdir rather than
+	// enumerating the user's home root. This is the same path used by
+	// ungrouped sessions and avoids Windows home-directory ACL failures.
+	defaultDir := t.TempDir()
+	srv.SetDefaultWorkdir(defaultDir)
+	rec = doReq(t, h, "GET", "/api/workspaces/directories", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("default directory = %d: %s", rec.Code, rec.Body.String())
+	}
+	var defaultListing struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &defaultListing); err != nil {
+		t.Fatalf("default directory decode: %v", err)
+	}
+	if defaultListing.Path != defaultDir {
+		t.Fatalf("default directory path = %q, want %q", defaultListing.Path, defaultDir)
+	}
 }
 
 func TestWorkspaceSessionCWD(t *testing.T) {
@@ -1661,5 +1680,35 @@ func TestEventViewImages(t *testing.T) {
 	}
 	if evs[0].Images[0].ID != "img-1" || evs[0].Images[0].MediaType != "image/png" {
 		t.Fatalf("image view = %+v, want img-1/png", evs[0].Images[0])
+	}
+}
+
+func TestEventViewHidesInternalContextMessages(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	seedSession(t, st, "s-context", []session.Event{
+		{Seq: 1, Type: session.EventUserMessage, At: time.Now(), Version: 1,
+			Data: mustData(t, session.NewUserMessage("当前目录"))},
+		{Seq: 2, Type: session.EventUserMessage, At: time.Now(), Version: 1,
+			Data: mustData(t, session.NewUserMessage("<system-reminder>\n<available_skills>\n- `demo`: hidden\n</available_skills>\n</system-reminder>"))},
+		{Seq: 3, Type: session.EventUserMessage, At: time.Now(), Version: 1,
+			Data: mustData(t, session.NewUserMessage("Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\nWorking directory: D:\\work"))},
+		{Seq: 4, Type: session.EventUserMessage, At: time.Now(), Version: 1,
+			Data: mustData(t, session.NewUserMessage("<skill_content name=\"demo\">\n<skill_instructions>\nhidden\n</skill_instructions>\n</skill_content>"))},
+	})
+	rec := doReq(t, srv.Handler(), "GET", "/api/sessions/s-context/events", "tok")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("events = %d: %s", rec.Code, rec.Body.String())
+	}
+	var events []eventView
+	if err := json.Unmarshal(rec.Body.Bytes(), &events); err != nil {
+		t.Fatalf("decode events: %v", err)
+	}
+	if len(events) != 4 || events[0].ContextMessage || events[0].Summary != "当前目录" {
+		t.Fatalf("human event = %+v", events[0])
+	}
+	for _, ev := range events[1:] {
+		if !ev.ContextMessage || ev.Summary != "" {
+			t.Fatalf("internal context event = %+v", ev)
+		}
 	}
 }

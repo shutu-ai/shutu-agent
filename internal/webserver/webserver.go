@@ -868,6 +868,7 @@ type eventView struct {
 	Type              string      `json:"type"`
 	Time              time.Time   `json:"time"`
 	Summary           string      `json:"summary"`
+	ContextMessage    bool        `json:"context_message,omitempty"` // model-only runtime/skill context; never a user bubble
 	CompactionID      string      `json:"compaction_id,omitempty"`
 	CompactionSummary string      `json:"compaction_summary,omitempty"`
 	CompactionItems   int         `json:"compaction_items,omitempty"`
@@ -885,13 +886,40 @@ type eventView struct {
 // toEventView builds the public view for one event (bounded summary + the W4
 // extra fields + the P5 image refs).
 func toEventView(ev session.Event) eventView {
-	v := eventView{Seq: ev.Seq, Type: ev.Type, Time: ev.At, Summary: summarize(ev)}
+	contextMessage := isInternalContextMessage(ev)
+	summary := summarize(ev)
+	if contextMessage {
+		// Context is sent to the model, but must not cross the Web conversation
+		// surface as a raw user message. The marker lets the browser advance its
+		// rendered sequence without rendering the internal text.
+		summary = ""
+	}
+	v := eventView{Seq: ev.Seq, Type: ev.Type, Time: ev.At, Summary: summary, ContextMessage: contextMessage}
 	v.CompactionID, v.CompactionSummary, v.CompactionItems, v.CompactionTokens, v.CompactionError, v.CompactionMarker = compactionFields(ev)
 	v.Reasoning, v.ToolName, v.ToolOutput = extraFields(ev)
 	v.Images = extractImages(ev)
 	v.CallID = callIDOf(ev)
 	v.Command = commandOf(ev)
 	return v
+}
+
+// isInternalContextMessage identifies durable user/message rows that are
+// model-facing projections rather than human-authored conversation turns.
+// Older logs do not carry a source discriminator, so the stable dsh-compatible
+// framing is used as a backwards-compatible wire classification.
+func isInternalContextMessage(ev session.Event) bool {
+	if ev.Type != session.EventUserMessage {
+		return false
+	}
+	var d struct {
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(ev.Data, &d) != nil {
+		return false
+	}
+	return strings.HasPrefix(d.Text, "<system-reminder>\n") ||
+		strings.HasPrefix(d.Text, "Current runtime context.") ||
+		strings.HasPrefix(d.Text, "<skill_content name=\"")
 }
 
 // compactionFields exposes the bounded, display-oriented compaction
@@ -1923,6 +1951,7 @@ type workspaceDirectoryListing struct {
 	Home      string                    `json:"home"`
 	Crumbs    []workspaceDirectoryEntry `json:"crumbs"`
 	Entries   []workspaceDirectoryEntry `json:"entries"`
+	ReadError string                    `json:"read_error,omitempty"`
 	Truncated bool                      `json:"truncated"`
 }
 
@@ -1933,9 +1962,13 @@ func (s *Server) handleWorkspaceDirectoryList(w http.ResponseWriter, r *http.Req
 	path := strings.TrimSpace(r.URL.Query().Get("path"))
 	if path == "" {
 		var err error
-		path, err = os.UserHomeDir()
+		// Start at the same directory used by ungrouped sessions and workspaces
+		// without an explicit path. Enumerating the user's home root is not
+		// reliable on Windows (it may be ACL-protected), while ~/shudu is the
+		// application-owned default and is created by sessionDefaultWorkdir.
+		path, err = s.sessionDefaultWorkdir()
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "resolve home: " + err.Error()})
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "resolve default workspace directory: " + err.Error()})
 			return
 		}
 	}
@@ -1956,6 +1989,17 @@ func (s *Server) handleWorkspaceDirectoryList(w http.ResponseWriter, r *http.Req
 	}
 	entries, err := os.ReadDir(abs)
 	if err != nil {
+		if os.IsPermission(err) {
+			// The current directory is still a valid selection even when the
+			// account cannot enumerate its children. Keep the path usable so the
+			// user can choose it or type a child path manually.
+			home, _ := os.UserHomeDir()
+			writeJSON(w, http.StatusOK, workspaceDirectoryListing{
+				Path: abs, Home: home, Crumbs: workspaceDirectoryCrumbs(abs),
+				ReadError: fmt.Sprintf("无法列出子目录：%v；仍可选择当前目录或输入完整路径", err),
+			})
+			return
+		}
 		writeJSON(w, http.StatusForbidden, map[string]any{"error": fmt.Sprintf("read directory %q: %v", abs, err)})
 		return
 	}

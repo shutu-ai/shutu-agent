@@ -1682,16 +1682,11 @@ function renderGrouped(list) {
     if (g.ws) {
       head.querySelector(".gh-add").addEventListener("click", async (e) => {
         e.stopPropagation();
-        try {
-          const res = await api("/api/sessions", {
-            method: "POST", body: JSON.stringify({ workspace_id: g.key }),
-          });
-          const body = await res.json();
-          localStorage.setItem(KEY_CURRENT, body.id);
-          currentID = body.id;
-          await openSession(body.id);
-          loadSessions();
-        } catch (err) { if (err.message !== "unauthorized") console.error(err); }
+        // Creating from a workspace header is also a navigation action: dsh
+        // keeps the target project open so the fresh blank session is visible
+        // immediately, even when the project was collapsed before the click.
+        setWsOpen(g.key, true);
+        await createSessionInWorkspace(g.key);
       });
       head.querySelector(".gh-menu").addEventListener("click", (e) => {
         e.stopPropagation();
@@ -2047,6 +2042,7 @@ function renderWsDir(data) {
   wsDirPath = data.path || "";
   wsDirSelected = wsDirPath;
   $("ws-dir-path").value = wsDirPath;
+  setWsDirError(data.read_error || "");
   const crumbs = $("ws-dir-crumbs");
   crumbs.textContent = "";
   for (const crumb of (data.crumbs || [])) {
@@ -2471,7 +2467,8 @@ async function createSessionInWorkspace(wsId) {
     currentID = b.id;
     localStorage.setItem(KEY_CURRENT, b.id);
     await openSession(b.id);
-    loadSessions();
+    if (wsId) setWsOpen(wsId, true);
+    await loadSessions();
     return true;
   } catch (e) {
     if (e.message !== "unauthorized") { console.error(e); toast("创建会话失败"); }
@@ -3451,6 +3448,10 @@ async function downloadSessionExport() {
 }
 
 function renderEvent(ev, replay) {
+  // Runtime/skill projections are durable model context, not conversation
+  // turns. They remain in the event stream for sequence reconciliation but
+  // must never be rendered as user bubbles.
+  if (ev.context_message) return;
   // First event of an empty session: the turn has begun, so leave the centered
   // hero and dock the composer (dsh: 第一次输入提交后输入条下移).
   if (sessionEmpty) { sessionEmpty = false; setHeroPhase(); }
