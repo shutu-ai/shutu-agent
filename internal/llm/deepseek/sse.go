@@ -58,6 +58,17 @@ func (d *sseDecoder) Next() (string, error) {
 
 // wireChunk is one SSE data payload of a chat.completion.chunk stream.
 type wireChunk struct {
+	Usage *struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+		PromptDetails    *struct {
+			CachedTokens int `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
+		CompletionDetails *struct {
+			ReasoningTokens int `json:"reasoning_tokens"`
+		} `json:"completion_tokens_details"`
+	} `json:"usage"`
 	Choices []struct {
 		Delta struct {
 			Content          string         `json:"content"`
@@ -80,6 +91,7 @@ type streamReader struct {
 	reasoning    strings.Builder // accumulated reasoning_content deltas (M8)
 	toolCalls    []llm.ToolCall  // in first-seen wire order
 	toolIndex    map[int]int     // wire index -> position in toolCalls
+	usage        llm.TokenUsage
 }
 
 func (r *streamReader) Next() (llm.StreamEvent, error) {
@@ -104,12 +116,26 @@ func (r *streamReader) Next() (llm.StreamEvent, error) {
 				FinishReason: r.finishReason,
 				ToolCalls:    r.toolCalls,
 				Reasoning:    r.reasoning.String(), // accumulated reasoning deltas (M8)
+				Usage:        r.usage,
 			}, nil
 		}
 
 		var chunk wireChunk
 		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
 			return llm.StreamEvent{}, fmt.Errorf("deepseek: malformed SSE payload: %w", err)
+		}
+		if chunk.Usage != nil {
+			r.usage = llm.TokenUsage{
+				InputTokens:  chunk.Usage.PromptTokens,
+				OutputTokens: chunk.Usage.CompletionTokens,
+				TotalTokens:  chunk.Usage.TotalTokens,
+			}
+			if chunk.Usage.PromptDetails != nil {
+				r.usage.CachedInputTokens = chunk.Usage.PromptDetails.CachedTokens
+			}
+			if chunk.Usage.CompletionDetails != nil {
+				r.usage.ReasoningTokens = chunk.Usage.CompletionDetails.ReasoningTokens
+			}
 		}
 		for _, choice := range chunk.Choices {
 			if choice.FinishReason != nil {

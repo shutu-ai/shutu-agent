@@ -114,11 +114,14 @@ const (
 	// https://api.anthropic.com/v1 and model claude-sonnet-4-5 (both
 	// configurable, consumed by M8-2b — these must stay in sync with the
 	// internal/llm/anthropic package defaults).
-	DefaultLLMProvider      = "deepseek-official"
-	DefaultOpenAIBaseURL    = "https://api.openai.com/v1"
-	DefaultOpenAIModel      = "gpt-4o-mini"
-	DefaultAnthropicBaseURL = "https://api.anthropic.com/v1"
-	DefaultAnthropicModel   = "claude-sonnet-4-5"
+	DefaultLLMProvider        = "deepseek-official"
+	DefaultOpenAIBaseURL      = "https://api.openai.com/v1"
+	DefaultOpenAIModel        = "gpt-4o-mini"
+	DefaultAnthropicBaseURL   = "https://api.anthropic.com/v1"
+	DefaultAnthropicModel     = "claude-sonnet-4-5"
+	DefaultLLMMaxRetries      = 2
+	DefaultLLMRetryBackoff    = 500 * time.Millisecond
+	DefaultLLMRetryMaxBackoff = 8 * time.Second
 
 	// M8-3 multimodal defaults (dispatch-m8-3 §3 / ADR
 	// 2026-08-20-m8-message-model.md 决策 M8-3): multimodal is ON by default
@@ -152,7 +155,10 @@ const (
 	// GAP-3 workflow defaults (dispatch-gap-3 §5): the ready-task concurrency
 	// cap is 4 when workflow.max_concurrent is absent or non-positive — kept in
 	// sync with workflow.DefaultMaxConcurrent (the same D-GAP-2 cap).
-	DefaultWorkflowMaxConcurrent = 4
+	DefaultWorkflowMaxConcurrent   = 4
+	DefaultWorkflowMaxTotalAgents  = 1000
+	DefaultWorkflowMaxItemsPerCall = 4096
+	DefaultWorkflowSyncTimeoutMS   = 5000
 
 	// Mode presets (ADR 2026-08-20-mode-presets.md D-MODE-1): the top-level
 	// mode selects the agent's capability preset — minimal (极简: 固定 persona
@@ -260,6 +266,7 @@ type LLMConfig struct {
 	// Anthropic carries the Anthropic Messages provider parameters (base_url /
 	// model); the API key is ANTHROPIC_API_KEY from the environment (M8-2b).
 	Anthropic AnthropicProviderConfig `yaml:"anthropic"`
+	Retry     RetryConfig             `yaml:"retry"`
 	// ModelInputModalities is the exact-model capability declaration
 	// (dispatch-m8-3 §3): "text" | "text,image". Empty defaults to "text".
 	// /llm-status displays it as the modalities line.
@@ -268,6 +275,14 @@ type LLMConfig struct {
 	// default (D10): when disabled the composition root creates no attachment
 	// store, /attach is unavailable, and image blocks are never serialized.
 	Multimodal MultimodalConfig `yaml:"multimodal"`
+}
+
+// RetryConfig is the shared request-level retry policy. Retries are attempted
+// only before a stream has yielded data; partial streams are never replayed.
+type RetryConfig struct {
+	MaxRetries     int      `yaml:"max_retries"`
+	InitialBackoff Duration `yaml:"initial_backoff"`
+	MaxBackoff     Duration `yaml:"max_backoff"`
 }
 
 // TerminalConfig is the pwsh-tool + M9 /term REPL policy (ADR
@@ -316,18 +331,21 @@ type RalphConfig struct {
 	Enabled *bool `yaml:"enabled"` // default false (D10)
 }
 
-// WorkflowConfig is the task-DAG orchestration policy (ADR
-// 2026-08-20-standard-gaps.md D-GAP-2 / dispatch-gap-3 §5). The capability is
-// default off (D10): when Enabled is false the composition root registers no
-// workflow_run tool. Enabling workflow also requires subagent (the DAG spawns
-// children through the subagent Runtime). minimal 模式同样关闭 (D-MODE-2).
+// WorkflowConfig is the dsh-compatible workflow policy. The capability is
+// default on through Enabled(nil), matching the personal-agent/dsh opt-out
+// posture; minimal mode still disables it. The Go DAG and external Node
+// JavaScript runner both use the subagent Runtime for child agents.
 type WorkflowConfig struct {
-	// Enabled gates the whole capability: when false, no Engine is created
-	// and workflow_run is neither registered nor whitelisted (D10).
-	Enabled *bool `yaml:"enabled"` // default false (D10)
+	// Enabled gates the whole capability: when false, no workflow_run tool is
+	// registered or whitelisted.
+	Enabled *bool `yaml:"enabled"` // default true (nil means enabled)
 	// MaxConcurrent is the ready-task concurrency cap the engine applies
 	// (D-GAP-2); <= 0 means the default 4.
 	MaxConcurrent int `yaml:"max_concurrent"` // default 4
+	// MaxTotalAgents and MaxItemsPerCall are the dsh script-runner backstops.
+	MaxTotalAgents  int `yaml:"max_total_agents"`   // default 1000
+	MaxItemsPerCall int `yaml:"max_items_per_call"` // default 4096
+	SyncTimeoutMS   int `yaml:"sync_timeout_ms"`    // default 5000
 }
 
 // WebServerConfig is the unified web portal policy (ADR
@@ -1071,6 +1089,9 @@ func applyDefaults(cfg *Config) {
 				cfg.Tools.Enabled = append(cfg.Tools.Enabled, name)
 			}
 		}
+		if cfg.Mode != ModeMinimal && Enabled(cfg.LLM.Multimodal.Enabled) && !contains(cfg.Tools.Enabled, "read_image") {
+			cfg.Tools.Enabled = append(cfg.Tools.Enabled, "read_image")
+		}
 	}
 	// M7-2 web defaults: off by default (D10); the search/query caps, timeouts,
 	// fetch bounds and DeepSeek provider parameters fall back to the defaults.
@@ -1148,6 +1169,15 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.LLM.Anthropic.Model == "" {
 		cfg.LLM.Anthropic.Model = DefaultAnthropicModel
+	}
+	if cfg.LLM.Retry.MaxRetries <= 0 {
+		cfg.LLM.Retry.MaxRetries = DefaultLLMMaxRetries
+	}
+	if cfg.LLM.Retry.InitialBackoff.Duration <= 0 {
+		cfg.LLM.Retry.InitialBackoff.Duration = DefaultLLMRetryBackoff
+	}
+	if cfg.LLM.Retry.MaxBackoff.Duration <= 0 {
+		cfg.LLM.Retry.MaxBackoff.Duration = DefaultLLMRetryMaxBackoff
 	}
 	// M8-3 multimodal defaults (dispatch-m8-3 §3): model_input_modalities 缺省
 	// "text"；multimodal.max_image_bytes 缺省 10MiB（非正值钳到默认，校验非负: 负值
@@ -1258,6 +1288,15 @@ func applyDefaults(cfg *Config) {
 	if cfg.Workflow.MaxConcurrent <= 0 {
 		cfg.Workflow.MaxConcurrent = DefaultWorkflowMaxConcurrent
 	}
+	if cfg.Workflow.MaxTotalAgents <= 0 {
+		cfg.Workflow.MaxTotalAgents = DefaultWorkflowMaxTotalAgents
+	}
+	if cfg.Workflow.MaxItemsPerCall <= 0 {
+		cfg.Workflow.MaxItemsPerCall = DefaultWorkflowMaxItemsPerCall
+	}
+	if cfg.Workflow.SyncTimeoutMS <= 0 {
+		cfg.Workflow.SyncTimeoutMS = DefaultWorkflowSyncTimeoutMS
+	}
 	// M10a web portal defaults (ADR 2026-08-20-m10-web-portal.md): addr defaults
 	// to the local-only personal portal; token is left for the composition root
 	// to fail closed on when enabled.
@@ -1331,7 +1370,11 @@ var jobsToolNames = []string{"job_start", "job_status", "job_cancel", "job_wait"
 // are registered and whitelisted only when subagent is enabled; keeping the
 // names here makes the "subagent.enabled ⇒ 工具自动白名单" rule a single, tested
 // fact shared by applyDefaults and the composition root.
-var subagentToolNames = []string{"subagent_spawn", "subagent_status", "subagent_cancel", "subagent_list"}
+var subagentToolNames = []string{
+	"subagent_spawn", "subagent_status", "subagent_cancel", "subagent_list",
+	"subagent_send", "subagent_interrupt", "subagent_report",
+	"subagent_resume",
+}
 
 // skillToolNames are the skill consumer tools (dispatch-m5d-2 §2). skill_load
 // is registered and whitelisted only when skill is enabled; keeping the name

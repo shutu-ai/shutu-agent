@@ -27,9 +27,13 @@ package fs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
+	"github.com/jabing/shutu-agent/internal/llm"
 	"github.com/jabing/shutu-agent/internal/session"
 )
 
@@ -37,24 +41,27 @@ import (
 // config.fsToolNames). read is the base tool (registered unconditionally);
 // write / list / edit live on this seam (dsh: read/write/edit).
 const (
-	ToolWriteName = "write"
-	ToolListName  = "list"
-	ToolEditName  = "edit"
+	ToolReadName      = "read"
+	ToolReadImageName = "read_image"
+	ToolWriteName     = "write"
+	ToolListName      = "list"
+	ToolEditName      = "edit"
 )
 
 // FsTools bundles the shared state of the fs file tools: the FileService
 // and the event sink. Keeping the bundle as fields keeps the constructor's
 // signature the seam contract and the tool package decoupled from config (D2).
 type FsTools struct {
-	f       FileService
-	onEvent func(typ string, data any)
+	f        FileService
+	onEvent  func(typ string, data any)
+	observed map[string]string
 }
 
 // NewFsTools returns the file tool bundle bound to a FileService. onEvent,
 // when non-nil, receives the fs/* event payloads; the composition root wires
 // it to the session log (D3).
 func NewFsTools(f FileService, onEvent func(typ string, data any)) *FsTools {
-	return &FsTools{f: f, onEvent: onEvent}
+	return &FsTools{f: f, onEvent: onEvent, observed: make(map[string]string)}
 }
 
 // emit forwards one fs/* event payload to the injected sink (D3).
@@ -65,6 +72,10 @@ func (t *FsTools) emit(typ string, data any) {
 }
 
 // Write returns the write tool.
+func (t *FsTools) Read() FsReadTool { return FsReadTool{t: t} }
+
+func (t *FsTools) ReadImage() FsReadImageTool { return FsReadImageTool{t: t} }
+
 func (t *FsTools) Write() FsWriteTool { return FsWriteTool{t: t} }
 
 // List returns the list tool.
@@ -72,6 +83,200 @@ func (t *FsTools) List() FsListTool { return FsListTool{t: t} }
 
 // Edit returns the edit tool.
 func (t *FsTools) Edit() FsEditTool { return FsEditTool{t: t} }
+
+// FsReadTool implements bounded, line-numbered read and records the observed
+// file version for the later write/edit observation policy.
+type FsReadTool struct {
+	t *FsTools
+}
+
+func (FsReadTool) Name() string { return ToolReadName }
+
+func (FsReadTool) Description() string {
+	return "read a bounded, line-numbered text window from a file inside the allowed fs root"
+}
+
+func (FsReadTool) Schema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"path":   map[string]any{"type": "string"},
+			"offset": map[string]any{"type": "integer", "minimum": 1},
+			"limit":  map[string]any{"type": "integer", "minimum": 1},
+		},
+		"required":             []string{"path"},
+		"additionalProperties": false,
+	}
+}
+
+func (t FsReadTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	var a struct {
+		Path   string `json:"path"`
+		Offset int    `json:"offset"`
+		Limit  int    `json:"limit"`
+	}
+	if err := json.Unmarshal(args, &a); err != nil {
+		return "", fmt.Errorf("read: %w", err)
+	}
+	if strings.TrimSpace(a.Path) == "" {
+		return "", fmt.Errorf("read: empty path")
+	}
+	content, err := t.t.f.Read(ctx, a.Path, 0)
+	if err != nil {
+		return "", fmt.Errorf("read: %w", err)
+	}
+	version, err := t.t.f.Fingerprint(ctx, a.Path)
+	if err != nil {
+		return "", fmt.Errorf("read: fingerprint: %w", err)
+	}
+	t.t.observed[t.t.key(a.Path)] = version
+	t.t.emit(session.EventFsRead, session.NewFsRead(a.Path, len(content)))
+	return formatReadWindow(content, a.Offset, a.Limit), nil
+}
+
+const (
+	maxReadLines = 2000
+	maxReadChars = 2000
+	maxReadBytes = 51200
+)
+
+func formatReadWindow(content string, offset, limit int) string {
+	if offset < 1 {
+		offset = 1
+	}
+	if limit <= 0 || limit > maxReadLines {
+		limit = maxReadLines
+	}
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	start := offset - 1
+	if start >= len(lines) {
+		return ""
+	}
+	end := start + limit
+	if end > len(lines) {
+		end = len(lines)
+	}
+	var out strings.Builder
+	chars := 0
+	for i := start; i < end && chars < maxReadChars; i++ {
+		line := lines[i]
+		remaining := maxReadChars - chars
+		runes := []rune(line)
+		if len(runes) > remaining {
+			line = string(runes[:remaining])
+		}
+		row := fmt.Sprintf("%d\t%s\n", i+1, line)
+		if out.Len()+len(row) > maxReadBytes {
+			break
+		}
+		out.WriteString(row)
+		chars += len([]rune(line))
+	}
+	return strings.TrimSuffix(out.String(), "\n")
+}
+
+func (t *FsTools) key(path string) string {
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path)
+	}
+	return filepath.Join(t.f.Root(), filepath.Clean(path))
+}
+
+func (t *FsTools) requireObserved(ctx context.Context, path string) error {
+	version, err := t.f.Fingerprint(ctx, path)
+	if err != nil {
+		return err
+	}
+	observed, ok := t.observed[t.key(path)]
+	if !ok {
+		return fmt.Errorf("file must be read before write/edit")
+	}
+	if observed != version {
+		return fmt.Errorf("file changed since it was read")
+	}
+	return nil
+}
+
+// FsReadImageTool returns an image attachment reference as a rich tool result.
+// The bytes stay on disk and are loaded by the provider only when it serializes
+// the next request.
+type FsReadImageTool struct {
+	t *FsTools
+}
+
+func (FsReadImageTool) Name() string { return ToolReadImageName }
+
+func (FsReadImageTool) Description() string {
+	return "read an image inside the allowed fs root and provide it to a vision-capable model"
+}
+
+func (FsReadImageTool) Schema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"path": map[string]any{"type": "string"},
+		},
+		"required":             []string{"path"},
+		"additionalProperties": false,
+	}
+}
+
+func (t FsReadImageTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	_, text, err := t.ExecuteContent(ctx, args)
+	return text, err
+}
+
+func (t FsReadImageTool) ExecuteContent(ctx context.Context, args json.RawMessage) ([]llm.ContentBlock, string, error) {
+	var a struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(args, &a); err != nil {
+		return nil, "", fmt.Errorf("read_image: %w", err)
+	}
+	if strings.TrimSpace(a.Path) == "" {
+		return nil, "", fmt.Errorf("read_image: empty path")
+	}
+	mediaType := map[string]string{
+		".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+		".webp": "image/webp", ".gif": "image/gif",
+	}[strings.ToLower(filepath.Ext(a.Path))]
+	if mediaType == "" {
+		return nil, "", fmt.Errorf("read_image: unsupported image type")
+	}
+	data, err := t.t.f.ReadBytes(ctx, a.Path, 20*1024*1024)
+	if err != nil {
+		return nil, "", fmt.Errorf("read_image: %w", err)
+	}
+	full := a.Path
+	if !filepath.IsAbs(full) {
+		full = filepath.Join(t.t.f.Root(), full)
+	}
+	ref := llm.ImageRef{
+		MediaType: mediaType,
+		Bytes:     int64(len(data)),
+		Path:      filepath.Clean(full),
+	}
+	t.t.emit(session.EventFsRead, session.NewFsRead(a.Path, len(data)))
+	return []llm.ContentBlock{{Kind: llm.BlockImage, Image: ref}}, "image " + a.Path, nil
+}
+
+func (t *FsTools) checkWriteObservation(ctx context.Context, path string) error {
+	version, err := t.f.Fingerprint(ctx, path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil // creating a new file needs no prior observation
+		}
+		return err
+	}
+	observed, ok := t.observed[t.key(path)]
+	if !ok {
+		return fmt.Errorf("file must be read before overwriting")
+	}
+	if observed != version {
+		return fmt.Errorf("file changed since it was read")
+	}
+	return nil
+}
 
 // FsWriteTool creates or overwrites a text file inside the allowed fs root
 // (missing parent directories are created on demand) and returns the written
@@ -118,9 +323,13 @@ func (t FsWriteTool) Execute(ctx context.Context, args json.RawMessage) (string,
 	if a.Content == nil {
 		return "", fmt.Errorf("write: missing content")
 	}
+	if err := t.t.checkWriteObservation(ctx, a.Path); err != nil {
+		return "", fmt.Errorf("write: %w", err)
+	}
 	if err := t.t.f.Write(ctx, a.Path, *a.Content); err != nil {
 		return "", fmt.Errorf("write: %w", err)
 	}
+	delete(t.t.observed, t.t.key(a.Path))
 	t.t.emit(session.EventFsWrite, session.NewFsWrite(a.Path))
 	return fmt.Sprintf("wrote %s (%d bytes)", a.Path, len(*a.Content)), nil
 }
@@ -228,6 +437,9 @@ func (t FsEditTool) Execute(ctx context.Context, args json.RawMessage) (string, 
 	if a.OldString == "" {
 		return "", fmt.Errorf("edit: empty old_string")
 	}
+	if err := t.t.requireObserved(ctx, a.Path); err != nil {
+		return "", fmt.Errorf("edit: %w", err)
+	}
 	content, err := t.t.f.Read(ctx, a.Path, 0)
 	if err != nil {
 		return "", fmt.Errorf("edit: %w", err)
@@ -243,9 +455,13 @@ func (t FsEditTool) Execute(ctx context.Context, args json.RawMessage) (string, 
 	if updated == content {
 		return "", fmt.Errorf("edit: old_string not found in %s", a.Path)
 	}
+	if err := t.t.requireObserved(ctx, a.Path); err != nil {
+		return "", fmt.Errorf("edit: %w", err)
+	}
 	if err := t.t.f.Write(ctx, a.Path, updated); err != nil {
 		return "", fmt.Errorf("edit: %w", err)
 	}
+	delete(t.t.observed, t.t.key(a.Path))
 	t.t.emit(session.EventFsWrite, session.NewFsWrite(a.Path))
 	return fmt.Sprintf("edited %s", a.Path), nil
 }

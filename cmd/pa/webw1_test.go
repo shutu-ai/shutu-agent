@@ -104,8 +104,8 @@ func TestRunTurnSerial(t *testing.T) {
 	if llm.calls != 5 {
 		t.Fatalf("LLM calls = %d, want 5", llm.calls)
 	}
-	if n := len(a.log.Events()); n != 15 { // 5 turns × (user/message + assistant/chunk + assistant/message)
-		t.Fatalf("log events = %d, want 15", n)
+	if n := len(a.log.Events()); n != 35 { // 5 turns × (turn/user/step/chunk/assistant/step/turn)
+		t.Fatalf("log events = %d, want 35", n)
 	}
 }
 

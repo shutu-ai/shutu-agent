@@ -6,15 +6,15 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+
+	"github.com/jabing/shutu-agent/internal/session"
 )
 
-// memProvider is the default in-memory Provider (ADR 决策 M6b). Every goal and
-// plan lives in memory only — nothing is persisted and no files are touched —
-// so a process restart clears the plan table by construction. It is safe for
-// concurrent use and performs no reference validation: the Engine is the
-// validation boundary (Put/Get/Delete are called through by the Engine). A
-// store-backed Provider can replace it without touching Engine or consumer
-// code.
+// memProvider is the default in-memory Provider (ADR 决策 M6b). It is a
+// disposable query projection: Restore folds the durable session event log
+// back into it after startup or session switching. It is safe for concurrent
+// use and performs no reference validation: the Engine is the validation
+// boundary (Put/Get/Delete are called through by the Engine).
 type memProvider struct {
 	mu     sync.Mutex
 	goals  map[string]Goal
@@ -33,6 +33,23 @@ func newMemProvider() *memProvider {
 		goals: map[string]Goal{},
 		plans: map[string]Plan{},
 	}
+}
+
+// Restore replaces the in-memory projection with the state folded from the
+// session event log. The replacement is atomic from readers' perspective.
+func (m *memProvider) Restore(events []session.Event) error {
+	goals, plans, err := restoreEvents(events)
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return ErrProviderClosed
+	}
+	m.goals = goals
+	m.plans = plans
+	return nil
 }
 
 // Name identifies the provider in the registry ("memory").

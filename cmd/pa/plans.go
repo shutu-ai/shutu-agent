@@ -18,9 +18,9 @@ import (
 	"github.com/jabing/shutu-agent/internal/tools"
 )
 
-// registerPlans creates the in-memory Provider + Engine and registers the six
-// plan_* tools when plan.enabled, and wires the D3 event sink. When plan is
-// disabled it creates nothing and registers nothing (D10, mirrors
+// registerPlans creates the event-replayable Provider + Engine and registers
+// the six plan_* tools when plan.enabled, and wires the D3 event sink. When
+// plan is disabled it creates nothing and registers nothing (D10, mirrors
 // registerJobs/registerSchedules).
 func (a *app) registerPlans() error {
 	if !config.Enabled(a.cfg.Plan.Enabled) {
@@ -53,4 +53,18 @@ func (a *app) registerPlans() error {
 		}
 	}
 	return nil
+}
+
+// restorePlans rebuilds the current session's plan projection from its event
+// log. The session log is authoritative; the provider is only a disposable
+// query projection and is therefore reset on every new/resumed session.
+func (a *app) restorePlans() error {
+	if a.plans == nil || a.log == nil {
+		return nil
+	}
+	r, ok := a.plans.(plan.EventRestorer)
+	if !ok {
+		return fmt.Errorf("pa: plan engine cannot restore session events")
+	}
+	return r.Restore(a.log.Events())
 }

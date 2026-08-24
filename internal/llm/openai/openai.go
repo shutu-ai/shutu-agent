@@ -43,6 +43,9 @@ type Config struct {
 	// MaxRequestImageBytes is the per-request image byte budget (dispatch-m8-3b
 	// §4.1); non-positive uses the default 20MiB.
 	MaxRequestImageBytes int
+	// DisableRetry delegates request retrying to the shared wrapper used by
+	// the composition root.
+	DisableRetry bool
 }
 
 // openaiProvider is an llm.Provider delegating the OpenAI-compatible SSE wire
@@ -73,6 +76,7 @@ func New(cfg Config) *openaiProvider {
 			Model:                cfg.Model,
 			SupportsImages:       cfg.SupportsImages,
 			MaxRequestImageBytes: cfg.MaxRequestImageBytes,
+			DisableRetry:         cfg.DisableRetry,
 		}),
 	}
 }

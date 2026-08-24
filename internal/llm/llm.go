@@ -6,6 +6,26 @@ package llm
 
 import "context"
 
+// TokenUsage is provider-neutral token accounting attached to a completed stream.
+type TokenUsage struct {
+	InputTokens       int `json:"inputTokens,omitempty"`
+	OutputTokens      int `json:"outputTokens,omitempty"`
+	TotalTokens       int `json:"totalTokens,omitempty"`
+	ReasoningTokens   int `json:"reasoningTokens,omitempty"`
+	CachedInputTokens int `json:"cachedInputTokens,omitempty"`
+}
+
+func (u TokenUsage) Empty() bool {
+	return u.InputTokens == 0 && u.OutputTokens == 0 && u.TotalTokens == 0 && u.ReasoningTokens == 0 && u.CachedInputTokens == 0
+}
+
+type RetryEvent struct {
+	Attempt    int
+	MaxRetries int
+	DelayMS    int64
+	Error      string
+}
+
 // Role is a provider-neutral conversation role, mirroring the OpenAI wire
 // vocabulary used by the DeepSeek chat completions API.
 type Role string
@@ -66,11 +86,18 @@ type StreamEvent struct {
 	Reasoning    string     // StreamFinish: accumulated reasoning text
 	FinishReason string     // StreamFinish: stop | tool_calls | ...
 	ToolCalls    []ToolCall // StreamFinish: complete calls in model order
+	Usage        TokenUsage // StreamFinish: provider usage, when available
 }
 
 // StreamReader yields StreamEvents until io.EOF.
 type StreamReader interface {
 	Next() (StreamEvent, error)
+}
+
+// RetryInfo is optionally implemented by a reader returned from the shared retry wrapper.
+type RetryInfo interface {
+	Attempts() int
+	RetryEvents() []RetryEvent
 }
 
 // LLM is the adapter interface every provider implements.

@@ -29,7 +29,7 @@ func makeFsApp(fsEnabled bool, root string) *app {
 // them (in production config.applyDefaults + PolicyFromConfig do this).
 func fsPolicy() tools.Policy {
 	return tools.Policy{
-		Enabled:     []string{"write", "list", "edit"},
+		Enabled:     []string{"read", "write", "list", "edit"},
 		Timeout:     0,
 		OutputLimit: 0,
 	}
@@ -78,7 +78,7 @@ func TestRegisterFsEnabledRegistersAndValidates(t *testing.T) {
 	for _, s := range a.reg.Specs() {
 		found[s.Name] = true
 	}
-	for _, name := range []string{"write", "list", "edit"} {
+	for _, name := range []string{"read", "write", "list", "edit"} {
 		if !found[name] {
 			t.Fatalf("%s not registered when fs.enabled=true", name)
 		}
@@ -119,11 +119,11 @@ func TestRegisterFsEnabledRegistersAndValidates(t *testing.T) {
 	if !hasEvent(a.log, session.EventFsList) {
 		t.Fatal("fs/list event missing from the session log after list")
 	}
+	if _, err := a.reg.Execute(context.Background(), "read", json.RawMessage(`{"path":"notes.txt"}`)); err != nil {
+		t.Fatalf("read via registry: %v", err)
+	}
 	if _, err := a.reg.Execute(context.Background(), "edit", json.RawMessage(`{"path":"notes.txt","old_string":"hello","new_string":"edited"}`)); err != nil {
 		t.Fatalf("edit via registry: %v", err)
-	}
-	if _, err := a.reg.Execute(context.Background(), "read", json.RawMessage(`{"path":"notes.txt"}`)); err == nil {
-		t.Fatal("read must not be registered by the fs seam (it is the base tool)")
 	}
 	// The events are log-only: nothing derives into model-visible messages.
 	if msgs := a.log.DeriveHistory(); len(msgs) != 0 {

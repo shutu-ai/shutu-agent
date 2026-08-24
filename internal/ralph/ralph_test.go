@@ -92,6 +92,37 @@ func TestRunBlocked(t *testing.T) {
 	}
 }
 
+func TestRunStructuredReport(t *testing.T) {
+	eng := mustEngine(t, &fakeSpawn{outputs: []string{
+		`{"status":"continue","summary":"implemented core","handoff":["run tests"]}`,
+		`{"status":"complete","result":"all tests pass","handoff":["ready"]}`,
+	}})
+	rep, err := eng.Run(context.Background(), "ship", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.Done || rep.Final != "all tests pass" || len(rep.RoundReports) != 2 {
+		t.Fatalf("structured report = %+v", rep)
+	}
+	if rep.RoundReports[0].Status != "continue" || len(rep.RoundReports[0].Handoff) != 1 {
+		t.Fatalf("first handoff = %+v", rep.RoundReports[0])
+	}
+}
+
+func TestRunDSHStructuredReport(t *testing.T) {
+	eng := mustEngine(t, &fakeSpawn{outputs: []string{
+		`{"status":"continue","summary":"implemented core","evidence":["go test passes"],"nextSteps":["run integration tests"],"blocker":""}`,
+		`{"status":"complete","summary":"finished","evidence":["integration tests pass"],"nextSteps":[],"blocker":""}`,
+	}})
+	rep, err := eng.Run(context.Background(), "ship", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.Done || len(rep.RoundReports) != 2 || len(rep.RoundReports[0].Evidence) != 1 || len(rep.RoundReports[0].NextSteps) != 1 {
+		t.Fatalf("dsh structured report = %+v", rep)
+	}
+}
+
 // TestRunProgressThenDone: a progress report carries the loop into round two,
 // where the DONE reply ends it with both briefs recorded.
 func TestRunProgressThenDone(t *testing.T) {

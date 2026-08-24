@@ -7,12 +7,10 @@
 // wiring) depend only on the seam's interfaces (D2), so swapping or persisting
 // the backend never touches consumer code.
 //
-// The default Provider is the in-memory memProvider (mem.go): every record
-// lives in memory only — nothing is persisted and no files are touched — so a
-// process restart clears the plan table by construction. Persisting the tree
-// to the store layer is deliberately deferred to M6b-2 or later: the seam
-// already isolates that change behind the Provider interface, so a store-backed
-// Provider can be added without touching Engine or consumer code.
+// The default Provider is the in-memory memProvider (mem.go), used as a
+// disposable projection. The composition root rebuilds it from the current
+// session event log on startup and session switch; the store remains the
+// durable source of truth and no second plan table is introduced.
 //
 // Status values follow the dsh goal/plan-mode/tool-todo vocabulary (pending →
 // in-progress → blocked / done / cancelled). A record that reaches done gets a

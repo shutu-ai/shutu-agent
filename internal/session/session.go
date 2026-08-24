@@ -14,6 +14,13 @@ import (
 
 // Event type discriminators (v1 vocabulary, see design.md §3).
 const (
+	EventTurnStart          = "turn/start"
+	EventTurnEnd            = "turn/end"
+	EventStepStart          = "step/start"
+	EventStepEnd            = "step/end"
+	EventLLMRequestStart    = "llm/request_start"
+	EventLLMRequestEnd      = "llm/request_end"
+	EventLLMRetry           = "llm/retry"
 	EventUserMessage        = "user/message"
 	EventAssistantChunk     = "assistant/chunk"
 	EventAssistantReasoning = "assistant/reasoning" // M8: one streamed reasoning delta
@@ -79,7 +86,13 @@ const (
 	// event, and DeriveHistory treats this type as opaque data, so adding it
 	// never changes the turn/step structure (D4). The payload is a lean summary
 	// — the task/completed/failed counts — never the task outputs.
-	EventWorkflowRun = "workflow/run"
+	EventWorkflowRun        = "workflow/run"
+	EventWorkflowStart      = "workflow/start"
+	EventWorkflowPhase      = "workflow/phase"
+	EventWorkflowLog        = "workflow/log"
+	EventWorkflowAgentStart = "workflow/agent-start"
+	EventWorkflowAgentEnd   = "workflow/agent-end"
+	EventWorkflowEnd        = "workflow/end"
 
 	// M5b subagent events (design.md §3 / ADR 2026-08-18-m5-agent-core.md
 	// 决策 ② / dispatch-m5b-2 §1): subagent/start lands when a delegation
@@ -93,6 +106,11 @@ const (
 	EventSubagentStart  = "subagent/start"
 	EventSubagentEnd    = "subagent/end"
 	EventSubagentReport = "subagent/report"
+
+	// Goal-round driver events (dsh goal-round-driver): opaque lifecycle facts
+	// for same-session continuation. The prompt itself remains a user/message.
+	EventGoalRoundStart = "goal/round_start"
+	EventGoalRoundEnd   = "goal/round_end"
 
 	// M5c compaction events (design.md §3 / ADR 2026-08-18-m5-agent-core.md
 	// 决策 ③ / dispatch-m5c-2 §1): compaction/start lands when a compaction
@@ -419,10 +437,14 @@ func derive(events []Event) []llm.Message {
 			if json.Unmarshal(ev.Data, &d) != nil {
 				continue
 			}
+			content := d.Content
+			if len(content) == 0 {
+				content = []llm.ContentBlock{llm.Text(d.Output)}
+			}
 			out = append(out, tagged{msg: llm.Message{
 				Role:       llm.RoleTool,
 				ToolCallID: d.CallID,
-				Content:    []llm.ContentBlock{llm.Text(d.Output)},
+				Content:    content,
 			}, seq: ev.Seq})
 		case EventToolError:
 			var d toolErrorData
@@ -451,6 +473,72 @@ type userMessageData struct {
 	Text      string             `json:"text"`
 	Content   []llm.ContentBlock `json:"content,omitempty"`   // M8-3 reservation: content blocks (images); not written this milestone
 	SurfaceOp *SurfaceReplace    `json:"surfaceOp,omitempty"` // set by compaction summaries (M5c)
+}
+
+type turnStartData struct{}
+
+type turnEndData struct {
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+}
+
+type stepData struct {
+	Step   int    `json:"step"`
+	Status string `json:"status,omitempty"`
+	Error  string `json:"error,omitempty"`
+}
+
+type llmRequestData struct {
+	Provider string          `json:"provider,omitempty"`
+	Model    string          `json:"model,omitempty"`
+	Effort   string          `json:"reasoningEffort,omitempty"`
+	Status   string          `json:"status,omitempty"`
+	Error    string          `json:"error,omitempty"`
+	Usage    *llm.TokenUsage `json:"usage,omitempty"`
+	Attempts int             `json:"attempts,omitempty"`
+}
+
+// NewTurnStart and NewTurnEnd provide durable lifecycle anchors for a turn.
+func NewTurnStart() any { return turnStartData{} }
+
+func NewTurnEnd(status, errText string) any {
+	return turnEndData{Status: status, Error: errText}
+}
+
+// NewStepStart and NewStepEnd provide durable lifecycle anchors for a model
+// request/tool step. They are opaque to history derivation.
+func NewStepStart(step int) any { return stepData{Step: step} }
+
+func NewStepEnd(step int, status, errText string) any {
+	return stepData{Step: step, Status: status, Error: errText}
+}
+
+func NewLLMRequestStart(provider, model, effort string) any {
+	return llmRequestData{Provider: provider, Model: model, Effort: effort}
+}
+
+func NewLLMRequestEnd(provider, model, effort, status, errText string) any {
+	return llmRequestData{Provider: provider, Model: model, Effort: effort, Status: status, Error: errText}
+}
+
+func NewLLMRequestEndWithUsage(provider, model, effort, status, errText string, usage llm.TokenUsage, attempts int) any {
+	var u *llm.TokenUsage
+	if !usage.Empty() {
+		copy := usage
+		u = &copy
+	}
+	return llmRequestData{Provider: provider, Model: model, Effort: effort, Status: status, Error: errText, Usage: u, Attempts: attempts}
+}
+
+func NewLLMRetry(provider, model string, retry llm.RetryEvent) any {
+	return struct {
+		Provider   string `json:"provider,omitempty"`
+		Model      string `json:"model,omitempty"`
+		Attempt    int    `json:"attempt"`
+		MaxRetries int    `json:"maxRetries"`
+		DelayMS    int64  `json:"delayMs"`
+		Error      string `json:"error,omitempty"`
+	}{Provider: provider, Model: model, Attempt: retry.Attempt, MaxRetries: retry.MaxRetries, DelayMS: retry.DelayMS, Error: retry.Error}
 }
 
 // surfaceReplaceOp is the only SurfaceReplace operation currently defined: the
@@ -482,17 +570,21 @@ type assistantReasoningData struct {
 }
 
 type assistantMessageData struct {
-	Text         string         `json:"text"`
-	Reasoning    string         `json:"reasoning,omitempty"` // assistant reasoning (M8, D3): folded to a reasoning block on derive
-	ToolCalls    []llm.ToolCall `json:"toolCalls,omitempty"`
-	FinishReason string         `json:"finishReason,omitempty"`
+	Text         string          `json:"text"`
+	Reasoning    string          `json:"reasoning,omitempty"` // assistant reasoning (M8, D3): folded to a reasoning block on derive
+	ToolCalls    []llm.ToolCall  `json:"toolCalls,omitempty"`
+	FinishReason string          `json:"finishReason,omitempty"`
+	Interrupted  bool            `json:"interrupted,omitempty"`
+	Usage        *llm.TokenUsage `json:"usage,omitempty"`
 }
 
 type toolResultData struct {
-	CallID string    `json:"callId"`
-	Name   string    `json:"name"`
-	Output string    `json:"output"`
-	Spill  *SpillRef `json:"spill,omitempty"` // set when the output was truncated and spilled
+	CallID  string             `json:"callId"`
+	Name    string             `json:"name"`
+	Output  string             `json:"output"`
+	Spill   *SpillRef          `json:"spill,omitempty"` // set when the output was truncated and spilled
+	Code    string             `json:"code,omitempty"`
+	Content []llm.ContentBlock `json:"content,omitempty"`
 }
 
 // toolStartData is the tool/start payload: a tool call dispatched, before its
@@ -568,6 +660,26 @@ func NewAssistantMessage(text string, toolCalls []llm.ToolCall, finishReason str
 	return assistantMessageData{Text: text, ToolCalls: toolCalls, FinishReason: finishReason, Reasoning: r}
 }
 
+func NewAssistantMessageWithUsage(text string, toolCalls []llm.ToolCall, finishReason, reasoning string, usage llm.TokenUsage) any {
+	var u *llm.TokenUsage
+	if !usage.Empty() {
+		copy := usage
+		u = &copy
+	}
+	return assistantMessageData{Text: text, ToolCalls: toolCalls, FinishReason: finishReason, Reasoning: reasoning, Usage: u}
+}
+
+// NewInterruptedAssistantMessage closes a stream that was interrupted after
+// producing partial output, preserving that output for replay/history.
+func NewInterruptedAssistantMessage(text string, toolCalls []llm.ToolCall, reasoning string) any {
+	return assistantMessageData{
+		Text:        text,
+		ToolCalls:   toolCalls,
+		Reasoning:   reasoning,
+		Interrupted: true,
+	}
+}
+
 // NewToolStart builds the tool/start payload logged the moment a tool call
 // dispatches (dsh: the row appears running before it settles).
 func NewToolStart(callID, name, args string) any {
@@ -578,6 +690,19 @@ func NewToolStart(callID, name, args string) any {
 // truncation record (non-nil only when the output was spilled to disk, M3).
 func NewToolResult(callID, name, output string, spill *SpillRef) any {
 	return toolResultData{CallID: callID, Name: name, Output: output, Spill: spill}
+}
+
+// NewToolResultWithContent records a tool result carrying provider-neutral
+// content blocks, such as a read_image attachment reference.
+func NewToolResultWithContent(callID, name, output string, content []llm.ContentBlock) any {
+	return toolResultData{CallID: callID, Name: name, Output: output, Content: content}
+}
+
+// NewAbortedToolResult records a tool call that was present in the assistant
+// response but could not be dispatched because the turn was cancelled.
+func NewAbortedToolResult(callID, name string) any {
+	const code = "ABORTED_BEFORE_DISPATCH"
+	return toolResultData{CallID: callID, Name: name, Output: code, Code: code}
 }
 
 // NewToolError builds one failed tool/error payload.
@@ -798,6 +923,7 @@ type subagentStartData struct {
 	Provider      string `json:"provider"`
 	ParentSession string `json:"parentSession,omitempty"`
 	Label         string `json:"label,omitempty"`
+	Depth         int    `json:"depth,omitempty"`
 }
 
 // subagentEndData is the subagent/end payload: a terminal settle (stop reason
@@ -827,6 +953,13 @@ func NewSubagentStart(childID, provider, parentSessionID, label string) any {
 	return subagentStartData{ID: childID, Provider: provider, ParentSession: parentSessionID, Label: label}
 }
 
+// NewSubagentStartWithDepth is the durable child-session variant. The parent
+// session can reconstruct lineage after a process restart without changing
+// the older parent-log payload constructor.
+func NewSubagentStartWithDepth(childID, provider, parentSessionID, label string, depth int) any {
+	return subagentStartData{ID: childID, Provider: provider, ParentSession: parentSessionID, Label: label, Depth: depth}
+}
+
 // NewSubagentEnd builds the subagent/end payload recorded when a child settles
 // (dispatch-m5b-2 §1 / D3). output is bounded to a summary head (200 runes,
 // the same on-disk bound as job/done) so the payload is always lean.
@@ -838,6 +971,27 @@ func NewSubagentEnd(childID, provider, stopReason, outputSummary string) any {
 // explicitly reports to its parent session (dispatch-m5b-2 §1 / D3).
 func NewSubagentReport(childID, parentSessionID, content string) any {
 	return subagentReportData{ID: childID, ParentSession: parentSessionID, Content: content}
+}
+
+type goalRoundStartData struct {
+	GoalID string `json:"goalId"`
+	Round  int    `json:"round"`
+	Prompt string `json:"prompt,omitempty"`
+}
+
+type goalRoundEndData struct {
+	GoalID string `json:"goalId"`
+	Round  int    `json:"round"`
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+}
+
+func NewGoalRoundStart(goalID string, round int, prompt string) any {
+	return goalRoundStartData{GoalID: goalID, Round: round, Prompt: summaryHead(prompt)}
+}
+
+func NewGoalRoundEnd(goalID string, round int, status, errText string) any {
+	return goalRoundEndData{GoalID: goalID, Round: round, Status: status, Error: summaryHead(errText)}
 }
 
 // compactionStartData is the compaction/start payload: why a compaction
@@ -1007,6 +1161,9 @@ type planCreateData struct {
 	// Acceptance carries the todo's eval criteria (nil for goals/plans, and
 	// omitted from the payload when empty).
 	Acceptance []string `json:"acceptance,omitempty"`
+	// Detail is an optional full-record snapshot used by the plan projection
+	// during restart. Older events intentionally omit it and remain readable.
+	Detail map[string]any `json:"detail,omitempty"`
 }
 
 // planUpdateData is the plan/update payload: the tree level and id of an
@@ -1043,8 +1200,12 @@ type planListData struct {
 // plan_plan / plan_todo store a goal/plan/todo (dispatch-m6b-2 §1 / D3).
 // acceptance is the todo's optional eval criteria list (ADR D-EVAL-4); goals
 // and plans pass nil.
-func NewPlanCreate(scope, id, title string, acceptance []string) any {
-	return planCreateData{Scope: scope, ID: id, Title: title, Acceptance: acceptance}
+func NewPlanCreate(scope, id, title string, acceptance []string, detail ...map[string]any) any {
+	var snapshot map[string]any
+	if len(detail) > 0 {
+		snapshot = detail[0]
+	}
+	return planCreateData{Scope: scope, ID: id, Title: title, Acceptance: acceptance, Detail: snapshot}
 }
 
 // NewPlanUpdate builds the plan/update payload — reserved vocabulary for a

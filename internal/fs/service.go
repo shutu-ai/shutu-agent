@@ -59,6 +59,8 @@ type FileService interface {
 	// maxSize (or DefaultMaxReadSize when maxSize <= 0) is rejected with
 	// ErrTooLarge before it is read.
 	Read(ctx context.Context, path string, maxSize int) (string, error)
+	// ReadBytes returns raw bytes for bounded binary resources such as images.
+	ReadBytes(ctx context.Context, path string, maxSize int) ([]byte, error)
 	// Write creates or overwrites the file at path (within Root) with
 	// content. A path that escapes the root is rejected with
 	// ErrPathOutsideRoot; missing parent directories are created on demand.
@@ -67,6 +69,8 @@ type FileService interface {
 	// dir (within Root), sorted by name. A path that escapes the root or a
 	// missing directory errors.
 	List(ctx context.Context, dir string) ([]Entry, error)
+	// Fingerprint returns a stable content version used by observation policy.
+	Fingerprint(ctx context.Context, path string) (string, error)
 	// Root returns the absolute, cleaned allowed root (the configured fs.root,
 	// defaulting to <project>, the process working directory).
 	Root() string

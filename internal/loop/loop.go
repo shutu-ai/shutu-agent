@@ -47,6 +47,7 @@ type Loop struct {
 	toolSpecs func() []llm.ToolSchema // per-session model-facing tool surface (dsh presentation mode)
 	prompt    *prompt.Builder
 	model     string
+	provider  string
 	effort    string
 	recall    func(context.Context, string) []llm.Message // M4b hook, kept as the first injector
 	preStep   []PreStepInjector                           // additional injectors, in registration order
@@ -62,6 +63,9 @@ type Config struct {
 	Tools  *tools.Registry
 	Prompt *prompt.Builder
 	Model  string
+	// Provider is persisted in request metadata when set; empty preserves the
+	// legacy in-memory/test behavior.
+	Provider string
 	// ToolSpecs, when set, is the session's model-facing tool surface (dsh
 	// presentation mode: standard = native tools minus run_code, PTC = only
 	// run_code, minimal = the fixed seam). It is called on every step; when
@@ -102,6 +106,7 @@ func New(cfg Config) *Loop {
 		toolSpecs: cfg.ToolSpecs,
 		prompt:    cfg.Prompt,
 		model:     cfg.Model,
+		provider:  cfg.Provider,
 		effort:    cfg.ReasoningEffort,
 		recall:    cfg.Recall,
 		preStep:   append([]PreStepInjector(nil), cfg.PreStep...),
@@ -113,7 +118,22 @@ func New(cfg Config) *Loop {
 // Run executes one turn for the given user input. It appends user/message,
 // then runs steps until the model stops requesting tools or maxSteps is hit.
 // The supplied context cancels the current step (design.md §4).
-func (l *Loop) Run(ctx context.Context, userText string) error {
+func (l *Loop) Run(ctx context.Context, userText string) (runErr error) {
+	if _, err := l.log.Append(session.EventTurnStart, session.NewTurnStart()); err != nil {
+		return err
+	}
+	defer func() {
+		status := "completed"
+		if runErr != nil {
+			status = "failed"
+			if errors.Is(runErr, context.Canceled) || errors.Is(runErr, context.DeadlineExceeded) {
+				status = "cancelled"
+			}
+		}
+		if _, err := l.log.Append(session.EventTurnEnd, session.NewTurnEnd(status, errorText(runErr))); err != nil && runErr == nil {
+			runErr = err
+		}
+	}()
 	if _, err := l.log.Append(session.EventUserMessage, session.NewUserMessage(userText)); err != nil {
 		return err
 	}
@@ -131,7 +151,7 @@ func (l *Loop) Run(ctx context.Context, userText string) error {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("loop: cancelled: %w", err)
 		}
-		done, err := l.step(ctx, contextMsgs)
+		done, err := l.step(ctx, contextMsgs, step+1)
 		if err != nil {
 			return err
 		}
@@ -215,7 +235,23 @@ func truncateRunes(s string, max int) string {
 // (true, nil) when the turn is complete (no tool calls requested). contextMsgs
 // are prepended to the request (after the system prompt, before the derived
 // history).
-func (l *Loop) step(ctx context.Context, contextMsgs []llm.Message) (bool, error) {
+func (l *Loop) step(ctx context.Context, contextMsgs []llm.Message, stepNumber int) (done bool, stepErr error) {
+	if _, err := l.log.Append(session.EventStepStart, session.NewStepStart(stepNumber)); err != nil {
+		return false, err
+	}
+	defer func() {
+		status := "completed"
+		if stepErr != nil {
+			status = "failed"
+			if errors.Is(stepErr, context.Canceled) || errors.Is(stepErr, context.DeadlineExceeded) {
+				status = "cancelled"
+			}
+		}
+		if _, err := l.log.Append(session.EventStepEnd, session.NewStepEnd(stepNumber, status, errorText(stepErr))); err != nil && stepErr == nil {
+			stepErr = err
+			done = false
+		}
+	}()
 	history := l.log.DeriveHistory()
 	specs := l.tools.Specs()
 	if l.toolSpecs != nil {
@@ -229,23 +265,64 @@ func (l *Loop) step(ctx context.Context, contextMsgs []llm.Message) (bool, error
 	messages = append(messages, contextMsgs...)
 	messages = append(messages, history...)
 
-	reader, err := l.llm.Stream(ctx, llm.ChatRequest{Model: l.model, ReasoningEffort: l.effort, Messages: messages, Tools: specs})
+	if l.provider != "" {
+		if _, err := l.log.Append(session.EventLLMRequestStart, session.NewLLMRequestStart(l.provider, l.model, l.effort)); err != nil {
+			return false, err
+		}
+	}
+	reader, err := l.llm.Stream(ctx, llm.ChatRequest{Provider: l.provider, Model: l.model, ReasoningEffort: l.effort, Messages: messages, Tools: specs})
 	if err != nil {
+		attempts := 1
+		if l.provider != "" {
+			if info, ok := err.(llm.RetryInfo); ok {
+				attempts = info.Attempts()
+				for _, retryEvent := range info.RetryEvents() {
+					if _, appendErr := l.log.Append(session.EventLLMRetry, session.NewLLMRetry(l.provider, l.model, retryEvent)); appendErr != nil {
+						return false, appendErr
+					}
+				}
+			}
+			_, _ = l.log.Append(session.EventLLMRequestEnd, session.NewLLMRequestEndWithUsage(l.provider, l.model, l.effort, "error", err.Error(), llm.TokenUsage{}, attempts))
+		}
 		return false, err
+	}
+	attempts := 1
+	if info, ok := reader.(llm.RetryInfo); ok {
+		attempts = info.Attempts()
+		if l.provider != "" {
+			for _, retryEvent := range info.RetryEvents() {
+				if _, appendErr := l.log.Append(session.EventLLMRetry, session.NewLLMRetry(l.provider, l.model, retryEvent)); appendErr != nil {
+					return false, appendErr
+				}
+			}
+		}
 	}
 
 	var text strings.Builder
 	var reasoning string
 	var calls []llm.ToolCall
 	var finishReason string
+	var usage llm.TokenUsage
 	for {
 		ev, err := reader.Next()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				break
 			}
+			// Keep a durable assistant anchor when a stream was interrupted
+			// after producing content. Without this row DeriveHistory would
+			// discard the already logged chunk/reasoning rows on resume.
+			if text.Len() > 0 || reasoning != "" {
+				if _, aerr := l.log.Append(session.EventAssistantMessage,
+					session.NewInterruptedAssistantMessage(text.String(), calls, reasoning)); aerr != nil {
+					return false, aerr
+				}
+			}
 			if l.onError != nil {
 				l.onError(err)
+			}
+			if l.provider != "" {
+				_, _ = l.log.Append(session.EventLLMRequestEnd, session.NewLLMRequestEndWithUsage(l.provider, l.model, l.effort, "error", err.Error(), usage, attempts))
 			}
 			return false, err
 		}
@@ -271,17 +348,29 @@ func (l *Loop) step(ctx context.Context, contextMsgs []llm.Message) (bool, error
 			calls = ev.ToolCalls
 			finishReason = ev.FinishReason
 			reasoning = ev.Reasoning // accumulated by the reader (M8)
+			usage = ev.Usage
 		}
 	}
 
-	if _, err := l.log.Append(session.EventAssistantMessage, session.NewAssistantMessage(text.String(), calls, finishReason, reasoning)); err != nil {
+	if _, err := l.log.Append(session.EventAssistantMessage, session.NewAssistantMessageWithUsage(text.String(), calls, finishReason, reasoning, usage)); err != nil {
 		return false, err
+	}
+	if l.provider != "" {
+		if _, err := l.log.Append(session.EventLLMRequestEnd, session.NewLLMRequestEndWithUsage(l.provider, l.model, l.effort, "completed", "", usage, attempts)); err != nil {
+			return false, err
+		}
 	}
 	if len(calls) == 0 {
 		return true, nil
 	}
-	for _, call := range calls {
+	for i, call := range calls {
 		if err := ctx.Err(); err != nil {
+			for _, aborted := range calls[i:] {
+				if _, aerr := l.log.Append(session.EventToolResult,
+					session.NewAbortedToolResult(aborted.ID, aborted.Name)); aerr != nil {
+					return false, aerr
+				}
+			}
 			return false, fmt.Errorf("loop: cancelled: %w", err)
 		}
 		// tool/start: the call is dispatched — the UI shows the running row
@@ -299,10 +388,21 @@ func (l *Loop) step(ctx context.Context, contextMsgs []llm.Message) (bool, error
 			if res.SpillPath != "" {
 				spill = &session.SpillRef{Locator: res.SpillPath, Bytes: res.SpillBytes}
 			}
-			if _, aerr := l.log.Append(session.EventToolResult, session.NewToolResult(call.ID, call.Name, res.Output, spill)); aerr != nil {
+			var payload any = session.NewToolResult(call.ID, call.Name, res.Output, spill)
+			if len(res.Content) > 0 {
+				payload = session.NewToolResultWithContent(call.ID, call.Name, res.Output, res.Content)
+			}
+			if _, aerr := l.log.Append(session.EventToolResult, payload); aerr != nil {
 				return false, aerr
 			}
 		}
 	}
 	return false, nil
+}
+
+func errorText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }

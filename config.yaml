@@ -38,6 +38,13 @@ llm:
     base_url: https://api.anthropic.com/v1
     # Chat model (M8-2b).
     model: claude-sonnet-4-5
+  # Shared request-level retry policy. Retries happen before stream data starts;
+  # a partially received stream is never replayed. 429/network/5xx are retryable;
+  # other 4xx errors fail closed.
+  retry:
+    max_retries: 2
+    initial_backoff: 500ms
+    max_backoff: 8s
     # API key: ANTHROPIC_API_KEY environment variable only (M8-2b, 纪律 6).
   # Exact-model input-modality capability declaration (M8-3, dispatch-m8-3 §3):
   # "text" | "text,image". /llm-status shows it as the modalities line. This is
@@ -488,26 +495,21 @@ ralph:
   # whitelisted (默认关 D10，不初始化).
   enabled: true
 
-# Task-DAG orchestration capability (GAP-3; ADR 2026-08-20-standard-gaps.md
-# D-GAP-2 / docs/dispatch-gap-3.md). Off by default (D10): when disabled the
-# composition root registers no workflow_run tool and whitelists nothing
-# (默认关闭，不初始化). When enabled, workflow_run submits a declarative task DAG
-# (tasks[] with id/prompt/depends_on) that the engine topologically sorts and
-# executes layer by layer — dependency-free tasks spawn concurrently (bounded
-# by max_concurrent, D-GAP-2), a dependent receives the bounded output summaries
-# of its dependencies, and a failed dependency never blocks its dependents. No
-# JS engine: the JSON DAG is the declarative form (用户拍板). The per-task
-# reports reach the model through the tool's tool/result, and workflow/run is
-# logged as a fact (D3). The tool runs on the serial tool path (D5). Enabling
-# workflow also requires subagent (the DAG spawns children through the subagent
-# Runtime).
+# Workflow orchestration: dsh-compatible JavaScript script is the dynamic path
+# (meta/script/args, agent/parallel/pipeline/phase/log); tasks[] remains the
+# Go-native DAG compatibility path. The capability defaults on (nil means on,
+# explicit false opts out), and minimal mode disables it. Node.js is an external
+# runtime; the Go binary itself has no Node dependency.
 workflow:
-  # Master switch. false ⇒ no workflow Engine is created and workflow_run is
-  # neither registered nor whitelisted (默认关 D10，不初始化).
+  # Master switch. false ⇒ no workflow_run is registered or whitelisted.
   enabled: true
   # Ready-task concurrency cap (how many DAG tasks spawn in parallel within one
   # layer); 0/absent ⇒ 4.
   max_concurrent: 4
+  # JavaScript runner backstops; 0/absent uses dsh-aligned defaults.
+  max_total_agents: 1000
+  max_items_per_call: 4096
+  sync_timeout_ms: 5000
 
 # Web 门户 (M10a, ADR 2026-08-20-m10-web-portal.md; 统一 webServer: dsh 式会话/
 # 事件浏览入口 + 后续 dashboard/KB 管理台). 默认关 D10: enabled=false 不启动
@@ -517,5 +519,3 @@ web_server:
   enabled: true
   addr: 127.0.0.1:18099
   token: ""
-
-

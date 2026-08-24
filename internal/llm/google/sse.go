@@ -56,6 +56,13 @@ func (d *sseDecoder) Next() (string, error) {
 
 // wireChunk is one SSE data payload of a streamGenerateContent response.
 type wireChunk struct {
+	UsageMetadata *struct {
+		PromptTokenCount        int `json:"promptTokenCount"`
+		CandidatesTokenCount    int `json:"candidatesTokenCount"`
+		TotalTokenCount         int `json:"totalTokenCount"`
+		CachedContentTokenCount int `json:"cachedContentTokenCount"`
+		ThoughtsTokenCount      int `json:"thoughtsTokenCount"`
+	} `json:"usageMetadata"`
 	Candidates []struct {
 		Content struct {
 			Role  string `json:"role"`
@@ -76,6 +83,7 @@ type streamReader struct {
 	finishReason string
 	reasoning    strings.Builder
 	toolCalls    []llm.ToolCall
+	usage        llm.TokenUsage
 }
 
 func (r *streamReader) Next() (llm.StreamEvent, error) {
@@ -99,6 +107,15 @@ func (r *streamReader) Next() (llm.StreamEvent, error) {
 		var chunk wireChunk
 		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
 			return llm.StreamEvent{}, fmt.Errorf("google: malformed SSE payload: %w", err)
+		}
+		if chunk.UsageMetadata != nil {
+			r.usage = llm.TokenUsage{
+				InputTokens:       chunk.UsageMetadata.PromptTokenCount,
+				OutputTokens:      chunk.UsageMetadata.CandidatesTokenCount,
+				TotalTokens:       chunk.UsageMetadata.TotalTokenCount,
+				CachedInputTokens: chunk.UsageMetadata.CachedContentTokenCount,
+				ReasoningTokens:   chunk.UsageMetadata.ThoughtsTokenCount,
+			}
 		}
 		for _, cand := range chunk.Candidates {
 			if cand.FinishReason != "" {
@@ -141,6 +158,7 @@ func (r *streamReader) finish(fallback string) llm.StreamEvent {
 		FinishReason: reason,
 		ToolCalls:    r.toolCalls,
 		Reasoning:    r.reasoning.String(),
+		Usage:        r.usage,
 	}
 }
 

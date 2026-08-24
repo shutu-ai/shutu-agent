@@ -33,10 +33,14 @@ import (
 
 // Tool names (whitelisted when subagent.enabled; see config.subagentToolNames).
 const (
-	ToolSpawnName  = "subagent_spawn"
-	ToolStatusName = "subagent_status"
-	ToolCancelName = "subagent_cancel"
-	ToolListName   = "subagent_list"
+	ToolSpawnName     = "subagent_spawn"
+	ToolStatusName    = "subagent_status"
+	ToolCancelName    = "subagent_cancel"
+	ToolListName      = "subagent_list"
+	ToolSendName      = "subagent_send"
+	ToolInterruptName = "subagent_interrupt"
+	ToolReportName    = "subagent_report"
+	ToolResumeName    = "subagent_resume"
 )
 
 // defaultProviderName is the provider subagent_spawn delegates to. v1 ships a
@@ -101,6 +105,18 @@ func (t *SubagentTools) Cancel() SubagentCancelTool { return SubagentCancelTool{
 
 // List returns the subagent_list tool.
 func (t *SubagentTools) List() SubagentListTool { return SubagentListTool{t: t} }
+
+// Send returns the continuable-child message tool.
+func (t *SubagentTools) Send() SubagentSendTool { return SubagentSendTool{t: t} }
+
+// Interrupt returns the dsh-compatible interrupt alias for cancellation.
+func (t *SubagentTools) Interrupt() SubagentInterruptTool { return SubagentInterruptTool{t: t} }
+
+// Report returns the explicit child-to-parent report event tool.
+func (t *SubagentTools) Report() SubagentReportTool { return SubagentReportTool{t: t} }
+
+// Resume returns the persisted-child cold-resume tool.
+func (t *SubagentTools) Resume() SubagentResumeTool { return SubagentResumeTool{t: t} }
 
 // callerSession returns the active session id (the delegating session for a
 // spawn and the parent filter for subagent_list); "" when no owner provider is
@@ -206,6 +222,10 @@ func (SubagentSpawnTool) Schema() map[string]any {
 				"enum":        []string{"spawn", "codex", "claude-code"},
 				"description": "subagent provider: spawn (default, local) | codex | claude-code (external CLI; must be enabled in config)",
 			},
+			"continuable": map[string]any{
+				"type":        "boolean",
+				"description": "keep the child alive after a turn so subagent_send can queue follow-up messages",
+			},
 		},
 		"required":             []string{"prompt"},
 		"additionalProperties": false,
@@ -220,6 +240,7 @@ func (t SubagentSpawnTool) Execute(ctx context.Context, args json.RawMessage) (s
 		MaxDepth           int      `json:"max_depth"`
 		AcceptanceCriteria []string `json:"acceptance_criteria"`
 		Provider           string   `json:"provider"`
+		Continuable        bool     `json:"continuable"`
 	}
 	if err := json.Unmarshal(args, &a); err != nil {
 		return "", fmt.Errorf("subagent_spawn: %w", err)
@@ -253,6 +274,7 @@ func (t SubagentSpawnTool) Execute(ctx context.Context, args json.RawMessage) (s
 		ParentSessionID:    parent,
 		MaxDepth:           maxDepth,
 		AcceptanceCriteria: a.AcceptanceCriteria,
+		Continuable:        a.Continuable,
 	})
 	if err != nil {
 		return "", fmt.Errorf("subagent_spawn: %w", err)
@@ -262,6 +284,140 @@ func (t SubagentSpawnTool) Execute(ctx context.Context, args json.RawMessage) (s
 	return fmt.Sprintf("started subagent %s (provider=%s, label=%q, parent=%s); "+
 		"observe with subagent_status/subagent_list, cancel with subagent_cancel",
 		run.ID, provider, label, parent), nil
+}
+
+// SubagentSendTool queues a follow-up message for a live continuable child.
+type SubagentSendTool struct{ t *SubagentTools }
+
+func (SubagentSendTool) Name() string { return ToolSendName }
+func (SubagentSendTool) Description() string {
+	return "send a follow-up message to a live continuable subagent"
+}
+func (SubagentSendTool) Schema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"id":      map[string]any{"type": "string", "minLength": 1},
+			"message": map[string]any{"type": "string", "minLength": 1},
+		},
+		"required":             []string{"id", "message"},
+		"additionalProperties": false,
+	}
+}
+func (t SubagentSendTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	var a struct {
+		ID      string `json:"id"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(args, &a); err != nil {
+		return "", fmt.Errorf("%s: %w", ToolSendName, err)
+	}
+	info, _, _ := t.t.lookup(a.ID)
+	if info == nil {
+		return "", fmt.Errorf("%s: unknown subagent %q", ToolSendName, a.ID)
+	}
+	if info.run.Send == nil {
+		return "", fmt.Errorf("%s: %w", ToolSendName, ErrNotContinuable)
+	}
+	if err := info.run.Send(ctx, a.Message); err != nil {
+		return "", fmt.Errorf("%s: %w", ToolSendName, err)
+	}
+	return "queued", nil
+}
+
+// SubagentInterruptTool is the dsh-compatible name for interrupting the
+// current child turn. It shares cancellation semantics with subagent_cancel.
+type SubagentInterruptTool struct{ t *SubagentTools }
+
+func (SubagentInterruptTool) Name() string        { return ToolInterruptName }
+func (SubagentInterruptTool) Description() string { return "interrupt a live subagent turn" }
+func (SubagentInterruptTool) Schema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"id":     map[string]any{"type": "string", "minLength": 1},
+			"reason": map[string]any{"type": "string"},
+		},
+		"required":             []string{"id"},
+		"additionalProperties": false,
+	}
+}
+func (t SubagentInterruptTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	return SubagentCancelTool{t: t.t}.Execute(ctx, args)
+}
+
+// SubagentReportTool records an explicit report on the parent session's event
+// stream. The report is intentionally bounded by the normal tool output cap;
+// the event payload itself remains a simple opaque session fact.
+type SubagentReportTool struct{ t *SubagentTools }
+
+func (SubagentReportTool) Name() string { return ToolReportName }
+func (SubagentReportTool) Description() string {
+	return "send a bounded report from a subagent to its parent session"
+}
+func (SubagentReportTool) Schema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"id":      map[string]any{"type": "string", "minLength": 1},
+			"content": map[string]any{"type": "string", "minLength": 1},
+		},
+		"required":             []string{"id", "content"},
+		"additionalProperties": false,
+	}
+}
+func (t SubagentReportTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	var a struct {
+		ID      string `json:"id"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(args, &a); err != nil {
+		return "", fmt.Errorf("%s: %w", ToolReportName, err)
+	}
+	info, _, _ := t.t.lookup(a.ID)
+	if info == nil {
+		return "", fmt.Errorf("%s: unknown subagent %q", ToolReportName, a.ID)
+	}
+	t.t.emit(session.EventSubagentReport, session.NewSubagentReport(a.ID, info.parent, a.Content))
+	return "reported", nil
+}
+
+// SubagentResumeTool reactivates a persisted local child session after a
+// process restart. The provider restores the child log; this tool only adds
+// the live run to the current process registry.
+type SubagentResumeTool struct{ t *SubagentTools }
+
+func (SubagentResumeTool) Name() string { return ToolResumeName }
+func (SubagentResumeTool) Description() string {
+	return "resume a persisted local subagent session with a new message"
+}
+func (SubagentResumeTool) Schema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"id":          map[string]any{"type": "string", "minLength": 1},
+			"message":     map[string]any{"type": "string", "minLength": 1},
+			"continuable": map[string]any{"type": "boolean"},
+		},
+		"required":             []string{"id", "message"},
+		"additionalProperties": false,
+	}
+}
+func (t SubagentResumeTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	var a struct {
+		ID          string `json:"id"`
+		Message     string `json:"message"`
+		Continuable bool   `json:"continuable"`
+	}
+	if err := json.Unmarshal(args, &a); err != nil {
+		return "", fmt.Errorf("%s: %w", ToolResumeName, err)
+	}
+	run, err := t.t.rt.Resume(ctx, defaultProviderName, a.ID, a.Message, a.Continuable)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", ToolResumeName, err)
+	}
+	t.t.register(run.ID, &childInfo{run: run, provider: defaultProviderName, label: "resumed"})
+	return fmt.Sprintf("resumed subagent %s", run.ID), nil
 }
 
 // SubagentStatusTool returns one subagent's summary: running while live, or

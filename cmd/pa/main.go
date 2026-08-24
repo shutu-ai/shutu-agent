@@ -138,9 +138,11 @@ func main() {
 		fmt.Fprintln(os.Stderr, "pa:", err)
 		os.Exit(1)
 	}
-	if err := reg.Register(tools.ReadFile{}); err != nil {
-		fmt.Fprintln(os.Stderr, "pa:", err)
-		os.Exit(1)
+	if !config.Enabled(cfg.Fs.Enabled) {
+		if err := reg.Register(tools.NewReadFile(cfg.Fs.Root)); err != nil {
+			fmt.Fprintln(os.Stderr, "pa:", err)
+			os.Exit(1)
+		}
 	}
 	if cfg.Tools.RunCommand.Enabled {
 		if err := reg.Register(tools.NewRunCommand(cfg.Tools.RunCommand.Workdir)); err != nil {
@@ -680,6 +682,9 @@ func (a *app) newSession(ctx context.Context) error {
 	}
 	a.currentID = id
 	a.log = session.New()
+	if err := a.restorePlans(); err != nil {
+		return err
+	}
 	a.attachSink(ctx)
 	a.bindSpillOwner()
 	a.markSessionViewed(ctx, id)
@@ -704,6 +709,9 @@ func (a *app) resumeSession(ctx context.Context, id string) error {
 	a.currentID = id
 	a.log = session.New()
 	if err := a.log.Restore(events); err != nil {
+		return err
+	}
+	if err := a.restorePlans(); err != nil {
 		return err
 	}
 	a.attachSink(ctx)
@@ -804,6 +812,9 @@ func (a *app) newLoopFor(rt sessionRuntime, interactive bool) *loop.Loop {
 // per-session mode is active. effort is the thinking-effort selection ("" keeps
 // the provider default).
 func (a *app) buildLoop(onText func(string), onError func(error), provider, model, effort, mode string, pb *prompt.Builder) *loop.Loop {
+	if provider == "" {
+		provider = a.cfg.LLM.Provider
+	}
 	if model == "" {
 		model = a.cfg.Model
 	}
@@ -821,6 +832,7 @@ func (a *app) buildLoop(onText func(string), onError func(error), provider, mode
 		ToolSpecs:       func() []llm.ToolSchema { return toolSpecsForMode(mode, a.reg.Specs()) },
 		Prompt:          pb,
 		Model:           model,
+		Provider:        provider,
 		ReasoningEffort: effort,
 		Recall:          a.recall,
 		// M5c-2b: the "compaction" pre-step injector (auto token-pressure
@@ -1054,6 +1066,13 @@ func (a *app) repl(ctx context.Context) {
 			// materialize the deterministic fallback and schedule the
 			// asynchronous model title.
 			a.ensureSessionTitle(ctx, a.currentID)
+			// Goal driver idle/followup: once the user-facing turn and its
+			// post-turn hooks settle, continue the newest active goal in the
+			// same session. runIdleGoal re-enters only through runTurn, never
+			// from inside a plan tool execution.
+			if err := a.runIdleGoal(ctx, true); err != nil {
+				fmt.Fprintln(os.Stderr, "\npa: goal:", err)
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {

@@ -220,7 +220,10 @@ func (a *app) webMessage(ctx context.Context, sessionID, text string, images []l
 	// commands (/new, /resume) stay on the sidebar/+ menu, which already drive
 	// them through the session manager.
 	if len(images) == 0 && strings.HasPrefix(strings.TrimSpace(text), "/") {
-		return a.webCommand(ctx, strings.TrimSpace(text))
+		if err := a.webCommand(ctx, strings.TrimSpace(text)); err != nil {
+			return err
+		}
+		return a.runIdleGoal(ctx, false)
 	}
 	if len(images) > 0 {
 		if !a.multimodalEnabled() || a.attachStore == nil {
@@ -251,6 +254,11 @@ func (a *app) webMessage(ctx context.Context, sessionID, text string, images []l
 	// scheduled. This runs after the turn, outside turnMu, so it never delays
 	// the answer.
 	a.ensureSessionTitle(ctx, sessionID)
+	// Goal driver idle/followup: the outer web turn has settled, so each
+	// continuation round can acquire the shared turn lock independently.
+	if err := a.runIdleGoal(ctx, false); err != nil {
+		return err
+	}
 	// dsh-session-status: keep this session out of the finished-but-unviewed
 	// reminder while the user is on it (the turn above bumped updated_at past
 	// the previous view, so this restores last_viewed_at >= updated_at).

@@ -30,6 +30,12 @@ type Tool interface {
 	Execute(ctx context.Context, args json.RawMessage) (string, error)
 }
 
+// ContentTool is an optional rich-result extension for tools such as
+// read_image. Text-only tools continue to implement Tool unchanged.
+type ContentTool interface {
+	ExecuteContent(ctx context.Context, args json.RawMessage) ([]llm.ContentBlock, string, error)
+}
+
 // Result is the outcome of one tool execution after the Execute pipeline has
 // applied the timeout and output cap. Output is the model-facing text (the
 // truncated head plus the locator notice when spilled); SpillPath is the
@@ -38,6 +44,7 @@ type Result struct {
 	Output     string
 	SpillPath  string // non-empty => Output was truncated and the full text spilled
 	SpillBytes int    // full output size in bytes (when spilled)
+	Content    []llm.ContentBlock
 }
 
 // Owner binds the registry's spill naming to the active session. It is set by
@@ -75,6 +82,29 @@ func New() *Registry {
 		schemas: map[string]*jsonschema.Schema{},
 		policy:  DefaultPolicy(),
 	}
+}
+
+// Clone returns an independent registry view for a child scope. Tool
+// implementations are intentionally shared, while the schema map, policy,
+// owner and gate are copied so a scoped capability (for example dsh's
+// structured_output tool) cannot mutate the parent registry.
+func (r *Registry) Clone() *Registry {
+	clone := &Registry{
+		tools:       make(map[string]Tool, len(r.tools)),
+		schemas:     make(map[string]*jsonschema.Schema, len(r.schemas)),
+		policy:      r.policy,
+		owner:       r.owner,
+		gate:        r.gate,
+		fallbackSeq: r.fallbackSeq,
+	}
+	clone.policy.Enabled = append([]string(nil), r.policy.Enabled...)
+	for name, tool := range r.tools {
+		clone.tools[name] = tool
+	}
+	for name, schema := range r.schemas {
+		clone.schemas[name] = schema
+	}
+	return clone
 }
 
 // SetPolicy installs the Execute pipeline's safety policy (M3). The REPL
@@ -207,14 +237,23 @@ func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessag
 		defer cancel()
 	}
 
-	out, err := t.Execute(execCtx, args)
+	var content []llm.ContentBlock
+	var out string
+	var err error
+	if rich, ok := t.(ContentTool); ok {
+		content, out, err = rich.ExecuteContent(execCtx, args)
+	} else {
+		out, err = t.Execute(execCtx, args)
+	}
 	if err != nil {
 		if execCtx.Err() == context.DeadlineExceeded {
 			return Result{}, fmt.Errorf("tools: %s: timed out after %s: %w", name, timeout, err)
 		}
 		return Result{}, err
 	}
-	return r.applyOutputCap(name, out), nil
+	result := r.applyOutputCap(name, out)
+	result.Content = content
+	return result, nil
 }
 
 // applyOutputCap truncates oversized results and spills the full text. A spill

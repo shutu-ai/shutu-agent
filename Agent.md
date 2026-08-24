@@ -169,6 +169,72 @@ go run ./cmd/pa       # 启动 REPL（M1 后可用，需 DEEPSEEK_API_KEY）
 **防跑偏红线**：实施会话的报告不作为验收依据；越界功能（超出里程碑范围）一律退回，不合并。
 
 ## 9. 参考链接
+## 10. dsh 对齐改进目标（2026-08-23，当前执行目标）
+
+本节是当前 Agent 实施与复核的目标清单，优先级高于历史里程碑中“loop 严格串行、不得修改”的旧约束。目标是逐步提高 `shutu-agent` 与当前 `deepseek-harness` 的行为一致性；不追求把 TypeScript/Cordis 插件运行时原样搬到 Go。
+
+### 实施顺序与验收标准
+
+1. **Loop 持久化与取消语义（P0）**
+   - 流式响应被取消或中断时，必须落库带 `interrupted` 标记的 `assistant/message`，不能丢失已生成文本/推理。
+   - 一个 assistant 响应包含多个工具调用时，取消发生在中途时，尚未派发的调用必须落库合成的 aborted tool result。
+   - 增加 turn/step 生命周期事件，保留现有历史回放兼容性。
+   - 在安全边界明确后，再实现 dsh 风格的并行安全工具调用、inbox/followup/steer/inject 和 pre-step 控制。
+
+2. **文件工具 dsh 语义（P0/P1）**
+   - 对齐 `read` 的 `offset`、`limit`、行号和输出上限；路径必须受 workspace/root 约束。
+   - `write/edit` 增加 observation policy 和文件版本不变检查，避免无确认覆盖外部修改。
+   - 增加 `read_image`，并按模型图像能力和附件引用规则工作。
+   - 保留 Go 专有扩展时，必须在文档中记录 schema/行为偏差并添加兼容测试。
+
+3. **可持续子 Agent（P1）**
+   - child session 和 parent/child 关系持久化，支持进程重启后的冷恢复。
+   - 增加 `send_message`、`interrupt_agent`、`report`，并保留 owner/权限边界。
+   - 覆盖 running/idle/ready/settled 状态、父子通知和 child-first teardown。
+
+4. **Goal round driver（P1）**
+   - 在现有 plan/todo 之上增加 goal 生命周期、同会话继续执行和 round 上限。
+   - Goal 推进必须能观察 plan/todo/subagent/eval 状态，并在达成、阻塞、超限时留下可回放事件。
+
+5. **Workflow/Ralph 协议对齐（P1）**
+   - 以 dsh 为能力完整性目标，补齐模型编写 JavaScript workflow script、`meta/script/args`、`agent()`、`parallel()`、`pipeline()`、`phase()`、`log()` 与 workflow 生命周期事件。
+   - Go 核心不直接依赖 Node.js；由外部 Node runtime 按需执行 workflow。当前个人 Agent 按 dsh 信任模型处理，JavaScript workflow 默认启用，不另设阻断能力的 `workflow_node_unsafe` 安全模式。
+   - 保留现有 Go-native JSON DAG 作为原生/兼容执行路径，但不得以它替代 dsh JavaScript workflow 的完整能力。
+   - Ralph 使用结构化 report、`continue/complete/blocked` 状态和受限 handoff/result，而不是只解析自由文本。
+
+6. **Plan tree 持久化（P1）**
+   - 将当前内存 plan tree 改为可由 session event log 重建的持久化投影，支持 Goal/Plan/Todo 的重启恢复、继续执行、状态查询和幂等更新。
+   - 不在本项实现 KB 直接功能或 `kb_import`；批量/大文档导入属于后续 KB 内容层，届时再单独设计可恢复 Job。
+   - Goal scheduler 仍不在本项实现；scheduler 属于后续自主任务能力，默认关闭，只负责未来的定时/周期触发。
+
+7. **LLM 请求元数据与重试（P1）**
+   - 补充 message/source/usage/provider/model 元数据和请求终态事件。
+   - 增加可配置 retry/backoff，并记录 retry 事件；失败必须收敛为可回放的终态。
+
+8. **剩余能力复核（P2）**
+   - 复核并按收益排序 `session-query`、LSP、rich ask-user、feedback、hooks、sandbox、ACP/SDK、Web UI 对齐等能力。
+   - plugin/bundle/profile/runtime self-modification 继续作为明确的 Go 编译期边界，不默认引入。
+
+### 每项的实施/复核纪律
+
+- 每个目标先对照 `../deepseek-harness` 当前源码和 README，必要时新增 `docs/decisions/` 记录。
+- 先写或更新测试，再实现；每项完成后至少运行相关包测试，并运行 `go vet ./...`、`go test ./...`、`go build ./...`。
+- 复核必须检查事件日志、模型可见历史、取消/重启/失败路径和工具 schema，不能只以编译通过作为完成标准。
+- 若 Go 实现与 dsh 有意不同，记录“偏差、原因、替代验收标准”，不得静默偏离。
+- 本节目标的状态由实施会话逐项更新为：`⬜ 未开始`、`🔄 实施中`、`✅ 已实现并复核`、`⚠️ 有明确偏差`。
+
+### 当前状态
+
+| 顺序 | 目标 | 状态 | 最近复核 |
+|---|---|---|---|
+| 1 | Loop 持久化与取消语义 | ✅ 已实现并复核 | 已完成 interrupted assistant、aborted tool result、turn/step 生命周期；并行/inbox 仍列入后续复核 |
+| 2 | 文件工具 dsh 语义 | ✅ 已实现并复核 | read window/root、write/edit observation、rich read_image 已通过定向测试 |
+| 3 | 可持续子 Agent | ✅ 已实现并复核 | child log + parent/depth 元数据持久化；Runtime.Resume/subagent_resume 支持冷恢复；continuable 子 Agent 支持 send/interrupt，report 记录 subagent/report；旧 status/cancel 保留兼容 |
+| 4 | Goal round driver | ✅ 已实现并复核 | `internal/goal` 已接入 cmd/pa CLI/Web 的外层 turn 完成→idle/followup 生命周期；同 session 逐轮调用 `runTurn`，通过 plan/create 事件定位当前 session 最新未完成 Goal，observer 汇总 plan/subagent/eval 状态；明确边界：不从工具 Execute 内递归进入 loop，不做后台 scheduler；plan tree 持久化移入第 6 项 |
+| 5 | Workflow/Ralph 协议对齐 | ✅ 已实现并复核 | Ralph 已补 dsh-compatible `summary/evidence/nextSteps/blocker` 状态语义、16K handoff 上限和旧 DONE/BLOCKED 兼容；workflow 已新增外部 Node runner、`meta/script/args`、`agent/parallel/pipeline/phase/log`、RPC、取消、并发/总量/item 上限和 `workflow/*` 生命周期事件；本地 spawn provider 已提供 scoped `structured_output` 工具，`agent({schema})` 会校验并返回结构化对象；JS 默认启用，Go-native DAG 保留兼容路径，Go 核心不依赖 Node.js |
+| 6 | Plan tree 持久化 | ✅ 已实现并复核 | `plan/create` 写入可重建的 Goal/Plan/Todo 快照，`plan/status/delete` 可重放；启动与 session 切换从 event log 重建内存 projection，支持状态查询、继续执行、幂等 Restore 与 ID 接续；KB 直接功能、`kb_import`、Goal scheduler 仍后置 |
+| 7 | LLM 元数据与重试 | ✅ 已完成 | 四种流式 provider 均映射 provider-neutral `TokenUsage`；`assistant/message` 与 `llm/request_end` 落 usage/attempts；统一 request-level retry wrapper 覆盖所有 provider，DeepSeek 应用 wiring 关闭内置 retry 防重复；429/网络/5xx 重试、4xx fail-closed、context-aware backoff、`llm/retry` 事件均已接入。边界：流已开始输出后不重放，避免重复内容 |
+| 8 | 剩余能力复核 | ⚠️ 有明确偏差 | 已复核 session-query、LSP、rich ask-user、feedback/hooks、sandbox、ACP/SDK、Web UI：已有 Web 工作台/交互/沙箱等 Go 接缝；LSP、ACP/SDK、完整 dsh session-query/hooks 语义仍未实现。运行时 plugin/bundle/profile/self-modification 按 Go 编译期边界保留不引入 |
 
 ### 文档
 

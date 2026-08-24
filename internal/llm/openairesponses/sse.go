@@ -58,11 +58,22 @@ func (d *sseDecoder) Next() (string, error) {
 // discriminator plus the per-type fields we consume. Unknown fields are left
 // untouched by json.
 type wireEvent struct {
-	Type    string          `json:"type"`
-	Delta   string          `json:"delta"`
-	Item    *wireEventItem  `json:"item"`
+	Type     string         `json:"type"`
+	Delta    string         `json:"delta"`
+	Item     *wireEventItem `json:"item"`
 	Response *struct {
 		Status string `json:"status"`
+		Usage  *struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+			TotalTokens  int `json:"total_tokens"`
+			InputDetails *struct {
+				CachedTokens int `json:"cached_tokens"`
+			} `json:"input_tokens_details"`
+			OutputDetails *struct {
+				ReasoningTokens int `json:"reasoning_tokens"`
+			} `json:"output_tokens_details"`
+		} `json:"usage"`
 	} `json:"response"`
 }
 
@@ -90,6 +101,7 @@ type streamReader struct {
 	// llm.ToolCall.id is the Responses call_id (echoed by function_call_output).
 	funcCalls map[string]*funcAccum
 	order     []string
+	usage     llm.TokenUsage
 }
 
 type funcAccum struct {
@@ -138,6 +150,19 @@ func (r *streamReader) Next() (llm.StreamEvent, error) {
 			}
 		case "response.completed":
 			if ev.Response != nil {
+				if ev.Response.Usage != nil {
+					r.usage = llm.TokenUsage{
+						InputTokens:  ev.Response.Usage.InputTokens,
+						OutputTokens: ev.Response.Usage.OutputTokens,
+						TotalTokens:  ev.Response.Usage.TotalTokens,
+					}
+					if ev.Response.Usage.InputDetails != nil {
+						r.usage.CachedInputTokens = ev.Response.Usage.InputDetails.CachedTokens
+					}
+					if ev.Response.Usage.OutputDetails != nil {
+						r.usage.ReasoningTokens = ev.Response.Usage.OutputDetails.ReasoningTokens
+					}
+				}
 				switch ev.Response.Status {
 				case "completed":
 					r.finishReason = "stop"
@@ -219,6 +244,7 @@ func (r *streamReader) finish(fallback string) llm.StreamEvent {
 		FinishReason: reason,
 		ToolCalls:    calls,
 		Reasoning:    r.reasoning.String(),
+		Usage:        r.usage,
 	}
 }
 

@@ -129,8 +129,28 @@ func TestReadFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	if res.Output != "hello agent" {
-		t.Fatalf("read out = %q", res.Output)
+	if res.Output != "1\thello agent" {
+		t.Fatalf("read out = %q, want numbered output", res.Output)
+	}
+}
+
+func TestReadFileWindowAndRoot(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "note.txt")
+	if err := os.WriteFile(path, []byte("one\ntwo\nthree"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := New()
+	r.Register(NewReadFile(root))
+	res, err := r.Execute(context.Background(), "read", json.RawMessage(`{"path":"note.txt","offset":2,"limit":1}`))
+	if err != nil {
+		t.Fatalf("read window: %v", err)
+	}
+	if res.Output != "2\ttwo" {
+		t.Fatalf("read window = %q", res.Output)
+	}
+	if _, err := r.Execute(context.Background(), "read", json.RawMessage(`{"path":"../outside.txt"}`)); err == nil {
+		t.Fatal("read must reject a path outside the workspace root")
 	}
 }
 

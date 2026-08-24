@@ -2,6 +2,8 @@ package fs
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"sort"
@@ -80,6 +82,73 @@ func (l *localFS) Read(ctx context.Context, path string, maxSize int) (string, e
 		return "", ErrTooLarge
 	}
 	return string(data), nil
+}
+
+func (l *localFS) ReadBytes(ctx context.Context, path string, maxSize int) ([]byte, error) {
+	if err := l.checkOpen(); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	full, err := l.resolve(path)
+	if err != nil {
+		return nil, err
+	}
+	limit := maxSize
+	if limit <= 0 {
+		limit = DefaultMaxReadSize
+	}
+	info, err := os.Stat(full)
+	if err != nil {
+		return nil, err
+	}
+	if info.IsDir() {
+		return nil, &os.PathError{Op: "read", Path: full, Err: os.ErrInvalid}
+	}
+	if info.Size() > int64(limit) {
+		return nil, ErrTooLarge
+	}
+	data, err := os.ReadFile(full)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > limit {
+		return nil, ErrTooLarge
+	}
+	return data, nil
+}
+
+// Fingerprint returns a content hash for the current file version. It is used
+// by the dsh-style observation policy before write/edit; hashing the bytes
+// catches same-size changes that metadata-only checks would miss.
+func (l *localFS) Fingerprint(ctx context.Context, path string) (string, error) {
+	if err := l.checkOpen(); err != nil {
+		return "", err
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	full, err := l.resolve(path)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(full)
+	if err != nil {
+		return "", err
+	}
+	if info.IsDir() {
+		return "", &os.PathError{Op: "fingerprint", Path: full, Err: os.ErrInvalid}
+	}
+	if info.Size() > DefaultMaxReadSize {
+		return "", ErrTooLarge
+	}
+	data, err := os.ReadFile(full)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // Write creates or overwrites the file at path (within Root) with content,

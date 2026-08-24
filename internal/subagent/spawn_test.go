@@ -12,6 +12,7 @@ import (
 	"github.com/jabing/shutu-agent/internal/llm"
 	"github.com/jabing/shutu-agent/internal/prompt"
 	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/jabing/shutu-agent/internal/store"
 	"github.com/jabing/shutu-agent/internal/tools"
 )
 
@@ -148,14 +149,14 @@ func TestSpawnFullRound(t *testing.T) {
 		t.Fatalf("child log for %s not found", run.ID)
 	}
 	events := childLog.Events()
-	if len(events) != 4 {
-		t.Fatalf("child events = %d, want 4 (user, 2 chunks, assistant)", len(events))
+	if len(events) != 8 {
+		t.Fatalf("child events = %d, want 8 (turn/step lifecycle + user, chunks, assistant)", len(events))
 	}
-	if events[0].Type != session.EventUserMessage {
-		t.Fatalf("first child event = %q, want user/message", events[0].Type)
+	if events[1].Type != session.EventUserMessage {
+		t.Fatalf("child user event = %q, want user/message", events[1].Type)
 	}
-	if events[len(events)-1].Type != session.EventAssistantMessage {
-		t.Fatalf("last child event = %q, want assistant/message", events[len(events)-1].Type)
+	if events[5].Type != session.EventAssistantMessage {
+		t.Fatalf("assistant child event = %q, want assistant/message", events[5].Type)
 	}
 	hist := childLog.DeriveHistory()
 	if len(hist) != 2 || hist[0].Role != llm.RoleUser || hist[0].Text() != "summarize the docs" ||
@@ -180,6 +181,154 @@ func TestSpawnFullRound(t *testing.T) {
 	}
 	if err := prov.Close(); err != nil {
 		t.Fatalf("close: %v", err)
+	}
+}
+
+func TestSpawnStructuredOutputUsesScopedToolAndReturnsValue(t *testing.T) {
+	model := &scriptedLLM{steps: [][]llm.StreamEvent{
+		{{Kind: llm.StreamFinish, ToolCalls: []llm.ToolCall{{ID: "call-1", Name: structuredOutputToolName, Arguments: `{"answer":"ok","score":3}`}}}},
+		{{Kind: llm.StreamFinish, FinishReason: "stop"}},
+	}}
+	parentTools := tools.New()
+	prov := NewSpawnProvider(Deps{LLM: model, Tools: parentTools, Prompt: prompt.New("child"), Model: "m"})
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"answer": map[string]any{"type": "string"},
+			"score":  map[string]any{"type": "integer"},
+		},
+		"required":             []string{"answer", "score"},
+		"additionalProperties": false,
+	}
+	run, err := prov.Start(context.Background(), StartRequest{Prompt: "return a report", OutputSchema: schema})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	result, err := run.Result(context.Background())
+	if err != nil {
+		t.Fatalf("result: %v", err)
+	}
+	value, ok := result.Structured.(map[string]any)
+	if !ok || value["answer"] != "ok" || value["score"] != float64(3) {
+		t.Fatalf("structured result = %#v, want validated object", result.Structured)
+	}
+	if result.StopReason != StopCompleted {
+		t.Fatalf("stop reason = %q, want completed", result.StopReason)
+	}
+	if len(model.calls) < 1 {
+		t.Fatal("model was not called")
+	}
+	found := false
+	for _, spec := range model.calls[0].Tools {
+		if spec.Name == structuredOutputToolName {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("first child request did not expose scoped structured_output tool")
+	}
+	if len(parentTools.Specs()) != 0 {
+		t.Fatalf("parent registry specs = %+v, structured tool leaked out of child scope", parentTools.Specs())
+	}
+	if err := prov.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+}
+
+// TestSpawnContinuableSend verifies the process-local dsh continuation shape:
+// a live continuable child accepts a follow-up message and appends another
+// complete turn to the same independent session.
+func TestSpawnContinuableSend(t *testing.T) {
+	model := &scriptedLLM{steps: [][]llm.StreamEvent{
+		{{Kind: llm.StreamTextDelta, Text: "first"}, {Kind: llm.StreamFinish, FinishReason: "stop"}},
+		{{Kind: llm.StreamTextDelta, Text: "second"}, {Kind: llm.StreamFinish, FinishReason: "stop"}},
+	}}
+	prov := NewSpawnProvider(Deps{LLM: model, Tools: tools.New(), Prompt: prompt.New("x"), Model: "m"})
+	run, err := prov.Start(context.Background(), StartRequest{Prompt: "first task", ParentSessionID: "p", Continuable: true})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if err := run.Send(context.Background(), "follow up"); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for len(model.calls) < 2 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := run.Cancel("done"); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	res, err := run.Result(context.Background())
+	if err != nil {
+		t.Fatalf("result: %v", err)
+	}
+	if res.StopReason != StopAborted {
+		t.Fatalf("stop reason = %q, want %q", res.StopReason, StopAborted)
+	}
+	log, ok := prov.ChildLog(run.ID)
+	if !ok {
+		t.Fatal("child log missing")
+	}
+	if got := len(log.DeriveHistory()); got != 4 {
+		t.Fatalf("derived messages = %d, want 4", got)
+	}
+	if err := prov.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+}
+
+// TestSpawnPersistsChildLog verifies that child events use the existing Store
+// seam and can be replayed independently of the in-memory provider registry.
+func TestSpawnPersistsChildLog(t *testing.T) {
+	st, err := store.OpenSQLite(t.TempDir() + "/agent.db")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	model := &scriptedLLM{steps: [][]llm.StreamEvent{{
+		{Kind: llm.StreamTextDelta, Text: "persisted"}, {Kind: llm.StreamFinish, FinishReason: "stop"},
+	}}}
+	prov := NewSpawnProvider(Deps{LLM: model, Tools: tools.New(), Prompt: prompt.New("x"), Model: "m", Store: st})
+	run, err := prov.Start(context.Background(), StartRequest{Prompt: "persist me", ParentSessionID: "p"})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if _, err := run.Result(context.Background()); err != nil {
+		t.Fatalf("result: %v", err)
+	}
+	events, err := st.LoadSession(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("load child session: %v", err)
+	}
+	if len(events) == 0 || events[len(events)-1].Type != session.EventTurnEnd {
+		t.Fatalf("persisted child events = %d, last=%q; want replayable turn end", len(events), events[len(events)-1].Type)
+	}
+	if err := prov.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// A fresh provider instance can recover the child lineage and append a new
+	// turn to the same durable session.
+	resumedModel := &scriptedLLM{steps: [][]llm.StreamEvent{{
+		{Kind: llm.StreamTextDelta, Text: "resumed"}, {Kind: llm.StreamFinish, FinishReason: "stop"},
+	}}}
+	resumed := NewSpawnProvider(Deps{LLM: resumedModel, Tools: tools.New(), Prompt: prompt.New("x"), Model: "m", Store: st})
+	resumedRun, err := resumed.Resume(context.Background(), run.ID, "continue after restart", false)
+	if err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	result, err := resumedRun.Result(context.Background())
+	if err != nil || result.Output != "resumed" {
+		t.Fatalf("resumed result = %+v, err=%v", result, err)
+	}
+	replayed, err := st.LoadSession(context.Background(), run.ID)
+	if err != nil || len(replayed) <= len(events) {
+		t.Fatalf("replayed events after resume = %d, err=%v; want appended turn", len(replayed), err)
+	}
+	if err := resumed.Close(); err != nil {
+		t.Fatalf("close resumed provider: %v", err)
 	}
 }
 

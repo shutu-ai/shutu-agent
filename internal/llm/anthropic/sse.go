@@ -78,6 +78,7 @@ type streamReader struct {
 	reasoning  strings.Builder // accumulated thinking deltas (M8)
 	toolCalls  []llm.ToolCall  // in first-seen wire block order
 	toolIndex  map[int]int     // wire block index -> position in toolCalls
+	usage      llm.TokenUsage
 }
 
 func newStreamReader(resp *http.Response) *streamReader {
@@ -107,8 +108,7 @@ func (r *streamReader) Next() (llm.StreamEvent, error) {
 		}
 		switch ev.event {
 		case "message_start":
-			// Ignored (the request id lives in the message envelope and is not
-			// needed this milestone).
+			r.onMessageStart(ev.data)
 		case "content_block_start":
 			r.onContentBlockStart(ev.data)
 		case "content_block_delta":
@@ -127,6 +127,7 @@ func (r *streamReader) Next() (llm.StreamEvent, error) {
 				FinishReason: mapStopReason(r.stopReason),
 				ToolCalls:    r.toolCalls,
 				Reasoning:    r.reasoning.String(),
+				Usage:        r.usage,
 			}, nil
 		case "error":
 			r.close()
@@ -135,6 +136,23 @@ func (r *streamReader) Next() (llm.StreamEvent, error) {
 			// Unknown event type: ignore.
 		}
 	}
+}
+
+func (r *streamReader) onMessageStart(data string) {
+	var start struct {
+		Message struct {
+			Usage struct {
+				InputTokens              int `json:"input_tokens"`
+				CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+				CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+			} `json:"usage"`
+		} `json:"message"`
+	}
+	if json.Unmarshal([]byte(data), &start) != nil {
+		return
+	}
+	r.usage.InputTokens = start.Message.Usage.InputTokens
+	r.usage.CachedInputTokens = start.Message.Usage.CacheCreationInputTokens + start.Message.Usage.CacheReadInputTokens
 }
 
 // close releases the response body. Safe to call multiple times.
@@ -148,7 +166,7 @@ func (r *streamReader) close() {
 // other block types are ignored (dispatch-m8-2b §2.2).
 func (r *streamReader) onContentBlockStart(data string) {
 	var start struct {
-		Index int `json:"index"`
+		Index        int `json:"index"`
 		ContentBlock struct {
 			Type string `json:"type"`
 			ID   string `json:"id"`
@@ -225,11 +243,20 @@ func (r *streamReader) onMessageDelta(data string) {
 		Delta struct {
 			StopReason *string `json:"stop_reason"`
 		} `json:"delta"`
+		Usage struct {
+			OutputTokens int `json:"output_tokens"`
+		} `json:"usage"`
 	}
-	if json.Unmarshal([]byte(data), &md) != nil || md.Delta.StopReason == nil {
+	if json.Unmarshal([]byte(data), &md) != nil {
 		return
 	}
-	r.stopReason = *md.Delta.StopReason
+	if md.Delta.StopReason != nil {
+		r.stopReason = *md.Delta.StopReason
+	}
+	if md.Usage.OutputTokens > 0 {
+		r.usage.OutputTokens = md.Usage.OutputTokens
+	}
+	r.usage.TotalTokens = r.usage.InputTokens + r.usage.OutputTokens
 }
 
 // mapStopReason maps the Anthropic stop_reason vocabulary to the

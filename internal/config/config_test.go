@@ -17,6 +17,7 @@ func defaultOnCaps() []string {
 	for _, group := range [][]string{kbToolNames, jobsToolNames, subagentToolNames,
 		skillToolNames, scheduleToolNames, planToolNames, spillToolNames,
 		interactToolNames, codeToolNames, mcpToolNames, fsToolNames,
+		[]string{"read_image"},
 		webToolNames, terminalToolNames, evalToolNames, fsSearchToolNames,
 		ralphToolNames, workflowToolNames} {
 		names = append(names, group...)

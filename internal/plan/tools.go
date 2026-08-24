@@ -187,7 +187,11 @@ func (t PlanGoalTool) Execute(ctx context.Context, args json.RawMessage) (string
 	// plan/create is a log-only fact (D3); the created goal id/title are logged
 	// with the goal scope, and the returned text is what the loop logs as
 	// tool/result.
-	t.t.emit(session.EventPlanCreate, session.NewPlanCreate(string(ScopeGoal), g.ID, g.Title, nil))
+	t.t.emit(session.EventPlanCreate, session.NewPlanCreate(string(ScopeGoal), g.ID, g.Title, nil, map[string]any{
+		"objective": g.Objective,
+		"status":    g.Status,
+		"createdAt": g.CreatedAt,
+	}))
 	return fmt.Sprintf("created goal %s: %s", g.ID, g.Title), nil
 }
 
@@ -247,7 +251,12 @@ func (t PlanPlanTool) Execute(ctx context.Context, args json.RawMessage) (string
 	if err != nil {
 		return "", fmt.Errorf("plan_plan: %w", err)
 	}
-	t.t.emit(session.EventPlanCreate, session.NewPlanCreate(string(ScopePlan), p.ID, p.Title, nil))
+	t.t.emit(session.EventPlanCreate, session.NewPlanCreate(string(ScopePlan), p.ID, p.Title, nil, map[string]any{
+		"goalId":    p.GoalID,
+		"status":    p.Status,
+		"createdAt": p.CreatedAt,
+		"steps":     p.Steps,
+	}))
 	return fmt.Sprintf("created plan %s under goal %s: %s (%d steps)", p.ID, p.GoalID, p.Title, len(p.Steps)), nil
 }
 
@@ -303,7 +312,11 @@ func (t PlanTodoTool) Execute(ctx context.Context, args json.RawMessage) (string
 	if err != nil {
 		return "", fmt.Errorf("plan_todo: %w", err)
 	}
-	t.t.emit(session.EventPlanCreate, session.NewPlanCreate(string(ScopeTodo), todo.ID, todo.Title, todo.Acceptance))
+	t.t.emit(session.EventPlanCreate, session.NewPlanCreate(string(ScopeTodo), todo.ID, todo.Title, todo.Acceptance, map[string]any{
+		"planId":    a.PlanID,
+		"status":    todo.Status,
+		"createdAt": todo.CreatedAt,
+	}))
 	return fmt.Sprintf("added todo %s to plan %s: %s", todo.ID, a.PlanID, todo.Title), nil
 }
 

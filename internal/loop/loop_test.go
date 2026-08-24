@@ -83,18 +83,22 @@ func TestRunSimpleAnswerNoTools(t *testing.T) {
 	}
 
 	events := log.Events()
-	if len(events) != 4 {
-		t.Fatalf("events = %d, want 4 (user, 2 chunks, assistant)", len(events))
+	if len(events) != 8 {
+		t.Fatalf("events = %d, want 8 (turn, user, step, chunks, assistant, step, turn)", len(events))
 	}
 	types := []string{}
 	for _, ev := range events {
 		types = append(types, ev.Type)
 	}
 	want := []string{
+		session.EventTurnStart,
 		session.EventUserMessage,
+		session.EventStepStart,
 		session.EventAssistantChunk,
 		session.EventAssistantChunk,
 		session.EventAssistantMessage,
+		session.EventStepEnd,
+		session.EventTurnEnd,
 	}
 	for i := range want {
 		if types[i] != want[i] {
@@ -142,6 +146,51 @@ func TestRunCarriesReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestRunRecordsLLMRequestMetadata(t *testing.T) {
+	model := &scriptedLLM{steps: [][]llm.StreamEvent{{
+		{Kind: llm.StreamTextDelta, Text: "ok"},
+		{Kind: llm.StreamFinish, FinishReason: "stop"},
+	}}}
+	reg := tools.New()
+	if err := reg.Register(tools.GetTime{}); err != nil {
+		t.Fatal(err)
+	}
+	log := session.New()
+	loop := New(Config{
+		LLM:             model,
+		Log:             log,
+		Tools:           reg,
+		Prompt:          prompt.New("You are helpful."),
+		Provider:        "deepseek-official",
+		Model:           "deepseek-v4-flash",
+		ReasoningEffort: "high",
+	})
+	if err := loop.Run(context.Background(), "metadata"); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	var starts, ends int
+	for _, ev := range log.Events() {
+		if ev.Type == session.EventLLMRequestStart {
+			starts++
+			if !strings.Contains(string(ev.Data), "deepseek-official") || !strings.Contains(string(ev.Data), "deepseek-v4-flash") {
+				t.Fatalf("request_start data = %s", ev.Data)
+			}
+		}
+		if ev.Type == session.EventLLMRequestEnd {
+			ends++
+			if !strings.Contains(string(ev.Data), "completed") {
+				t.Fatalf("request_end data = %s", ev.Data)
+			}
+		}
+	}
+	if starts != 1 || ends != 1 {
+		t.Fatalf("llm request events = start:%d end:%d, want 1/1", starts, ends)
+	}
+	if len(model.calls) != 1 || model.calls[0].Provider != "deepseek-official" {
+		t.Fatalf("request provider = %+v", model.calls)
+	}
+}
+
 func TestRunToolCallExecutesAndLogs(t *testing.T) {
 	model := &scriptedLLM{steps: [][]llm.StreamEvent{
 		{ // step 1: model asks for get_time
@@ -166,12 +215,18 @@ func TestRunToolCallExecutesAndLogs(t *testing.T) {
 		types = append(types, ev.Type)
 	}
 	want := []string{
+		session.EventTurnStart,
 		session.EventUserMessage,
+		session.EventStepStart,
 		session.EventAssistantMessage,
 		session.EventToolStart,
 		session.EventToolResult,
+		session.EventStepEnd,
+		session.EventStepStart,
 		session.EventAssistantChunk,
 		session.EventAssistantMessage,
+		session.EventStepEnd,
+		session.EventTurnEnd,
 	}
 	for i := range want {
 		if types[i] != want[i] {
@@ -180,9 +235,15 @@ func TestRunToolCallExecutesAndLogs(t *testing.T) {
 	}
 
 	// Tool result must reference the call id.
-	ev := events[3]
-	if !strings.Contains(string(ev.Data), "call_1") {
-		t.Fatalf("tool result data = %s", ev.Data)
+	var toolResult session.Event
+	for _, candidate := range events {
+		if candidate.Type == session.EventToolResult {
+			toolResult = candidate
+			break
+		}
+	}
+	if toolResult.Type == "" || !strings.Contains(string(toolResult.Data), "call_1") {
+		t.Fatalf("tool result data = %s", toolResult.Data)
 	}
 
 	// Two model requests: step 2 must include the tool result as a tool-role
@@ -223,8 +284,15 @@ func TestRunUnknownToolLogsErrorAndContinues(t *testing.T) {
 	for _, ev := range events {
 		types = append(types, ev.Type)
 	}
-	if len(types) < 4 || types[3] != session.EventToolError {
-		t.Fatalf("expected tool/error at index 3, got %v", types)
+	foundError := false
+	for _, typ := range types {
+		if typ == session.EventToolError {
+			foundError = true
+			break
+		}
+	}
+	if !foundError {
+		t.Fatalf("expected tool/error, got %v", types)
 	}
 }
 
@@ -355,10 +423,30 @@ func (r *cancelReader) Next() (llm.StreamEvent, error) {
 	return llm.StreamEvent{}, r.ctx.Err()
 }
 
+type partialCancelReader struct {
+	ctx  context.Context
+	done bool
+}
+
+func (r *partialCancelReader) Next() (llm.StreamEvent, error) {
+	if !r.done {
+		r.done = true
+		return llm.StreamEvent{Kind: llm.StreamTextDelta, Text: "partial"}, nil
+	}
+	<-r.ctx.Done()
+	return llm.StreamEvent{}, r.ctx.Err()
+}
+
 type cancelLLM struct{ ctx context.Context }
 
 func (m *cancelLLM) Stream(ctx context.Context, req llm.ChatRequest) (llm.StreamReader, error) {
 	return &cancelReader{ctx: m.ctx}, nil
+}
+
+type partialCancelLLM struct{ ctx context.Context }
+
+func (m *partialCancelLLM) Stream(ctx context.Context, req llm.ChatRequest) (llm.StreamReader, error) {
+	return &partialCancelReader{ctx: m.ctx}, nil
 }
 
 // TestRunCancelDuringStream covers Ctrl+C during streaming (dispatch-m3: 流式
@@ -376,6 +464,93 @@ func TestRunCancelDuringStream(t *testing.T) {
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+}
+
+func TestRunCancelDuringStreamPersistsInterruptedAssistant(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	loop, log, _ := newTestLoop(t, &partialCancelLLM{ctx: ctx})
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		cancel()
+	}()
+	err := loop.Run(ctx, "go")
+	if err == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+
+	var found bool
+	for _, ev := range log.Events() {
+		if ev.Type != session.EventAssistantMessage {
+			continue
+		}
+		var payload struct {
+			Text        string `json:"text"`
+			Interrupted bool   `json:"interrupted"`
+		}
+		if err := json.Unmarshal(ev.Data, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.Text == "partial" && payload.Interrupted {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("missing interrupted assistant anchor: %+v", log.Events())
+	}
+	if got := log.DeriveHistory(); len(got) != 2 || got[1].Text() != "partial" {
+		t.Fatalf("history = %+v, want user + partial assistant", got)
+	}
+}
+
+type cancellingTool struct {
+	name   string
+	cancel context.CancelFunc
+}
+
+func (t cancellingTool) Name() string        { return t.name }
+func (t cancellingTool) Description() string { return "cancels the turn when dispatched" }
+func (t cancellingTool) Schema() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{}}
+}
+func (t cancellingTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	t.cancel()
+	return "done", nil
+}
+
+func TestRunCancelLogsUndispatchedToolCalls(t *testing.T) {
+	model := &scriptedLLM{steps: [][]llm.StreamEvent{{
+		{Kind: llm.StreamFinish, FinishReason: "tool_calls", ToolCalls: []llm.ToolCall{
+			{ID: "call_1", Name: "cancel_tool", Arguments: "{}"},
+			{ID: "call_2", Name: "never_dispatched", Arguments: "{}"},
+		}},
+	}}}
+	ctx, cancel := context.WithCancel(context.Background())
+	loop, log, reg := newTestLoop(t, model)
+	if err := reg.Register(cancellingTool{name: "cancel_tool", cancel: cancel}); err != nil {
+		t.Fatal(err)
+	}
+	reg.SetPolicy(tools.Policy{
+		Enabled:     []string{"get_time", "cancel_tool"},
+		Timeout:     time.Second,
+		OutputLimit: tools.DefaultOutputLimit,
+	})
+	err := loop.Run(ctx, "cancel after first tool")
+	if err == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+
+	var found bool
+	for _, ev := range log.Events() {
+		if ev.Type != session.EventToolResult || !strings.Contains(string(ev.Data), "ABORTED_BEFORE_DISPATCH") {
+			continue
+		}
+		if strings.Contains(string(ev.Data), "call_2") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("missing aborted result for undispatched call: %+v", log.Events())
 	}
 }
 

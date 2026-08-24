@@ -8,6 +8,7 @@ package ralph
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -33,14 +34,26 @@ type Spawn func(ctx context.Context, prompt string) (string, error)
 // Report is the bounded result of one loop run (D-GAP-3: 只携带摘要, 不携带
 // 全量对话).
 type Report struct {
-	Objective   string
-	MaxRounds   int
-	Rounds      int      // rounds actually spawned
-	Done        bool     // a worker reported DONE
-	Blocked     bool     // a worker reported BLOCKED
-	BlockReason string   // set when Blocked
-	Final       string   // final deliverable (when Done)
-	RoundBriefs []string // one bounded brief per round (progress or final)
+	Objective    string
+	MaxRounds    int
+	Rounds       int      // rounds actually spawned
+	Done         bool     // a worker reported DONE
+	Blocked      bool     // a worker reported BLOCKED
+	BlockReason  string   // set when Blocked
+	Final        string   // final deliverable (when Done)
+	RoundBriefs  []string // one bounded brief per round (progress or final)
+	RoundReports []RoundReport
+}
+
+// RoundReport is the restricted handoff crossing one fresh-agent boundary.
+type RoundReport struct {
+	Status    string   `json:"status"`
+	Summary   string   `json:"summary,omitempty"`
+	Result    string   `json:"result,omitempty"`
+	Evidence  []string `json:"evidence,omitempty"`
+	NextSteps []string `json:"nextSteps,omitempty"`
+	Blocker   string   `json:"blocker,omitempty"`
+	Handoff   []string `json:"handoff,omitempty"` // legacy compatibility
 }
 
 // Engine runs the loop.
@@ -75,6 +88,29 @@ func (e *Engine) Run(ctx context.Context, objective string, maxRounds int) (Repo
 			return Report{}, err
 		}
 		trimmed := strings.TrimSpace(out)
+		if structured, ok := parseWorkerReport(trimmed); ok {
+			rep.RoundReports = append(rep.RoundReports, structured)
+			switch structured.Status {
+			case "complete":
+				rep.Rounds, rep.Done = round, true
+				rep.Final = boundRunes(firstNonEmpty(structured.Result, structured.Summary), 4000)
+				rep.RoundBriefs = append(rep.RoundBriefs, rep.Final)
+				return rep, nil
+			case "blocked":
+				rep.Rounds, rep.Blocked = round, true
+				rep.BlockReason = boundRunes(firstNonEmpty(structured.Blocker, structured.Summary), 2000)
+				rep.RoundBriefs = append(rep.RoundBriefs, rep.BlockReason)
+				return rep, nil
+			case "continue":
+				brief := boundRunes(firstNonEmpty(structured.Summary, structured.Result), 4000)
+				rep.Rounds = round
+				rep.RoundBriefs = append(rep.RoundBriefs, brief)
+				prevBrief = brief
+				continue
+			default:
+				rep.RoundReports = rep.RoundReports[:len(rep.RoundReports)-1]
+			}
+		}
 		switch {
 		case strings.HasPrefix(trimmed, MarkerDone):
 			rest := strings.TrimSpace(strings.TrimPrefix(trimmed, MarkerDone))
@@ -100,6 +136,66 @@ func (e *Engine) Run(ctx context.Context, objective string, maxRounds int) (Repo
 	return rep, nil
 }
 
+func parseWorkerReport(text string) (RoundReport, bool) {
+	if !strings.HasPrefix(text, "{") {
+		return RoundReport{}, false
+	}
+	var report RoundReport
+	if err := json.Unmarshal([]byte(text), &report); err != nil {
+		return RoundReport{}, false
+	}
+	if report.Status != "continue" && report.Status != "complete" && report.Status != "blocked" {
+		return RoundReport{}, false
+	}
+	// Keep the original summary/result/handoff envelope readable for old
+	// workers. When any dsh-compatible field is present, validate its stricter
+	// status-specific contract instead of silently accepting malformed data.
+	if report.Evidence == nil && report.NextSteps == nil && report.Blocker == "" {
+		return report, true
+	}
+	if strings.TrimSpace(report.Summary) == "" || report.Summary != strings.TrimSpace(report.Summary) ||
+		!normalizedList(report.Evidence) || !normalizedList(report.NextSteps) || report.Blocker != strings.TrimSpace(report.Blocker) {
+		return RoundReport{}, false
+	}
+	switch report.Status {
+	case "continue":
+		if len(report.NextSteps) == 0 || report.Blocker != "" {
+			return RoundReport{}, false
+		}
+	case "complete":
+		if len(report.Evidence) == 0 || len(report.NextSteps) != 0 || report.Blocker != "" {
+			return RoundReport{}, false
+		}
+	case "blocked":
+		if report.Blocker == "" {
+			return RoundReport{}, false
+		}
+	}
+	encoded, err := json.Marshal(report)
+	if err != nil || len([]rune(string(encoded))) > 16384 {
+		return RoundReport{}, false
+	}
+	return report, true
+}
+
+func normalizedList(values []string) bool {
+	for _, value := range values {
+		if strings.TrimSpace(value) == "" || value != strings.TrimSpace(value) {
+			return false
+		}
+	}
+	return true
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
 // buildWorkerPrompt renders the round prompt: the immutable objective + the
 // previous round's bounded brief (or "（无）" for round one). Fresh agents share
 // no session, so only this text carries history across rounds; the workspace on
@@ -109,7 +205,8 @@ func buildWorkerPrompt(objective string, round int, prevBrief string) string {
 	if prev == "" {
 		prev = "（无）"
 	}
-	return fmt.Sprintf(`你是数驼 AI Agent 的 fresh 工作代理。目标（不可变）：
+	instruction := `When possible, finish with one JSON object using this dsh-compatible schema: {"status":"continue|complete|blocked","summary":"...","evidence":["..."],"nextSteps":["..."],"blocker":"..."}. For continue, summary and nextSteps must be non-empty and blocker empty. For complete, summary and evidence must be non-empty, nextSteps and blocker empty. For blocked, summary and blocker must be non-empty. Legacy DONE:/BLOCKED: replies remain accepted.`
+	return instruction + "\n\n" + fmt.Sprintf(`你是数驼 AI Agent 的 fresh 工作代理。目标（不可变）：
 %s
 
 这是第 %d 轮。上一轮进展摘要（第一轮为「无」）：

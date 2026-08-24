@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/jabing/shutu-agent/internal/config"
 	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/jabing/shutu-agent/internal/store"
 	"github.com/jabing/shutu-agent/internal/tools"
 )
 
@@ -147,5 +149,66 @@ func TestRegisterPlansEnabledRegistersAndValidates(t *testing.T) {
 	}
 	if _, err := a.reg.Execute(context.Background(), "plan_status", json.RawMessage(`{"scope":"plan","id":"plan-99","status":"done"}`)); err == nil {
 		t.Fatal("plan_status of an unknown id must error")
+	}
+}
+
+func TestPlanTreeRebuildsAcrossAppRestart(t *testing.T) {
+	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "pa.db"))
+	if err != nil {
+		t.Fatalf("OpenSQLite: %v", err)
+	}
+	defer st.Close()
+
+	ctx := context.Background()
+	first := makePlanApp(true)
+	first.store = st
+	first.baseCtx = ctx
+	first.reg.SetPolicy(planPolicy())
+	if err := first.registerPlans(); err != nil {
+		t.Fatalf("first registerPlans: %v", err)
+	}
+	if err := first.newSession(ctx); err != nil {
+		t.Fatalf("first newSession: %v", err)
+	}
+	if _, err := first.reg.Execute(ctx, "plan_goal", json.RawMessage(`{"title":"Ship","objective":"durable"}`)); err != nil {
+		t.Fatalf("plan_goal: %v", err)
+	}
+	if _, err := first.reg.Execute(ctx, "plan_plan", json.RawMessage(`{"goal_id":"goal-1","title":"Persist","steps":["reopen"]}`)); err != nil {
+		t.Fatalf("plan_plan: %v", err)
+	}
+	sessionID := first.currentID
+	first.plans.Close()
+
+	second := makePlanApp(true)
+	second.store = st
+	second.baseCtx = ctx
+	second.reg.SetPolicy(planPolicy())
+	if err := second.registerPlans(); err != nil {
+		t.Fatalf("second registerPlans: %v", err)
+	}
+	defer second.plans.Close()
+	if err := second.resumeSession(ctx, sessionID); err != nil {
+		t.Fatalf("second resumeSession: %v", err)
+	}
+	goals, err := second.plans.List(ctx)
+	if err != nil {
+		t.Fatalf("restored List: %v", err)
+	}
+	if len(goals) != 1 || goals[0].ID != "goal-1" || len(goals[0].Plans) != 1 {
+		t.Fatalf("restored goals = %+v", goals)
+	}
+	res, err := second.reg.Execute(ctx, "plan_list", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("restored plan_list: %v", err)
+	}
+	if !strings.Contains(res.Output, "plan-1: Persist (pending)") || !strings.Contains(res.Output, "todo-1: reopen (pending)") {
+		t.Fatalf("restored plan tree = %q", res.Output)
+	}
+	next, err := second.plans.CreateGoal(ctx, "Next", "continue")
+	if err != nil {
+		t.Fatalf("create after restart: %v", err)
+	}
+	if next.ID != "goal-2" {
+		t.Fatalf("next goal id = %q, want goal-2", next.ID)
 	}
 }

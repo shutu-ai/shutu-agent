@@ -87,6 +87,11 @@ func TestFsToolSchemas(t *testing.T) {
 	if len(ereq) != 3 || ereq[0] != "path" || ereq[1] != "old_string" || ereq[2] != "new_string" {
 		t.Fatalf("edit required = %v, want [path old_string new_string]", ereq)
 	}
+
+	read := ft.Read().Schema()
+	if read["type"] != "object" || read["additionalProperties"] != false {
+		t.Fatalf("read schema = %+v, want type object / additionalProperties false", read)
+	}
 }
 
 // TestFsWriteToolWritesAndEmits covers the happy path: write creates the
@@ -157,6 +162,9 @@ func TestFsEditToolReplacesAndEmits(t *testing.T) {
 	if err := svc.Write(ctx, "notes.txt", "alpha beta alpha"); err != nil {
 		t.Fatalf("seed notes.txt: %v", err)
 	}
+	if _, err := ft.Read().Execute(ctx, json.RawMessage(`{"path":"notes.txt"}`)); err != nil {
+		t.Fatalf("observe notes.txt: %v", err)
+	}
 	out, err := ft.Edit().Execute(ctx, json.RawMessage(`{"path":"notes.txt","old_string":"alpha","new_string":"gamma"}`))
 	if err != nil {
 		t.Fatalf("edit: %v", err)
@@ -168,11 +176,14 @@ func TestFsEditToolReplacesAndEmits(t *testing.T) {
 	if err != nil || got != "gamma beta alpha" {
 		t.Fatalf("after first-occurrence edit = %q, %v, want gamma beta alpha", got, err)
 	}
-	if types := eventTypes(*recs); len(types) != 1 || types[0] != session.EventFsWrite {
-		t.Fatalf("emitted types = %v, want [fs/write]", types)
+	if types := eventTypes(*recs); len(types) != 2 || types[0] != session.EventFsRead || types[1] != session.EventFsWrite {
+		t.Fatalf("emitted types = %v, want [fs/read fs/write]", types)
 	}
 
 	// replace_all replaces every occurrence.
+	if _, err := ft.Read().Execute(ctx, json.RawMessage(`{"path":"notes.txt"}`)); err != nil {
+		t.Fatalf("re-observe notes.txt: %v", err)
+	}
 	_, err = ft.Edit().Execute(ctx, json.RawMessage(`{"path":"notes.txt","old_string":"alpha","new_string":"x","replace_all":true}`))
 	if err != nil {
 		t.Fatalf("edit all: %v", err)
@@ -191,6 +202,9 @@ func TestFsEditToolMissingOldStringErrors(t *testing.T) {
 	if err := svc.Write(ctx, "notes.txt", "hello"); err != nil {
 		t.Fatalf("seed notes.txt: %v", err)
 	}
+	if _, err := ft.Read().Execute(ctx, json.RawMessage(`{"path":"notes.txt"}`)); err != nil {
+		t.Fatalf("observe notes.txt: %v", err)
+	}
 	if _, err := ft.Edit().Execute(ctx, json.RawMessage(`{"path":"notes.txt","old_string":"nope","new_string":"x"}`)); err == nil {
 		t.Fatal("edit with an absent old_string must error")
 	} else if !strings.Contains(err.Error(), "not found") {
@@ -200,8 +214,32 @@ func TestFsEditToolMissingOldStringErrors(t *testing.T) {
 	if err != nil || got != "hello" {
 		t.Fatalf("file must stay untouched, got %q, %v", got, err)
 	}
-	if len(*recs) != 0 {
-		t.Fatalf("no event may be emitted on a failed edit, got %v", eventTypes(*recs))
+	if types := eventTypes(*recs); len(types) != 1 || types[0] != session.EventFsRead {
+		t.Fatalf("failed edit must not add an event, got %v", types)
+	}
+}
+
+func TestFsReadToolWindowAndObservationPolicy(t *testing.T) {
+	svc, ft, recs := newToolsWithEvents(t)
+	ctx := context.Background()
+	if err := svc.Write(ctx, "notes.txt", "one\ntwo\nthree\nfour"); err != nil {
+		t.Fatalf("seed notes.txt: %v", err)
+	}
+	out, err := ft.Read().Execute(ctx, json.RawMessage(`{"path":"notes.txt","offset":2,"limit":2}`))
+	if err != nil {
+		t.Fatalf("read window: %v", err)
+	}
+	if out != "2\ttwo\n3\tthree" {
+		t.Fatalf("read window = %q, want numbered lines 2-3", out)
+	}
+	if _, err := ft.Edit().Execute(ctx, json.RawMessage(`{"path":"notes.txt","old_string":"two","new_string":"TWO"}`)); err != nil {
+		t.Fatalf("edit after read: %v", err)
+	}
+	if _, err := ft.Edit().Execute(ctx, json.RawMessage(`{"path":"notes.txt","old_string":"three","new_string":"THREE"}`)); err == nil {
+		t.Fatal("second edit without a fresh read must be rejected")
+	}
+	if len(*recs) < 1 || (*recs)[0].typ != session.EventFsRead {
+		t.Fatalf("events = %v, want fs/read first", eventTypes(*recs))
 	}
 }
 

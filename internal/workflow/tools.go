@@ -21,10 +21,13 @@ import (
 // WorkflowRunToolName is the task-DAG orchestration tool name (D-GAP-2).
 const WorkflowRunToolName = "workflow_run"
 
-// WorkflowRunTool bundles the workflow_run tool's shared state: the Engine it
-// drives and the D3 event sink.
+// WorkflowRunTool bundles both workflow execution paths: the legacy Go DAG and
+// the optional dsh-shaped JavaScript runner. The D3 event sink is shared.
 type WorkflowRunTool struct {
 	eng     *Engine
+	script  ScriptRunner
+	agent   AgentStart
+	parent  func() string
 	onEvent func(typ string, data any)
 }
 
@@ -33,6 +36,13 @@ type WorkflowRunTool struct {
 // it to the session log (D3).
 func NewWorkflowRunTool(eng *Engine, onEvent func(typ string, data any)) *WorkflowRunTool {
 	return &WorkflowRunTool{eng: eng, onEvent: onEvent}
+}
+
+// NewWorkflowRunToolWithScript adds the dsh-compatible JavaScript path while
+// preserving the existing Go DAG path. parent supplies the active session id
+// at execution time so /new and /resume switches are honored.
+func NewWorkflowRunToolWithScript(eng *Engine, script ScriptRunner, agent AgentStart, parent func() string, onEvent func(typ string, data any)) *WorkflowRunTool {
+	return &WorkflowRunTool{eng: eng, script: script, agent: agent, parent: parent, onEvent: onEvent}
 }
 
 func (t *WorkflowRunTool) emit(typ string, data any) {
@@ -44,13 +54,43 @@ func (t *WorkflowRunTool) emit(typ string, data any) {
 func (WorkflowRunTool) Name() string { return WorkflowRunToolName }
 
 func (WorkflowRunTool) Description() string {
-	return "提交任务 DAG，并发编排多个子代理（依赖在先后执行），返回逐任务结果"
+	return "Run a dsh-compatible JavaScript workflow script (meta/script/args with agent, parallel, pipeline, phase, and log) or a Go-native task DAG over subagents. JavaScript is the dynamic path; tasks is the fixed DAG compatibility path."
 }
 
 func (WorkflowRunTool) Schema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
+			"meta": map[string]any{
+				"type":        "object",
+				"description": "Workflow metadata for the dsh JavaScript script path.",
+				"properties": map[string]any{
+					"name":        map[string]any{"type": "string"},
+					"description": map[string]any{"type": "string"},
+					"whenToUse":   map[string]any{"type": "string"},
+					"phases": map[string]any{"type": "array", "items": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"title":    map[string]any{"type": "string", "minLength": 1},
+							"detail":   map[string]any{"type": "string"},
+							"provider": map[string]any{"type": "string"},
+							"model":    map[string]any{"type": "string"},
+						},
+						"required":             []string{"title"},
+						"additionalProperties": true,
+					}},
+				},
+				"additionalProperties": true,
+			},
+			"args": map[string]any{
+				"type":        "object",
+				"description": "JSON object exposed to the JavaScript workflow as args.",
+			},
+			"script": map[string]any{
+				"type":        "string",
+				"minLength":   1,
+				"description": "JavaScript workflow body; top-level return and await are supported.",
+			},
 			"tasks": map[string]any{
 				"type": "array",
 				"items": map[string]any{
@@ -70,7 +110,10 @@ func (WorkflowRunTool) Schema() map[string]any {
 				"description": "task DAG nodes (unique ids; depends_on lists prerequisite ids)",
 			},
 		},
-		"required":             []string{"tasks"},
+		"anyOf": []any{
+			map[string]any{"required": []string{"meta", "script"}},
+			map[string]any{"required": []string{"tasks"}},
+		},
 		"additionalProperties": false,
 	}
 }
@@ -81,10 +124,39 @@ func (WorkflowRunTool) Schema() map[string]any {
 // event carries only the counts (D3 — 只记元数据, 不落输出全文).
 func (t *WorkflowRunTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var a struct {
-		Tasks []Task `json:"tasks"`
+		Meta   map[string]any `json:"meta"`
+		Args   any            `json:"args"`
+		Script string         `json:"script"`
+		Tasks  []Task         `json:"tasks"`
 	}
 	if err := json.Unmarshal(args, &a); err != nil {
 		return "", fmt.Errorf("workflow_run: %w", err)
+	}
+	if a.Script != "" {
+		if t.script == nil {
+			return "", fmt.Errorf("workflow_run: JavaScript provider is unavailable")
+		}
+		if err := validateScriptMeta(a.Meta); err != nil {
+			return "", fmt.Errorf("workflow_run: %w", err)
+		}
+		parent := ""
+		if t.parent != nil {
+			parent = t.parent()
+		}
+		res, err := t.script.RunScript(ctx, ScriptRequest{Meta: a.Meta, Script: a.Script, Args: a.Args, ParentSessionID: parent}, t.agent, func(ev ScriptEvent) {
+			t.emit(ev.Type, ev.Data)
+		})
+		if err != nil {
+			return "", fmt.Errorf("workflow_run: JavaScript: %w", err)
+		}
+		if res.StopReason != "completed" {
+			if res.Error == "" {
+				res.Error = "workflow stopped with " + res.StopReason
+			}
+			return "", fmt.Errorf("workflow_run: JavaScript: %s", res.Error)
+		}
+		t.emit(session.EventWorkflowRun, map[string]any{"mode": "script", "stopReason": res.StopReason, "agentsStarted": res.AgentsStarted})
+		return formatScriptResult(res), nil
 	}
 	if len(a.Tasks) == 0 {
 		return "", fmt.Errorf("workflow_run: empty tasks")
@@ -103,6 +175,55 @@ func (t *WorkflowRunTool) Execute(ctx context.Context, args json.RawMessage) (st
 	}
 	t.emit(session.EventWorkflowRun, session.NewWorkflowRun(len(rep.Tasks), completed, failed))
 	return formatReport(rep), nil
+}
+
+func validateScriptMeta(meta map[string]any) error {
+	if meta == nil {
+		return fmt.Errorf("JavaScript workflow meta is required")
+	}
+	for _, key := range []string{"name", "description"} {
+		value, ok := meta[key].(string)
+		if !ok || strings.TrimSpace(value) == "" {
+			return fmt.Errorf("JavaScript workflow meta.%s must be a non-empty string", key)
+		}
+	}
+	if phases, ok := meta["phases"]; ok {
+		items, ok := phases.([]any)
+		if !ok {
+			return fmt.Errorf("JavaScript workflow meta.phases must be an array")
+		}
+		for i, raw := range items {
+			phase, ok := raw.(map[string]any)
+			if !ok {
+				return fmt.Errorf("JavaScript workflow meta.phases[%d] must be an object", i)
+			}
+			title, ok := phase["title"].(string)
+			if !ok || strings.TrimSpace(title) == "" {
+				return fmt.Errorf("JavaScript workflow meta.phases[%d].title must be a non-empty string", i)
+			}
+		}
+	}
+	return nil
+}
+
+func formatScriptResult(res ScriptResult) string {
+	value, err := json.Marshal(res.Value)
+	if err != nil {
+		value = []byte("null")
+	}
+	var text string
+	if string(value) != "null" {
+		var s string
+		if json.Unmarshal(value, &s) == nil {
+			text = s
+		} else {
+			text = string(value)
+		}
+	}
+	if text == "" {
+		text = "null"
+	}
+	return fmt.Sprintf("workflow_run: JavaScript workflow (%d agents)\n  result: %s", res.AgentsStarted, text)
 }
 
 // formatReport renders the per-task summary: a header with the task count and

@@ -16,6 +16,64 @@ type eventCapture struct {
 	data any
 }
 
+type fakeScriptRunner struct {
+	request ScriptRequest
+}
+
+func (f *fakeScriptRunner) RunScript(_ context.Context, req ScriptRequest, _ AgentStart, emit func(ScriptEvent)) (ScriptResult, error) {
+	f.request = req
+	if emit != nil {
+		emit(ScriptEvent{Type: session.EventWorkflowStart, Data: map[string]any{"name": req.Meta["name"]}})
+	}
+	return ScriptResult{Value: map[string]any{"ok": true}, StopReason: "completed", AgentsStarted: 1}, nil
+}
+
+func TestWorkflowToolSchemaDeclaresBothWorkflowPaths(t *testing.T) {
+	description := WorkflowRunTool{}.Description()
+	if !strings.Contains(description, "dsh-compatible JavaScript workflow") || !strings.Contains(description, "Go-native task DAG") {
+		t.Fatal("workflow description must disclose both JavaScript and Go-native workflow paths")
+	}
+	schema := WorkflowRunTool{}.Schema()
+	properties, ok := schema["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("workflow schema properties missing")
+	}
+	for _, name := range []string{"meta", "args", "script", "tasks"} {
+		if _, ok := properties[name]; !ok {
+			t.Errorf("workflow schema missing %q", name)
+		}
+	}
+	if _, ok := schema["anyOf"]; !ok {
+		t.Fatal("workflow schema must express script/tasks alternative")
+	}
+}
+
+func TestWorkflowToolExecuteScriptPathValidatesMetaAndForwardsEvents(t *testing.T) {
+	fs := &fakeSpawn{}
+	eng := mustEngine(t, fs, 0)
+	runner := &fakeScriptRunner{}
+	var events []eventCapture
+	tool := NewWorkflowRunToolWithScript(eng, runner, nil, func() string { return "parent-1" }, func(typ string, data any) {
+		events = append(events, eventCapture{typ: typ, data: data})
+	})
+	out, err := tool.Execute(context.Background(), json.RawMessage(`{"meta":{"name":"audit","description":"check files"},"args":{"scope":"repo"},"script":"return 1"}`))
+	if err != nil {
+		t.Fatalf("Execute script: %v", err)
+	}
+	if !strings.Contains(out, `"ok":true`) {
+		t.Fatalf("script result = %q, want JSON result", out)
+	}
+	if runner.request.ParentSessionID != "parent-1" || runner.request.Script != "return 1" {
+		t.Fatalf("request = %+v, want parent and script forwarded", runner.request)
+	}
+	if len(events) != 2 || events[0].typ != session.EventWorkflowStart || events[1].typ != session.EventWorkflowRun {
+		t.Fatalf("events = %+v, want workflow/start then workflow/run", events)
+	}
+	if _, err := tool.Execute(context.Background(), json.RawMessage(`{"script":"return 1"}`)); err == nil || !strings.Contains(err.Error(), "meta is required") {
+		t.Fatalf("missing meta error = %v, want meta validation", err)
+	}
+}
+
 // TestWorkflowToolExecuteFormatsReport verifies Execute drives the engine,
 // renders the per-task summary (header + completed tasks + bounded output),
 // and emits the workflow/run event with the lean counts payload (D3).

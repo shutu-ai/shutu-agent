@@ -5,6 +5,9 @@ import (
 	"errors"
 	"reflect"
 	"testing"
+	"time"
+
+	"github.com/jabing/shutu-agent/internal/session"
 )
 
 // Compile-time assertions: engine implements the Engine Service and memProvider
@@ -128,6 +131,62 @@ func TestEngineCreatePlanStandalone(t *testing.T) {
 	}
 	if len(goals) != 0 {
 		t.Errorf("List returned %d goals, want 0 (standalone plan must not be in the tree)", len(goals))
+	}
+}
+
+func TestEngineRestoreFromSessionEventsIsIdempotentAndReseedsIDs(t *testing.T) {
+	e := newTestEngine(t)
+	log := session.New()
+	created := time.Date(2026, 8, 24, 10, 0, 0, 0, time.UTC)
+	steps := []Todo{{ID: "todo-9", Title: "implement", Status: StatusPending, CreatedAt: created}}
+	if _, err := log.Append(session.EventPlanCreate, session.NewPlanCreate("goal", "goal-7", "Ship", nil, map[string]any{
+		"objective": "ship the durable tree", "status": StatusPending, "createdAt": created,
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := log.Append(session.EventPlanCreate, session.NewPlanCreate("plan", "plan-8", "Core", nil, map[string]any{
+		"goalId": "goal-7", "status": StatusPending, "createdAt": created, "steps": steps,
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := log.Append(session.EventPlanCreate, session.NewPlanCreate("todo", "todo-9", "verify", []string{"contains:ok"}, map[string]any{
+		"planId": "plan-8", "status": StatusPending, "createdAt": created,
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := log.Append(session.EventPlanStatus, session.NewPlanStatus("todo", "todo-9", string(StatusDone))); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Restore(log.Events()); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	firstGoals, err := e.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(firstGoals) != 1 || firstGoals[0].ID != "goal-7" || firstGoals[0].Plans[0] != "plan-8" {
+		t.Fatalf("restored goals = %+v", firstGoals)
+	}
+	firstPlan := getPlan(t, e, "plan-8")
+	if len(firstPlan.Steps) != 1 || firstPlan.Steps[0].ID != "todo-9" || firstPlan.Steps[0].Status != StatusDone {
+		t.Fatalf("restored plan = %+v", firstPlan)
+	}
+	if firstPlan.Steps[0].Acceptance[0] != "contains:ok" || firstPlan.Steps[0].CompletedAt == nil {
+		t.Fatalf("restored todo metadata = %+v", firstPlan.Steps[0])
+	}
+	if err := e.Restore(log.Events()); err != nil {
+		t.Fatalf("second Restore: %v", err)
+	}
+	secondPlan := getPlan(t, e, "plan-8")
+	if !reflect.DeepEqual(firstPlan, secondPlan) {
+		t.Fatalf("Restore is not idempotent:\nfirst=%+v\nsecond=%+v", firstPlan, secondPlan)
+	}
+	newGoal, err := e.CreateGoal(context.Background(), "Next", "continue")
+	if err != nil {
+		t.Fatalf("CreateGoal after Restore: %v", err)
+	}
+	if newGoal.ID != "goal-8" {
+		t.Fatalf("new goal id = %q, want goal-8", newGoal.ID)
 	}
 }
 

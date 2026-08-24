@@ -20,6 +20,7 @@ import (
 	"github.com/jabing/shutu-agent/internal/config"
 	"github.com/jabing/shutu-agent/internal/subagent"
 	"github.com/jabing/shutu-agent/internal/workflow"
+	nodeworkflow "github.com/jabing/shutu-agent/internal/workflow/node"
 )
 
 // registerWorkflow wires the task-DAG orchestration seam (D-GAP-2) when
@@ -48,12 +49,43 @@ func (a *app) registerWorkflow() error {
 	if err != nil {
 		return err
 	}
+	parentID := a.currentID
+	startAgent := func(ctx context.Context, req workflow.AgentRequest) (workflow.AgentResult, error) {
+		provider := req.Provider
+		if provider == "" {
+			provider = a.cfg.Subagent.DefaultProvider
+		}
+		if provider == "" {
+			provider = "spawn"
+		}
+		run, err := a.subagents.Start(ctx, provider, subagent.StartRequest{
+			Label:           req.Label,
+			Prompt:          req.Prompt,
+			Model:           req.Model,
+			OutputSchema:    req.Schema,
+			ParentSessionID: parentID,
+		})
+		if err != nil {
+			return workflow.AgentResult{}, err
+		}
+		res, err := run.Result(ctx)
+		if err != nil {
+			return workflow.AgentResult{}, err
+		}
+		return workflow.AgentResult{ID: run.ID, Output: res.Output, StopReason: res.StopReason}, nil
+	}
+	scriptRunner := nodeworkflow.New(nodeworkflow.Config{
+		MaxConcurrent:   a.cfg.Workflow.MaxConcurrent,
+		MaxTotalAgents:  a.cfg.Workflow.MaxTotalAgents,
+		MaxItemsPerCall: a.cfg.Workflow.MaxItemsPerCall,
+		SyncTimeoutMS:   a.cfg.Workflow.SyncTimeoutMS,
+	})
 	onEvent := func(typ string, data any) {
 		if _, err := a.log.Append(typ, data); err != nil {
 			fmt.Fprintln(os.Stderr, "pa: "+typ+" event:", err)
 		}
 	}
-	if err := a.reg.Register(workflow.NewWorkflowRunTool(eng, onEvent)); err != nil {
+	if err := a.reg.Register(workflow.NewWorkflowRunToolWithScript(eng, scriptRunner, startAgent, func() string { return a.currentID }, onEvent)); err != nil {
 		return fmt.Errorf("pa: register %s: %w", workflow.WorkflowRunToolName, err)
 	}
 	return nil

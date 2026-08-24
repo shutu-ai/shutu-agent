@@ -25,7 +25,7 @@ import (
 // Capabilities declares which StartRequest features a Provider supports (ADR
 // 决策 ②). Each bool gates the matching StartRequest field in Runtime.Start.
 type Capabilities struct {
-	OutputSchema bool // structured (schema-constrained) results — not yet provided by any provider
+	OutputSchema bool // structured (schema-constrained) results
 	DepthLimit   bool // MaxDepth is enforced (depth tracking + ErrDepthExceeded)
 	ToolFilter   bool // ToolFilter whitelist is applied to the child's visible tools
 	Persona      bool // Persona is applied to the child's system prompt
@@ -36,6 +36,12 @@ type StartRequest struct {
 	Label string
 	// Prompt is the child agent's first user message (its task).
 	Prompt string
+	// Model optionally overrides the provider's configured model. Providers
+	// that do not expose model routing may ignore this field explicitly.
+	Model string
+	// OutputSchema requests a dsh-style structured result. Providers that
+	// support it expose a scoped structured_output tool to the child.
+	OutputSchema map[string]any
 	// ParentSessionID identifies the delegating session ("" for an unowned
 	// root spawn). Providers track the parent → child lineage for depth and
 	// ListChildren.
@@ -54,6 +60,10 @@ type StartRequest struct {
 	// D-EVAL-4). The provider injects it into the child's prompt as a
 	// "验收标准（交付自检）" section so the child self-checks its deliverable.
 	AcceptanceCriteria []string
+	// Continuable keeps the child alive after a completed turn so Send can
+	// queue follow-up messages while the process remains alive. It is false
+	// for one-shot children and is intentionally opt-in for compatibility.
+	Continuable bool
 }
 
 // Result is the terminal outcome of a subagent run. StopReason is one of
@@ -61,6 +71,9 @@ type StartRequest struct {
 type Result struct {
 	Output     string // the child's last non-empty assistant/message text
 	StopReason string
+	// Structured is populated only when OutputSchema was requested and the
+	// child successfully called the scoped structured_output tool.
+	Structured any
 }
 
 // Stop reason vocabulary (ADR 决策 ②: completed | aborted | error | max-tokens
@@ -81,6 +94,9 @@ type Run struct {
 	// Result blocks until the subagent settles (or ctx is cancelled) and
 	// returns its terminal outcome. It is safe to call repeatedly.
 	Result func(ctx context.Context) (Result, error)
+	// Send queues one follow-up user message for a live continuable child.
+	// Providers may reject it when the child is one-shot or already settled.
+	Send func(ctx context.Context, message string) error
 	// Cancel requests cancellation of a live subagent with a reason; it is
 	// idempotent and fails with an error once the subagent has settled.
 	Cancel func(reason string) error
@@ -116,6 +132,10 @@ type closer interface {
 	Close() error
 }
 
+type resumer interface {
+	Resume(ctx context.Context, sessionID, prompt string, continuable bool) (*Run, error)
+}
+
 // Runtime is the subagent Service (ADR 决策 ②): a multi-provider registry that
 // validates each Start against the named provider's capabilities and delegates.
 // Consumers (the M5b-2 subagent tools) depend only on this interface.
@@ -131,6 +151,7 @@ type Runtime interface {
 	// (MaxDepth>0 ⇒ DepthLimit; ToolFilter ⇒ ToolFilter; Persona ⇒ Persona),
 	// then delegates to the provider. An unknown provider name is rejected.
 	Start(ctx context.Context, name string, req StartRequest) (*Run, error)
+	Resume(ctx context.Context, name, sessionID, prompt string, continuable bool) (*Run, error)
 	// ListChildren aggregates the spawned children of every provider that
 	// tracks them for one parent session, sorted by id.
 	ListChildren(ctx context.Context, parentSessionID string) ([]ChildSummary, error)
@@ -149,6 +170,7 @@ var (
 	ErrDepthExceeded          = errors.New("subagent: delegation depth exceeded")
 	ErrProviderClosed         = errors.New("subagent: provider closed")
 	ErrInvalidRequest         = errors.New("subagent: invalid start request")
+	ErrNotContinuable         = errors.New("subagent: run is not continuable")
 )
 
 // NewRuntime returns an empty Runtime registry.
@@ -220,6 +242,9 @@ func (r *runtime) Start(ctx context.Context, name string, req StartRequest) (*Ru
 	if req.MaxDepth > 0 && !caps.DepthLimit {
 		return nil, fmt.Errorf("%w: max_depth=%d requires a depth-limit provider", ErrCapabilityNotSupported, req.MaxDepth)
 	}
+	if req.OutputSchema != nil && !caps.OutputSchema {
+		return nil, fmt.Errorf("%w: structured output requires an output-schema provider", ErrCapabilityNotSupported)
+	}
 	if len(req.ToolFilter) > 0 && !caps.ToolFilter {
 		return nil, fmt.Errorf("%w: tool filter requires a tool-filter provider", ErrCapabilityNotSupported)
 	}
@@ -227,6 +252,27 @@ func (r *runtime) Start(ctx context.Context, name string, req StartRequest) (*Ru
 		return nil, fmt.Errorf("%w: persona requires a persona provider", ErrCapabilityNotSupported)
 	}
 	return p.Start(ctx, req)
+}
+
+func (r *runtime) Resume(ctx context.Context, name, sessionID, prompt string, continuable bool) (*Run, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return nil, ErrProviderClosed
+	}
+	p, ok := r.providers[name]
+	r.mu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", ErrUnknownProvider, name)
+	}
+	rp, ok := p.(resumer)
+	if !ok {
+		return nil, fmt.Errorf("%w: provider %s does not support resume", ErrCapabilityNotSupported, name)
+	}
+	return rp.Resume(ctx, sessionID, prompt, continuable)
 }
 
 func (r *runtime) ListChildren(ctx context.Context, parentSessionID string) ([]ChildSummary, error) {

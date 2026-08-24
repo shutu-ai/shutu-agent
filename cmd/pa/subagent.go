@@ -38,6 +38,7 @@ func (a *app) registerSubagent() error {
 		Tools:  a.reg,
 		Prompt: a.prompt,
 		Model:  a.cfg.Model,
+		Store:  a.store,
 	})
 	rt := subagent.NewRuntime()
 	if err := rt.RegisterProvider(prov); err != nil {
@@ -79,6 +80,10 @@ func (a *app) registerSubagent() error {
 		st.Status(),
 		st.Cancel(),
 		st.List(),
+		st.Send(),
+		st.Interrupt(),
+		st.Report(),
+		st.Resume(),
 	} {
 		if err := a.reg.Register(t); err != nil {
 			return fmt.Errorf("pa: register %s: %w", t.Name(), err)

@@ -15,11 +15,13 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/jabing/shutu-agent/internal/llm"
 	"github.com/jabing/shutu-agent/internal/loop"
 	"github.com/jabing/shutu-agent/internal/prompt"
 	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/jabing/shutu-agent/internal/store"
 	"github.com/jabing/shutu-agent/internal/tools"
 )
 
@@ -35,6 +37,9 @@ type Deps struct {
 	Tools  *tools.Registry
 	Prompt *prompt.Builder
 	Model  string
+	// Store durably records the independent child session when provided. It is
+	// optional so library users and existing tests can remain in-memory.
+	Store store.Store
 }
 
 // SpawnProvider spawns a brand-new child session + child loop for every Start.
@@ -53,18 +58,22 @@ type SpawnProvider struct {
 // is never handed out; callers receive fresh values (Run closures,
 // ChildSummary, ChildLog).
 type childRun struct {
-	id     string
-	label  string
-	parent string
-	depth  int
-	log    *session.Log
-	cancel context.CancelFunc // cancels the child loop context (set in Start)
-	done   chan struct{}      // closed once the child settles
+	id          string
+	label       string
+	parent      string
+	depth       int
+	log         *session.Log
+	cancel      context.CancelFunc // cancels the child loop context (set in Start)
+	done        chan struct{}      // closed once the child settles
+	inbox       chan string        // follow-up messages for continuable children
+	continuable bool
 
-	mu           sync.Mutex
-	cancelReason string
-	result       Result
-	settled      bool
+	mu            sync.Mutex
+	cancelReason  string
+	result        Result
+	structured    any
+	structuredSet bool
+	settled       bool
 }
 
 // NewSpawnProvider returns a SpawnProvider bound to the given core components.
@@ -77,9 +86,9 @@ func (p *SpawnProvider) Name() string { return "spawn" }
 
 // Capabilities declares what the spawn provider actually enforces: delegation
 // depth (MaxDepth ⇒ ErrDepthExceeded). ToolFilter/Persona application and
-// structured output are M5b-2 / later wiring, so they are not declared.
+// structured output is captured through a child-scoped structured_output tool.
 func (p *SpawnProvider) Capabilities() Capabilities {
-	return Capabilities{DepthLimit: true}
+	return Capabilities{DepthLimit: true, OutputSchema: true}
 }
 
 // Start registers a brand-new child session (depth = parent depth + 1, tracked
@@ -94,7 +103,22 @@ func (p *SpawnProvider) Start(ctx context.Context, req StartRequest) (*Run, erro
 	if req.Prompt == "" {
 		return nil, fmt.Errorf("%w: prompt is required", ErrInvalidRequest)
 	}
+	if req.OutputSchema != nil {
+		if root, ok := req.OutputSchema["type"].(string); !ok || root != "object" {
+			return nil, fmt.Errorf("%w: output schema must have an object root", ErrInvalidRequest)
+		}
+		if p.deps.Tools == nil {
+			return nil, fmt.Errorf("%w: structured output requires a tool registry", ErrInvalidRequest)
+		}
+		probe := tools.New()
+		if err := probe.Register(structuredOutputTool{schema: req.OutputSchema}); err != nil {
+			return nil, fmt.Errorf("%w: invalid output schema: %v", ErrInvalidRequest, err)
+		}
+	}
 	req.Prompt = withAcceptance(req.Prompt, req.AcceptanceCriteria)
+	if req.OutputSchema != nil {
+		req.Prompt = structuredPrompt(req.Prompt, req.OutputSchema)
+	}
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
@@ -114,23 +138,121 @@ func (p *SpawnProvider) Start(ctx context.Context, req StartRequest) (*Run, erro
 	id := fmt.Sprintf("spawn-%d", p.nextID)
 	runCtx, cancel := context.WithCancel(context.Background())
 	child := &childRun{
-		id:     id,
-		label:  req.Label,
-		parent: req.ParentSessionID,
-		depth:  depth,
-		log:    session.New(),
-		cancel: cancel,
-		done:   make(chan struct{}),
+		id:          id,
+		label:       req.Label,
+		parent:      req.ParentSessionID,
+		depth:       depth,
+		log:         session.New(),
+		cancel:      cancel,
+		done:        make(chan struct{}),
+		inbox:       make(chan string, 16),
+		continuable: req.Continuable,
 	}
 	p.children[id] = child
 	p.mu.Unlock()
+	if p.deps.Store != nil {
+		if err := p.deps.Store.CreateSession(context.Background(), id, time.Now().UTC()); err != nil {
+			cancel()
+			p.mu.Lock()
+			delete(p.children, id)
+			p.mu.Unlock()
+			return nil, fmt.Errorf("subagent: persist child session %q: %w", id, err)
+		}
+		child.log.SetSink(func(ev session.Event) error {
+			return p.deps.Store.AppendEvents(context.Background(), id, []session.Event{ev})
+		})
+		if _, err := child.log.Append(session.EventSubagentStart,
+			session.NewSubagentStartWithDepth(id, p.Name(), child.parent, child.label, child.depth)); err != nil {
+			cancel()
+			p.mu.Lock()
+			delete(p.children, id)
+			p.mu.Unlock()
+			return nil, fmt.Errorf("subagent: persist child metadata %q: %w", id, err)
+		}
+	}
 
 	go p.runChild(child, req, runCtx)
 	return &Run{
 		ID:     id,
 		Result: p.resultFunc(child),
+		Send:   p.sendFunc(child),
 		Cancel: p.cancelFunc(child),
 	}, nil
+}
+
+// Resume rehydrates a persisted spawn session and runs one new turn against
+// the restored history. Only the local provider supports this operation;
+// external providers remain explicitly non-resumable.
+func (p *SpawnProvider) Resume(ctx context.Context, sessionID, message string, continuable bool) (*Run, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if p.deps.Store == nil {
+		return nil, fmt.Errorf("%w: spawn provider has no Store", ErrCapabilityNotSupported)
+	}
+	if strings.TrimSpace(sessionID) == "" || strings.TrimSpace(message) == "" {
+		return nil, fmt.Errorf("%w: session id and prompt are required", ErrInvalidRequest)
+	}
+	events, err := p.deps.Store.LoadSession(ctx, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("subagent: load child session %q: %w", sessionID, err)
+	}
+	var meta struct {
+		ID            string `json:"id"`
+		Provider      string `json:"provider"`
+		ParentSession string `json:"parentSession"`
+		Label         string `json:"label"`
+		Depth         int    `json:"depth"`
+	}
+	for _, ev := range events {
+		if ev.Type == session.EventSubagentStart && json.Unmarshal(ev.Data, &meta) == nil {
+			break
+		}
+	}
+	if meta.ID != sessionID || meta.Provider != p.Name() {
+		return nil, fmt.Errorf("%w: session %q is not a persisted spawn child", ErrInvalidRequest, sessionID)
+	}
+	if meta.Depth <= 0 {
+		meta.Depth = 1
+	}
+	log := session.New()
+	if err := log.Restore(events); err != nil {
+		return nil, fmt.Errorf("subagent: restore child session %q: %w", sessionID, err)
+	}
+	runCtx, cancel := context.WithCancel(context.Background())
+	child := &childRun{
+		id: sessionID, label: meta.Label, parent: meta.ParentSession, depth: meta.Depth,
+		log: log, cancel: cancel, done: make(chan struct{}), inbox: make(chan string, 16), continuable: continuable,
+	}
+	log.SetSink(func(ev session.Event) error {
+		return p.deps.Store.AppendEvents(context.Background(), sessionID, []session.Event{ev})
+	})
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		cancel()
+		return nil, ErrProviderClosed
+	}
+	if _, exists := p.children[sessionID]; exists {
+		p.mu.Unlock()
+		cancel()
+		return nil, fmt.Errorf("subagent: child %q is already active", sessionID)
+	}
+	p.children[sessionID] = child
+	if n := parseSpawnID(sessionID); n > p.nextID {
+		p.nextID = n
+	}
+	p.mu.Unlock()
+	go p.runChild(child, StartRequest{Prompt: message, Continuable: continuable}, runCtx)
+	return &Run{ID: sessionID, Result: p.resultFunc(child), Send: p.sendFunc(child), Cancel: p.cancelFunc(child)}, nil
+}
+
+func parseSpawnID(id string) int {
+	var n int
+	if _, err := fmt.Sscanf(id, "spawn-%d", &n); err != nil {
+		return 0
+	}
+	return n
 }
 
 // runChild drives one child agent to completion against its own independent
@@ -143,15 +265,52 @@ func (p *SpawnProvider) runChild(child *childRun, req StartRequest, runCtx conte
 			p.settle(child, Result{StopReason: StopError})
 		}
 	}()
+	model := p.deps.Model
+	if req.Model != "" {
+		model = req.Model
+	}
+	childTools := p.deps.Tools
+	if req.OutputSchema != nil {
+		childTools = p.deps.Tools.Clone()
+		if err := childTools.Register(structuredOutputTool{
+			schema: req.OutputSchema,
+			capture: func(value any) error {
+				child.mu.Lock()
+				defer child.mu.Unlock()
+				if child.structuredSet {
+					return fmt.Errorf("structured output already recorded")
+				}
+				child.structured = value
+				child.structuredSet = true
+				return nil
+			},
+		}); err != nil {
+			p.settle(child, Result{StopReason: StopError})
+			return
+		}
+		childTools.Allow(structuredOutputToolName)
+	}
 	lp := loop.New(loop.Config{
 		LLM:    p.deps.LLM,
 		Log:    child.log,
-		Tools:  p.deps.Tools,
+		Tools:  childTools,
 		Prompt: p.deps.Prompt,
-		Model:  p.deps.Model,
+		Model:  model,
 	})
-	runErr := lp.Run(runCtx, req.Prompt)
-	p.settle(child, p.deriveResult(child, runErr))
+	message := req.Prompt
+	for {
+		runErr := lp.Run(runCtx, message)
+		if !child.continuable || runErr != nil {
+			p.settle(child, p.deriveResult(child, runErr))
+			return
+		}
+		select {
+		case message = <-child.inbox:
+		case <-runCtx.Done():
+			p.settle(child, p.deriveResult(child, runCtx.Err()))
+			return
+		}
+	}
 }
 
 // settle records the first terminal result for a child. First-wins: a Close
@@ -172,14 +331,22 @@ func (p *SpawnProvider) deriveResult(child *childRun, runErr error) Result {
 	last := lastAssistantEvent(child.log)
 	child.mu.Lock()
 	cancelled := child.cancelReason != ""
+	structured := child.structured
+	structuredSet := child.structuredSet
 	child.mu.Unlock()
+	result := Result{Output: last.text}
 	switch {
 	case cancelled:
-		return Result{Output: last.text, StopReason: StopAborted}
+		result.StopReason = StopAborted
 	case runErr != nil:
-		return Result{Output: last.text, StopReason: StopError}
+		result.StopReason = StopError
+	default:
+		result.StopReason = mapStopReason(last.finishReason)
 	}
-	return Result{Output: last.text, StopReason: mapStopReason(last.finishReason)}
+	if result.StopReason == StopCompleted && structuredSet {
+		result.Structured = structured
+	}
+	return result
 }
 
 // resultFunc returns the Run.Result closure for a child: it blocks until the
@@ -194,6 +361,35 @@ func (p *SpawnProvider) resultFunc(child *childRun) func(ctx context.Context) (R
 		child.mu.Lock()
 		defer child.mu.Unlock()
 		return child.result, nil
+	}
+}
+
+// sendFunc queues one follow-up turn for a live continuable child. The queue
+// is bounded so a caller cannot create unbounded memory growth while a model
+// request is in flight.
+func (p *SpawnProvider) sendFunc(child *childRun) func(context.Context, string) error {
+	return func(ctx context.Context, message string) error {
+		if strings.TrimSpace(message) == "" {
+			return fmt.Errorf("subagent: message is empty")
+		}
+		child.mu.Lock()
+		settled := child.settled
+		continuable := child.continuable
+		child.mu.Unlock()
+		if settled {
+			return fmt.Errorf("subagent: %s: already finished", child.id)
+		}
+		if !continuable {
+			return fmt.Errorf("%w: %s", ErrNotContinuable, child.id)
+		}
+		select {
+		case child.inbox <- message:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			return fmt.Errorf("subagent: %s: message queue is full", child.id)
+		}
 	}
 }
 

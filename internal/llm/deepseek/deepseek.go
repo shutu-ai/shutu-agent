@@ -55,6 +55,9 @@ type Config struct {
 	// Backoff returns the delay before retry attempt n (1-based). Nil uses an
 	// exponential schedule (500ms, 1s, 2s, ... capped at 8s).
 	Backoff func(attempt int) time.Duration
+	// DisableRetry lets the composition root delegate retries to the shared
+	// provider-neutral wrapper. Direct clients keep the historical default.
+	DisableRetry bool
 	// SupportsImages is the model's input-modality capability declaration,
 	// passed from config llm.model_input_modalities by the composition root
 	// (dispatch-m8-3b §4.1). false (the default) means a request carrying an
@@ -69,12 +72,13 @@ type Config struct {
 
 // Client is a DeepSeek LLM adapter.
 type Client struct {
-	baseURL    string
-	apiKey     string
-	model      string
-	client     *http.Client
-	maxRetries int
-	backoff    func(attempt int) time.Duration
+	baseURL      string
+	apiKey       string
+	model        string
+	client       *http.Client
+	maxRetries   int
+	backoff      func(attempt int) time.Duration
+	disableRetry bool
 
 	supportsImages       bool
 	maxRequestImageBytes int
@@ -108,6 +112,7 @@ func New(cfg Config) *Client {
 		client:               cfg.HTTPClient,
 		maxRetries:           cfg.MaxRetries,
 		backoff:              backoff,
+		disableRetry:         cfg.DisableRetry,
 		supportsImages:       cfg.SupportsImages,
 		maxRequestImageBytes: cfg.MaxRequestImageBytes,
 	}
@@ -314,7 +319,7 @@ func (c *Client) Stream(ctx context.Context, req llm.ChatRequest) (llm.StreamRea
 		if err == nil {
 			return reader, nil
 		}
-		if !retryable || attempt >= c.maxRetries {
+		if !retryable || c.disableRetry || attempt >= c.maxRetries {
 			return nil, err
 		}
 		if err := sleepCtx(ctx, c.backoff(attempt+1)); err != nil {

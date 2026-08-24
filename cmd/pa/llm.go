@@ -24,7 +24,16 @@ import (
 	"github.com/jabing/shutu-agent/internal/llm/google"
 	"github.com/jabing/shutu-agent/internal/llm/openai"
 	"github.com/jabing/shutu-agent/internal/llm/openairesponses"
+	"github.com/jabing/shutu-agent/internal/llm/retry"
 )
+
+func wrapProvider(p llm.Provider, cfg *config.Config) llm.Provider {
+	return retry.WrapProvider(p, retry.Config{
+		MaxRetries:     cfg.LLM.Retry.MaxRetries,
+		InitialBackoff: cfg.LLM.Retry.InitialBackoff.Duration,
+		MaxBackoff:     cfg.LLM.Retry.MaxBackoff.Duration,
+	})
+}
 
 // registerLLM builds the provider registry and injects the selected provider
 // into a.llm. Fail-closed contract (dispatch-m8-2 §6):
@@ -58,14 +67,15 @@ func (a *app) registerLLM() error {
 	if dsProfile.Model != "" {
 		dsModel = dsProfile.Model
 	}
-	if err := reg.Register(deepseek.New(deepseek.Config{
+	if err := reg.Register(wrapProvider(deepseek.New(deepseek.Config{
 		APIKey:               a.providerKey("deepseek-official"),
 		BaseURL:              dsBaseURL,
 		Model:                dsModel,
 		MaxRetries:           2,
+		DisableRetry:         true,
 		SupportsImages:       strings.Contains(a.cfg.LLM.ModelInputModalities, "image"),
 		MaxRequestImageBytes: a.cfg.LLM.Multimodal.MaxRequestImageBytes, // 默认 20MiB 由 New 兜底
-	})); err != nil {
+	}), &a.cfg)); err != nil {
 		return fmt.Errorf("pa: register deepseek provider: %w", err)
 	}
 
@@ -74,13 +84,14 @@ func (a *app) registerLLM() error {
 	// wins, M11). It reuses the deepseek OpenAI-compatible client — zero new
 	// wire code (dispatch-m8-2 §4).
 	if key := a.providerKey("openai"); key != "" {
-		if err := reg.Register(openai.New(openai.Config{
+		if err := reg.Register(wrapProvider(openai.New(openai.Config{
 			APIKey:               key,
 			BaseURL:              a.cfg.LLM.OpenAI.BaseURL,
 			Model:                a.cfg.LLM.OpenAI.Model,
+			DisableRetry:         true,
 			SupportsImages:       strings.Contains(a.cfg.LLM.ModelInputModalities, "image"),
 			MaxRequestImageBytes: a.cfg.LLM.Multimodal.MaxRequestImageBytes, // 默认 20MiB 由 New 兜底
-		})); err != nil {
+		}), &a.cfg)); err != nil {
 			return fmt.Errorf("pa: register openai provider: %w", err)
 		}
 	}
@@ -90,14 +101,14 @@ func (a *app) registerLLM() error {
 	// wins, M11). Its parameters come from llm.anthropic.base_url/model
 	// (defaults https://api.anthropic.com/v1 / claude-sonnet-4-5, M8-2b §3).
 	if key := a.providerKey("anthropic"); key != "" {
-		if err := reg.Register(anthropic.New(anthropic.Config{
+		if err := reg.Register(wrapProvider(anthropic.New(anthropic.Config{
 			ID:                   "anthropic",
 			APIKey:               key,
 			BaseURL:              a.cfg.LLM.Anthropic.BaseURL,
 			Model:                a.cfg.LLM.Anthropic.Model,
 			SupportsImages:       strings.Contains(a.cfg.LLM.ModelInputModalities, "image"),
 			MaxRequestImageBytes: a.cfg.LLM.Multimodal.MaxRequestImageBytes, // 默认 20MiB 由 New 兜底
-		})); err != nil {
+		}), &a.cfg)); err != nil {
 			return fmt.Errorf("pa: register anthropic provider: %w", err)
 		}
 	}
@@ -210,41 +221,41 @@ func registerBuiltinByProtocol(reg *llm.Registry, bp builtinProvider, key string
 	maxBytes := cfg.LLM.Multimodal.MaxRequestImageBytes
 	switch bp.protocol {
 	case protocolCompletions:
-		return reg.Register(openai.New(openai.Config{
+		return reg.Register(wrapProvider(openai.New(openai.Config{
 			ID:                   bp.id,
 			APIKey:               key,
 			BaseURL:              bp.baseURL,
 			Model:                bp.model,
 			SupportsImages:       images,
 			MaxRequestImageBytes: maxBytes,
-		}))
+		}), cfg))
 	case protocolMessages:
-		return reg.Register(anthropic.New(anthropic.Config{
+		return reg.Register(wrapProvider(anthropic.New(anthropic.Config{
 			ID:                   bp.id,
 			APIKey:               key,
 			BaseURL:              bp.baseURL,
 			Model:                bp.model,
 			SupportsImages:       images,
 			MaxRequestImageBytes: maxBytes,
-		}))
+		}), cfg))
 	case protocolGemini:
-		return reg.Register(google.New(google.Config{
+		return reg.Register(wrapProvider(google.New(google.Config{
 			ID:                   bp.id,
 			APIKey:               key,
 			BaseURL:              bp.baseURL,
 			Model:                bp.model,
 			SupportsImages:       images,
 			MaxRequestImageBytes: maxBytes,
-		}))
+		}), cfg))
 	case protocolResponses:
-		return reg.Register(openairesponses.New(openairesponses.Config{
+		return reg.Register(wrapProvider(openairesponses.New(openairesponses.Config{
 			ID:                   bp.id,
 			APIKey:               key,
 			BaseURL:              bp.baseURL,
 			Model:                bp.model,
 			SupportsImages:       images,
 			MaxRequestImageBytes: maxBytes,
-		}))
+		}), cfg))
 	default:
 		return fmt.Errorf("pa: provider %q: unknown protocol %q", bp.id, bp.protocol)
 	}

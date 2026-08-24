@@ -40,7 +40,11 @@ func (a *app) registerFs() error {
 		}
 	}
 	ft := fs.NewFsTools(svc, onEvent)
-	for _, tl := range []tools.Tool{ft.Write(), ft.List(), ft.Edit()} {
+	fileTools := []tools.Tool{ft.Read(), ft.Write(), ft.List(), ft.Edit()}
+	if a.multimodalEnabled() {
+		fileTools = append(fileTools, ft.ReadImage())
+	}
+	for _, tl := range fileTools {
 		if err := a.reg.Register(tl); err != nil {
 			return fmt.Errorf("pa: register %s: %w", tl.Name(), err)
 		}
