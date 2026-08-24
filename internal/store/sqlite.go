@@ -43,6 +43,7 @@ CREATE INDEX IF NOT EXISTS idx_events_session ON events (session_id, seq);
 CREATE TABLE IF NOT EXISTS workspaces (
     id    TEXT    NOT NULL PRIMARY KEY,
     title TEXT    NOT NULL,
+    path  TEXT    NOT NULL DEFAULT '',
     sort  INTEGER NOT NULL,
     created_at INTEGER NOT NULL DEFAULT 0
 );
@@ -81,6 +82,7 @@ func migrateSchema(db *sql.DB) error {
 		{"sessions", "provider", `ALTER TABLE sessions ADD COLUMN provider TEXT`},
 		{"sessions", "reasoning_effort", `ALTER TABLE sessions ADD COLUMN reasoning_effort TEXT`},
 		{"workspaces", "created_at", `ALTER TABLE workspaces ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0`},
+		{"workspaces", "path", `ALTER TABLE workspaces ADD COLUMN path TEXT NOT NULL DEFAULT ''`},
 	}
 	for _, st := range steps {
 		if _, err := db.Exec(st.ddl); err != nil {
@@ -718,13 +720,20 @@ func (s *SQLiteStore) DeleteSession(ctx context.Context, sessionID string) error
 // CreateWorkspace inserts a workspace row (idempotent) at the end of the
 // current sort order.
 func (s *SQLiteStore) CreateWorkspace(ctx context.Context, id, title string) error {
+	return s.CreateWorkspaceWithPath(ctx, id, title, "")
+}
+
+// CreateWorkspaceWithPath inserts a workspace and persists its canonical
+// directory. The empty path is retained for legacy callers; the Web layer
+// supplies its configured default before calling this method.
+func (s *SQLiteStore) CreateWorkspaceWithPath(ctx context.Context, id, title, path string) error {
 	var next int
 	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(sort), -1) + 1 FROM workspaces`).Scan(&next); err != nil {
 		return fmt.Errorf("store: next workspace sort: %w", err)
 	}
 	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO workspaces (id, title, sort, created_at) VALUES (?, ?, ?, ?)
-		 ON CONFLICT(id) DO NOTHING`, id, title, next, time.Now().UnixMilli()); err != nil {
+		`INSERT INTO workspaces (id, title, path, sort, created_at) VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO NOTHING`, id, title, path, next, time.Now().UnixMilli()); err != nil {
 		return fmt.Errorf("store: create workspace %q: %w", id, err)
 	}
 	return nil
@@ -732,7 +741,7 @@ func (s *SQLiteStore) CreateWorkspace(ctx context.Context, id, title string) err
 
 // ListWorkspaces returns every workspace, ordered by Sort then id.
 func (s *SQLiteStore) ListWorkspaces(ctx context.Context) ([]WorkspaceMeta, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, title, sort, created_at FROM workspaces ORDER BY sort, id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, title, path, sort, created_at FROM workspaces ORDER BY sort, id`)
 	if err != nil {
 		return nil, fmt.Errorf("store: list workspaces: %w", err)
 	}
@@ -741,7 +750,7 @@ func (s *SQLiteStore) ListWorkspaces(ctx context.Context) ([]WorkspaceMeta, erro
 	for rows.Next() {
 		var m WorkspaceMeta
 		var created int64
-		if err := rows.Scan(&m.ID, &m.Title, &m.Sort, &created); err != nil {
+		if err := rows.Scan(&m.ID, &m.Title, &m.Path, &m.Sort, &created); err != nil {
 			return nil, fmt.Errorf("store: scan workspace: %w", err)
 		}
 		if created > 0 {

@@ -9,6 +9,11 @@ model: deepseek-v4-flash
 # (https://api.deepseek.com).
 base_url: ""
 
+# Session workspace fallback. Ungrouped sessions and legacy title-only
+# workspaces use this directory; empty falls back to the agent process cwd.
+workspace:
+  default_dir: ""
+
 # Agent 模式预设 (ADR 2026-08-20-mode-presets.md): standard (标准, 默认: 全部
 # 能力按各自 enabled 开关) | minimal (极简: 固定 persona + 持久 shell + 文件
 # 编辑, 其余能力忽略) | code (PTC: 标准全部 + 程序化操作 Code Mode 段, 用

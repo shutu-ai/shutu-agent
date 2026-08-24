@@ -1152,6 +1152,37 @@ func TestWorkspaceAPI(t *testing.T) {
 	}
 }
 
+func TestWorkspaceSessionCWD(t *testing.T) {
+	srv, st := newTestServer(t, "")
+	dir := t.TempDir()
+	srv.SetDefaultWorkdir(t.TempDir())
+	workspaceBody, _ := json.Marshal(map[string]string{"title": "project", "path": dir})
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/workspaces", "", string(workspaceBody))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create workspace = %d: %s", rec.Code, rec.Body.String())
+	}
+	var workspace struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &workspace); err != nil || workspace.ID == "" {
+		t.Fatalf("workspace response = %s", rec.Body.String())
+	}
+	srv.SetSessionManager(func(ctx context.Context, action, id string) (string, error) {
+		if err := st.CreateSession(ctx, "session-cwd", time.Now().UTC()); err != nil {
+			return "", err
+		}
+		return "session-cwd", nil
+	})
+	rec = doReqBody(t, srv.Handler(), "POST", "/api/sessions", "", `{"workspace_id":"`+workspace.ID+`"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create session = %d: %s", rec.Code, rec.Body.String())
+	}
+	meta, err := st.GetSessionMeta(context.Background(), "session-cwd")
+	if err != nil || meta.CWD != dir {
+		t.Fatalf("session cwd = %q, err=%v, want %q", meta.CWD, err, dir)
+	}
+}
+
 // TestSessionForkArchiveOrder covers P6.2: fork clones the event log, archive
 // leaves the active list, unarchive restores it, and drag order moves/orders
 // sessions and workspaces.

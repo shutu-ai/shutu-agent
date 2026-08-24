@@ -1576,9 +1576,10 @@ function showWorkspaceHover(rowEl, g) {
   const card = ensureWsHover();
   const created = g.created_at;
   const timeHtml = created ? `<div class="shv-time">创建于 ${fmtShort(created)}</div>` : "";
+  const cwdHtml = g.path ? `<div class="shv-cwd">${esc(g.path)}</div>` : "";
   card.innerHTML = `
     <div class="shv-title">${esc(g.title)}</div>
-    ${timeHtml}`;
+    ${timeHtml}${cwdHtml}`;
   card.hidden = false;
   positionWorkspaceHover(rowEl);
 }
@@ -1961,6 +1962,11 @@ function openWsDialog(mode, id, current) {
   $("ws-dialog-ok").textContent = mode === "rename" ? "保存" : "创建";
   const inp = $("ws-dialog-input");
   inp.value = current || "";
+  const pathInput = $("ws-dialog-path");
+  if (pathInput) {
+    pathInput.value = "";
+    pathInput.classList.toggle("hidden", mode === "rename");
+  }
   $("ws-dialog").classList.remove("hidden");
   inp.focus();
   inp.select();
@@ -1979,7 +1985,8 @@ async function submitWsDialog() {
         method: "PATCH", body: JSON.stringify({ title }),
       });
     } else {
-      await api("/api/workspaces", { method: "POST", body: JSON.stringify({ title }) });
+      const path = $("ws-dialog-path")?.value.trim() || "";
+      await api("/api/workspaces", { method: "POST", body: JSON.stringify({ title, path }) });
       groupBy = "workspace";
       localStorage.setItem("pa_groupby", "workspace");
     }
@@ -1996,9 +2003,8 @@ $("ws-folder").addEventListener("change", async () => {
   if (f && f.webkitRelativePath) {
     const folderName = f.webkitRelativePath.split("/")[0];
     try {
-      await api("/api/workspaces", { method: "POST", body: JSON.stringify({ title: folderName }) });
-      groupBy = "workspace";
-      localStorage.setItem("pa_groupby", "workspace");
+      openWsDialog("create");
+      $("ws-dialog-input").value = folderName;
     } catch (e) { if (e.message !== "unauthorized") console.error(e); }
   }
   $("ws-folder").value = "";

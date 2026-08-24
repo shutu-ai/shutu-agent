@@ -364,12 +364,12 @@ code { font-family: var(--dsw-font-code); background: var(--dsw-alias-markdown-i
   box-shadow: var(--dsw-shadow-l3); display: flex; flex-direction: column; gap: 12px;
 }
 .ws-dialog-title { font-size: 15px; font-weight: 600; color: var(--dsw-alias-label-primary); }
-#ws-dialog-input, #sr-dialog-input {
+#ws-dialog-input, #ws-dialog-path, #sr-dialog-input {
   box-sizing: border-box; width: 100%; height: 36px; padding: 0 12px;
   border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; outline: none;
   background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); font-size: 14px;
 }
-#ws-dialog-input:focus, #sr-dialog-input:focus { border-color: var(--dsw-alias-state-business-primary); }
+#ws-dialog-input:focus, #ws-dialog-path:focus, #sr-dialog-input:focus { border-color: var(--dsw-alias-state-business-primary); }
 .ws-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .ws-view-menu { min-width: 150px; }
 .ws-view-menu button { width: 100%; }
@@ -504,6 +504,7 @@ mark {
   overflow-wrap: anywhere; line-height: 1.35;
 }
 .ws-hover .shv-time { font-size: 12px; color: var(--dsw-alias-label-tertiary); }
+.ws-hover .shv-cwd { font-size: 12px; color: var(--dsw-alias-label-tertiary); max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* inline rename input replaces the title row */
 .session-item.renaming { cursor: text; }

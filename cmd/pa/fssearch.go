@@ -10,7 +10,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/jabing/shutu-agent/internal/config"
 	"github.com/jabing/shutu-agent/internal/fssearch"
@@ -26,14 +25,10 @@ func (a *app) registerFsSearch() error {
 	if !config.Enabled(a.cfg.FsSearch.Enabled) {
 		return nil
 	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("pa: search cwd: %w", err)
-	}
-	if err := a.reg.Register(fssearch.NewGrepTool(cwd)); err != nil {
+	if err := a.reg.Register(fssearch.NewGrepToolForCWD(a.sessionCWD)); err != nil {
 		return fmt.Errorf("pa: register %s: %w", fssearch.GrepToolName, err)
 	}
-	if err := a.reg.Register(fssearch.NewGlobTool(cwd)); err != nil {
+	if err := a.reg.Register(fssearch.NewGlobToolForCWD(a.sessionCWD)); err != nil {
 		return fmt.Errorf("pa: register %s: %w", fssearch.GlobToolName, err)
 	}
 	return nil

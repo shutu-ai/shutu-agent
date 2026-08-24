@@ -42,6 +42,7 @@ type SearchFunc func(ctx context.Context, query string, opts Options) ([]Hit, er
 // tests.
 type GrepTool struct {
 	cwd      string
+	cwdFn    func() string
 	searchFn SearchFunc
 }
 
@@ -49,6 +50,10 @@ type GrepTool struct {
 // (used as the default search root and the display base).
 func NewGrepTool(cwd string) GrepTool {
 	return GrepTool{cwd: cwd, searchFn: Search}
+}
+
+func NewGrepToolForCWD(cwd func() string) GrepTool {
+	return GrepTool{cwdFn: cwd, searchFn: Search}
 }
 
 func (GrepTool) Name() string { return GrepToolName }
@@ -107,8 +112,9 @@ func (t GrepTool) Execute(ctx context.Context, args json.RawMessage) (string, er
 		}
 	}
 	root := a.Path
+	cwd := t.currentCWD()
 	if strings.TrimSpace(root) == "" {
-		root = t.cwd
+		root = cwd
 	}
 	if strings.TrimSpace(root) == "" {
 		return "", fmt.Errorf("grep: no search path (pass path or configure the agent working directory)")
@@ -121,7 +127,14 @@ func (t GrepTool) Execute(ctx context.Context, args json.RawMessage) (string, er
 	if err != nil && !errors.Is(err, ErrLimit) {
 		return "", fmt.Errorf("grep: %w", err)
 	}
-	return formatGrepOutput(hits, t.displayPath, errors.Is(err, ErrLimit)), nil
+	return formatGrepOutput(hits, func(path string) string { return displayRelative(cwd, path) }, errors.Is(err, ErrLimit)), nil
+}
+
+func (t GrepTool) currentCWD() string {
+	if t.cwdFn != nil {
+		return t.cwdFn()
+	}
+	return t.cwd
 }
 
 // validateInclude rejects an include that is not ONE positive glob filter
@@ -202,10 +215,14 @@ func formatGrepGrouped(hits []Hit, display func(string) string) string {
 // lies under it (more readable for the model; follow-up-readable by read);
 // anything else stays absolute (dsh toWorkdirRelative).
 func (t GrepTool) displayPath(p string) string {
-	if t.cwd == "" {
+	return displayRelative(t.currentCWD(), p)
+}
+
+func displayRelative(cwd, p string) string {
+	if cwd == "" {
 		return p
 	}
-	rel, err := filepath.Rel(t.cwd, p)
+	rel, err := filepath.Rel(cwd, p)
 	if err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return filepath.ToSlash(rel)
 	}
@@ -219,12 +236,17 @@ func (t GrepTool) displayPath(p string) string {
 // whole tree). cwd is the default root when the model omits path and the
 // display base.
 type GlobTool struct {
-	cwd string
+	cwd   string
+	cwdFn func() string
 }
 
 // NewGlobTool returns the glob tool bound to the agent working directory.
 func NewGlobTool(cwd string) GlobTool {
 	return GlobTool{cwd: cwd}
+}
+
+func NewGlobToolForCWD(cwd func() string) GlobTool {
+	return GlobTool{cwdFn: cwd}
 }
 
 func (GlobTool) Name() string { return GlobToolName }
@@ -277,7 +299,7 @@ func (t GlobTool) Execute(ctx context.Context, args json.RawMessage) (string, er
 	}
 	root := a.Path
 	if strings.TrimSpace(root) == "" {
-		root = t.cwd
+		root = t.currentCWD()
 	}
 	if strings.TrimSpace(root) == "" {
 		return "", fmt.Errorf("glob: no search path (pass path or configure the agent working directory)")
@@ -357,12 +379,20 @@ type globEntry struct {
 // lies under it (dsh prints workdir-relative paths); anything else stays
 // relative to the search root.
 func (t GlobTool) displayPath(m globEntry) string {
-	if t.cwd == "" {
+	cwd := t.currentCWD()
+	if cwd == "" {
 		return m.rel
 	}
-	rel, err := filepath.Rel(t.cwd, m.abs)
+	rel, err := filepath.Rel(cwd, m.abs)
 	if err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return filepath.ToSlash(rel)
 	}
 	return m.rel
+}
+
+func (t GlobTool) currentCWD() string {
+	if t.cwdFn != nil {
+		return t.cwdFn()
+	}
+	return t.cwd
 }

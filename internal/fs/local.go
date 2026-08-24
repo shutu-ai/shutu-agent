@@ -18,6 +18,7 @@ import (
 // ErrClosed.
 type localFS struct {
 	root   string // absolute, cleaned allowed root
+	rootFn func() string
 	mu     sync.Mutex
 	closed bool
 }
@@ -40,8 +41,27 @@ func NewLocalFS(root string) *localFS {
 	return &localFS{root: filepath.Clean(abs)}
 }
 
+// NewLocalFSForRoot creates a filesystem whose allowed root is resolved at
+// operation time. This is the local equivalent of dsh's session cwd lookup.
+func NewLocalFSForRoot(root func() string) *localFS {
+	return &localFS{rootFn: root}
+}
+
 // Root returns the absolute, cleaned allowed root.
-func (l *localFS) Root() string { return l.root }
+func (l *localFS) Root() string {
+	root := l.root
+	if l.rootFn != nil {
+		root = l.rootFn()
+	}
+	if root == "" {
+		root = "."
+	}
+	abs, err := filepath.Abs(root)
+	if err == nil {
+		root = abs
+	}
+	return filepath.Clean(root)
+}
 
 // Read returns the content of the file at path (within Root), capped at
 // maxSize (DefaultMaxReadSize when maxSize <= 0). A file that exceeds the cap
@@ -166,7 +186,8 @@ func (l *localFS) Write(ctx context.Context, path, content string) error {
 		return err
 	}
 	dir := filepath.Dir(full)
-	if dir != l.root && dir != "." {
+	root := l.Root()
+	if dir != root && dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
 		}
@@ -200,7 +221,8 @@ func (l *localFS) List(ctx context.Context, dir string) ([]Entry, error) {
 			// rather than failing the whole listing.
 			continue
 		}
-		rel, rerr := filepath.Rel(l.root, filepath.Join(full, de.Name()))
+		root := l.Root()
+		rel, rerr := filepath.Rel(root, filepath.Join(full, de.Name()))
 		if rerr != nil {
 			continue
 		}
@@ -220,15 +242,16 @@ func (l *localFS) List(ctx context.Context, dir string) ([]Entry, error) {
 // cleans, so ".." collapses) and must still land inside it; an absolute path
 // is cleaned and accepted only when it is already inside the root.
 func (l *localFS) resolve(path string) (string, error) {
+	root := l.Root()
 	if filepath.IsAbs(path) {
 		full := filepath.Clean(path)
-		if !within(l.root, full) {
+		if !within(root, full) {
 			return "", ErrPathOutsideRoot
 		}
 		return full, nil
 	}
-	full := filepath.Join(l.root, path)
-	if !within(l.root, full) {
+	full := filepath.Join(root, path)
+	if !within(root, full) {
 		return "", ErrPathOutsideRoot
 	}
 	return full, nil

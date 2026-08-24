@@ -111,6 +111,7 @@ func (a *app) registerWebServer() error {
 	if err != nil {
 		return fmt.Errorf("register web server: %w", err)
 	}
+	srv.SetDefaultWorkdir(a.defaultWorkdir())
 	if a.hub == nil {
 		a.hub = NewEventHub()
 	}

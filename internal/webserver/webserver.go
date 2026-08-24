@@ -22,6 +22,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"os"
 	"path"
 	"path/filepath"
 	"runtime/debug"
@@ -56,7 +57,11 @@ type Server struct {
 	tokenHash [32]byte // sha256 of the configured token; the plaintext never survives New
 	authOn    bool     // token != "" → bearer check enforced
 	addr      string
-	srv       *http.Server
+	// defaultWorkdir is the fallback cwd for ungrouped sessions and legacy
+	// title-only workspaces. The composition root sets it from config; an empty
+	// value falls back to the server process cwd.
+	defaultWorkdir string
+	srv            *http.Server
 
 	// M10 W1 interactive wiring (ADR D-WEB2-A/B/C): the optional handlers the
 	// composition root injects after New. All three are nil until a Setter is
@@ -238,6 +243,10 @@ func (s *Server) SetProviderManager(fn func(ctx context.Context, action string, 
 func (s *Server) SetProviderDiscover(fn func(ctx context.Context, request ProviderDiscover) ([]ProviderModel, error)) {
 	s.setDiscoverFn = fn
 }
+
+// SetDefaultWorkdir sets the absolute directory used by ungrouped sessions
+// and by workspaces created without an explicit path.
+func (s *Server) SetDefaultWorkdir(dir string) { s.defaultWorkdir = dir }
 
 // empty opens the portal to the local machine (dsh-style, no login); a token
 // turns on bearer auth and only its SHA-256 digest is retained. addr defaults
@@ -1292,6 +1301,12 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if body.WorkspaceID != "" {
+		if err := s.syncSessionCWD(r.Context(), id, body.WorkspaceID); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+	}
 	cfg := store.SessionConfig{AgentPreset: body.AgentPreset, Model: body.Model, Permission: body.Permission}
 	if cfg.AgentPreset != "" || cfg.Model != "" || cfg.Permission != "" {
 		if scs, ok := s.store.(store.SessionConfigStore); ok {
@@ -1305,6 +1320,78 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		"id": id, "workspace_id": body.WorkspaceID,
 		"agent_preset": body.AgentPreset, "model": body.Model, "permission": body.Permission,
 	})
+}
+
+// sessionDefaultWorkdir returns the configured fallback, resolving it once at
+// the API boundary so persisted session headers are always absolute.
+func (s *Server) sessionDefaultWorkdir() (string, error) {
+	dir := strings.TrimSpace(s.defaultWorkdir)
+	if dir == "" {
+		var err error
+		dir, err = os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("webserver: resolve default workdir: %w", err)
+		}
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("webserver: resolve workdir: %w", err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", fmt.Errorf("webserver: workdir %q: %w", abs, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("webserver: workdir %q is not a directory", abs)
+	}
+	return filepath.Clean(abs), nil
+}
+
+// workspaceWorkdir resolves a workspace id to its persisted directory. Legacy
+// title-only workspaces intentionally use the same default as ungrouped.
+func (s *Server) workspaceWorkdir(ctx context.Context, workspaceID string) (string, error) {
+	if workspaceID == "" {
+		return s.sessionDefaultWorkdir()
+	}
+	workspaces, err := s.store.ListWorkspaces(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, ws := range workspaces {
+		if ws.ID != workspaceID {
+			continue
+		}
+		if strings.TrimSpace(ws.Path) == "" {
+			return s.sessionDefaultWorkdir()
+		}
+		abs, err := filepath.Abs(ws.Path)
+		if err != nil {
+			return "", fmt.Errorf("webserver: resolve workspace %q path: %w", workspaceID, err)
+		}
+		info, err := os.Stat(abs)
+		if err != nil {
+			return "", fmt.Errorf("webserver: workspace %q path %q: %w", workspaceID, abs, err)
+		}
+		if !info.IsDir() {
+			return "", fmt.Errorf("webserver: workspace %q path %q is not a directory", workspaceID, abs)
+		}
+		return filepath.Clean(abs), nil
+	}
+	return "", fmt.Errorf("workspace not found: %s", workspaceID)
+}
+
+// syncSessionCWD keeps the durable session header aligned with its workspace,
+// mirroring dsh's invariant that tools resolve against session.header.cwd.
+func (s *Server) syncSessionCWD(ctx context.Context, sessionID, workspaceID string) error {
+	hs, ok := s.store.(store.SessionHeaderStore)
+	if !ok {
+		return nil
+	}
+	cwd, err := s.workspaceWorkdir(ctx, workspaceID)
+	if err != nil {
+		return err
+	}
+	return hs.SetSessionCWD(ctx, sessionID, cwd)
 }
 
 // handleSessionConfigGet implements GET /api/sessions/{id}/config: the raw
@@ -1432,11 +1519,11 @@ func (s *Server) handleSessionFork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Carry the source title and workspace membership over to the clone.
-	srcTitle, srcTitleSource, srcWorkspace := "", "", ""
+	srcTitle, srcTitleSource, srcWorkspace, srcCWD := "", "", "", ""
 	if all, err := s.store.ListSessions(r.Context()); err == nil {
 		for _, m := range all {
 			if m.ID == id {
-				srcTitle, srcTitleSource, srcWorkspace = m.Title, m.TitleSource, m.WorkspaceID
+				srcTitle, srcTitleSource, srcWorkspace, srcCWD = m.Title, m.TitleSource, m.WorkspaceID, m.CWD
 				break
 			}
 		}
@@ -1466,6 +1553,16 @@ func (s *Server) handleSessionFork(w http.ResponseWriter, r *http.Request) {
 	}
 	if srcWorkspace != "" {
 		_ = s.store.SetSessionWorkspace(r.Context(), forkID, srcWorkspace)
+	}
+	if hs, ok := s.store.(store.SessionHeaderStore); ok {
+		if srcCWD == "" {
+			if resolved, resolveErr := s.workspaceWorkdir(r.Context(), srcWorkspace); resolveErr == nil {
+				srcCWD = resolved
+			}
+		}
+		if srcCWD != "" {
+			_ = hs.SetSessionCWD(r.Context(), forkID, srcCWD)
+		}
 	}
 	// The fork inherits the source's per-session overrides (dsh fork: the
 	// clone keeps the parent's agent preset / model / permission), so the
@@ -1527,6 +1624,12 @@ func (s *Server) handleSessionsOrder(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.ReorderSessions(r.Context(), body.WorkspaceID, body.SessionIDs); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
+	}
+	for _, id := range body.SessionIDs {
+		if err := s.syncSessionCWD(r.Context(), id, body.WorkspaceID); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -1602,6 +1705,7 @@ const maxWorkspaceTitle = 60
 type workspaceView struct {
 	ID         string   `json:"id"`
 	Title      string   `json:"title"`
+	Path       string   `json:"path,omitempty"`
 	SessionIDs []string `json:"session_ids"`
 	CreatedAt  int64    `json:"created_at"`
 }
@@ -1661,7 +1765,7 @@ func (s *Server) handleWorkspaces(w http.ResponseWriter, r *http.Request) {
 		if !m.CreatedAt.IsZero() {
 			created = m.CreatedAt.UnixMilli()
 		}
-		out = append(out, workspaceView{ID: m.ID, Title: m.Title, SessionIDs: ids, CreatedAt: created})
+		out = append(out, workspaceView{ID: m.ID, Title: m.Title, Path: m.Path, SessionIDs: ids, CreatedAt: created})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"workspaces": out, "ungrouped_ids": ungrouped})
 }
@@ -1675,9 +1779,12 @@ func newWorkspaceID() (string, error) {
 	return "w-" + hex.EncodeToString(b[:]), nil
 }
 
-// handleWorkspaceCreate implements POST /api/workspaces {"title":...} (P6).
+// handleWorkspaceCreate implements POST /api/workspaces {"title","path"}.
 func (s *Server) handleWorkspaceCreate(w http.ResponseWriter, r *http.Request) {
-	var body struct{ Title string }
+	var body struct {
+		Title string `json:"title"`
+		Path  string `json:"path"`
+	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "bad request: " + err.Error()})
 		return
@@ -1692,11 +1799,34 @@ func (s *Server) handleWorkspaceCreate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	if err := s.store.CreateWorkspace(r.Context(), id, title); err != nil {
+	workspacePath := strings.TrimSpace(body.Path)
+	if workspacePath == "" {
+		workspacePath, err = s.sessionDefaultWorkdir()
+	} else {
+		workspacePath, err = filepath.Abs(workspacePath)
+		if err == nil {
+			info, statErr := os.Stat(workspacePath)
+			if statErr != nil {
+				err = fmt.Errorf("workspace path %q: %w", workspacePath, statErr)
+			} else if !info.IsDir() {
+				err = fmt.Errorf("workspace path %q is not a directory", workspacePath)
+			}
+		}
+	}
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	if ps, ok := s.store.(store.WorkspacePathStore); ok {
+		err = ps.CreateWorkspaceWithPath(r.Context(), id, title, filepath.Clean(workspacePath))
+	} else {
+		err = s.store.CreateWorkspace(r.Context(), id, title)
+	}
+	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "title": title})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "title": title, "path": workspacePath})
 }
 
 // handleWorkspaceTitle implements PATCH /api/workspaces/{id} {"title":...}.
@@ -1727,6 +1857,14 @@ func (s *Server) handleWorkspaceTitle(w http.ResponseWriter, r *http.Request) {
 // is removed and its sessions return to the ungrouped bucket (store-owned).
 func (s *Server) handleWorkspaceDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	var moved []string
+	if metas, err := s.store.ListSessions(r.Context()); err == nil {
+		for _, m := range metas {
+			if m.WorkspaceID == id {
+				moved = append(moved, m.ID)
+			}
+		}
+	}
 	if err := s.store.DeleteWorkspace(r.Context(), id); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]any{"error": "workspace not found"})
@@ -1734,6 +1872,12 @@ func (s *Server) handleWorkspaceDelete(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
+	}
+	for _, sessionID := range moved {
+		if err := s.syncSessionCWD(r.Context(), sessionID, ""); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
 }

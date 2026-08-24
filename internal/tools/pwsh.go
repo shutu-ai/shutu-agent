@@ -69,6 +69,9 @@ type PwshOpts struct {
 	// Workdir is the default working directory of every call (the session
 	// workspace). Empty means the agent process's own working directory.
 	Workdir string
+	// WorkdirFunc, when set, is evaluated for every call and takes precedence
+	// over Workdir. It is the session-header cwd bridge used by Web sessions.
+	WorkdirFunc func() string
 	// Jobs is the background-job registry used by run_in_background; nil
 	// means the parameter is not advertised and is rejected.
 	Jobs jobs.Registry
@@ -79,20 +82,22 @@ type PwshOpts struct {
 
 // PwshTool runs one PowerShell command in a fresh process per call.
 type PwshTool struct {
-	workdir    string
-	jobs       jobs.Registry
-	owner      func() string
-	background bool // run_in_background advertised and accepted
+	workdir     string
+	workdirFunc func() string
+	jobs        jobs.Registry
+	owner       func() string
+	background  bool // run_in_background advertised and accepted
 }
 
 // NewPwsh returns a PwshTool bound to the composition's defaults. Background
 // execution is available exactly when a usable jobs registry is supplied.
 func NewPwsh(opts PwshOpts) PwshTool {
 	return PwshTool{
-		workdir:    opts.Workdir,
-		jobs:       opts.Jobs,
-		owner:      opts.Owner,
-		background: registryPresent(opts.Jobs),
+		workdir:     opts.Workdir,
+		workdirFunc: opts.WorkdirFunc,
+		jobs:        opts.Jobs,
+		owner:       opts.Owner,
+		background:  registryPresent(opts.Jobs),
 	}
 }
 
@@ -189,7 +194,11 @@ func (t PwshTool) Execute(ctx context.Context, args json.RawMessage) (string, er
 	if a.TimeoutMS != nil && *a.TimeoutMS <= 0 {
 		return "", fmt.Errorf("pwsh: timeoutMs must be a positive number")
 	}
-	workdir := resolveWorkdir(a.Workdir, t.workdir)
+	base := t.workdir
+	if t.workdirFunc != nil {
+		base = t.workdirFunc()
+	}
+	workdir := resolveWorkdir(a.Workdir, base)
 	if a.RunInBackground {
 		if !t.background {
 			return "", fmt.Errorf("pwsh: run_in_background is unavailable (jobs disabled)")

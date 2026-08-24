@@ -25,11 +25,18 @@ var sensitiveEnvTokens = []string{"KEY", "SECRET", "TOKEN", "PASSWORD", "API"}
 // directory. It is deliberately not an interactive shell: on Windows the
 // command runs through "cmd /C <line>", elsewhere "/bin/sh -c <line>".
 type RunCommand struct {
-	Workdir string // fixed working directory; empty means the agent's own cwd
+	Workdir     string // fixed working directory; empty means the agent's own cwd
+	WorkdirFunc func() string
 }
 
 // NewRunCommand returns a RunCommand bound to a fixed working directory.
 func NewRunCommand(workdir string) RunCommand { return RunCommand{Workdir: workdir} }
+
+// NewRunCommandForWorkdir resolves the working directory for each invocation,
+// allowing one registry to serve multiple session workspaces.
+func NewRunCommandForWorkdir(workdir func() string) RunCommand {
+	return RunCommand{WorkdirFunc: workdir}
+}
 
 func (RunCommand) Name() string { return runCommandName }
 
@@ -73,7 +80,11 @@ func (t RunCommand) Execute(ctx context.Context, args json.RawMessage) (string, 
 	if err := ctx.Err(); err != nil {
 		return "", fmt.Errorf("run_command: cancelled: %w", err)
 	}
-	cmd := newCommand(a.Command, t.Workdir, scrubbedEnv())
+	workdir := t.Workdir
+	if t.WorkdirFunc != nil {
+		workdir = t.WorkdirFunc()
+	}
+	cmd := newCommand(a.Command, workdir, scrubbedEnv())
 	outFile, err := os.CreateTemp("", "pa-run-*.txt")
 	if err != nil {
 		return "", fmt.Errorf("run_command: create output file: %w", err)

@@ -28,7 +28,12 @@ func (a *app) registerFs() error {
 	if !config.Enabled(a.cfg.Fs.Enabled) {
 		return nil
 	}
-	svc := fs.NewLocalFS(a.cfg.Fs.Root)
+	var svc fs.FileService
+	if a.cfg.Fs.Root != "" {
+		svc = fs.NewLocalFS(a.cfg.Fs.Root)
+	} else {
+		svc = fs.NewLocalFSForRoot(a.sessionCWD)
+	}
 	a.fs = svc
 	// D3 event sink: fs/* events are appended to the active session log. The
 	// callback only ever runs inside a tool Execute — the serial main-loop

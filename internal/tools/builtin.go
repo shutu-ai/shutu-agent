@@ -33,7 +33,8 @@ func (GetTime) Execute(ctx context.Context, args json.RawMessage) (string, error
 // compatibility with direct unit tests; the composition root uses
 // NewReadFile, which pins the tool to the workspace.
 type ReadFile struct {
-	Root string
+	Root     string
+	RootFunc func() string
 }
 
 func NewReadFile(root string) ReadFile {
@@ -48,6 +49,13 @@ func NewReadFile(root string) ReadFile {
 		}
 	}
 	return ReadFile{Root: root}
+}
+
+// NewReadFileForRoot binds the read tool to the caller's current session cwd.
+// dsh resolves the filesystem root at execution time from session.header.cwd;
+// this constructor preserves that behavior for the single process registry.
+func NewReadFileForRoot(root func() string) ReadFile {
+	return ReadFile{RootFunc: root}
 }
 
 func (ReadFile) Name() string { return "read" }
@@ -101,9 +109,13 @@ func (r ReadFile) Execute(ctx context.Context, args json.RawMessage) (string, er
 		}
 	}
 	path := a.Path
-	if r.Root != "" {
+	root := r.Root
+	if r.RootFunc != nil {
+		root = r.RootFunc()
+	}
+	if root != "" {
 		var err error
-		path, err = resolveReadPath(r.Root, path)
+		path, err = resolveReadPath(root, path)
 		if err != nil {
 			return "", fmt.Errorf("read: %w", err)
 		}

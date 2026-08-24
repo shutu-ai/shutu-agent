@@ -245,11 +245,19 @@ type Config struct {
 	LSP             LSPConfig          `yaml:"lsp"`           // read-only language-server queries (P2)
 	Hooks           HooksConfig        `yaml:"hooks"`         // metadata-only event hooks (P2)
 	WebServer       WebServerConfig    `yaml:"web_server"`    // unified web portal (M10a)
+	Workspace       WorkspaceConfig    `yaml:"workspace"`     // workspace/session cwd policy
 
 	// Mode selects the agent capability preset (D-MODE-1): minimal | standard
 	// | code; default standard. minimal is preset-first (D-MODE-6): 能力开关
 	// 与白名单被覆盖, 用户显式开启的其余能力在 minimal 下被忽略.
 	Mode string `yaml:"mode"`
+}
+
+// WorkspaceConfig controls the process-side directory used by sessions that
+// are not attached to a directory-backed workspace. An empty value resolves
+// to the agent process working directory, matching dsh's fallback cwd.
+type WorkspaceConfig struct {
+	DefaultDir string `yaml:"default_dir"`
 }
 
 // LLMConfig is the LLM provider-selection policy (dispatch-m8-2 §5 / ADR

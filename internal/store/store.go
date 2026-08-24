@@ -98,12 +98,12 @@ type SessionConfigStore interface {
 // MessageFeedback is the durable rating attached to one assistant/message
 // event. Seq is scoped by SessionID and identifies the assistant response.
 type MessageFeedback struct {
-	SessionID string    `json:\session_id\`
-	Seq       uint64    `json:\seq\`
-	Rating    string    `json:\rating\`
-	Note      string    `json:\note,omitempty\`
-	CreatedAt time.Time `json:\created_at\`
-	UpdatedAt time.Time `json:\updated_at\`
+	SessionID string    `json:"session_id"`
+	Seq       uint64    `json:"seq"`
+	Rating    string    `json:"rating"`
+	Note      string    `json:"note,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // MaxMessageFeedbackNoteBytes bounds optional notes accepted by the feedback
@@ -135,10 +135,20 @@ type SearchHit struct {
 type WorkspaceMeta struct {
 	ID    string
 	Title string
-	Sort  int
+	// Path is the canonical directory backing this workspace. Empty means a
+	// legacy title-only workspace and callers should use their default cwd.
+	Path string
+	Sort int
 	// CreatedAt is the workspace creation time (dsh workspace hover card); the
 	// zero value means it predates the column and is omitted from the UI.
 	CreatedAt time.Time
+}
+
+// WorkspacePathStore is the optional path-aware workspace surface. It keeps
+// the base Store interface source-compatible with older test doubles while
+// allowing the Web composition to persist dsh-style directory workspaces.
+type WorkspacePathStore interface {
+	CreateWorkspaceWithPath(ctx context.Context, id, title, path string) error
 }
 
 // Store is the durable append-only event backend. The agent loop is strictly

@@ -34,8 +34,14 @@ func (a *app) registerTerminal() error {
 	}
 	pwsh := tools.NewPwsh(tools.PwshOpts{
 		Workdir: a.cfg.Terminal.Workdir, // default working dir (session workspace)
-		Jobs:    a.jobs,                 // nil when jobs disabled → no run_in_background
-		Owner:   func() string { return a.currentID },
+		WorkdirFunc: func() string {
+			if a.cfg.Terminal.Workdir == "" {
+				return a.sessionCWD()
+			}
+			return a.cfg.Terminal.Workdir
+		},
+		Jobs:  a.jobs, // nil when jobs disabled → no run_in_background
+		Owner: func() string { return a.currentID },
 	})
 	if err := a.reg.Register(pwsh); err != nil {
 		return fmt.Errorf("pa: register %s: %w", pwsh.Name(), err)
@@ -68,7 +74,7 @@ func (ac *terminalAccess) Start(opts terminal.SessionOpts) (*terminal.Session, e
 	opts = terminal.SessionOpts{
 		Shell:              ac.a.cfg.Terminal.Shell,
 		Args:               ac.a.cfg.Terminal.Args,
-		Workdir:            ac.a.cfg.Terminal.Workdir,
+		Workdir:            ac.a.sessionCWD(),
 		IdleMS:             ac.a.cfg.Terminal.ReadIdleMS,
 		TimeoutMS:          ac.a.cfg.Terminal.ReadTimeoutMS,
 		ScrollbackMaxBytes: ac.a.cfg.Terminal.ScrollbackMaxBytes,

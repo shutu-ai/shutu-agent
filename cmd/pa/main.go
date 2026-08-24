@@ -118,6 +118,20 @@ func main() {
 	// M3: the Execute pipeline's safety policy 鈥?whitelist, deadline, output
 	// cap with spill to <data_dir>/spill (design.md 搂5).
 	reg := tools.New()
+	var runtimeApp *app
+	sessionRoot := func() string {
+		if runtimeApp != nil {
+			return runtimeApp.sessionCWD()
+		}
+		dir := cfg.Workspace.DefaultDir
+		if dir == "" {
+			dir, _ = os.Getwd()
+		}
+		if abs, err := filepath.Abs(dir); err == nil {
+			dir = abs
+		}
+		return filepath.Clean(dir)
+	}
 	pol := tools.PolicyFromConfig(cfg.Tools, cfg.DataDir)
 	// The base policy keeps the FULL registered whitelist (dsh: the deployment
 	// composition). Per-session agent presets (standard / PTC / minimal) are
@@ -142,13 +156,13 @@ func main() {
 		os.Exit(1)
 	}
 	if !config.Enabled(cfg.Fs.Enabled) {
-		if err := reg.Register(tools.NewReadFile(cfg.Fs.Root)); err != nil {
+		if err := reg.Register(tools.NewReadFileForRoot(sessionRoot)); err != nil {
 			fmt.Fprintln(os.Stderr, "pa:", err)
 			os.Exit(1)
 		}
 	}
 	if cfg.Tools.RunCommand.Enabled {
-		if err := reg.Register(tools.NewRunCommand(cfg.Tools.RunCommand.Workdir)); err != nil {
+		if err := reg.Register(tools.NewRunCommandForWorkdir(sessionRoot)); err != nil {
 			fmt.Fprintln(os.Stderr, "pa:", err)
 			os.Exit(1)
 		}
@@ -178,6 +192,7 @@ func main() {
 		// persist sink and the web-only block live as long as the process.
 		baseCtx: ctx,
 	}
+	runtimeApp = app
 	// M11: load the provider API-key overrides (llm.key.<id>) and custom
 	// OpenAI-compatible provider declarations (llm.custom.<route>) from the
 	// durable settings table before registerLLM builds the registry. A
@@ -721,12 +736,20 @@ func (a *app) newSession(ctx context.Context) error {
 	if err := a.store.CreateSession(ctx, id, time.Now().UTC()); err != nil {
 		return err
 	}
+	if err := a.setSessionCWD(ctx, id, a.defaultWorkdir()); err != nil {
+		return err
+	}
 	a.currentID = id
 	a.log = session.New()
 	if err := a.restorePlans(); err != nil {
 		return err
 	}
 	if err := a.restoreGoalScheduler(); err != nil {
+		return err
+	}
+	// Repair legacy sessions and keep the durable header aligned with a
+	// directory-backed workspace after a restart.
+	if err := a.setSessionCWD(ctx, id, a.sessionCWD()); err != nil {
 		return err
 	}
 	a.attachSink(ctx)
