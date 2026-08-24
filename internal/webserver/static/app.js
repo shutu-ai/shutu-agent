@@ -94,6 +94,7 @@ let runningStart = 0;           // wall clock of the running turn's start (elaps
 let runningTimer = null;        // 1s ticker for the elapsed clock
 let pollTimer = null;           // session-list refresh
 let config = {};                // cached GET /api/config view
+let pendingSlashCommands = [];  // built-in slash inputs waiting for their result
 
 // The web command catalog is loaded from the backend config.commands response.
 // The server remains authoritative and still handles unknown commands. The
@@ -529,6 +530,24 @@ function toolRowTitle(name, variant) {
 }
 function firstLine(text) { const i = text.indexOf("\n"); return i === -1 ? text : text.slice(0, i); }
 function latestLine(text) { const v = text.trimEnd(); const i = v.lastIndexOf("\n"); return i === -1 ? v : v.slice(i + 1); }
+function slashCommandName(text) {
+  const match = String(text || "").trim().match(/^\/([^\s]+)/);
+  return match ? match[1].toLowerCase() : "";
+}
+function isBuiltInSlashCommand(name) {
+  const item = webCommands.find((entry) => entry.name === name);
+  // A catalogued skill is a normal model invocation, not a host command card.
+  // Unknown slash names still go through the host command dispatcher and use
+  // the generic dsh command row with the server's error text.
+  return !item || item.kind !== "skill";
+}
+function queueSlashCommand(ev) {
+  const name = slashCommandName(ev && ev.summary);
+  if (!name || !isBuiltInSlashCommand(name)) return false;
+  pendingSlashCommands.push({ name, seq: ev.seq });
+  return true;
+}
+function takeSlashCommand() { return pendingSlashCommands.shift() || null; }
 function parseToolArgs(raw) {
   try { const v = JSON.parse(raw || "{}"); return v && typeof v === "object" ? v : {}; } catch { return {}; }
 }
@@ -1038,6 +1057,48 @@ function addContextInjection(ev) {
   scrollToBottom(true);
 }
 
+// addCommandRow mirrors dsh GenericCommandCard: API glyph at rest, the dsh
+// disclosure glyph on hover/focus, a bare command name, a 2px separator and
+// the handler-authored result. Multiline results stay compact on the row and
+// are available in a collapsed preformatted body.
+function addCommandRow(ev) {
+  const inner = msgInner();
+  const command = String(ev.command || "command").replace(/^\/+/, "") || "command";
+  const text = String(ev.summary || "");
+  const failed = /^\s*⚠/.test(text);
+  const body = text.includes("\n") ? text : "";
+  const summary = firstLine(text || (failed ? "命令失败" : "命令已完成"));
+  const node = document.createElement("div");
+  node.className = "msg command";
+  node.dataset.command = command;
+  if (ev.seq != null) node.dataset.seq = String(ev.seq);
+  node.innerHTML = `<div class="command-row">
+    <button type="button" class="command-toggle" aria-expanded="false"${body ? "" : " disabled"}>
+      <span class="command-leading" aria-hidden="true">
+        <span class="command-context-icon">${failed ? '<span class="dsh-statedot dsh-statedot-err"></span>' : DSH_ICON_API}</span>
+        <span class="command-disclosure-icon">${DSH_ICON_CHEVRON_RIGHT}</span>
+      </span>
+      <span class="command-title">${esc(command)}</span>
+      <span class="command-sep" aria-hidden="true"></span>
+      <span class="command-summary${failed ? " command-summary-err" : ""}">${esc(summary)}</span>
+    </button>
+    ${body ? `<pre class="command-body hidden">${esc(body)}</pre>` : ""}
+  </div>`;
+  const button = node.querySelector(".command-toggle");
+  if (body) {
+    button.addEventListener("click", () => {
+      const content = node.querySelector(".command-body");
+      const open = content.classList.toggle("hidden");
+      button.setAttribute("aria-expanded", String(!open));
+      const disclosure = node.querySelector(".command-disclosure-icon");
+      disclosure.innerHTML = open ? DSH_ICON_CHEVRON_RIGHT : DSH_ICON_CHEVRON_DOWN;
+    });
+  }
+  inner.appendChild(node);
+  scrollToBottom(true);
+  return node;
+}
+
 // dsh compaction presentation: the replacement user/message is not shown as
 // a normal user bubble. Its lifecycle is folded into one collapsed row, with
 // the generated summary available on demand and the saved-token count filled
@@ -1047,6 +1108,7 @@ const compactionRows = new Map();
 function resetCompactionRows() {
   pendingCompactionRow = null;
   compactionRows.clear();
+  pendingSlashCommands = [];
 }
 function compactionRowMeta(ev) {
   if (ev.compaction_error) return `压缩失败：${ev.compaction_error}`;
@@ -3231,6 +3293,7 @@ function renderEvent(ev, replay) {
         addCompactionEvent(ev);
         break;
       }
+      if (queueSlashCommand(ev)) break;
       const imgs = (ev.images || []).map((iv) => ({
         src: `/api/sessions/${encodeURIComponent(currentID)}/attachments/${iv.id}`,
         id: iv.id,
@@ -3248,13 +3311,28 @@ function renderEvent(ev, replay) {
     case "assistant/message":
       // The joined reasoning already streamed as assistant/reasoning deltas;
       // only legacy logs (reasoning without deltas) add the card here.
+      {
+        const command = takeSlashCommand();
+        if (command) {
+          // A successful /compact is already represented by its dedicated dsh
+          // compaction row. Failed/no-history compactions have no lifecycle row
+          // and retain the generic command card, matching dsh's fallback.
+          if (command.name === "compact" && (pendingCompactionRow || compactionRows.size)) {
+            streamState = null;
+            break;
+          }
+          streamState = null;
+          addCommandRow({ command: command.name, summary: ev.summary, seq: ev.seq });
+          break;
+        }
+      }
       if (ev.reasoning && !reasoningLive) addReasoning(ev.reasoning, ev.time);
       if (ev.reasoning || reasoningLive) settleReasoning();
       reasoningLive = false;
       finishAssistant(ev.summary || "", ev.time, ev.seq);
       break;
     case "web/command-result":
-      addAssistant(ev.summary || "", ev.time, null);
+      addCommandRow({ command: ev.command || "command", summary: ev.summary, seq: ev.seq });
       if (!replay && ev.command === "export") void downloadSessionExport();
       break;
     case "compaction/start":
@@ -3361,7 +3439,15 @@ async function reconcileEvents() {
     let advanced = false;
     for (const ev of evs) {
       if (ev.seq != null && renderedSeqs.has(ev.seq)) continue;
-      if (ev.type === "assistant/chunk" || ev.type === "assistant/reasoning" || ev.type === "user/message") {
+      if (ev.type === "assistant/chunk" || ev.type === "assistant/reasoning") {
+        noteRendered(ev.seq);
+        continue;
+      }
+      if (ev.type === "user/message") {
+        // Reconcile must not append a late ordinary user bubble below its
+        // answer, but a dropped slash command still has to be paired with its
+        // assistant result so it can become a dsh command row.
+        queueSlashCommand(ev);
         noteRendered(ev.seq);
         continue;
       }

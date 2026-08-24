@@ -1128,6 +1128,53 @@ mark {
 }
 .compaction-body.hidden { display: none; }
 
+/* dsh GenericCommandCard: command rows use the same DisclosureRow geometry as
+   compaction, with the API icon replaced by a red StateDot on failure. */
+.msg.command .command-row { display: block; }
+.command-toggle {
+  display: flex; align-items: center; width: 100%; gap: 8px;
+  padding: 5px 0; border: 0; background: transparent; color: inherit;
+  font: inherit; text-align: left; cursor: pointer;
+}
+.command-toggle:disabled { cursor: default; }
+.command-leading {
+  flex: none; display: inline-grid; place-items: center;
+  width: 16px; height: 16px; margin-right: 2px;
+  color: var(--dsw-alias-label-secondary);
+}
+.command-context-icon,
+.command-disclosure-icon {
+  display: inline-flex; grid-area: 1 / 1;
+  align-items: center; justify-content: center;
+}
+.command-disclosure-icon { opacity: 0; }
+.command-toggle:not(:disabled):hover .command-context-icon,
+.command-toggle:not(:disabled):focus-visible .command-context-icon { opacity: 0; }
+.command-toggle:not(:disabled):hover .command-disclosure-icon,
+.command-toggle:not(:disabled):focus-visible .command-disclosure-icon { opacity: 1; }
+.command-context-icon svg,
+.command-disclosure-icon svg { display: block; width: 14px; height: 14px; }
+.command-title {
+  flex: none; color: var(--dsw-alias-label-primary-dimmed);
+  font-size: 14px; line-height: 24px; font-weight: 400; white-space: nowrap;
+}
+.command-sep {
+  flex: none; width: 2px; height: 2px; margin: 0 2px;
+  border-radius: 1px; background: var(--dsw-alias-label-caption);
+}
+.command-summary {
+  flex: 1 1 auto; min-width: 0; color: var(--dsw-alias-label-tertiary); overflow: hidden;
+  font-size: 14px; line-height: 24px; text-overflow: ellipsis; white-space: nowrap;
+}
+.command-summary-err { color: var(--dsw-alias-state-error-primary); }
+.command-body {
+  display: block; margin: 2px 0 4px 22px; padding: 8px 10px;
+  border-left: 2px solid var(--dsw-alias-border-l2);
+  color: var(--dsw-alias-label-secondary); font: 12px/18px var(--dsw-font-code);
+  white-space: pre-wrap; word-break: break-word;
+}
+.command-body.hidden { display: none; }
+
 /* error / failed-turn row */
 .msg.error .error-row {
   display: flex; align-items: flex-start; gap: 6px;

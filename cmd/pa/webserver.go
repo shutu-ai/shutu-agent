@@ -306,7 +306,7 @@ func (a *app) webCommand(ctx context.Context, line string) error {
 		if err != nil {
 			result = "⚠ " + err.Error()
 		}
-		_, appendErr := a.log.Append(session.EventWebCommandResult, session.NewWebCommandResult(result))
+		_, appendErr := a.log.Append(session.EventWebCommandResult, session.NewWebCommandResult(result, "feedback"))
 		if appendErr != nil {
 			return appendErr
 		}
@@ -600,26 +600,26 @@ func (a *app) webPlanCommand(ctx context.Context, suffix string) (bool, error) {
 	trimmed := strings.TrimSpace(suffix)
 	if trimmed == "off" {
 		if !active {
-			return false, a.appendWebCommandResult("Plan mode is already inactive.")
+			return false, a.appendWebCommandResult("Plan mode is already inactive.", "plan")
 		}
 		if _, err := a.log.Append(session.EventPlanMode, session.NewPlanMode(false)); err != nil {
 			return false, err
 		}
-		return false, a.appendWebCommandResult("Plan mode off.")
+		return false, a.appendWebCommandResult("Plan mode off.", "plan")
 	}
 	if !active {
 		if _, err := a.log.Append(session.EventPlanMode, session.NewPlanMode(true)); err != nil {
 			return false, err
 		}
 		if trimmed == "" {
-			return false, a.appendWebCommandResult("Plan mode on. Use /plan off to leave.")
+			return false, a.appendWebCommandResult("Plan mode on. Use /plan off to leave.", "plan")
 		}
-		return true, a.appendWebCommandResult("Plan mode on. Use /plan off to leave.")
+		return true, a.appendWebCommandResult("Plan mode on. Use /plan off to leave.", "plan")
 	}
 	if trimmed == "" {
-		return false, a.appendWebCommandResult("Plan mode is already active. Use /plan off to leave.")
+		return false, a.appendWebCommandResult("Plan mode is already active. Use /plan off to leave.", "plan")
 	}
-	return true, a.appendWebCommandResult("Plan mode already active. Submitting the message in plan mode.")
+	return true, a.appendWebCommandResult("Plan mode already active. Submitting the message in plan mode.", "plan")
 }
 
 func (a *app) appendWebCommandResult(text string, command ...string) error {
