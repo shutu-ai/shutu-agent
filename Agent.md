@@ -22,7 +22,7 @@ Go 实现、借鉴 DeepSeek Harness 架构的个人 Agent：薄核心（会话�
 
 **两条参照原则（用户定，2026-08-20）**：
 1. **Agent 功能**（循环/会话/LLM/工具/各能力族）参考 **dsh-harness** → `../deepseek-harness`；
-2. **KB 全量**（知识库）参考 **dsh-knowledge** → `../dsh-knowledge`。
+2. **KB** 不属于本项目实施范围，由另一个项目负责。
 二者源码均已在本项目根目录同级子目录中，无需另行下载。
 
 ## 2. 设计基线（防漂移摘要，细节见 design.md）
@@ -107,10 +107,10 @@ Go 实现、借鉴 DeepSeek Harness 架构的个人 Agent：薄核心（会话�
 | **M6e 代码沙箱** | `code` 接口（沙箱 Provider）+ 本地子进程隔离实现 + `code_run` 工具 + `code/*` 事件 + config | 模型生成代码在受控沙箱执行（超时/配额/默认无网络）；补强 M3 `run_command`；默认关闭 | ✅ 2026-08-19 验收通过（M6e-1 `a66d33e`+`24d7f1c`；M6e-2 `be9ecf2`+`e850820`+`cf2590f`+`cb39660`） |
 | **M6f 工具生态** | `mcp` 接口（MCP 客户端，JSON-RPC 自实现优先）+ `fs`/workspace 统一封装 + 工具 + `mcp/*` 事件 + config | 外部工具/服务经 MCP 接入；文件操作统一封装；默认关闭 | ✅ 2026-08-19 验收通过（M6f-1 `764261c`+`4e474f2`；M6f-2 `29ea541`+`ef92769`+`0e025fc`+`a5a9494`；M6f-3 `8526f59`+`c3a74a0`+`9e09d9e`+`f20ae3b`） |
 
-### 候选里程碑（2026-08-20，执行顺序：Agent 部分优先 → 呈现层 → 内容层）
+### 候选里程碑（2026-08-24，当前仅保留 Agent 能力与 Agent Web 工作台）
 
-> **用户定序（2026-08-20）**：先把 Agent 部分（M7 → M8 → M9 → 评测接缝 → 模式预设/四缺口）完成，再做 **M10 Web 门户（呈现层，统一 webServer 整体先行）**，最后 **KB 全量（内容层，其管理台在门户内后挂）**。**2026-08-20 用户二次拍板翻转**：Web 门户先行、KB 后补——理由：M10 是一个统一门户（一个 webServer 承载 dsh 式会话/事件入口 + KB 管理台 + dashboard 工作台），其中 M10a 基础设施与 dsh 式入口零 KB 依赖，可先行落地；KB 管理台在门户内先空壳、KB 全量后挂功能面。
-> 依赖关系：M8 打包 多 provider + reasoning 回传 + 多模态（同改 `llm.Message` 消息模型与 wire 层）；M9 持久 PTY 经 jobs（M5a）owner-fenced 承载；M10 用 Go 标准库 `net/http` 自建（零新依赖），借鉴 dsh-knowledge web 层功能面 + dsh 自身门户心智；M10b 管理台以 KB 全量为展示前提（先空壳、后挂）。参照源：Agent 功能 → `../deepseek-harness`，KB 全量 → `../dsh-knowledge`（**KB 全量启动前先 git 更新后者**，纪律 9）。
+> **用户定序（2026-08-20）**：先把 Agent 部分（M7 → M8 → M9 → 评测接缝 → 模式预设/四缺口）完成，再做 **M10 Web 工作台**。**2026-08-24 范围调整**：KB 内容层、KB 管理台真实数据、`kb_import` 批量/大文档导入均移交另一个项目，本项目不再排期。
+> 依赖关系：M8 打包多 provider + reasoning 回传 + 多模态（同改 `llm.Message` 消息模型与 wire 层）；M9 持久 PTY 经 jobs（M5a）owner-fenced 承载；M10 用 Go 标准库 `net/http` 自建（零新依赖），只负责 Agent Web 工作台。Agent 参照源为 `../deepseek-harness`。
 
 | 阶段 | 候选 | 交付物 | 验收标准（达标才算完成） | 状态 |
 |---|---|---|---|---|
@@ -119,8 +119,7 @@ Go 实现、借鉴 DeepSeek Harness 架构的个人 Agent：薄核心（会话�
 | **① Agent 部分** | **M9 persistent terminal**（持久 shell，ADR `2026-08-20-m9-terminal.md`） | `internal/terminal`（BoundedTextBuffer 有界回滚 + Session 持久 shell 子进程 + Windows-first cmd /Q 管道实现 + 就绪判定 stdin_read/timeout/session_exit）+ 五件套工具（`terminal_start`/`write`/`read`/`signal`/`stop`，owner-fenced 单活跃会话 D5）+ `terminal/*` 事件（D3 元数据，不落输出正文）+ `/term` REPL + config（默认关 D10 + 会话环境 scrubbed） | 多步操作共享 shell 状态；就绪判定可靠；超时/退出检测；输出有界；默认关闭（D10）；零新依赖 | ✅ 2026-08-20 完成（ADR `2026-08-20-m9-terminal.md`；M9-1 `c0b973e`+`b78f694`+`c8d9b1a`；M9-2 `aa5fe1e`+`2c67343`+`2bb5dcc`+`443dd15`+`604cc2d`+`ddd4fdb`；Windows 无 ConPTY 诚实限制已文档化） |
 | **① Agent 部分（收尾）** | **任务评测接缝**（ADR `2026-08-20-eval-seam.md`） | `internal/eval`（Evaluator 接口 + rule/llm/manual/composite 四实现 + Engine + mem 历史存储上限淘汰）+ `eval_run`/`eval_result`/`eval_list` 工具 + `eval/run` D3 事件（只记摘要）+ config（默认关 D10）+ 验收标准来源：`plan_todo` 带 `acceptance` 字段、`subagent_spawn` 带 `acceptance_criteria` 注入子代理 prompt | 规则断言优先（确定性）、LLM judge 兜底、无法自动判定落 interact 人工回退（approved→pass/rejected→fail）；"分解→派发→评测→（不合格重派）"闭环由模型驱动（不改 loop，D4）；默认关闭（D10）；零新依赖 | ✅ 2026-08-20 完成（ADR `2026-08-20-eval-seam.md`；Eval-1a `7931fff`；Eval-1b `8be20b6`；Eval-2a `03db1a2`；Eval-2b `8a6feb9`；Eval-3a `06289e9`；Eval-3b `902f04f`） |
 | **① Agent 部分（对齐 dsh 模式）** | **模式预设 + 标准模式四缺口**（ADR `2026-08-20-mode-presets.md` + `2026-08-20-standard-gaps.md`） | `config.yaml` 顶层 `mode: standard|minimal|code`（默认 standard，minimal 预设优先 / code 注入程序化操作段，Mode-1 `e3e5fef` + Mode-2 `e8c7e45`）；四缺口：fs-search 全文检索（`188d36e`）、workflow JSON DAG 编排（`324f700`）、ralph fresh 循环（`f68ba09`）、subagent 外部 provider codex/claude-code（`2f6cb31`） | 三种模式可经 config 切换（默认 standard 现状零变化）；四缺口工具注册/白名单/D3 事件/config 齐全；全量测试绿；零新依赖；不改 loop | ✅ 2026-08-20 完成（四缺口全验收，见 `Agent.md` 当前状态段） |
-| **③ 呈现层（先行）** | **M10 Web 门户**（webServer 基础设施 → 知识库管理台 → dashboard 工作台，统一门户整体先行） | **M10a webServer 基础设施**：Go 标准库 `net/http` HTTP 服务 + 静态资源 + JSON API 路由 + bearer 认证（Token 存 SHA-256 摘要，dsh-knowledge 一致）+ **dsh 式会话/事件浏览 API（Agent 门户入口）**；**M10c dashboard 工作台**：会话/工具/搜索统计可视化 + 工作台入口（业务数据查询走已有 fs/code_run/MCP/kb/web 能力）；**M10b 知识库 Web 管理台（先空壳占位，KB 全量后挂）**：三栏文档界面（README/facts/decisions 视图）+ 条目搜索/维护 + 回写 AI 候选审核 + 客户端令牌管理（借鉴 dsh-knowledge `web/` 功能面，vanilla JS 静态前端） | webServer 可服务静态页与 JSON API 且认证生效；dsh 式会话/事件浏览可用；dashboard 展示统计图表；管理台路由占位（KB 后补数据）；默认关闭（D10）；零新依赖 | ⬜ 候选（**先行**） |
-| **② 内容层（后补）** | **KB 全量**（dsh-knowledge 核心功能层，不含其 web 层） | 多知识库（各自说明/默认标签/提取要求）+ 会话/项目挂载（继承/覆盖/关闭）+ 包含/排除标签 + 全局"严谨/主动"回写策略 + 直写协调（create/update/conflict/skip、同主题合并留版本、完全重复跳过、疑似冲突转审核）+ 条目 List/Delete/Markdown 导出 + `/kb-ingest` 文档摄入（含 web 页面）+ `knowledge_search`/`read`/`base_create`/`base_update` 工具 + 事件 + config | 多库/挂载/标签生效；回写策略与直写协调正确；摄入文档可检索；条目可管理；门户内 KB 管理台后挂；默认关闭（D10）；零新依赖 | ⬜ 候选（**后补**） |
+| **③ Agent 呈现层** | **M10 Web 工作台** | webServer 基础设施、dsh 式会话/事件入口、聊天交互、dashboard、设置与工具状态展示 | Agent Web 工作台可用；默认关闭（D10）；零新依赖 | ✅ 已完成 |
 
 
 
@@ -134,7 +133,7 @@ Go 实现、借鉴 DeepSeek Harness 架构的个人 Agent：薄核心（会话�
 6. **API Key 只走环境变量**，绝不写入代码、配置或日志。
 7. **双向同步**：design.md 与本文状态/决策变更必须同步更新。
 8. **一里程碑一 PR/提交**：按验收标准检查后才算完成，不达标不进入下一里程碑。
-9. **参照源先更新**：里程碑开始前先更新对应参照源码——Agent 功能类拉 `../deepseek-harness`（`git -C ../deepseek-harness -c http.sslBackend=openssl pull --ff-only origin master`）；KB 类拉 `../dsh-knowledge`（`git -C ../dsh-knowledge pull`）。**KB 全量启动前必做**（2026-08-20 已确认 dsh-knowledge 与 origin/main 同步，HEAD `3c32663`）。
+9. **参照源先更新**：里程碑开始前仅更新 Agent 参照源码 `../deepseek-harness`。KB 由另一个项目负责，本项目不再拉取或验收 `../dsh-knowledge`。
 
 ## 6. 决策记录（ADR）
 
@@ -169,6 +168,8 @@ go run ./cmd/pa       # 启动 REPL（M1 后可用，需 DEEPSEEK_API_KEY）
 **防跑偏红线**：实施会话的报告不作为验收依据；越界功能（超出里程碑范围）一律退回，不合并。
 
 ## 9. 参考链接
+
+**2026-08-24 范围调整**：用户决定将 KB 全量内容层、`kb_import` 批量/大文档导入及其可恢复 Job 移出本项目，由另一个项目负责。本项目不再排期、实现或验收这些任务；本项目保留现有 KB 接缝仅作为兼容边界。Goal scheduler 仍是本项目未来自主任务候选，默认关闭。
 ## 10. dsh 对齐改进目标（2026-08-23，当前执行目标）
 
 本节是当前 Agent 实施与复核的目标清单，优先级高于历史里程碑中“loop 严格串行、不得修改”的旧约束。目标是逐步提高 `shutu-agent` 与当前 `deepseek-harness` 的行为一致性；不追求把 TypeScript/Cordis 插件运行时原样搬到 Go。
@@ -204,7 +205,7 @@ go run ./cmd/pa       # 启动 REPL（M1 后可用，需 DEEPSEEK_API_KEY）
 
 6. **Plan tree 持久化（P1）**
    - 将当前内存 plan tree 改为可由 session event log 重建的持久化投影，支持 Goal/Plan/Todo 的重启恢复、继续执行、状态查询和幂等更新。
-   - 不在本项实现 KB 直接功能或 `kb_import`；批量/大文档导入属于后续 KB 内容层，届时再单独设计可恢复 Job。
+   - KB 直接功能、`kb_import` 及批量/大文档导入 Job 已移出本项目，由另一个项目负责；本项不实现或验收这些内容。
    - Goal scheduler 仍不在本项实现；scheduler 属于后续自主任务能力，默认关闭，只负责未来的定时/周期触发。
 
 7. **LLM 请求元数据与重试（P1）**
@@ -232,7 +233,7 @@ go run ./cmd/pa       # 启动 REPL（M1 后可用，需 DEEPSEEK_API_KEY）
 | 3 | 可持续子 Agent | ✅ 已实现并复核 | child log + parent/depth 元数据持久化；Runtime.Resume/subagent_resume 支持冷恢复；continuable 子 Agent 支持 send/interrupt，report 记录 subagent/report；旧 status/cancel 保留兼容 |
 | 4 | Goal round driver | ✅ 已实现并复核 | `internal/goal` 已接入 cmd/pa CLI/Web 的外层 turn 完成→idle/followup 生命周期；同 session 逐轮调用 `runTurn`，通过 plan/create 事件定位当前 session 最新未完成 Goal，observer 汇总 plan/subagent/eval 状态；明确边界：不从工具 Execute 内递归进入 loop，不做后台 scheduler；plan tree 持久化移入第 6 项 |
 | 5 | Workflow/Ralph 协议对齐 | ✅ 已实现并复核 | Ralph 已补 dsh-compatible `summary/evidence/nextSteps/blocker` 状态语义、16K handoff 上限和旧 DONE/BLOCKED 兼容；workflow 已新增外部 Node runner、`meta/script/args`、`agent/parallel/pipeline/phase/log`、RPC、取消、并发/总量/item 上限和 `workflow/*` 生命周期事件；本地 spawn provider 已提供 scoped `structured_output` 工具，`agent({schema})` 会校验并返回结构化对象；JS 默认启用，Go-native DAG 保留兼容路径，Go 核心不依赖 Node.js |
-| 6 | Plan tree 持久化 | ✅ 已实现并复核 | `plan/create` 写入可重建的 Goal/Plan/Todo 快照，`plan/status/delete` 可重放；启动与 session 切换从 event log 重建内存 projection，支持状态查询、继续执行、幂等 Restore 与 ID 接续；KB 直接功能、`kb_import`、Goal scheduler 仍后置 |
+| 6 | Plan tree 持久化 | ✅ 已实现并复核 | `plan/create` 写入可重建的 Goal/Plan/Todo 快照，`plan/status/delete` 可重放；启动与 session 切换从 event log 重建内存 projection，支持状态查询、继续执行、幂等 Restore 与 ID 接续；KB 直接功能与 `kb_import` 已移交外部项目，Goal scheduler 仍后置 |
 | 7 | LLM 元数据与重试 | ✅ 已完成 | 四种流式 provider 均映射 provider-neutral `TokenUsage`；`assistant/message` 与 `llm/request_end` 落 usage/attempts；统一 request-level retry wrapper 覆盖所有 provider，DeepSeek 应用 wiring 关闭内置 retry 防重复；429/网络/5xx 重试、4xx fail-closed、context-aware backoff、`llm/retry` 事件均已接入。边界：流已开始输出后不重放，避免重复内容 |
 | 8 | 剩余能力复核 | ⚠️ 有明确偏差 | 已复核 session-query、LSP、rich ask-user、feedback/hooks、sandbox、ACP/SDK、Web UI：已有 Web 工作台/交互/沙箱等 Go 接缝；LSP、ACP/SDK、完整 dsh session-query/hooks 语义仍未实现。运行时 plugin/bundle/profile/self-modification 按 Go 编译期边界保留不引入 |
 
