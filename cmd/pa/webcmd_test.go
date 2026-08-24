@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -84,6 +85,38 @@ func TestWebCommandHelp(t *testing.T) {
 	}
 	if text := assistantText(t, lastEvent(t, a.log).Data); !strings.Contains(text, "可用的斜杠命令") {
 		t.Fatalf("/help result = %q, want the command table", text)
+	}
+}
+
+func TestWebCommandCatalogAppendsUserSkillsAfterCommands(t *testing.T) {
+	a, proj := skillFixture(t, true)
+	writeSkill(t, filepath.Join(proj, ".dsh", "skills"), "review-bash", "review bash scripts", "body")
+	private := filepath.Join(proj, ".dsh", "skills", "private.md")
+	if err := os.WriteFile(private, []byte("---\ndescription: private\nuser-invocable: false\n---\nbody"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.registerSkills(); err != nil {
+		t.Fatalf("registerSkills: %v", err)
+	}
+	defer a.skills.Close()
+
+	catalog := a.webCommandCatalog()
+	commands := []string{"help", "status", "compact", "permission", "feedback", "goal", "plan", "export"}
+	if len(catalog) <= len(commands) {
+		t.Fatalf("catalog = %#v, want commands plus user skill", catalog)
+	}
+	for i, want := range commands {
+		if catalog[i]["name"] != want {
+			t.Fatalf("catalog[%d] = %#v, want built-in command %q", i, catalog[i], want)
+		}
+	}
+	if catalog[len(commands)]["name"] != "review-bash" || catalog[len(commands)]["hint"] != "Skill: review bash scripts" {
+		t.Fatalf("skill catalog entry = %#v, want review-bash after commands", catalog[len(commands)])
+	}
+	for _, item := range catalog {
+		if item["name"] == "private" {
+			t.Fatal("user-invocable:false skill must not be offered as a slash entry")
+		}
 	}
 }
 

@@ -89,11 +89,18 @@ func (a *app) preStepInjectors() []loop.PreStepInjector {
 	if a.skills != nil {
 		injectors = append(injectors, a.skillCatalogInjector())
 	}
+	// Human skill references are resolved after the catalog so the first request
+	// carries both discovery and the selected <skill_content> body. This keeps
+	// the original /skill-name text in history while matching dsh's host
+	// pre-step behavior.
+	if a.skills != nil {
+		injectors = append(injectors, a.skillInvocationInjector())
+	}
 	// M6a-2: the "schedule" injector is appended after skill (ADR 决策 M6a /
 	// dispatch-m6a-2 §4) so the serial schedule-clock advance — turning due
 	// triggers into schedule/fire events and fired jobs — runs after the skill
 	// catalog on every turn. It contributes no context message (schedule/fire
-	// is log-only); the ordering is recall → compaction → skill → schedule.
+	// is log-only); the ordering is recall → compaction → skill → skill-invocation → schedule.
 	if a.schedules != nil {
 		injectors = append(injectors, a.scheduleInjector())
 	}

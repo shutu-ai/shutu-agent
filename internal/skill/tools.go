@@ -101,18 +101,18 @@ func (t SkillLoadTool) Execute(ctx context.Context, args json.RawMessage) (strin
 	if def == nil {
 		return "", fmt.Errorf("skill_load: unknown skill %q", a.Name)
 	}
-	body := truncateSkillBody(def.Content, t.t.bodyMaxChars)
+	body := TruncateSkillBody(def.Content, t.t.bodyMaxChars)
 	// skill/load is a log-only fact (D3); the body the model sees is bounded
 	// to 200 runes in the payload by session.NewSkillLoad. The full returned
 	// text is what the loop logs as tool/result.
 	t.t.emit(session.EventSkillLoad, session.NewSkillLoad(def.Name, def.Source, body))
-	return renderSkillContent(def.Name, body), nil
+	return RenderSkillContent(def.Name, body), nil
 }
 
-// truncateSkillBody shortens body to at most max runes, never splitting a
+// TruncateSkillBody shortens body to at most max runes, never splitting a
 // UTF-8 sequence (Unicode 安全, dispatch-m5d-2 §3 正文有长度上限防超长注入).
 // max <= 0 means no bound.
-func truncateSkillBody(body string, max int) string {
+func TruncateSkillBody(body string, max int) string {
 	if max <= 0 || len(body) == 0 {
 		return body
 	}
@@ -123,13 +123,13 @@ func truncateSkillBody(body string, max int) string {
 	return string(runes[:max])
 }
 
-// renderSkillContent renders one loaded skill for the model as a
+// RenderSkillContent renders one loaded skill for the model as a
 // <skill_content> block (mirrors dsh renderSkillContent, Go 裁剪): the name
 // rides an attribute and the body is embedded verbatim under
 // <skill_instructions>. The name is kebab-case-validated (IsSkillName), so it
 // carries no character that needs escaping. Skills are trusted local content
 // returned as instruction text — never executed.
-func renderSkillContent(name, body string) string {
+func RenderSkillContent(name, body string) string {
 	return "<skill_content name=\"" + name + "\">\n" +
 		"<skill_instructions>\n" +
 		body +

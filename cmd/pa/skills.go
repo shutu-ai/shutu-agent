@@ -79,6 +79,79 @@ func (a *app) skillCatalogInjector() loop.PreStepInjector {
 	}
 }
 
+// skillInvocationInjector builds the dsh-compatible human skill invocation
+// injector. A user-invocable skill referenced as a whitespace-bounded
+// /skill-name token is loaded into the first model request; the original user
+// text remains unchanged in session history.
+func (a *app) skillInvocationInjector() loop.PreStepInjector {
+	return loop.PreStepInjector{
+		Name:   "skill-invocation",
+		Inject: a.skillInvocationPreStep,
+	}
+}
+
+// skillInvocationPreStep resolves user-invocable /skill-name tokens anywhere
+// in the user message. It is deliberately fail-open: an unknown, disabled or
+// unreadable skill leaves the literal user text untouched. Built-in Web
+// commands win over a same-named skill, matching dsh command adjudication.
+func (a *app) skillInvocationPreStep(ctx context.Context, userText string) []llm.Message {
+	if a.skills == nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var messages []llm.Message
+	for _, token := range strings.Fields(userText) {
+		token = strings.Trim(token, ",.;:!?()[]{}")
+		if len(token) < 2 || token[0] != '/' {
+			continue
+		}
+		name := token[1:]
+		if !skill.IsSkillName(name) || isWebCommandName(name) {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		def, err := a.skills.Get(ctx, name)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "[skill invocation failed open]", err)
+			continue
+		}
+		if def == nil || !def.UserInvocable {
+			continue
+		}
+		body := skill.TruncateSkillBody(def.Content, a.cfg.Skill.BodyMaxChars)
+		if _, err := a.log.Append(session.EventSkillLoad, session.NewSkillLoad(def.Name, def.Source, body)); err != nil {
+			fmt.Fprintln(os.Stderr, "pa: skill/load event:", err)
+		}
+		messages = append(messages, llm.Message{
+			Role:    llm.RoleUser,
+			Content: []llm.ContentBlock{llm.Text(skill.RenderSkillContent(def.Name, body))},
+		})
+	}
+	return messages
+}
+
+// isUserSkillInvocation reports whether a leading slash line belongs to the
+// skill plane rather than the Web command plane. It is used before Web's
+// generic slash-command dispatch so /skill-name starts a normal model turn.
+func (a *app) isUserSkillInvocation(ctx context.Context, text string) bool {
+	if a.skills == nil {
+		return false
+	}
+	fields := strings.Fields(text)
+	if len(fields) == 0 || len(fields[0]) < 2 || fields[0][0] != '/' {
+		return false
+	}
+	name := strings.Trim(fields[0][1:], ",.;:!?()[]{}")
+	if !skill.IsSkillName(name) || isWebCommandName(name) {
+		return false
+	}
+	def, err := a.skills.Get(ctx, name)
+	return err == nil && def != nil && def.UserInvocable
+}
+
 // skillCatalogPreStep is the "skill" pre-step injector body. It lists the
 // current skill catalog (re-read every turn — no file watching), formats the
 // sorted name + description list bounded to skill.catalog_max_chars, and

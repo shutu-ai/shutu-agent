@@ -3545,6 +3545,8 @@ async function loadConfig() {
   try {
     const res = await api("/api/config");
     config = await res.json();
+    webCommands = Array.isArray(config.commands) ? config.commands : [];
+    if (slashMenuOpen) renderSlashMenu();
     loadConfigLabels();
   } catch (e) { if (e.message !== "unauthorized") console.error(e); }
 }
@@ -4998,10 +5000,7 @@ function boot() {
   updatePlaceholder();
   syncPermSelect();
   syncSendButton();
-  loadConfig().then(() => {
-    webCommands = Array.isArray(config.commands) ? config.commands : [];
-    if (slashMenuOpen) renderSlashMenu();
-  });
+  loadConfig();
   loadComposerPrefs();
   loadSessions();
   if (currentID) openSession(currentID);

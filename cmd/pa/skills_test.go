@@ -418,3 +418,43 @@ func TestLoopPreStepSkillCatalog(t *testing.T) {
 		t.Fatal("tool/result with the <skill_content> body missing after skill_load in the loop")
 	}
 }
+
+func TestWebMessageUserSkillRunsTurnAndInjectsBody(t *testing.T) {
+	a, proj := skillFixture(t, true)
+	writeSkill(t, filepath.Join(proj, ".dsh", "skills"), "review-bash", "review bash scripts", "Always run shellcheck.")
+	if err := a.registerSkills(); err != nil {
+		t.Fatalf("registerSkills: %v", err)
+	}
+	defer a.skills.Close()
+	a.prompt = prompt.New("You are helpful.")
+	model := &compactScriptedLLM{steps: [][]llm.StreamEvent{{
+		{Kind: llm.StreamTextDelta, Text: "done"},
+		{Kind: llm.StreamFinish, FinishReason: "stop"},
+	}}}
+	a.llm = model
+
+	if err := a.webMessage(context.Background(), a.currentID, "/review-bash inspect this", nil); err != nil {
+		t.Fatalf("webMessage: %v", err)
+	}
+	if len(model.calls) != 1 {
+		t.Fatalf("LLM calls = %d, want one normal model turn", len(model.calls))
+	}
+	var bodySeen, originalSeen bool
+	for _, msg := range model.calls[0].Messages {
+		if strings.Contains(msg.Text(), "<skill_content name=\"review-bash\">") && strings.Contains(msg.Text(), "Always run shellcheck.") {
+			bodySeen = true
+		}
+		if msg.Text() == "/review-bash inspect this" {
+			originalSeen = true
+		}
+	}
+	if !bodySeen || !originalSeen {
+		t.Fatalf("first request = %+v, want skill body plus original user text", model.calls[0].Messages)
+	}
+	if n := countEvent(a.log, session.EventSkillLoad); n != 1 {
+		t.Fatalf("skill/load events = %d, want one", n)
+	}
+	if history := a.log.DeriveHistory(); len(history) == 0 || history[0].Text() != "/review-bash inspect this" {
+		t.Fatalf("history = %+v, want literal slash skill invocation", history)
+	}
+}

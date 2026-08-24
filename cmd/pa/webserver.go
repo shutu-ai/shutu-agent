@@ -222,7 +222,7 @@ func (a *app) webMessage(ctx context.Context, sessionID, text string, images []l
 	// appends a rendered result to the session — no LLM turn. Session-switching
 	// commands (/new, /resume) stay on the sidebar/+ menu, which already drive
 	// them through the session manager.
-	if len(images) == 0 && strings.HasPrefix(strings.TrimSpace(text), "/") {
+	if len(images) == 0 && strings.HasPrefix(strings.TrimSpace(text), "/") && !a.isUserSkillInvocation(ctx, strings.TrimSpace(text)) {
 		trimmed := strings.TrimSpace(text)
 		if strings.HasPrefix(trimmed, "/plan") && (len(trimmed) == len("/plan") || trimmed[len("/plan")] == ' ' || trimmed[len("/plan")] == '\t') {
 			a.turnMu.Lock()
@@ -531,6 +531,51 @@ func (a *app) webCommandCatalog() []map[string]string {
 		`name`: `export`,
 		`hint`: `Download Session log: /export`,
 	})
+	// dsh appends user-invocable skills after the host command directory. Keep
+	// this order stable: the composer presents commands first and skills last.
+	out = append(out, a.webSkillCatalog()...)
+	return out
+}
+
+// isWebCommandName reports whether name belongs to the built-in Web command
+// plane. A same-named skill never claims a command slot; dsh command
+// adjudication gives the host command precedence.
+func isWebCommandName(name string) bool {
+	switch name {
+	case "help", "status", "compact", "permission", "feedback", "goal", "plan", "export":
+		return true
+	default:
+		return false
+	}
+}
+
+// webSkillCatalog returns the user-facing skill entries for the Web composer.
+// The registry List call is deliberately followed by Get so invocation policy
+// comes from the same parsed frontmatter as skill execution. Discovery is
+// fail-open for /api/config: one unreadable skill must not hide built-in
+// commands or make the Web UI unavailable.
+func (a *app) webSkillCatalog() []map[string]string {
+	if a.skills == nil {
+		return nil
+	}
+	cands, err := a.skills.List(context.Background())
+	if err != nil {
+		return nil
+	}
+	out := make([]map[string]string, 0, len(cands))
+	for _, c := range cands {
+		if isWebCommandName(c.Name) {
+			continue
+		}
+		def, err := a.skills.Get(context.Background(), c.Name)
+		if err != nil || def == nil || !def.UserInvocable {
+			continue
+		}
+		out = append(out, map[string]string{
+			`name`: c.Name,
+			`hint`: `Skill: ` + c.Description,
+		})
+	}
 	return out
 }
 
