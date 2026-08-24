@@ -1091,9 +1091,34 @@ mark {
   font: inherit; text-align: left; cursor: pointer;
 }
 .compaction-toggle:disabled { cursor: default; }
-.compaction-title { color: var(--dsw-alias-label-primary); font-weight: 600; white-space: nowrap; }
+.compaction-leading {
+  flex: none; display: inline-grid; place-items: center;
+  width: 16px; height: 16px; margin-right: 2px;
+  color: var(--dsw-alias-label-secondary);
+}
+.compaction-context-icon,
+.compaction-disclosure-icon {
+  display: inline-flex; grid-area: 1 / 1;
+  align-items: center; justify-content: center;
+}
+.compaction-disclosure-icon { opacity: 0; }
+.compaction-toggle:not(:disabled):hover .compaction-context-icon,
+.compaction-toggle:not(:disabled):focus-visible .compaction-context-icon { opacity: 0; }
+.compaction-toggle:not(:disabled):hover .compaction-disclosure-icon,
+.compaction-toggle:not(:disabled):focus-visible .compaction-disclosure-icon { opacity: 1; }
+.compaction-context-icon svg,
+.compaction-disclosure-icon svg { display: block; width: 14px; height: 14px; }
+.compaction-title {
+  flex: none; color: var(--dsw-alias-label-primary-dimmed);
+  font-size: 14px; line-height: 24px; font-weight: 400; white-space: nowrap;
+}
+.compaction-sep {
+  flex: none; width: 2px; height: 2px; margin: 0 2px;
+  border-radius: 1px; background: var(--dsw-alias-label-caption);
+}
 .compaction-meta {
-  color: var(--dsw-alias-label-tertiary); overflow: hidden;
+  flex: 1 1 auto; min-width: 0; color: var(--dsw-alias-label-tertiary); overflow: hidden;
+  font-size: 14px; line-height: 24px;
   text-overflow: ellipsis; white-space: nowrap;
 }
 .compaction-body {

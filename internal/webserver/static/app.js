@@ -481,6 +481,9 @@ const DSH_ICON_LIKE = '<svg width="16" height="16" viewBox="0 0 16 16" fill="non
 const DSH_ICON_DISLIKE = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"> <path d="M7.72451 15.1086C7.18929 15.7705 6.22975 15.8694 5.57357 15.3597L5.44643 15.2492L5.42247 15.2253L5.41934 15.2232L5.39016 15.194C4.68239 14.4804 4.40679 13.4441 4.66589 12.473L4.66693 12.4689L4.67631 12.4334L4.67735 12.4314L5.14318 10.7431C5.15243 10.7096 5.1613 10.6783 5.16923 10.6493C5.13878 10.6493 5.10558 10.6483 5.07023 10.6483H4.14274C3.62288 10.6483 3.27015 10.6512 2.9912 10.6035C1.25757 10.3069 0.103662 8.64702 0.42863 6.91854C0.480965 6.64037 0.606164 6.30975 0.787119 5.82223L1.73336 3.27321C1.92812 2.74852 2.08912 2.31209 2.25442 1.96535C2.42515 1.60724 2.62191 1.29594 2.91304 1.03578C3.08408 0.882951 3.273 0.751121 3.47579 0.643944C3.82102 0.461504 4.18214 0.38551 4.57731 0.350066C4.95993 0.315784 5.42553 0.316718 5.98521 0.316718H11.0916C11.876 0.316718 12.52 0.31607 13.0362 0.37195C13.5655 0.429293 14.0423 0.552534 14.4608 0.856536C14.7007 1.03085 14.9117 1.24193 15.086 1.48181C15.3901 1.90027 15.5143 2.37709 15.5717 2.90638C15.6276 3.42269 15.6269 4.06721 15.6269 4.85202V6.50274C15.6269 7.1616 15.633 7.6369 15.5164 8.04299C15.2475 8.97962 14.5158 9.71242 13.5791 9.98133C13.173 10.0979 12.6977 10.0908 12.0389 10.0908C11.8372 10.0908 11.8118 10.0933 11.795 10.096C11.723 10.1077 11.6549 10.1393 11.6012 10.1887C11.5887 10.2002 11.5724 10.219 11.447 10.3784L7.74639 15.0815L7.74535 15.0825L7.72451 15.1086ZM14.2388 4.85202C14.2388 4.03628 14.2379 3.47965 14.1919 3.05541C14.1473 2.64443 14.0672 2.4403 13.9637 2.29779C13.8749 2.17562 13.768 2.06769 13.6458 1.9789C13.5033 1.87532 13.2984 1.79523 12.8872 1.75067C12.4907 1.70773 11.979 1.70511 11.2479 1.70482C11.6511 2.25917 11.8918 2.93968 11.8919 3.67755V7.41251H10.5038V3.67755C10.5036 2.58745 9.62023 1.70378 8.53007 1.70378H5.98521C5.40065 1.70378 5.00679 1.70442 4.70028 1.73192C4.40651 1.7583 4.24662 1.80571 4.12399 1.87052C4.02069 1.92511 3.92452 1.99276 3.8374 2.07061C3.73401 2.16306 3.634 2.2962 3.50705 2.56249C3.37462 2.84027 3.23734 3.20873 3.03393 3.75675L2.08768 6.30578C1.88395 6.85467 1.81646 7.0434 1.79172 7.1749C1.61005 8.14146 2.25533 9.06902 3.22464 9.23517C3.35654 9.25774 3.55717 9.26123 4.14274 9.26123H5.07023C5.25717 9.26123 5.4593 9.25926 5.62672 9.27894C5.80364 9.29975 6.05492 9.35452 6.27179 9.55094C6.37381 9.6434 6.45784 9.75417 6.51982 9.87712C6.65133 10.1381 6.6374 10.3941 6.61048 10.5701C6.58498 10.7366 6.52988 10.9309 6.48022 11.111L6.01439 12.8003L6.00501 12.8347C5.87513 13.3268 6.01464 13.8509 6.37184 14.2134L6.40935 14.2509L6.46667 14.2863C6.52866 14.3087 6.60155 14.2912 6.64591 14.2363L6.65738 14.2238L6.65633 14.2228L10.3569 9.52072C10.4543 9.39693 10.5491 9.27238 10.6633 9.16744C10.9166 8.93476 11.2325 8.7818 11.572 8.72662C11.7251 8.70177 11.8814 8.70369 12.0389 8.70369C12.7927 8.70369 13.0245 8.69645 13.1956 8.64742C13.6727 8.51045 14.0465 8.13761 14.1836 7.66053C14.2327 7.48935 14.2388 7.25721 14.2388 6.50274V4.85202Z" fill="currentColor" /> </svg>';
 
 
+const DSH_ICON_CHEVRON_RIGHT = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M5.5 2.15137L5.92383 2.57617L8.65137 5.30273C8.90706 5.55843 9.13382 5.78438 9.29785 5.98828C9.46883 6.20088 9.61756 6.44405 9.66602 6.75C9.69222 6.91565 9.69222 7.08435 9.66602 7.25C9.61756 7.55595 9.46883 7.79912 9.29785 8.01172C9.13382 8.21561 8.90706 8.44157 8.65137 8.69727L5.92383 11.4238L5.5 11.8486L4.65137 11L5.07617 10.57617L7.80273 7.84863C8.07732 7.57405 8.24848 7.40124 8.3623 7.25977C8.46904 7.12709 8.47813 7.07728 8.48047 7.0625C8.48703 7.02105 8.48703 6.97895 8.48047 6.9375C8.47813 6.92272 8.46904 6.87291 8.3623 6.74023C8.24848 6.59876 8.07732 6.42595 7.80273 6.15137L5.07617 3.42383L4.65137 3L5.5 2.15137Z" fill="currentColor"/></svg>';
+const DSH_ICON_CHEVRON_DOWN = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M11.8486 5.5L11.4238 5.92383L8.69727 8.65137C8.44157 8.90706 8.21562 9.13382 8.01172 9.29785C7.79912 9.46883 7.55595 9.61756 7.25 9.66602C7.08435 9.69222 6.91565 9.69222 6.75 9.66602C6.44405 9.61756 6.20088 9.46883 5.98828 9.29785C5.78438 9.13382 5.55843 8.90706 5.30273 8.65137L2.57617 5.92383L2.15137 5.5L3 4.65137L3.42383 5.07617L6.15137 7.80273C6.42595 8.07732 6.59876 8.24849 6.74023 8.3623C6.87291 8.46904 6.92272 8.47813 6.9375 8.48047C6.97895 8.48703 7.02105 8.48703 7.0625 8.48047C7.07728 8.47813 7.12709 8.46904 7.25977 8.3623C7.40124 8.24849 7.57405 8.07732 7.84863 7.80273L10.5762 5.07617L11 4.65137L11.8486 5.5Z" fill="currentColor"/></svg>';
+
 // Theme-toggle glyphs (dsh ui-primitives ic_ds_light_outline_16 /
 // ic_ds_dark_outline_16): monochrome currentColor, so the button renders white
 // on dark and black on light (the theme seat shows the target theme's icon).
@@ -1058,6 +1061,9 @@ function compactionRowMeta(ev) {
   }
   return "正在压缩上下文…";
 }
+function compactionRowTitle(ev) {
+  return "compact";
+}
 function ensureCompactionRow(ev) {
   let node = ev.compaction_id ? compactionRows.get(ev.compaction_id) : pendingCompactionRow;
   if (node) return node;
@@ -1066,7 +1072,12 @@ function ensureCompactionRow(ev) {
   node.className = "msg context compaction";
   node.innerHTML = `<div class="context-row compaction-row">
     <button type="button" class="compaction-toggle" aria-expanded="false">
-      <span class="context-dot"></span><span class="compaction-title">上下文已压缩</span>
+      <span class="compaction-leading" aria-hidden="true">
+        <span class="compaction-context-icon" data-compaction-icon="context">${DSH_ICON_API}</span>
+        <span class="compaction-disclosure-icon" data-compaction-disclosure="collapsed">${DSH_ICON_CHEVRON_RIGHT}</span>
+      </span>
+      <span class="compaction-title">${esc(compactionRowTitle(ev))}</span>
+      <span class="compaction-sep" aria-hidden="true"></span>
       <span class="compaction-meta">${esc(compactionRowMeta(ev))}</span>
     </button>
     <div class="compaction-body hidden"></div>
@@ -1076,6 +1087,11 @@ function ensureCompactionRow(ev) {
     const button = node.querySelector(".compaction-toggle");
     const open = body.classList.toggle("hidden");
     button.setAttribute("aria-expanded", String(!open));
+    const disclosure = node.querySelector(".compaction-disclosure-icon");
+    if (disclosure) {
+      disclosure.dataset.compactionDisclosure = open ? "collapsed" : "expanded";
+      disclosure.innerHTML = open ? DSH_ICON_CHEVRON_RIGHT : DSH_ICON_CHEVRON_DOWN;
+    }
   });
   inner.appendChild(node);
   pendingCompactionRow = node;
@@ -1089,6 +1105,8 @@ function addCompactionEvent(ev) {
     compactionRows.set(id, node);
     pendingCompactionRow = null;
   }
+  const title = node.querySelector(".compaction-title");
+  if (title && ev.type === "compaction/end") title.textContent = compactionRowTitle(ev);
   const meta = node.querySelector(".compaction-meta");
   if (ev.type === "compaction/end" && meta) meta.textContent = compactionRowMeta(ev);
   const body = node.querySelector(".compaction-body");
