@@ -2073,6 +2073,13 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 // the frontend displays it whole (dsh behavior).
 func summarize(ev session.Event) string {
 	switch ev.Type {
+	case session.EventWebCommandResult:
+		var d struct {
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(ev.Data, &d) == nil {
+			return d.Text
+		}
 	case "user/message":
 		var d struct{ Text string }
 		if json.Unmarshal(ev.Data, &d) == nil {

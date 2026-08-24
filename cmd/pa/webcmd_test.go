@@ -87,6 +87,53 @@ func TestWebCommandHelp(t *testing.T) {
 	}
 }
 
+func TestWebCommandFeedbackMatchesDSH(t *testing.T) {
+	a := makePlanApp(true)
+	a.currentID = "s-feedback"
+	if err := a.webCommand(context.Background(), "/feedback  /plan felt SLOW\n\ttwice today "); err != nil {
+		t.Fatalf("webCommand feedback: %v", err)
+	}
+	evs := a.log.Events()
+	if len(evs) != 2 || evs[0].Type != session.EventFeedbackRecord || evs[1].Type != session.EventWebCommandResult {
+		t.Fatalf("feedback events = %+v, want feedback/record + web/command-result", evs)
+	}
+	var feedback struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(evs[0].Data, &feedback); err != nil {
+		t.Fatal(err)
+	}
+	if feedback.Text != "/plan felt SLOW\n\ttwice today" {
+		t.Fatalf("feedback text = %q, want surrounding whitespace trimmed only", feedback.Text)
+	}
+	var result struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(evs[1].Data, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Text != "Feedback recorded for session s-feedback" {
+		t.Fatalf("feedback result = %q", result.Text)
+	}
+	if got := a.log.DeriveHistory(); len(got) != 0 {
+		t.Fatalf("feedback entered model history: %+v", got)
+	}
+
+	if err := a.webCommand(context.Background(), "/feedback   "); err != nil {
+		t.Fatalf("empty feedback command: %v", err)
+	}
+	if countEvent(a.log, session.EventFeedbackRecord) != 1 {
+		t.Fatalf("empty feedback created a record; events=%+v", a.log.Events())
+	}
+	last := lastEvent(t, a.log)
+	if err := json.Unmarshal(last.Data, &result); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.Text, "Feedback text is required. Usage: /feedback <text>") {
+		t.Fatalf("empty feedback result = %q", result.Text)
+	}
+}
+
 // TestWebCommandCompact verifies /compact uses the manual compaction engine
 // and returns its report as the Web assistant message.
 func TestWebCommandCompact(t *testing.T) {
@@ -159,6 +206,19 @@ func TestWebCommandCatalogIncludesPermission(t *testing.T) {
 		}
 	}
 	t.Fatal("backend command catalog is missing permission")
+}
+
+func TestWebCommandCatalogIncludesFeedback(t *testing.T) {
+	a := &app{}
+	for _, command := range a.webCommandCatalog() {
+		if command["name"] == "feedback" {
+			if command["hint"] != "Record feedback: /feedback <text>" {
+				t.Fatalf("feedback hint = %q", command["hint"])
+			}
+			return
+		}
+	}
+	t.Fatal("backend command catalog is missing feedback")
 }
 
 // TestWebCommandUnknown verifies an unknown command answers with the /help

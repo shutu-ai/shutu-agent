@@ -30,6 +30,8 @@ const (
 	EventToolStart          = "tool/start" // tool call dispatched (dsh running row)
 	EventToolResult         = "tool/result"
 	EventToolError          = "tool/error"
+	EventFeedbackRecord     = "feedback/record"    // dsh /feedback; log-only
+	EventWebCommandResult   = "web/command-result" // Web-only command acknowledgement
 
 	// M4 knowledge-base events (design.md §3): kb/recall lands with the M4a
 	// kernel so the D3 logging mechanism exists before any orchestration;
@@ -477,6 +479,14 @@ type userMessageData struct {
 	SurfaceOp *SurfaceReplace    `json:"surfaceOp,omitempty"` // set by compaction summaries (M5c)
 }
 
+type feedbackRecordData struct {
+	Text string `json:"text"`
+}
+
+type webCommandResultData struct {
+	Text string `json:"text"`
+}
+
 type turnStartData struct{}
 
 type turnEndData struct {
@@ -618,6 +628,14 @@ type toolErrorData struct {
 
 // NewUserMessage builds the user/message payload.
 func NewUserMessage(text string) any { return userMessageData{Text: text} }
+
+// NewFeedbackRecord builds the dsh-compatible log-only feedback payload. It is
+// deliberately not a user/message, so feedback never enters model history.
+func NewFeedbackRecord(text string) any { return feedbackRecordData{Text: text} }
+
+// NewWebCommandResult builds a Web-only acknowledgement event. The frontend
+// renders it, while DeriveHistory ignores it like other log-only projections.
+func NewWebCommandResult(text string) any { return webCommandResultData{Text: text} }
 
 // NewUserMessageWithBlocks builds a user/message payload carrying explicit
 // content blocks (M8-3, /attach; dispatch-m8-3 §4): the image attachment lands

@@ -282,6 +282,17 @@ func (a *app) webCommand(ctx context.Context, line string) error {
 	fields := strings.Fields(line)
 	name := fields[0]
 	args := fields[1:]
+	if name == "/feedback" {
+		result, err := a.webFeedback(ctx, strings.TrimSpace(line[len(name):]))
+		if err != nil {
+			result = "⚠ " + err.Error()
+		}
+		_, appendErr := a.log.Append(session.EventWebCommandResult, session.NewWebCommandResult(result))
+		if appendErr != nil {
+			return appendErr
+		}
+		return nil
+	}
 	if _, err := a.log.Append(session.EventUserMessage, session.NewUserMessage(line)); err != nil {
 		return err
 	}
@@ -308,6 +319,8 @@ func (a *app) execWebCommand(ctx context.Context, name string, args []string) (s
 		return a.webCompact(ctx, args)
 	case "/permission":
 		return a.webPermission(ctx, args)
+	case "/feedback":
+		return a.webFeedback(ctx, strings.Join(args, " "))
 	case "/goal", "/plan":
 		return a.webPlanGoal(ctx, args)
 	default:
@@ -322,9 +335,29 @@ func (a *app) webHelp() string {
 		"  /status             显示当前 provider / model / mode\n" +
 		"  /compact [region <start> <end>]  手动压缩上下文\n" +
 		"  /permission [readonly|standard|full]  查看或切换权限\n" +
+		"  /feedback <text>   记录对本次会话的反馈\n" +
 		"  /goal <标题> [说明]   创建目标 (plan_goal)\n" +
 		"  /plan <标题> [说明]   创建目标 (plan 模式入口)\n" +
 		"  其他文本             发送给智能体"
+}
+
+// webFeedback mirrors dsh's /feedback <text> command: surrounding whitespace
+// is removed, the text is recorded as a log-only feedback/record event, and no
+// model turn or user/message event is created. The Web-only acknowledgement is
+// emitted separately by webCommand so it remains visible in the transcript.
+func (a *app) webFeedback(ctx context.Context, text string) (string, error) {
+	_ = ctx // kept in the command signature for parity with the other handlers
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return "", errors.New("Feedback text is required. Usage: /feedback <text>")
+	}
+	if a.log == nil {
+		return "", errors.New("no active session")
+	}
+	if _, err := a.log.Append(session.EventFeedbackRecord, session.NewFeedbackRecord(text)); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("Feedback recorded for session %s", a.currentID), nil
 }
 
 // webStatus returns the current provider / model / mode summary (dsh 输入条
@@ -431,7 +464,7 @@ func (a *app) webPermission(ctx context.Context, args []string) (string, error) 
 // webCommandCatalog is the backend-owned discovery view used by the web
 // composer.
 func (a *app) webCommandCatalog() []map[string]string {
-	out := make([]map[string]string, 6)
+	out := make([]map[string]string, 7)
 	out[0] = make(map[string]string)
 	out[0][`name`] = `help`
 	out[0][`hint`] = `Show available slash commands`
@@ -445,11 +478,14 @@ func (a *app) webCommandCatalog() []map[string]string {
 	out[3][`name`] = `permission`
 	out[3][`hint`] = `Show or set permission: /permission [readonly|standard|full]`
 	out[4] = make(map[string]string)
-	out[4][`name`] = `goal`
-	out[4][`hint`] = `Create a goal: /goal title [details]`
+	out[4][`name`] = `feedback`
+	out[4][`hint`] = `Record feedback: /feedback <text>`
 	out[5] = make(map[string]string)
-	out[5][`name`] = `plan`
-	out[5][`hint`] = `Create a goal in plan mode`
+	out[5][`name`] = `goal`
+	out[5][`hint`] = `Create a goal: /goal title [details]`
+	out[6] = make(map[string]string)
+	out[6][`name`] = `plan`
+	out[6][`hint`] = `Create a goal in plan mode`
 	return out
 }
 

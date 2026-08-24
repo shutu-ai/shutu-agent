@@ -3126,6 +3126,9 @@ function renderEvent(ev, replay) {
       reasoningLive = false;
       finishAssistant(ev.summary || "", ev.time, ev.seq);
       break;
+    case "web/command-result":
+      addAssistant(ev.summary || "", ev.time, null);
+      break;
     case "tool/start":
     case "tool/result":
     case "tool/error":
