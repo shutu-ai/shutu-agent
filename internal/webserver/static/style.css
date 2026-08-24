@@ -1172,6 +1172,10 @@ mark {
   border-left: 2px solid var(--dsw-alias-border-l2);
   color: var(--dsw-alias-label-secondary); font: 12px/18px var(--dsw-font-code);
   white-space: pre-wrap; word-break: break-word;
+  /* dsh command cards use a bounded disclosure body. Keeping the scroll
+     inside every multiline command prevents the outer transcript's
+     auto-scroll from hiding the beginning of /help, /goal, or /compact. */
+  max-height: min(360px, 45vh); overflow-y: auto;
 }
 .command-body.hidden { display: none; }
 
