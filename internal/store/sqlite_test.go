@@ -624,3 +624,42 @@ func TestSessionConfig(t *testing.T) {
 		t.Fatalf("UpdateSessionConfig(missing) err = %v, want ErrNotFound", err)
 	}
 }
+
+func TestMessageFeedbackCRUD(t *testing.T) {
+	ctx := context.Background()
+	st := openSQLite(t)
+	if err := st.CreateSession(ctx, "s-feedback", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, ok, err := st.GetMessageFeedback(ctx, "s-feedback", 2); err != nil || ok || got != (MessageFeedback{}) {
+		t.Fatalf("initial feedback = %+v, %v, %v; want zero,false,nil", got, ok, err)
+	}
+	created, err := st.PutMessageFeedback(ctx, "s-feedback", 2, "positive", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.SessionID != "s-feedback" || created.Seq != 2 || created.Rating != "positive" {
+		t.Fatalf("created feedback = %+v", created)
+	}
+	items, err := st.ListMessageFeedback(ctx, "s-feedback")
+	if err != nil || len(items) != 1 || items[0].Rating != "positive" {
+		t.Fatalf("listed feedback = %+v, err=%v", items, err)
+	}
+	updated, err := st.PutMessageFeedback(ctx, "s-feedback", 2, "negative", "changed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Rating != "negative" || updated.Note != "changed" || updated.UpdatedAt.Before(updated.CreatedAt) {
+		t.Fatalf("updated feedback = %+v", updated)
+	}
+	if err := st.DeleteMessageFeedback(ctx, "s-feedback", 2); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := st.GetMessageFeedback(ctx, "s-feedback", 2); err != nil || ok {
+		t.Fatalf("feedback after delete = ok=%v err=%v, want false,nil", ok, err)
+	}
+	if _, err := st.ListMessageFeedback(ctx, "missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("ListMessageFeedback(missing) err=%v, want ErrNotFound", err)
+	}
+}

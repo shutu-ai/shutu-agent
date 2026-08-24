@@ -7,10 +7,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/jabing/shutu-agent/internal/store"
 )
 
 // assistantText extracts the "text" field of an assistant/message payload.
@@ -82,6 +85,80 @@ func TestWebCommandHelp(t *testing.T) {
 	if text := assistantText(t, lastEvent(t, a.log).Data); !strings.Contains(text, "可用的斜杠命令") {
 		t.Fatalf("/help result = %q, want the command table", text)
 	}
+}
+
+// TestWebCommandCompact verifies /compact uses the manual compaction engine
+// and returns its report as the Web assistant message.
+func TestWebCommandCompact(t *testing.T) {
+	a := makeCompactApp(true)
+	a.log = threeTurnLog(t)
+	a.compaction = basicEngine(nil, &compactStubLLM{text: "S"})
+	if err := a.webCommand(context.Background(), "/compact"); err != nil {
+		t.Fatalf("webCommand: %v", err)
+	}
+	text := assistantText(t, lastEvent(t, a.log).Data)
+	if !strings.Contains(text, "compacted") || !strings.Contains(text, "summary: S") {
+		t.Fatalf("/compact result = %q, want compaction report", text)
+	}
+	if countEvent(a.log, session.EventCompactionStart) != 1 || countEvent(a.log, session.EventCompactionEnd) != 1 {
+		t.Fatalf("/compact event counts = start %d, end %d, want one each",
+			countEvent(a.log, session.EventCompactionStart), countEvent(a.log, session.EventCompactionEnd))
+	}
+}
+
+// TestWebCommandPermission verifies /permission reads and persists the active
+// session's permission override.
+func TestWebCommandPermission(t *testing.T) {
+	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "permission.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	if err := st.CreateSession(ctx, "s-permission", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetSetting(ctx, "permission_preset", "full"); err != nil {
+		t.Fatal(err)
+	}
+	a := makePlanApp(true)
+	a.store = st
+	a.currentID = "s-permission"
+	if err := a.webCommand(ctx, "/permission"); err != nil {
+		t.Fatalf("read global permission: %v", err)
+	}
+	if text := assistantText(t, lastEvent(t, a.log).Data); !strings.Contains(text, "current preset full") {
+		t.Fatalf("global permission query = %q, want full", text)
+	}
+	if err := a.webCommand(ctx, "/permission readonly"); err != nil {
+		t.Fatalf("set permission: %v", err)
+	}
+	cfg, err := st.GetSessionConfig(ctx, a.currentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Permission != "readonly" {
+		t.Fatalf("session permission = %q, want readonly", cfg.Permission)
+	}
+	if err := a.webCommand(ctx, "/permission"); err != nil {
+		t.Fatalf("read permission: %v", err)
+	}
+	if text := assistantText(t, lastEvent(t, a.log).Data); !strings.Contains(text, "current preset readonly") {
+		t.Fatalf("permission query = %q, want readonly", text)
+	}
+}
+
+func TestWebCommandCatalogIncludesPermission(t *testing.T) {
+	a := &app{}
+	for _, command := range a.webCommandCatalog() {
+		if command["name"] == "permission" {
+			if !strings.Contains(command["hint"], "readonly") {
+				t.Fatalf("permission hint = %q, want preset choices", command["hint"])
+			}
+			return
+		}
+	}
+	t.Fatal("backend command catalog is missing permission")
 }
 
 // TestWebCommandUnknown verifies an unknown command answers with the /help

@@ -185,6 +185,44 @@ func TestSessionEvents(t *testing.T) {
 	}
 }
 
+func TestMessageFeedbackAPI(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	seedSession(t, st, "s-feedback", []session.Event{
+		{Seq: 1, Type: session.EventUserMessage, At: time.Now(), Version: 1, Data: mustData(t, map[string]any{"Text": "hello"})},
+		{Seq: 2, Type: session.EventAssistantMessage, At: time.Now(), Version: 1, Data: mustData(t, map[string]any{"Text": "answer"})},
+	})
+
+	rec := doReq(t, srv.Handler(), "GET", "/api/sessions/s-feedback/feedback", "tok")
+	if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != "[]" {
+		t.Fatalf("initial feedback = %d %s, want 200 []", rec.Code, rec.Body.String())
+	}
+	rec = doReqBody(t, srv.Handler(), "PUT", "/api/sessions/s-feedback/feedback/2", "tok", `{"rating":"positive"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("put feedback = %d %s, want 200", rec.Code, rec.Body.String())
+	}
+	var item store.MessageFeedback
+	if err := json.Unmarshal(rec.Body.Bytes(), &item); err != nil || item.Seq != 2 || item.Rating != "positive" {
+		t.Fatalf("put feedback body = %+v, err=%v", item, err)
+	}
+	rec = doReqBody(t, srv.Handler(), "PUT", "/api/sessions/s-feedback/feedback/2", "tok", `{"rating":"negative","note":"changed"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("replace feedback = %d %s, want 200", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &item); err != nil || item.Rating != "negative" || item.Note != "changed" {
+		t.Fatalf("replace feedback body = %+v, err=%v", item, err)
+	}
+	rec = doReq(t, srv.Handler(), "DELETE", "/api/sessions/s-feedback/feedback/2", "tok")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete feedback = %d %s, want 200", rec.Code, rec.Body.String())
+	}
+	if rec := doReqBody(t, srv.Handler(), "PUT", "/api/sessions/s-feedback/feedback/1", "tok", `{"rating":"positive"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("feedback on user event = %d, want 400", rec.Code)
+	}
+	if rec := doReq(t, srv.Handler(), "GET", "/api/sessions/missing/feedback", "tok"); rec.Code != http.StatusNotFound {
+		t.Fatalf("feedback on missing session = %d, want 404", rec.Code)
+	}
+}
+
 func TestStaticServed(t *testing.T) {
 	srv, _ := newTestServer(t, "tok")
 	h := srv.Handler()
@@ -193,6 +231,9 @@ func TestStaticServed(t *testing.T) {
 	}
 	if rec := doReq(t, h, "GET", "/static/app.js", "tok"); rec.Code != http.StatusOK {
 		t.Fatalf("GET /static/app.js → %d, want 200", rec.Code)
+	}
+	if rec := doReq(t, h, "GET", "/", "tok"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "id=\"slash-menu\"") {
+		t.Fatalf("index.html missing slash menu container")
 	}
 	if rec := doReq(t, h, "GET", "/nope", "tok"); rec.Code != http.StatusNotFound {
 		t.Fatalf("GET /nope → %d, want 404", rec.Code)

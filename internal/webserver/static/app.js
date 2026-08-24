@@ -41,6 +41,7 @@ const topbarEl = $("topbar"); // hidden while the session is blank (dsh headerHi
 const messagesEl = $("messages"), heroEl = $("hero");
 const colCenterEl = document.querySelector(".col-center");
 const composerText = $("composer-text"), composerBox = $("composer"), sendBtn = $("composer-send");
+const slashMenu = $("slash-menu");
 const growWrapEl = document.querySelector(".grow-wrap");
 const scrollBottomBtn = $("scroll-bottom");
 const settingsEl = $("settings"), placeholderEl = $("placeholder");
@@ -63,6 +64,8 @@ let heroWorkspace = "";             // selected hero workspace id ("" = pick a w
 let heroMenuOpen = false;           // hero workspace picker popover state
 let heroModeOpen = false;           // hero mode (agent preset) popover state
 let cmdMenuOpen = false;            // composer +(command) menu popover state
+let slashMenuOpen = false;          // leading-/ command suggestions in the composer
+let slashHighlight = 0;
 let modelMenuOpen = false;          // composer model seat popover state
 let modelPane = "root";             // model seat menu pane: root | model | effort (dsh ModelSelect)
 let effortTarget = "";              // model id whose effort pane is open ("" = current model)
@@ -85,11 +88,21 @@ let reasoningLive = false;      // thinking deltas of the current step already s
 let currentReasoningNode = null; // the live Think row being accumulated
 let lastReasoningSeq = 0;       // seq of the last rendered reasoning delta (step boundary)
 let renderedSeqs = new Set();   // event seqs rendered in the current view (replay dedup)
+let feedbackBySeq = new Map();  // assistant event seq -> positive | negative
 let runningNode = null;         // "Deep diving..." element (turn-level, dsh TurnStatus)
 let runningStart = 0;           // wall clock of the running turn's start (elapsed anchor)
 let runningTimer = null;        // 1s ticker for the elapsed clock
 let pollTimer = null;           // session-list refresh
 let config = {};                // cached GET /api/config view
+
+// The web command catalog is loaded from the backend config.commands response.
+// The server remains authoritative and still handles unknown commands.
+let webCommands = []; /* const WEB_COMMANDS = [
+  { name: "help", hint: "Show available slash commands" },
+  { name: "status", hint: "Show provider, model and mode" },
+  { name: "goal", hint: "Create a goal: /goal <title> [details]" },
+  { name: "plan", hint: "Create a goal in plan mode" },
+]; */
 
 // noteRendered records one rendered event seq. A Set — not a watermark — so a
 // gap event (dropped by the SSE hub) stays "not rendered" even when later
@@ -914,21 +927,46 @@ function addAssistant(text, timeIso, seq) {
     navigator.clipboard?.writeText(text || "").catch(() => {});
   });
   if (seq != null) {
-    // P5 feedback: localStorage per (session, seq) — optimistic, no backend.
-    const k = `pa_fb:${currentID || ""}:${seq}`;
+    const feedbackSession = currentID;
+    const feedbackSeq = seq;
     const upBtn = node.querySelector('[data-act="up"]');
     const downBtn = node.querySelector('[data-act="down"]');
-    const cur = localStorage.getItem(k);
-    if (cur === "up") upBtn.classList.add("active-up");
-    if (cur === "down") downBtn.classList.add("active-down");
-    const set = (val) => {
-      const next = localStorage.getItem(k) === val ? "" : val;
-      if (next) localStorage.setItem(k, next); else localStorage.removeItem(k);
-      upBtn.classList.toggle("active-up", next === "up");
-      downBtn.classList.toggle("active-down", next === "down");
+    const setButtons = (rating) => {
+      upBtn.classList.toggle("active-up", rating === "positive");
+      downBtn.classList.toggle("active-down", rating === "negative");
     };
-    upBtn.addEventListener("click", () => set("up"));
-    downBtn.addEventListener("click", () => set("down"));
+    setButtons(feedbackBySeq.get(feedbackSeq) || "");
+    const saveFeedback = async (rating) => {
+      const current = feedbackBySeq.get(feedbackSeq) || "";
+      const next = current === rating ? "" : rating;
+      upBtn.disabled = true;
+      downBtn.disabled = true;
+      try {
+        const path = `/api/sessions/${encodeURIComponent(feedbackSession)}/feedback/${encodeURIComponent(feedbackSeq)}`;
+        const res = next
+          ? await api(path, { method: "PUT", body: JSON.stringify({ rating: next }) })
+          : await api(path, { method: "DELETE" });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.error || ("HTTP " + res.status));
+        }
+        if (currentID === feedbackSession) {
+          if (next) feedbackBySeq.set(feedbackSeq, next);
+          else feedbackBySeq.delete(feedbackSeq);
+          setButtons(next);
+        }
+      } catch (e) {
+        if (e.message !== "unauthorized") {
+          toast("反馈保存失败");
+          console.error("feedback", e);
+        }
+      } finally {
+        upBtn.disabled = false;
+        downBtn.disabled = false;
+      }
+    };
+    upBtn.addEventListener("click", () => saveFeedback("positive"));
+    downBtn.addEventListener("click", () => saveFeedback("negative"));
   }
   inner.appendChild(node);
   return node.querySelector(".markdown");
@@ -2220,6 +2258,87 @@ function toggleCmdMenu(force) {
   if (cmdBtn) cmdBtn.setAttribute("aria-expanded", String(open));
 }
 
+// ---- composer slash-command menu (dsh InputTrigger) --------------------------
+// The backend accepts a leading slash as a web command. This catalog is loaded
+// from the backend config response and gives the textarea dsh-style discovery.
+function slashQueryAtCaret() {
+  if (!composerText || composerText.selectionStart !== composerText.selectionEnd) return null;
+  const caret = composerText.selectionStart;
+  const before = composerText.value.slice(0, caret);
+  const hit = before.match(/^(\s*)\/([^\s]*)$/);
+  if (!hit) return null;
+  return { whitespace: hit[1], query: hit[2], caret };
+}
+function syncSlashMenuPosition() {
+  if (!slashMenu || !composerBox) return;
+  const r = composerBox.getBoundingClientRect();
+  const edge = 8;
+  const width = Math.min(320, Math.max(220, r.width));
+  slashMenu.style.width = width + "px";
+  slashMenu.style.left = Math.max(edge, Math.min(r.left, window.innerWidth - width - edge)) + "px";
+  slashMenu.style.top = Math.max(edge, r.top - Math.min(slashMenu.offsetHeight || 240, 320) - 8) + "px";
+}
+function closeSlashMenu() {
+  slashMenuOpen = false;
+  slashHighlight = 0;
+  if (slashMenu) {
+    slashMenu.classList.add("hidden");
+    slashMenu.removeAttribute("aria-activedescendant");
+  }
+}
+function renderSlashMenu() {
+  if (!slashMenu) return;
+  const hit = slashQueryAtCaret();
+  if (!hit) { closeSlashMenu(); return; }
+  const q = hit.query.toLowerCase();
+  const items = webCommands.filter((item) => item.name.startsWith(q));
+  if (!items.length) { closeSlashMenu(); return; }
+  slashHighlight = Math.min(slashHighlight, items.length - 1);
+  slashMenu.innerHTML = items.map((item, index) =>
+    '<button id="slash-option-' + esc(item.name) + '" class="hm-item' + (index === slashHighlight ? ' hm-active' : '') +
+    '" role="option" aria-selected="' + (index === slashHighlight) +
+    '" data-slash-command="' + esc(item.name) + '">' +
+    '<span class="hm-item-text"><span class="hm-item-name">/' + esc(item.name) +
+    '</span><span class="hm-item-desc">' + esc(item.hint) + '</span></span></button>'
+  ).join("");
+  slashMenu.querySelectorAll("[data-slash-command]").forEach((button) => {
+    button.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      pickSlashCommand(button.dataset.slashCommand || "");
+    });
+  });
+  slashMenuOpen = true;
+  slashMenu.classList.remove("hidden");
+  slashMenu.setAttribute("aria-activedescendant", "slash-option-" + items[slashHighlight].name);
+  syncSlashMenuPosition();
+}
+function updateSlashMenu() {
+  slashHighlight = 0;
+  renderSlashMenu();
+}
+function moveSlashHighlight(direction) {
+  const hit = slashQueryAtCaret();
+  if (!hit) return false;
+  const items = webCommands.filter((item) => item.name.startsWith(hit.query.toLowerCase()));
+  if (!items.length) return false;
+  slashHighlight = (slashHighlight + direction + items.length) % items.length;
+  renderSlashMenu();
+  return true;
+}
+function pickSlashCommand(name) {
+  if (!name) return;
+  const hit = slashQueryAtCaret();
+  if (!hit) return;
+  const after = composerText.value.slice(hit.caret);
+  composerText.value = hit.whitespace + "/" + name + " " + after;
+  const nextCaret = hit.whitespace.length + name.length + 2;
+  composerText.setSelectionRange(nextCaret, nextCaret);
+  syncGrow();
+  updatePlaceholder();
+  closeSlashMenu();
+  composerText.focus();
+}
+
 // ---- composer model seat (dsh ModelSeat) ------------------------------------
 // syncModelSeatPosition places the model menu relative to the seat. The
 // composer sits at the bottom edge, so the menu opens UPWARD (dsh ModelSelect
@@ -2788,6 +2907,25 @@ async function loadSessionConfig(id) {
   syncPermSelect();
   syncModelSeat();
 }
+
+async function loadFeedback(id) {
+  if (!id || currentID !== id) return;
+  feedbackBySeq = new Map();
+  try {
+    const res = await api(`/api/sessions/${encodeURIComponent(id)}/feedback`);
+    if (res.status === 401) return;
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const items = await res.json();
+    if (currentID !== id) return;
+    for (const item of items) {
+      if (item && Number.isSafeInteger(item.seq) && (item.rating === "positive" || item.rating === "negative")) {
+        feedbackBySeq.set(item.seq, item.rating);
+      }
+    }
+  } catch (e) {
+    if (e.message !== "unauthorized") console.error("session feedback", e);
+  }
+}
 // Composer pref loading: the mode comes from the config view (loadConfigLabels);
 // the permission preset is a persisted setting (fallback localStorage).
 async function loadComposerPrefs() {
@@ -2903,6 +3041,7 @@ function openSession(id) {
   streamActive = false;
   turnRunning = false;
   renderedSeqs = new Set(); // per-session rendered-event dedup
+  feedbackBySeq = new Map();
   syncSendButton();
   messagesEl.querySelector(".messages-inner")?.remove();
   syncSessionTitle();
@@ -2916,7 +3055,7 @@ function openSession(id) {
   syncHeaderActions();
   if (!id) { sessionCfg = { model: "", permission: "" }; setHeroPhase(); if (contextMeter) { contextMeter.textContent = ""; cmOpen = false; } return; }
   loadSessionConfig(id);
-  return Promise.all([loadEvents(id), connectStream(id)]);
+  return loadFeedback(id).then(() => Promise.all([loadEvents(id), connectStream(id)]));
 }
 
 async function loadEvents(id) {
@@ -3105,6 +3244,7 @@ function syncGrow() {
   growWrapEl.dataset.replicatedValue = composerText.value + "\n";
 }
 function setComposerDisabled(disabled) {
+  if (disabled) closeSlashMenu();
   composerBox.classList.toggle("disabled", disabled);
   // The send seat becomes the STOP control while a turn runs (dsh): it must
   // stay clickable in the running state even though the composer is locked.
@@ -3125,6 +3265,7 @@ function updatePlaceholder() {
 composerText.addEventListener("input", () => {
   syncGrow();
   updatePlaceholder();
+  updateSlashMenu();
 });
 
 async function sendMessage() {
@@ -3154,6 +3295,7 @@ async function sendMessage() {
     }
     composerText.value = "";
     syncGrow();
+    closeSlashMenu();
     const res = await api(`/api/sessions/${encodeURIComponent(currentID)}/message`, {
       method: "POST",
       body: JSON.stringify({ text, images }),
@@ -3162,6 +3304,9 @@ async function sendMessage() {
       const body = await res.json().catch(() => ({}));
       throw new Error(body.error || ("HTTP " + res.status));
     }
+    // /permission persists the active session override on the backend; reload
+    // it so the permission seat reflects a typed slash command immediately.
+    if (/^\/permission(?:\s|$)/.test(text)) await loadSessionConfig(currentID);
   } catch (e) {
     if (e.message !== "unauthorized") {
       // A user-initiated stop aborts the turn — the POST settles with an
@@ -3320,6 +3465,32 @@ function toast(msg) {
   toastTimer = setTimeout(() => t.classList.remove("show"), 2600);
 }
 composerText.addEventListener("keydown", (e) => {
+  if (slashMenuOpen) {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      moveSlashHighlight(1);
+      return;
+    }
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      moveSlashHighlight(-1);
+      return;
+    }
+    if ((e.key === "Tab" || e.key === "Enter") && !e.isComposing) {
+      const hit = slashQueryAtCaret();
+      const items = hit ? webCommands.filter((item) => item.name.startsWith(hit.query.toLowerCase())) : [];
+      if (items[slashHighlight]) {
+        e.preventDefault();
+        pickSlashCommand(items[slashHighlight].name);
+        return;
+      }
+    }
+    if (e.key === "Escape") {
+      e.preventDefault();
+      closeSlashMenu();
+      return;
+    }
+  }
   // Composer send key follows the General-settings preference: "send" sends on
   // plain Enter (Shift+Enter newline); "newline" sends on Ctrl/Cmd+Enter only.
   const mode = localStorage.getItem("pa_enter") || "send";
@@ -4801,7 +4972,10 @@ function boot() {
   updatePlaceholder();
   syncPermSelect();
   syncSendButton();
-  loadConfig();
+  loadConfig().then(() => {
+    webCommands = Array.isArray(config.commands) ? config.commands : [];
+    if (slashMenuOpen) renderSlashMenu();
+  });
   loadComposerPrefs();
   loadSessions();
   if (currentID) openSession(currentID);
@@ -4850,6 +5024,7 @@ document.addEventListener("click", (e) => {
   if (heroMenuOpen && !e.target.closest("#hero-ws-chip, #hero-ws-menu")) toggleHeroMenu(false);
   if (heroModeOpen && !e.target.closest("#hero-mode-chip, #hero-mode-menu")) toggleModeMenu(false);
   if (cmdMenuOpen && !e.target.closest("#cmd-btn, #cmd-menu")) toggleCmdMenu(false);
+  if (slashMenuOpen && !e.target.closest("#composer, #slash-menu")) closeSlashMenu();
   if (permMenuOpen && !e.target.closest("#perm-seat, #perm-menu")) togglePermMenu(false);
   if (modelMenuOpen && !e.target.closest("#model-seat, #model-menu")) toggleModelMenu(false);
 });
@@ -4946,6 +5121,7 @@ document.addEventListener("keydown", (e) => {
     return;
   }
   if (e.key === "Escape") {
+    if (slashMenuOpen) closeSlashMenu();
     if (modelMenuOpen) toggleModelMenu(false);
     if (permMenuOpen) togglePermMenu(false);
     if (cmdMenuOpen) toggleCmdMenu(false);
@@ -4954,6 +5130,8 @@ document.addEventListener("keydown", (e) => {
     if (cmOpen) toggleCMPanel(false);
   }
 });
+window.addEventListener("resize", () => { if (slashMenuOpen) syncSlashMenuPosition(); });
+window.addEventListener("scroll", () => { if (slashMenuOpen) syncSlashMenuPosition(); }, true);
 // dsh ContextMeter: a pointer down outside the meter closes its open panel.
 document.addEventListener("pointerdown", (e) => {
   if (cmOpen && contextMeter && !contextMeter.contains(e.target)) toggleCMPanel(false);

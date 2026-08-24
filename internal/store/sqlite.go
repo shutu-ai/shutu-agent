@@ -50,6 +50,16 @@ CREATE TABLE IF NOT EXISTS settings (
     key   TEXT NOT NULL PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS message_feedback (
+    session_id TEXT    NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    seq        INTEGER NOT NULL,
+    rating     TEXT    NOT NULL,
+    note       TEXT    NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (session_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_message_feedback_session ON message_feedback (session_id, seq);
 `
 
 // migrateSchema brings older databases forward. CREATE TABLE IF NOT EXISTS
@@ -195,6 +205,113 @@ func (s *SQLiteStore) UpdateSessionConfig(ctx context.Context, sessionID, provid
 	}
 	if n, err := res.RowsAffected(); err == nil && n == 0 {
 		return fmt.Errorf("%w: %q", ErrNotFound, sessionID)
+	}
+	return nil
+}
+
+// ListMessageFeedback returns all ratings for one session in assistant-event
+// sequence order. A missing session is reported as ErrNotFound.
+func (s *SQLiteStore) ListMessageFeedback(ctx context.Context, sessionID string) ([]MessageFeedback, error) {
+	if err := s.ensureSession(ctx, sessionID); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT session_id, seq, rating, note, created_at, updated_at
+		FROM message_feedback WHERE session_id = ? ORDER BY seq`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("store: list message feedback %q: %w", sessionID, err)
+	}
+	defer rows.Close()
+	feedback := make([]MessageFeedback, 0)
+	for rows.Next() {
+		var item MessageFeedback
+		var seq, createdAt, updatedAt int64
+		if err := rows.Scan(&item.SessionID, &seq, &item.Rating, &item.Note, &createdAt, &updatedAt); err != nil {
+			return nil, fmt.Errorf("store: scan message feedback: %w", err)
+		}
+		item.Seq = uint64(seq)
+		item.CreatedAt = time.Unix(0, createdAt).UTC()
+		item.UpdatedAt = time.Unix(0, updatedAt).UTC()
+		feedback = append(feedback, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: read message feedback: %w", err)
+	}
+	return feedback, nil
+}
+
+// GetMessageFeedback reads one rating. The bool is false when the session
+// exists but this assistant event has not been rated yet.
+func (s *SQLiteStore) GetMessageFeedback(ctx context.Context, sessionID string, seq uint64) (MessageFeedback, bool, error) {
+	if err := s.ensureSession(ctx, sessionID); err != nil {
+		return MessageFeedback{}, false, err
+	}
+	var item MessageFeedback
+	var storedSeq, createdAt, updatedAt int64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT session_id, seq, rating, note, created_at, updated_at
+		FROM message_feedback WHERE session_id = ? AND seq = ?`, sessionID, seq).
+		Scan(&item.SessionID, &storedSeq, &item.Rating, &item.Note, &createdAt, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return MessageFeedback{}, false, nil
+	}
+	if err != nil {
+		return MessageFeedback{}, false, fmt.Errorf("store: get message feedback %q/%d: %w", sessionID, seq, err)
+	}
+	item.Seq = uint64(storedSeq)
+	item.CreatedAt = time.Unix(0, createdAt).UTC()
+	item.UpdatedAt = time.Unix(0, updatedAt).UTC()
+	return item, true, nil
+}
+
+// PutMessageFeedback creates or replaces one rating for an assistant event.
+func (s *SQLiteStore) PutMessageFeedback(ctx context.Context, sessionID string, seq uint64, rating, note string) (MessageFeedback, error) {
+	if rating != "positive" && rating != "negative" {
+		return MessageFeedback{}, fmt.Errorf("store: invalid message feedback rating %q", rating)
+	}
+	if len([]byte(note)) > MaxMessageFeedbackNoteBytes {
+		return MessageFeedback{}, fmt.Errorf("store: message feedback note exceeds %d bytes", MaxMessageFeedbackNoteBytes)
+	}
+	if err := s.ensureSession(ctx, sessionID); err != nil {
+		return MessageFeedback{}, err
+	}
+	now := time.Now().UTC()
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO message_feedback (session_id, seq, rating, note, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(session_id, seq) DO UPDATE SET
+			rating = excluded.rating, note = excluded.note, updated_at = excluded.updated_at`,
+		sessionID, seq, rating, note, unixNano(now), unixNano(now)); err != nil {
+		return MessageFeedback{}, fmt.Errorf("store: put message feedback %q/%d: %w", sessionID, seq, err)
+	}
+	item, ok, err := s.GetMessageFeedback(ctx, sessionID, seq)
+	if err != nil {
+		return MessageFeedback{}, err
+	}
+	if !ok {
+		return MessageFeedback{}, fmt.Errorf("store: message feedback %q/%d disappeared after write", sessionID, seq)
+	}
+	return item, nil
+}
+
+// DeleteMessageFeedback removes one rating. It is idempotent for an existing
+// session, matching the toggle-off behavior of the Web button.
+func (s *SQLiteStore) DeleteMessageFeedback(ctx context.Context, sessionID string, seq uint64) error {
+	if err := s.ensureSession(ctx, sessionID); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM message_feedback WHERE session_id = ? AND seq = ?`, sessionID, seq); err != nil {
+		return fmt.Errorf("store: delete message feedback %q/%d: %w", sessionID, seq, err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) ensureSession(ctx context.Context, sessionID string) error {
+	var exists int
+	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM sessions WHERE id = ?`, sessionID).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w: %q", ErrNotFound, sessionID)
+	} else if err != nil {
+		return fmt.Errorf("store: check session %q: %w", sessionID, err)
 	}
 	return nil
 }

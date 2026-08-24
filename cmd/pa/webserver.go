@@ -18,9 +18,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 
+	"github.com/jabing/shutu-agent/internal/compaction"
 	"github.com/jabing/shutu-agent/internal/config"
 	"github.com/jabing/shutu-agent/internal/llm"
 	"github.com/jabing/shutu-agent/internal/session"
@@ -220,7 +222,10 @@ func (a *app) webMessage(ctx context.Context, sessionID, text string, images []l
 	// commands (/new, /resume) stay on the sidebar/+ menu, which already drive
 	// them through the session manager.
 	if len(images) == 0 && strings.HasPrefix(strings.TrimSpace(text), "/") {
-		if err := a.webCommand(ctx, strings.TrimSpace(text)); err != nil {
+		a.turnMu.Lock()
+		err := a.webCommand(ctx, strings.TrimSpace(text))
+		a.turnMu.Unlock()
+		if err != nil {
 			return err
 		}
 		return a.runIdleGoal(ctx, false)
@@ -299,6 +304,10 @@ func (a *app) execWebCommand(ctx context.Context, name string, args []string) (s
 		return a.webHelp(), nil
 	case "/status":
 		return a.webStatus(), nil
+	case "/compact":
+		return a.webCompact(ctx, args)
+	case "/permission":
+		return a.webPermission(ctx, args)
 	case "/goal", "/plan":
 		return a.webPlanGoal(ctx, args)
 	default:
@@ -311,6 +320,8 @@ func (a *app) webHelp() string {
 	return "可用的斜杠命令:\n" +
 		"  /help               显示本命令表\n" +
 		"  /status             显示当前 provider / model / mode\n" +
+		"  /compact [region <start> <end>]  手动压缩上下文\n" +
+		"  /permission [readonly|standard|full]  查看或切换权限\n" +
 		"  /goal <标题> [说明]   创建目标 (plan_goal)\n" +
 		"  /plan <标题> [说明]   创建目标 (plan 模式入口)\n" +
 		"  其他文本             发送给智能体"
@@ -321,6 +332,125 @@ func (a *app) webHelp() string {
 func (a *app) webStatus() string {
 	return fmt.Sprintf("provider=%s model=%s mode=%s",
 		a.cfg.LLM.Provider, llmProviderModel(a.cfg, a.cfg.LLM.Provider), a.cfg.Mode)
+}
+
+// webCompact runs the same manual compaction as the REPL and formats the
+// report as an assistant message for the Web SSE stream.
+func (a *app) webCompact(ctx context.Context, args []string) (string, error) {
+	if a.compaction == nil {
+		return "compaction: disabled (compaction.enabled=false)", nil
+	}
+	var res *compaction.Result
+	var err error
+	switch {
+	case len(args) == 3 && args[0] == "region":
+		start, e1 := strconv.ParseInt(args[1], 10, 64)
+		end, e2 := strconv.ParseInt(args[2], 10, 64)
+		if e1 != nil || e2 != nil {
+			return "", fmt.Errorf("usage: /compact region <start> <end> (integer event seqs)")
+		}
+		res, err = a.compactAndLog(ctx, "manual /compact region command", "manual",
+			func() (*compaction.Result, error) { return a.compaction.CompactRegion(ctx, a.log, start, end) })
+	case len(args) != 0:
+		return "", fmt.Errorf("usage: /compact or /compact region <start> <end>")
+	default:
+		res, err = a.compactAndLog(ctx, "manual /compact command", "manual",
+			func() (*compaction.Result, error) { return a.compaction.CompactNow(ctx, a.log) })
+	}
+	if err != nil {
+		return "", err
+	}
+	if res == nil {
+		return "compaction: nothing to compact", nil
+	}
+	return fmt.Sprintf("compacted %d events (seq %d..%d), saved %d tokens (id %s)\nsummary: %s",
+		len(res.ShadowedSeqs), res.ShadowedRange[0], res.ShadowedRange[1], res.ShadowedTokens, res.CompactionID, res.Summary), nil
+}
+
+// webPermission implements dsh's /permission command. With no argument it
+// reports the effective preset; with one argument it persists a session
+// override when a session is active, otherwise the global default.
+func (a *app) webPermission(ctx context.Context, args []string) (string, error) {
+	const available = "readonly, standard, full"
+	if len(args) > 1 {
+		return "", fmt.Errorf("usage: /permission [readonly|standard|full]")
+	}
+	current := "standard"
+	if a.currentID != "" {
+		if scs, ok := a.store.(store.SessionConfigStore); ok {
+			cfg, err := scs.GetSessionConfig(ctx, a.currentID)
+			if err != nil {
+				return "", err
+			}
+			if cfg.Permission != "" {
+				current = cfg.Permission
+			} else {
+				settings, err := a.store.GetSettings(ctx)
+				if err != nil {
+					return "", err
+				}
+				if value := settings["permission_preset"]; value != "" {
+					current = value
+				}
+			}
+		}
+	} else {
+		settings, err := a.store.GetSettings(ctx)
+		if err != nil {
+			return "", err
+		}
+		if value := settings["permission_preset"]; value != "" {
+			current = value
+		}
+	}
+	if len(args) == 0 {
+		return fmt.Sprintf("current preset %s (available: %s)", current, available), nil
+	}
+	next := args[0]
+	if next != "readonly" && next != "standard" && next != "full" {
+		return "", fmt.Errorf("unknown preset %q (available: %s)", next, available)
+	}
+	if a.currentID != "" {
+		scs, ok := a.store.(store.SessionConfigStore)
+		if !ok {
+			return "", errors.New("session permission overrides are unsupported by this store")
+		}
+		cfg, err := scs.GetSessionConfig(ctx, a.currentID)
+		if err != nil {
+			return "", err
+		}
+		if err := scs.UpdateSessionConfig(ctx, a.currentID, cfg.Provider, cfg.Model, cfg.ReasoningEffort, next); err != nil {
+			return "", err
+		}
+	} else if err := a.store.SetSetting(ctx, "permission_preset", next); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("preset %s", next), nil
+}
+
+// webCommandCatalog is the backend-owned discovery view used by the web
+// composer.
+func (a *app) webCommandCatalog() []map[string]string {
+	out := make([]map[string]string, 6)
+	out[0] = make(map[string]string)
+	out[0][`name`] = `help`
+	out[0][`hint`] = `Show available slash commands`
+	out[1] = make(map[string]string)
+	out[1][`name`] = `status`
+	out[1][`hint`] = `Show provider, model and mode`
+	out[2] = make(map[string]string)
+	out[2][`name`] = `compact`
+	out[2][`hint`] = `Compact context: /compact [region start end]`
+	out[3] = make(map[string]string)
+	out[3][`name`] = `permission`
+	out[3][`hint`] = `Show or set permission: /permission [readonly|standard|full]`
+	out[4] = make(map[string]string)
+	out[4][`name`] = `goal`
+	out[4][`hint`] = `Create a goal: /goal title [details]`
+	out[5] = make(map[string]string)
+	out[5][`name`] = `plan`
+	out[5][`hint`] = `Create a goal in plan mode`
+	return out
 }
 
 // webPlanGoal creates a goal via the plan_goal tool (dsh /goal /plan entry). It
@@ -476,6 +606,7 @@ func (a *app) stopTurn(sessionID string) error {
 
 func (a *app) webConfig() map[string]any {
 	return map[string]any{
+		`commands`:         a.webCommandCatalog(),
 		"model":            llmProviderModel(a.cfg, a.cfg.LLM.Provider),
 		"base_url":         a.cfg.BaseURL,
 		"llm_provider":     a.cfg.LLM.Provider,

@@ -1423,6 +1423,9 @@ mark {
 .ws-menu .hm-item .hm-item-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ws-menu .hm-item .hm-item-desc { font-size: 11px; color: var(--dsw-alias-label-caption); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ws-menu .hm-item[disabled] { opacity: 0.5; cursor: not-allowed; }
+.slash-menu { max-height: 320px; overflow-y: auto; }
+.slash-menu .hm-item { min-height: 36px; }
+.slash-menu .hm-item.hm-active { background: var(--dsw-alias-interactive-bg-hover); }
 
 /* scroll-to-bottom floating button */
 .scroll-bottom {
@@ -1898,4 +1901,3 @@ body[data-ds-dark-theme="false"] .nav-cell.active { background: #EBEEF2; }
 .sk-grouprow { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--dsw-alias-border-l1); }
 .sk-grouprow:last-child { border-bottom: 0; }
 .sk-groupcheck { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--dsw-alias-label-primary); flex: 1; }
-

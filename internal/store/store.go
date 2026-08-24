@@ -95,6 +95,31 @@ type SessionConfigStore interface {
 	UpdateSessionConfig(ctx context.Context, sessionID, provider, model, reasoningEffort, permission string) error
 }
 
+// MessageFeedback is the durable rating attached to one assistant/message
+// event. Seq is scoped by SessionID and identifies the assistant response.
+type MessageFeedback struct {
+	SessionID string    `json:\session_id\`
+	Seq       uint64    `json:\seq\`
+	Rating    string    `json:\rating\`
+	Note      string    `json:\note,omitempty\`
+	CreatedAt time.Time `json:\created_at\`
+	UpdatedAt time.Time `json:\updated_at\`
+}
+
+// MaxMessageFeedbackNoteBytes bounds optional notes accepted by the feedback
+// API. The current Web UI only sends the rating, but the field is kept for
+// parity with dsh's feedback model.
+const MaxMessageFeedbackNoteBytes = 4096
+
+// MessageFeedbackStore is the optional persistence surface used by the Web
+// portal's assistant thumbs-up/thumbs-down actions.
+type MessageFeedbackStore interface {
+	ListMessageFeedback(ctx context.Context, sessionID string) ([]MessageFeedback, error)
+	GetMessageFeedback(ctx context.Context, sessionID string, seq uint64) (MessageFeedback, bool, error)
+	PutMessageFeedback(ctx context.Context, sessionID string, seq uint64, rating, note string) (MessageFeedback, error)
+	DeleteMessageFeedback(ctx context.Context, sessionID string, seq uint64) error
+}
+
 // SearchHit is one session that matched a body-text query, with the first
 // matching line snippet (P6.3 remote search, dsh searchAcrossSessions).
 type SearchHit struct {

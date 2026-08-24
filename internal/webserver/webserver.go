@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -264,6 +265,9 @@ func New(st store.Store, token, addr string) (*Server, error) {
 	mux.Handle("GET /api/kb/{rest...}", s.requireAuth(http.HandlerFunc(s.handleKBStub)))
 	mux.Handle("GET /api/sessions", s.requireAuth(http.HandlerFunc(s.handleSessions)))
 	mux.Handle("GET /api/sessions/{id}/events", s.requireAuth(http.HandlerFunc(s.handleEvents)))
+	mux.Handle("GET /api/sessions/{id}/feedback", s.requireAuth(http.HandlerFunc(s.handleFeedbackList)))
+	mux.Handle("PUT /api/sessions/{id}/feedback/{seq}", s.requireAuth(http.HandlerFunc(s.handleFeedbackPut)))
+	mux.Handle("DELETE /api/sessions/{id}/feedback/{seq}", s.requireAuth(http.HandlerFunc(s.handleFeedbackDelete)))
 	// ContextMeter (dsh ContextMeter): the current session's estimated tokens.
 	mux.Handle("GET /api/sessions/{id}/context", s.requireAuth(http.HandlerFunc(s.handleSessionContext)))
 	// Stop a running turn (dsh 停止按钮).
@@ -964,6 +968,114 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		out = append(out, v)
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) feedbackStore(w http.ResponseWriter) (store.MessageFeedbackStore, bool) {
+	fs, ok := s.store.(store.MessageFeedbackStore)
+	if !ok {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "feedback persistence unavailable"})
+		return nil, false
+	}
+	return fs, true
+}
+
+func (s *Server) handleFeedbackList(w http.ResponseWriter, r *http.Request) {
+	fs, ok := s.feedbackStore(w)
+	if !ok {
+		return
+	}
+	items, err := fs.ListMessageFeedback(r.Context(), r.PathValue("id"))
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) handleFeedbackPut(w http.ResponseWriter, r *http.Request) {
+	fs, ok := s.feedbackStore(w)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	seq, err := strconv.ParseUint(r.PathValue("seq"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid feedback sequence"})
+		return
+	}
+	var body struct {
+		Rating string `json:"rating"`
+		Note   string `json:"note"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON body"})
+		return
+	}
+	if body.Rating != "positive" && body.Rating != "negative" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "rating must be positive or negative"})
+		return
+	}
+	if len([]byte(body.Note)) > store.MaxMessageFeedbackNoteBytes {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "feedback note is too large"})
+		return
+	}
+	if err := s.requireFeedbackTarget(r.Context(), id, seq); err != nil {
+		s.writeFeedbackError(w, err)
+		return
+	}
+	item, err := fs.PutMessageFeedback(r.Context(), id, seq, body.Rating, body.Note)
+	if err != nil {
+		s.writeFeedbackError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) handleFeedbackDelete(w http.ResponseWriter, r *http.Request) {
+	fs, ok := s.feedbackStore(w)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	seq, err := strconv.ParseUint(r.PathValue("seq"), 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid feedback sequence"})
+		return
+	}
+	if err := fs.DeleteMessageFeedback(r.Context(), id, seq); err != nil {
+		s.writeFeedbackError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) requireFeedbackTarget(ctx context.Context, sessionID string, seq uint64) error {
+	events, err := s.store.LoadSession(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	for _, ev := range events {
+		if ev.Seq == seq && ev.Type == session.EventAssistantMessage {
+			return nil
+		}
+	}
+	return fmt.Errorf("feedback target %d not found", seq)
+}
+
+func (s *Server) writeFeedbackError(w http.ResponseWriter, err error) {
+	if errors.Is(err, store.ErrNotFound) {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
+		return
+	}
+	if strings.HasPrefix(err.Error(), "feedback target ") {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 }
 
 // callIDOf returns the correlation id of a tool/start, tool/result or
