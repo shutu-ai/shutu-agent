@@ -601,6 +601,45 @@ func TestSessionContextAPI(t *testing.T) {
 	if d.Percent <= 0 {
 		t.Fatalf("percent = %v, want > 0", d.Percent)
 	}
+
+	// Compaction keeps the old append-only events, but the meter must count the
+	// replacement surface rather than those shadowed events. This is the
+	// regression that previously left the ring unchanged after /compact.
+	long := strings.Repeat("historical context ", 40)
+	seedSession(t, st, "s-before-compact", []session.Event{
+		{Seq: 1, Type: session.EventUserMessage, At: time.Now(), Version: 1, Data: mustData(t, map[string]any{"Text": long})},
+		{Seq: 2, Type: session.EventAssistantMessage, At: time.Now(), Version: 1, Data: mustData(t, map[string]any{"Text": long})},
+		{Seq: 3, Type: session.EventUserMessage, At: time.Now(), Version: 1, Data: mustData(t, map[string]any{"Text": long})},
+		{Seq: 4, Type: session.EventAssistantMessage, At: time.Now(), Version: 1, Data: mustData(t, map[string]any{"Text": long})},
+	})
+	seedSession(t, st, "s-after-compact", []session.Event{
+		{Seq: 1, Type: session.EventUserMessage, At: time.Now(), Version: 1, Data: mustData(t, map[string]any{"Text": long})},
+		{Seq: 2, Type: session.EventAssistantMessage, At: time.Now(), Version: 1, Data: mustData(t, map[string]any{"Text": long})},
+		{Seq: 3, Type: session.EventUserMessage, At: time.Now(), Version: 1, Data: mustData(t, map[string]any{"Text": long})},
+		{Seq: 4, Type: session.EventAssistantMessage, At: time.Now(), Version: 1, Data: mustData(t, map[string]any{"Text": long})},
+		{Seq: 5, Type: session.EventUserMessage, At: time.Now(), Version: 1, Data: mustData(t, session.NewUserMessageReplace("condensed history", 1, 4))},
+		{Seq: 6, Type: session.EventCompactionSummary, At: time.Now(), Version: 1, Data: mustData(t, session.NewCompactionSummary("cmp-1", "condensed history"))},
+		{Seq: 7, Type: session.EventCompactionEnd, At: time.Now(), Version: 1, Data: mustData(t, session.NewCompactionEnd("cmp-1", [2]int64{1, 4}, len(long)))},
+	})
+	readUsed := func(id string) int {
+		t.Helper()
+		rec := doReq(t, srv.Handler(), "GET", "/api/sessions/"+id+"/context", "tok")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("context %s → %d", id, rec.Code)
+		}
+		var out struct {
+			UsedTokens int `json:"used_tokens"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out.UsedTokens
+	}
+	before := readUsed("s-before-compact")
+	after := readUsed("s-after-compact")
+	if after >= before {
+		t.Fatalf("compacted context used_tokens = %d, before = %d; want a reduction", after, before)
+	}
 	// Unknown session → 404.
 	if rec := doReq(t, srv.Handler(), "GET", "/api/sessions/s-nope/context", "tok"); rec.Code != http.StatusNotFound {
 		t.Fatalf("unknown session → %d, want 404", rec.Code)

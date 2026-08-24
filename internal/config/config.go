@@ -484,6 +484,10 @@ type CompactionConfig struct {
 	// RetainTurns is the tail of recent turns the basic provider keeps
 	// unshadowed; <= 0 means the default 8.
 	RetainTurns int `yaml:"retain_turns"`
+	// RetainTokens is the dsh-style token budget kept at the tail. When
+	// positive it takes precedence over retain_turns; zero keeps legacy turn
+	// based selection.
+	RetainTokens int `yaml:"retain_tokens"`
 	// MaxChars bounds the generated summary; <= 0 means the engine default
 	// (the wiring passes BasicEngine's default, or 0 for the engine to fall
 	// back on).

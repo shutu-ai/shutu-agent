@@ -87,10 +87,13 @@ func (f *acpFactory) NewSession(ctx context.Context, cwd string) (acp.Session, e
 			threshold = config.DefaultCompactionTokenThreshold
 		}
 		compactionEngine = compaction.NewBasic(compaction.BasicOpts{
-			LLM:            f.app.llmFor(""),
-			Model:          llmProviderModel(f.app.cfg, f.app.cfg.LLM.Provider),
-			TokenThreshold: threshold,
-			RetainTurns:    f.app.cfg.Compaction.RetainTurns,
+			LLM:                   f.app.llmFor(""),
+			Model:                 llmProviderModel(f.app.cfg, f.app.cfg.LLM.Provider),
+			TokenThreshold:        threshold,
+			RetainTurns:           f.app.cfg.Compaction.RetainTurns,
+			RetainTokens:          f.app.cfg.Compaction.RetainTokens,
+			FrameSummary:          true,
+			RequireSmallerSummary: true,
 		})
 	}
 	pb, err := buildPrompt(f.app.cfg.Mode, f.app.cfg.PromptsDir)
@@ -297,11 +300,15 @@ func (s *acpSession) compactionPreStep() func(context.Context, string) []llm.Mes
 		_, _ = s.log.Append(session.EventCompactionStart,
 			session.NewCompactionStart("surface token estimate exceeded threshold", "pressure"))
 		result, err := s.compaction.CompactIfNeeded(ctx, s.log, compaction.TriggerPressure)
-		if err != nil || result == nil {
+		if err != nil {
+			_, _ = s.log.Append(session.EventCompactionEnd, session.NewCompactionEndError("", err.Error()))
+			return nil
+		}
+		if result == nil {
 			return nil
 		}
 		_, _ = s.log.Append(session.EventCompactionSummary,
-			session.NewCompactionSummary(result.CompactionID, result.Summary))
+			session.NewCompactionSummaryWithStats(result.CompactionID, result.Summary, result.ShadowedSeqs, result.ShadowedTokens, "pressure"))
 		_, _ = s.log.Append(session.EventCompactionEnd,
 			session.NewCompactionEnd(result.CompactionID, result.ShadowedRange, result.ShadowedTokens))
 		return []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{

@@ -96,13 +96,20 @@ let pollTimer = null;           // session-list refresh
 let config = {};                // cached GET /api/config view
 
 // The web command catalog is loaded from the backend config.commands response.
-// The server remains authoritative and still handles unknown commands.
-let webCommands = []; /* const WEB_COMMANDS = [
-  { name: "help", hint: "Show available slash commands" },
-  { name: "status", hint: "Show provider, model and mode" },
-  { name: "goal", hint: "Create a goal: /goal <title> [details]" },
-  { name: "plan", hint: "Create a goal in plan mode" },
-]; */
+// The server remains authoritative and still handles unknown commands. The
+// built-in fallback makes the trigger useful during the first async config
+// load; a successful response replaces it and appends the skill entries.
+const DEFAULT_WEB_COMMANDS = [
+  { name: "help", hint: "Show available slash commands", kind: "command" },
+  { name: "status", hint: "Show provider, model and mode", kind: "command" },
+  { name: "compact", hint: "Compact context: /compact [region start end]", kind: "command" },
+  { name: "permission", hint: "Show or set permission: /permission [readonly|standard|full]", kind: "command" },
+  { name: "feedback", hint: "Record feedback: /feedback <text>", kind: "command" },
+  { name: "goal", hint: "Manage the goal: /goal [objective|clear|edit <objective>|pause|resume]", kind: "command" },
+  { name: "plan", hint: "Plan mode: /plan [off|message]", kind: "command" },
+  { name: "export", hint: "Download Session log: /export", kind: "command" },
+];
+let webCommands = DEFAULT_WEB_COMMANDS.slice();
 
 // noteRendered records one rendered event seq. A Set — not a watermark — so a
 // gap event (dropped by the SSE hub) stays "not rendered" even when later
@@ -1026,6 +1033,75 @@ function addContextInjection(ev) {
   node.innerHTML = `<div class="context-row"><span class="context-dot"></span><span>${esc(ev.summary || "上下文注入")}</span></div>`;
   inner.appendChild(node);
   scrollToBottom(true);
+}
+
+// dsh compaction presentation: the replacement user/message is not shown as
+// a normal user bubble. Its lifecycle is folded into one collapsed row, with
+// the generated summary available on demand and the saved-token count filled
+// when compaction/end arrives.
+let pendingCompactionRow = null;
+const compactionRows = new Map();
+function resetCompactionRows() {
+  pendingCompactionRow = null;
+  compactionRows.clear();
+}
+function compactionRowMeta(ev) {
+  if (ev.compaction_error) return `压缩失败：${ev.compaction_error}`;
+  if (ev.type === "compaction/end") {
+    return `已压缩 ${ev.compaction_items || 0} 条历史记录（约 ${fmtTokens(ev.compaction_tokens || 0)} tokens）`;
+  }
+  if (ev.compaction_items && ev.compaction_tokens) {
+    return `已压缩 ${ev.compaction_items} 条历史记录（约 ${fmtTokens(ev.compaction_tokens)} tokens）`;
+  }
+  if (ev.compaction_tokens) {
+    return `已释放约 ${fmtTokens(ev.compaction_tokens)} tokens`;
+  }
+  return "正在压缩上下文…";
+}
+function ensureCompactionRow(ev) {
+  let node = ev.compaction_id ? compactionRows.get(ev.compaction_id) : pendingCompactionRow;
+  if (node) return node;
+  const inner = msgInner();
+  node = document.createElement("div");
+  node.className = "msg context compaction";
+  node.innerHTML = `<div class="context-row compaction-row">
+    <button type="button" class="compaction-toggle" aria-expanded="false">
+      <span class="context-dot"></span><span class="compaction-title">上下文已压缩</span>
+      <span class="compaction-meta">${esc(compactionRowMeta(ev))}</span>
+    </button>
+    <div class="compaction-body hidden"></div>
+  </div>`;
+  node.querySelector(".compaction-toggle").addEventListener("click", () => {
+    const body = node.querySelector(".compaction-body");
+    const button = node.querySelector(".compaction-toggle");
+    const open = body.classList.toggle("hidden");
+    button.setAttribute("aria-expanded", String(!open));
+  });
+  inner.appendChild(node);
+  pendingCompactionRow = node;
+  scrollToBottom(true);
+  return node;
+}
+function addCompactionEvent(ev) {
+  const node = ensureCompactionRow(ev);
+  const id = ev.compaction_id || "";
+  if (id) {
+    compactionRows.set(id, node);
+    pendingCompactionRow = null;
+  }
+  const meta = node.querySelector(".compaction-meta");
+  if (ev.type === "compaction/end" && meta) meta.textContent = compactionRowMeta(ev);
+  const body = node.querySelector(".compaction-body");
+  const summary = ev.compaction_summary || (ev.compaction_marker ? ev.summary : "");
+  if (summary && body && !body.dataset.summary) {
+    body.innerHTML = renderMarkdown(summary);
+    body.dataset.summary = "1";
+    const button = node.querySelector(".compaction-toggle");
+    button.disabled = false;
+    button.title = "点击查看压缩摘要";
+    meta.textContent = ev.type === "compaction/end" ? compactionRowMeta(ev) : "点击查看压缩摘要";
+  }
+  return node;
 }
 
 // ---- scroll behavior -------------------------------------------------------
@@ -2295,6 +2371,8 @@ function renderSlashMenu() {
   if (!items.length) { closeSlashMenu(); return; }
   slashHighlight = Math.min(slashHighlight, items.length - 1);
   slashMenu.innerHTML = items.map((item, index) =>
+    (index > 0 && item.kind === "skill" && items[index - 1].kind !== "skill"
+      ? '<div class="slash-group-gap" role="separator" aria-hidden="true"></div>' : '') +
     '<button id="slash-option-' + esc(item.name) + '" class="hm-item' + (index === slashHighlight ? ' hm-active' : '') +
     '" role="option" aria-selected="' + (index === slashHighlight) +
     '" data-slash-command="' + esc(item.name) + '">' +
@@ -2311,6 +2389,10 @@ function renderSlashMenu() {
   slashMenu.classList.remove("hidden");
   slashMenu.setAttribute("aria-activedescendant", "slash-option-" + items[slashHighlight].name);
   syncSlashMenuPosition();
+  const active = slashMenu.querySelector(".hm-active");
+  if (active && typeof active.scrollIntoView === "function") {
+    active.scrollIntoView({ block: "nearest" });
+  }
 }
 function updateSlashMenu() {
   slashHighlight = 0;
@@ -3042,6 +3124,7 @@ function openSession(id) {
   turnRunning = false;
   renderedSeqs = new Set(); // per-session rendered-event dedup
   feedbackBySeq = new Map();
+  resetCompactionRows();
   syncSendButton();
   messagesEl.querySelector(".messages-inner")?.remove();
   syncSessionTitle();
@@ -3126,6 +3209,10 @@ function renderEvent(ev, replay) {
   if (sessionEmpty) { sessionEmpty = false; setHeroPhase(); }
   switch (ev.type) {
     case "user/message": {
+      if (ev.compaction_marker) {
+        addCompactionEvent(ev);
+        break;
+      }
       const imgs = (ev.images || []).map((iv) => ({
         src: `/api/sessions/${encodeURIComponent(currentID)}/attachments/${iv.id}`,
         id: iv.id,
@@ -3152,6 +3239,9 @@ function renderEvent(ev, replay) {
       addAssistant(ev.summary || "", ev.time, null);
       if (!replay && ev.command === "export") void downloadSessionExport();
       break;
+    case "compaction/start":
+      addCompactionEvent(ev);
+      break;
     case "tool/start":
     case "tool/result":
     case "tool/error":
@@ -3161,7 +3251,9 @@ function renderEvent(ev, replay) {
     case "kb/recall":
     case "skill/catalog":
     case "compaction/summary":
-      addContextInjection(ev);
+    case "compaction/end":
+      addCompactionEvent(ev);
+      if (!replay && ev.type === "compaction/end") refreshContextMeter();
       break;
     default: break;
   }
@@ -3545,7 +3637,9 @@ async function loadConfig() {
   try {
     const res = await api("/api/config");
     config = await res.json();
-    webCommands = Array.isArray(config.commands) ? config.commands : [];
+    if (Array.isArray(config.commands) && config.commands.length) {
+      webCommands = config.commands;
+    }
     if (slashMenuOpen) renderSlashMenu();
     loadConfigLabels();
   } catch (e) { if (e.message !== "unauthorized") console.error(e); }

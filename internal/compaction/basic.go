@@ -6,6 +6,7 @@
 package compaction
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -41,6 +42,14 @@ type BasicOpts struct {
 	// RetainTurns is the number of most-recent user/message turns kept
 	// unshadowed. <= 0 keeps none.
 	RetainTurns int
+	// RetainTokens is the dsh-style token budget kept at the tail of the
+	// surface. When positive it takes precedence over RetainTurns.
+	RetainTokens int
+	// FrameSummary stores the dsh checkpoint envelope around the raw summary.
+	FrameSummary bool
+	// RequireSmallerSummary rejects a checkpoint whose framed summary is not
+	// strictly smaller than the surface it replaces.
+	RequireSmallerSummary bool
 }
 
 // defaultTokenEstimate is the zero-dependency token proxy: ~4 bytes per token,
@@ -78,14 +87,14 @@ func (e *BasicEngine) CompactIfNeeded(ctx context.Context, sess SessionLike, tri
 	if !over && trigger == TriggerPressure {
 		return nil, nil
 	}
-	return e.compactPrefix(ctx, sess)
+	return e.compactPrefix(ctx, sess, true)
 }
 
 // CompactNow performs one effective compaction regardless of pressure: it
 // shadows the largest pairing-balanced prefix that leaves the last RetainTurns
 // user turns unshadowed, summarizes it, and appends the summary marker.
 func (e *BasicEngine) CompactNow(ctx context.Context, sess SessionLike) (*Result, error) {
-	return e.compactPrefix(ctx, sess)
+	return e.compactPrefix(ctx, sess, false)
 }
 
 // CompactRegion compacts the given surface range [start, end] after correcting
@@ -98,33 +107,48 @@ func (e *BasicEngine) CompactRegion(ctx context.Context, sess SessionLike, start
 	if !ok {
 		return nil, nil
 	}
-	return e.doCompact(ctx, sess, r, seqs)
+	return e.doCompact(ctx, sess, r, seqs, false)
 }
 
 // compactPrefix shadows the maximal pairing-balanced prefix before the retained
 // tail and appends the summary marker (the shared body of CompactIfNeeded and
 // CompactNow).
-func (e *BasicEngine) compactPrefix(ctx context.Context, sess SessionLike) (*Result, error) {
+func (e *BasicEngine) compactPrefix(ctx context.Context, sess SessionLike, wholeSurface bool) (*Result, error) {
 	r, seqs, ok := e.choosePrefixRange(sess)
 	if !ok {
 		return nil, nil
 	}
-	return e.doCompact(ctx, sess, r, seqs)
+	return e.doCompact(ctx, sess, r, seqs, wholeSurface)
 }
 
 // doCompact summarizes the shadowed range, appends the surfaceOp.replace
 // summary marker (D1, append-only) and returns the Result.
-func (e *BasicEngine) doCompact(ctx context.Context, sess SessionLike, r [2]int64, seqs []int64) (*Result, error) {
+func (e *BasicEngine) doCompact(ctx context.Context, sess SessionLike, r [2]int64, seqs []int64, wholeSurface bool) (*Result, error) {
 	if len(seqs) == 0 {
 		return nil, nil
 	}
 	start, end := r[0], r[1]
-	msgs := shadowedHistory(sess.Events(), start, end)
+	snapshot := sess.Events()
+	msgs := shadowedHistory(snapshot, start, end)
 	summary, err := e.summarize(ctx, msgs)
 	if err != nil {
 		return nil, fmt.Errorf("compaction: summarize [%d,%d]: %w", start, end, err)
 	}
-	if _, err := sess.Append(session.EventUserMessage, session.NewUserMessageReplace(summary, start, end)); err != nil {
+	if strings.TrimSpace(summary) == "" {
+		return nil, errors.New("compaction: summary is empty")
+	}
+	if !snapshotStable(snapshot, sess.Events(), start, end, wholeSurface) {
+		return nil, fmt.Errorf("compaction: history changed while summarizing [%d,%d]", start, end)
+	}
+	storedSummary := summary
+	if e.opts.FrameSummary {
+		storedSummary = frameSummary(summary)
+	}
+	shadowedTokens := e.estimateMessages(msgs)
+	if e.opts.RequireSmallerSummary && e.est(storedSummary) >= shadowedTokens {
+		return nil, fmt.Errorf("compaction: summary is not smaller (%d >= %d tokens)", e.est(storedSummary), shadowedTokens)
+	}
+	if _, err := sess.Append(session.EventUserMessage, session.NewUserMessageReplace(storedSummary, start, end)); err != nil {
 		return nil, fmt.Errorf("compaction: append summary marker: %w", err)
 	}
 	return &Result{
@@ -132,7 +156,7 @@ func (e *BasicEngine) doCompact(ctx context.Context, sess SessionLike, r [2]int6
 		Summary:        summary,
 		ShadowedRange:  [2]int64{start, end},
 		ShadowedSeqs:   seqs,
-		ShadowedTokens: e.estimateMessages(msgs),
+		ShadowedTokens: shadowedTokens,
 	}, nil
 }
 
@@ -151,6 +175,9 @@ func (e *BasicEngine) choosePrefixRange(sess SessionLike) ([2]int64, []int64, bo
 	userSeqs := userMessageSeqs(events)
 	if len(userSeqs) == 0 {
 		return [2]int64{}, nil, false
+	}
+	if e.opts.RetainTokens > 0 {
+		return e.choosePrefixByTokens(sess, events)
 	}
 	keep := e.opts.RetainTurns
 	if keep < 0 {
@@ -185,6 +212,38 @@ func (e *BasicEngine) choosePrefixRange(sess SessionLike) ([2]int64, []int64, bo
 		return [2]int64{}, nil, false
 	}
 	return [2]int64{firstSeq, end}, seqsInRange(events, firstSeq, end), true
+}
+
+// choosePrefixByTokens mirrors dsh's retainTokens selection: walk the priced
+// surface backwards until the retained tail reaches its token budget, then
+// expand the tail backwards until its start is outside a tool pair.
+func (e *BasicEngine) choosePrefixByTokens(sess SessionLike, events []session.Event) ([2]int64, []int64, bool) {
+	keepFrom := len(events) - 1
+	retained := 0
+	for keepFrom >= 0 && retained < e.opts.RetainTokens {
+		seq := int64(events[keepFrom].Seq)
+		retained += e.estimateMessages(shadowedHistory(events, seq, seq))
+		keepFrom--
+	}
+	if keepFrom < 0 {
+		return [2]int64{}, nil, false
+	}
+	for keepFrom >= 0 && !ToolPairingBalancedBefore(sess, int64(events[keepFrom].Seq)) {
+		keepFrom--
+	}
+	if keepFrom < 0 {
+		return [2]int64{}, nil, false
+	}
+	first := int64(events[0].Seq)
+	endLimit := int64(events[keepFrom].Seq) - 1
+	bal := pairingBalancedAfter(events)
+	for i := keepFrom; i >= 0; i-- {
+		if int64(events[i].Seq) <= endLimit && bal[i] && rangeHasUser(events, first, int64(events[i].Seq)) {
+			end := int64(events[i].Seq)
+			return [2]int64{first, end}, seqsInRange(events, first, end), true
+		}
+	}
+	return [2]int64{}, nil, false
 }
 
 // correctRegionRange clamps [start, end] to the log, pushes Start forward to
@@ -299,6 +358,48 @@ func (e *BasicEngine) summarize(ctx context.Context, msgs []llm.Message) (string
 		}
 	}
 	return strings.TrimSpace(b.String()), nil
+}
+
+const (
+	checkpointPreamble = "This is an automatically generated checkpoint condensing an earlier span of the conversation."
+	checkpointOpen     = "<compacted-summary>"
+	checkpointClose    = "</compacted-summary>"
+)
+
+func frameSummary(summary string) string {
+	return checkpointPreamble + "\n\n" + checkpointOpen + "\n" + strings.TrimSpace(summary) + "\n" + checkpointClose
+}
+
+func snapshotStable(before, after []session.Event, start, end int64, wholeSurface bool) bool {
+	if wholeSurface {
+		if len(before) != len(after) {
+			return false
+		}
+		for i := range before {
+			if !sameEvent(before[i], after[i]) {
+				return false
+			}
+		}
+		return true
+	}
+	bySeq := make(map[uint64]session.Event, len(after))
+	for _, ev := range after {
+		bySeq[ev.Seq] = ev
+	}
+	for _, ev := range before {
+		seq := int64(ev.Seq)
+		if seq >= start && seq <= end {
+			current, ok := bySeq[ev.Seq]
+			if !ok || !sameEvent(ev, current) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func sameEvent(a, b session.Event) bool {
+	return a.Seq == b.Seq && a.Type == b.Type && a.Version == b.Version && bytes.Equal(a.Data, b.Data)
 }
 
 // nextID returns a self-generated compaction id (timestamp + per-engine

@@ -450,7 +450,7 @@ func TestCompactionInjectorNilEngineNoOp(t *testing.T) {
 
 // TestCompactionInjectorSummaryFailureIsFailOpen verifies a failing summary
 // model does not abort the turn: the injector returns nil context (fail-open),
-// leaves only the compaction/start attempt marker, and never appends the notice.
+// closes the lifecycle with compaction/end, and never appends the notice.
 func TestCompactionInjectorSummaryFailureIsFailOpen(t *testing.T) {
 	app := makeCompactApp(true)
 	app.log = threeTurnLog(t)
@@ -462,8 +462,8 @@ func TestCompactionInjectorSummaryFailureIsFailOpen(t *testing.T) {
 	if n := countEvent(app.log, session.EventCompactionSummary); n != 0 {
 		t.Fatalf("compaction/summary logged %d times after a failed summary, want 0", n)
 	}
-	if n := countEvent(app.log, session.EventCompactionEnd); n != 0 {
-		t.Fatalf("compaction/end logged %d times after a failed summary, want 0", n)
+	if n := countEvent(app.log, session.EventCompactionEnd); n != 1 {
+		t.Fatalf("compaction/end logged %d times after a failed summary, want 1", n)
 	}
 	// The attempt marker remains — an orphan start reveals the interrupted
 	// attempt (ADR 决策 ③).

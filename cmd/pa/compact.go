@@ -62,10 +62,13 @@ func (a *app) registerCompaction() error {
 		return nil
 	}
 	a.compaction = compaction.NewBasic(compaction.BasicOpts{
-		LLM:            a.currentLLM(),
-		Model:          llmProviderModel(a.cfg, a.cfg.LLM.Provider),
-		TokenThreshold: a.cfg.Compaction.TokenThreshold,
-		RetainTurns:    a.cfg.Compaction.RetainTurns,
+		LLM:                   a.currentLLM(),
+		Model:                 llmProviderModel(a.cfg, a.cfg.LLM.Provider),
+		TokenThreshold:        a.cfg.Compaction.TokenThreshold,
+		RetainTurns:           a.cfg.Compaction.RetainTurns,
+		RetainTokens:          a.cfg.Compaction.RetainTokens,
+		FrameSummary:          true,
+		RequireSmallerSummary: true,
 	})
 	return nil
 }
@@ -132,19 +135,42 @@ func (a *app) compactionPreStep(est compactionEstimator) func(context.Context, s
 		if !a.overPressure(est) {
 			return nil
 		}
-		res, err := a.compactAndLog(ctx, "surface token estimate exceeded threshold", "pressure",
-			func() (*compaction.Result, error) {
-				return a.compaction.CompactIfNeeded(ctx, a.log, compaction.TriggerPressure)
-			})
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "[compaction failed open]", err)
-			return nil
+		// dsh gives pressure compaction one follow-up attempt when the first
+		// summary did not bring the surface below the pressure threshold.
+		var res *compaction.Result
+		for attempt := 0; attempt < 2 && a.overPressure(est); attempt++ {
+			result, err := a.compactAndLog(ctx, "surface token estimate exceeded threshold", "pressure",
+				func() (*compaction.Result, error) {
+					return a.compaction.CompactIfNeeded(ctx, a.log, compaction.TriggerPressure)
+				})
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "[compaction failed open]", err)
+				return nil
+			}
+			if result == nil {
+				break
+			}
+			res = result
 		}
 		if res == nil {
 			return nil
 		}
 		return []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text(compactedNotice)}}}
 	}
+}
+
+// recoverContextOverflow performs the dsh-style forced compaction retry for a
+// provider context-window rejection. It runs on the loop's serial step path,
+// so the retry observes the newly appended checkpoint marker immediately.
+func (a *app) recoverContextOverflow(ctx context.Context) bool {
+	if a.compaction == nil || a.log == nil {
+		return false
+	}
+	res, err := a.compactAndLog(ctx, "provider rejected the request because the context window is full", "context-overflow",
+		func() (*compaction.Result, error) {
+			return a.compaction.CompactIfNeeded(ctx, a.log, compaction.TriggerContextOverflow)
+		})
+	return err == nil && res != nil
 }
 
 // overPressure reports whether the current surface token estimate exceeds the
@@ -174,10 +200,17 @@ func (a *app) compactAndLog(ctx context.Context, reason, trigger string, run fun
 		fmt.Fprintln(os.Stderr, "pa: compaction/start event:", err)
 	}
 	res, err := run()
-	if err != nil || res == nil {
+	if err != nil {
+		if _, appendErr := a.log.Append(session.EventCompactionEnd, session.NewCompactionEndError("", err.Error())); appendErr != nil {
+			fmt.Fprintln(os.Stderr, "pa: compaction/end error event:", appendErr)
+		}
 		return res, err
 	}
-	if _, err := a.log.Append(session.EventCompactionSummary, session.NewCompactionSummary(res.CompactionID, res.Summary)); err != nil {
+	if res == nil {
+		return res, err
+	}
+	if _, err := a.log.Append(session.EventCompactionSummary,
+		session.NewCompactionSummaryWithStats(res.CompactionID, res.Summary, res.ShadowedSeqs, res.ShadowedTokens, trigger)); err != nil {
 		fmt.Fprintln(os.Stderr, "pa: compaction/summary event:", err)
 	}
 	if _, err := a.log.Append(session.EventCompactionEnd, session.NewCompactionEnd(res.CompactionID, res.ShadowedRange, res.ShadowedTokens)); err != nil {

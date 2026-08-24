@@ -889,9 +889,10 @@ func (a *app) buildLoop(onText func(string), onError func(error), provider, mode
 		// compaction) is appended when compaction is enabled; it runs after the
 		// M4b recall hook, inside the loop's existing pre-step extension point
 		// (D4 — the turn/step structure is unchanged).
-		PreStep: a.preStepInjectors(),
-		OnText:  onText,
-		OnError: onError,
+		PreStep:                a.preStepInjectors(),
+		RecoverContextOverflow: a.recoverContextOverflow,
+		OnText:                 onText,
+		OnError:                onError,
 	})
 }
 

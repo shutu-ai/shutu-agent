@@ -1039,8 +1039,11 @@ type compactionStartData struct {
 // body itself is a user/message with surfaceOp.replace, M5c-1a; this record is
 // its log fact). DeriveHistory treats it as opaque data.
 type compactionSummaryData struct {
-	CompactionID string `json:"compactionId"`
-	Summary      string `json:"summary"`
+	CompactionID   string  `json:"compactionId"`
+	Summary        string  `json:"summary"`
+	ShadowedSeqs   []int64 `json:"shadowedSeqs,omitempty"`
+	ShadowedTokens int     `json:"shadowedTokens,omitempty"`
+	Source         string  `json:"source,omitempty"`
 }
 
 // compactionEndData is the compaction/end payload: the compaction id, the
@@ -1050,6 +1053,7 @@ type compactionEndData struct {
 	CompactionID   string   `json:"compactionId"`
 	ShadowedRange  [2]int64 `json:"shadowedRange"`
 	ShadowedTokens int      `json:"shadowedTokens"`
+	Error          string   `json:"error,omitempty"`
 }
 
 // compactionPruneData is the compaction/prune payload: the compaction id that
@@ -1075,10 +1079,26 @@ func NewCompactionSummary(compactionID, summary string) any {
 	return compactionSummaryData{CompactionID: compactionID, Summary: summaryHead(summary)}
 }
 
+// NewCompactionSummaryWithStats records the dsh-compatible shadow set and
+// source metadata alongside the bounded summary projection.
+func NewCompactionSummaryWithStats(compactionID, summary string, shadowedSeqs []int64, shadowedTokens int, source string) any {
+	seqs := append([]int64(nil), shadowedSeqs...)
+	return compactionSummaryData{
+		CompactionID: compactionID, Summary: summaryHead(summary),
+		ShadowedSeqs: seqs, ShadowedTokens: shadowedTokens, Source: source,
+	}
+}
+
 // NewCompactionEnd builds the compaction/end payload recorded when a
 // compaction attempt completes (dispatch-m5c-2 §1 / D3).
 func NewCompactionEnd(compactionID string, shadowedRange [2]int64, shadowedTokens int) any {
 	return compactionEndData{CompactionID: compactionID, ShadowedRange: shadowedRange, ShadowedTokens: shadowedTokens}
+}
+
+// NewCompactionEndError closes a failed compaction attempt, matching dsh's
+// lifecycle guarantee that every started attempt has one terminal event.
+func NewCompactionEndError(compactionID, errText string) any {
+	return compactionEndData{CompactionID: compactionID, Error: summaryHead(errText)}
 }
 
 // NewCompactionPrune builds the compaction/prune payload recorded when a

@@ -41,18 +41,19 @@ type PreStepInjector struct {
 
 // Loop drives one conversation turn against the session log.
 type Loop struct {
-	llm       llm.LLM
-	log       *session.Log
-	tools     *tools.Registry
-	toolSpecs func() []llm.ToolSchema // per-session model-facing tool surface (dsh presentation mode)
-	prompt    *prompt.Builder
-	model     string
-	provider  string
-	effort    string
-	recall    func(context.Context, string) []llm.Message // M4b hook, kept as the first injector
-	preStep   []PreStepInjector                           // additional injectors, in registration order
-	onText    func(string)                                // optional sink for streamed assistant text (REPL)
-	onError   func(error)                                 // optional sink for stream errors (REPL)
+	llm                    llm.LLM
+	log                    *session.Log
+	tools                  *tools.Registry
+	toolSpecs              func() []llm.ToolSchema // per-session model-facing tool surface (dsh presentation mode)
+	prompt                 *prompt.Builder
+	model                  string
+	provider               string
+	effort                 string
+	recall                 func(context.Context, string) []llm.Message // M4b hook, kept as the first injector
+	preStep                []PreStepInjector                           // additional injectors, in registration order
+	onText                 func(string)                                // optional sink for streamed assistant text (REPL)
+	onError                func(error)                                 // optional sink for stream errors (REPL)
+	recoverContextOverflow func(context.Context) bool                  // one forced compaction retry
 }
 
 // Config wires the loop's dependencies. All fields are required except the
@@ -95,23 +96,28 @@ type Config struct {
 	OnText func(string)
 	// OnError, if set, is called when a step's stream fails after start.
 	OnError func(error)
+	// RecoverContextOverflow is called once when the provider rejects a request
+	// because its context window is full. Returning true retries the same step
+	// after the callback has compacted the append-only session surface.
+	RecoverContextOverflow func(context.Context) bool
 }
 
 // New returns a Loop.
 func New(cfg Config) *Loop {
 	return &Loop{
-		llm:       cfg.LLM,
-		log:       cfg.Log,
-		tools:     cfg.Tools,
-		toolSpecs: cfg.ToolSpecs,
-		prompt:    cfg.Prompt,
-		model:     cfg.Model,
-		provider:  cfg.Provider,
-		effort:    cfg.ReasoningEffort,
-		recall:    cfg.Recall,
-		preStep:   append([]PreStepInjector(nil), cfg.PreStep...),
-		onText:    cfg.OnText,
-		onError:   cfg.OnError,
+		llm:                    cfg.LLM,
+		log:                    cfg.Log,
+		tools:                  cfg.Tools,
+		toolSpecs:              cfg.ToolSpecs,
+		prompt:                 cfg.Prompt,
+		model:                  cfg.Model,
+		provider:               cfg.Provider,
+		effort:                 cfg.ReasoningEffort,
+		recall:                 cfg.Recall,
+		preStep:                append([]PreStepInjector(nil), cfg.PreStep...),
+		onText:                 cfg.OnText,
+		onError:                cfg.OnError,
+		recoverContextOverflow: cfg.RecoverContextOverflow,
 	}
 }
 
@@ -231,6 +237,24 @@ func truncateRunes(s string, max int) string {
 	return string(runes[:max])
 }
 
+func isContextOverflowError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	markers := []string{
+		"context length", "context window", "context_length", "maximum context",
+		"max context", "too many tokens", "token limit", "prompt is too long",
+		"request too large",
+	}
+	for _, marker := range markers {
+		if strings.Contains(s, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // step performs one model request and its tool executions. It returns
 // (true, nil) when the turn is complete (no tool calls requested). contextMsgs
 // are prepended to the request (after the system prompt, before the derived
@@ -270,7 +294,24 @@ func (l *Loop) step(ctx context.Context, contextMsgs []llm.Message, stepNumber i
 			return false, err
 		}
 	}
-	reader, err := l.llm.Stream(ctx, llm.ChatRequest{Provider: l.provider, Model: l.model, ReasoningEffort: l.effort, Messages: messages, Tools: specs})
+	request := llm.ChatRequest{Provider: l.provider, Model: l.model, ReasoningEffort: l.effort, Messages: messages, Tools: specs}
+	reader, err := l.llm.Stream(ctx, request)
+	if err != nil && l.recoverContextOverflow != nil && isContextOverflowError(err) && l.recoverContextOverflow(ctx) {
+		// Compaction appends a surface replacement marker. Rebuild history so the
+		// retry sees the folded checkpoint rather than the rejected surface.
+		history = l.log.DeriveHistory()
+		messages = messages[:0]
+		messages = append(messages, llm.Message{Role: llm.RoleSystem, Content: []llm.ContentBlock{llm.Text(l.prompt.Build())}})
+		messages = append(messages, contextMsgs...)
+		messages = append(messages, history...)
+		if l.provider != "" {
+			if _, startErr := l.log.Append(session.EventLLMRequestStart, session.NewLLMRequestStart(l.provider, l.model, l.effort)); startErr != nil {
+				return false, startErr
+			}
+		}
+		request.Messages = messages
+		reader, err = l.llm.Stream(ctx, request)
+	}
 	if err != nil {
 		attempts := 1
 		if l.provider != "" {

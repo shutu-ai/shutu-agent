@@ -849,28 +849,76 @@ type imageView struct {
 // messages (bytes never leave the attachment store; the browser fetches them
 // through the authorized echo endpoint).
 type eventView struct {
-	Command    string      `json:"command,omitempty"` // browser-side web command action
-	Seq        uint64      `json:"seq"`
-	Type       string      `json:"type"`
-	Time       time.Time   `json:"time"`
-	Summary    string      `json:"summary"`
-	Reasoning  string      `json:"reasoning,omitempty"`   // assistant/message 的思维链（有界）
-	ToolName   string      `json:"tool_name,omitempty"`   // tool/start、tool/result、tool/error 的工具名
-	ToolOutput string      `json:"tool_output,omitempty"` // tool/result 的有界输出
-	ToolArgs   string      `json:"tool_args,omitempty"`   // 该调用名对应的工具入参（来自 assistant 的 toolCall；只读展示用）
-	CallID     string      `json:"call_id,omitempty"`     // 工具调用关联 id（tool/start → tool/result/error 配对）
-	Images     []imageView `json:"images,omitempty"`      // P5: 该消息携带的图片引用
+	Command           string      `json:"command,omitempty"` // browser-side web command action
+	Seq               uint64      `json:"seq"`
+	Type              string      `json:"type"`
+	Time              time.Time   `json:"time"`
+	Summary           string      `json:"summary"`
+	CompactionID      string      `json:"compaction_id,omitempty"`
+	CompactionSummary string      `json:"compaction_summary,omitempty"`
+	CompactionItems   int         `json:"compaction_items,omitempty"`
+	CompactionTokens  int         `json:"compaction_tokens,omitempty"`
+	CompactionError   string      `json:"compaction_error,omitempty"`
+	CompactionMarker  bool        `json:"compaction_marker,omitempty"`
+	Reasoning         string      `json:"reasoning,omitempty"`   // assistant/message 的思维链（有界）
+	ToolName          string      `json:"tool_name,omitempty"`   // tool/start、tool/result、tool/error 的工具名
+	ToolOutput        string      `json:"tool_output,omitempty"` // tool/result 的有界输出
+	ToolArgs          string      `json:"tool_args,omitempty"`   // 该调用名对应的工具入参（来自 assistant 的 toolCall；只读展示用）
+	CallID            string      `json:"call_id,omitempty"`     // 工具调用关联 id（tool/start → tool/result/error 配对）
+	Images            []imageView `json:"images,omitempty"`      // P5: 该消息携带的图片引用
 }
 
 // toEventView builds the public view for one event (bounded summary + the W4
 // extra fields + the P5 image refs).
 func toEventView(ev session.Event) eventView {
 	v := eventView{Seq: ev.Seq, Type: ev.Type, Time: ev.At, Summary: summarize(ev)}
+	v.CompactionID, v.CompactionSummary, v.CompactionItems, v.CompactionTokens, v.CompactionError, v.CompactionMarker = compactionFields(ev)
 	v.Reasoning, v.ToolName, v.ToolOutput = extraFields(ev)
 	v.Images = extractImages(ev)
 	v.CallID = callIDOf(ev)
 	v.Command = commandOf(ev)
 	return v
+}
+
+// compactionFields exposes the bounded, display-oriented compaction
+// projection. The replacement user/message is model history machinery, while
+// the browser renders it as dsh's dedicated context row.
+func compactionFields(ev session.Event) (id, summary string, items, tokens int, errText string, marker bool) {
+	switch ev.Type {
+	case session.EventUserMessage:
+		var d struct {
+			SurfaceOp *struct {
+				Op string `json:"op"`
+			} `json:"surfaceOp"`
+		}
+		if json.Unmarshal(ev.Data, &d) == nil && d.SurfaceOp != nil && d.SurfaceOp.Op == "replace" {
+			return "", summarize(ev), 0, 0, "", true
+		}
+	case session.EventCompactionSummary:
+		var d struct {
+			CompactionID   string  `json:"compactionId"`
+			Summary        string  `json:"summary"`
+			ShadowedSeqs   []int64 `json:"shadowedSeqs"`
+			ShadowedTokens int     `json:"shadowedTokens"`
+		}
+		if json.Unmarshal(ev.Data, &d) == nil {
+			return d.CompactionID, boundRunes(d.Summary, maxSummary), len(d.ShadowedSeqs), d.ShadowedTokens, "", false
+		}
+	case session.EventCompactionEnd:
+		var d struct {
+			CompactionID   string   `json:"compactionId"`
+			ShadowedRange  [2]int64 `json:"shadowedRange"`
+			ShadowedTokens int      `json:"shadowedTokens"`
+			Error          string   `json:"error"`
+		}
+		if json.Unmarshal(ev.Data, &d) == nil {
+			if d.ShadowedRange[1] >= d.ShadowedRange[0] && d.ShadowedRange[0] > 0 {
+				items = int(d.ShadowedRange[1] - d.ShadowedRange[0] + 1)
+			}
+			return d.CompactionID, "", items, d.ShadowedTokens, boundRunes(d.Error, maxSummary), false
+		}
+	}
+	return "", "", 0, 0, "", false
 }
 
 func commandOf(ev session.Event) string {
@@ -2051,12 +2099,11 @@ func (s *Server) handleSessionContext(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	// Rough token proxy (len/4, mirroring compaction.defaultTokenEstimate): the
-	// body of every event - messages, tool-call names/arguments, injected text.
-	used := 0
-	for _, ev := range events {
-		used += len(ev.Data) / 4
-	}
+	// Context occupancy follows dsh and the compaction engine: count the
+	// model-visible surface after replaying surfaceOp.replace markers. The
+	// append-only log deliberately retains shadowed events for audit/replay, so
+	// summing every raw event here would make /compact appear to do nothing.
+	used := estimateContextTokens(events)
 	window := defaultContextWindow
 	if s.contextWindowFn != nil {
 		if w := s.contextWindowFn(id); w > 0 {
@@ -2072,6 +2119,29 @@ func (s *Server) handleSessionContext(w http.ResponseWriter, r *http.Request) {
 		"context_window": window,
 		"percent":        percent,
 	})
+}
+
+// estimateContextTokens mirrors compaction.defaultTokenEstimate over the
+// derived model history. Raw-event fallback is intentionally fail-open for an
+// old or damaged log: the meter should still provide a useful conservative
+// value instead of making the whole context endpoint fail.
+func estimateContextTokens(events []session.Event) int {
+	var log session.Log
+	if err := log.Restore(events); err != nil {
+		used := 0
+		for _, ev := range events {
+			used += len(ev.Data) / 4
+		}
+		return used
+	}
+	used := 0
+	for _, message := range log.DeriveHistory() {
+		used += len(message.Text()) / 4
+		for _, call := range message.ToolCalls {
+			used += (len(call.Name) + len(call.Arguments)) / 4
+		}
+	}
+	return used
 }
 
 // defaultContextWindow is the fallback token budget when the wired

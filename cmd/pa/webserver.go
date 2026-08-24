@@ -509,27 +509,35 @@ func (a *app) webCommandCatalog() []map[string]string {
 	out[0] = make(map[string]string)
 	out[0][`name`] = `help`
 	out[0][`hint`] = `Show available slash commands`
+	out[0][`kind`] = `command`
 	out[1] = make(map[string]string)
 	out[1][`name`] = `status`
 	out[1][`hint`] = `Show provider, model and mode`
+	out[1][`kind`] = `command`
 	out[2] = make(map[string]string)
 	out[2][`name`] = `compact`
 	out[2][`hint`] = `Compact context: /compact [region start end]`
+	out[2][`kind`] = `command`
 	out[3] = make(map[string]string)
 	out[3][`name`] = `permission`
 	out[3][`hint`] = `Show or set permission: /permission [readonly|standard|full]`
+	out[3][`kind`] = `command`
 	out[4] = make(map[string]string)
 	out[4][`name`] = `feedback`
 	out[4][`hint`] = `Record feedback: /feedback <text>`
+	out[4][`kind`] = `command`
 	out[5] = make(map[string]string)
 	out[5][`name`] = `goal`
 	out[5][`hint`] = `Manage the goal: /goal [objective|clear|edit <objective>|pause|resume]`
+	out[5][`kind`] = `command`
 	out[6] = make(map[string]string)
 	out[6][`name`] = `plan`
 	out[6][`hint`] = `Plan mode: /plan [off|message]`
+	out[6][`kind`] = `command`
 	out = append(out, map[string]string{
 		`name`: `export`,
 		`hint`: `Download Session log: /export`,
+		`kind`: `command`,
 	})
 	// dsh appends user-invocable skills after the host command directory. Keep
 	// this order stable: the composer presents commands first and skills last.
@@ -574,6 +582,7 @@ func (a *app) webSkillCatalog() []map[string]string {
 		out = append(out, map[string]string{
 			`name`: c.Name,
 			`hint`: `Skill: ` + c.Description,
+			`kind`: `skill`,
 		})
 	}
 	return out

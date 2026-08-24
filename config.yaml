@@ -194,6 +194,9 @@ compaction:
   token_threshold: 32000
   # Tail of recent turns kept unshadowed by the basic provider; 0/absent ⇒ 8.
   retain_turns: 8
+  # dsh-style token tail budget. When positive it takes precedence over
+  # retain_turns; 0 keeps the legacy turn-based fallback.
+  retain_tokens: 0
   # Upper bound on the generated summary; 0/absent ⇒ the engine default.
   max_chars: 0
 
