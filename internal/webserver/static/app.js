@@ -1068,21 +1068,25 @@ function addCommandRow(ev) {
   const failed = /^\s*⚠/.test(text);
   const body = text.includes("\n") ? text : "";
   const summary = firstLine(text || (failed ? "命令失败" : "命令已完成"));
+  // /help is the command-discovery surface. dsh keeps the catalog visible in
+  // its composer, so the equivalent Web result opens its complete catalog
+  // immediately; other multiline command results retain the compact card.
+  const expanded = command === "help" && body !== "";
   const node = document.createElement("div");
   node.className = "msg command";
   node.dataset.command = command;
   if (ev.seq != null) node.dataset.seq = String(ev.seq);
   node.innerHTML = `<div class="command-row">
-    <button type="button" class="command-toggle" aria-expanded="false"${body ? "" : " disabled"}>
+    <button type="button" class="command-toggle" aria-expanded="${expanded ? "true" : "false"}"${body ? "" : " disabled"}>
       <span class="command-leading" aria-hidden="true">
         <span class="command-context-icon">${failed ? '<span class="dsh-statedot dsh-statedot-err"></span>' : DSH_ICON_API}</span>
-        <span class="command-disclosure-icon">${DSH_ICON_CHEVRON_RIGHT}</span>
+        <span class="command-disclosure-icon">${expanded ? DSH_ICON_CHEVRON_DOWN : DSH_ICON_CHEVRON_RIGHT}</span>
       </span>
       <span class="command-title">${esc(command)}</span>
       <span class="command-sep" aria-hidden="true"></span>
       <span class="command-summary${failed ? " command-summary-err" : ""}">${esc(summary)}</span>
     </button>
-    ${body ? `<pre class="command-body hidden">${esc(body)}</pre>` : ""}
+    ${body ? `<pre class="command-body${expanded ? "" : " hidden"}">${esc(body)}</pre>` : ""}
   </div>`;
   const button = node.querySelector(".command-toggle");
   if (body) {

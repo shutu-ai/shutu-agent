@@ -365,21 +365,33 @@ func (a *app) execWebCommand(ctx context.Context, name string, args []string) (s
 	}
 }
 
-// webHelp returns the web composer's slash-command table (dsh 输入条命令对齐).
+// webHelp returns the same discovery view used by the Web composer. Keeping
+// this derived from webCommandCatalog makes /help follow dsh's command
+// registry semantics: built-in commands first, then user-invocable skills.
 func (a *app) webHelp() string {
-	return a.webHelpText() + "\n  /export             Download current Session log as ZIP"
-}
+	var b strings.Builder
+	catalog := a.webCommandCatalog()
+	b.WriteString("可用的斜杠命令:\n")
+	for _, item := range catalog {
+		if item[`kind`] != `command` {
+			continue
+		}
+		fmt.Fprintf(&b, "  /%-16s %s\n", item[`name`], item[`hint`])
+	}
 
-func (a *app) webHelpText() string {
-	return "可用的斜杠命令:\n" +
-		"  /help               显示本命令表\n" +
-		"  /status             显示当前 provider / model / mode\n" +
-		"  /compact [region <start> <end>]  手动压缩上下文\n" +
-		"  /permission [readonly|standard|full]  查看或切换权限\n" +
-		"  /feedback <text>   记录对本次会话的反馈\n" +
-		"  /goal [目标|clear|edit <目标>|pause|resume]   管理当前目标\n" +
-		"  /plan [off|消息]      进入/退出计划模式，附消息时提交给模型\n" +
-		"  其他文本             发送给智能体"
+	hasSkill := false
+	for _, item := range catalog {
+		if item[`kind`] == `skill` {
+			if !hasSkill {
+				b.WriteString("\n可用技能:\n")
+				hasSkill = true
+			}
+			hint := strings.TrimPrefix(item[`hint`], "Skill: ")
+			fmt.Fprintf(&b, "  /%-16s %s\n", item[`name`], hint)
+		}
+	}
+	b.WriteString("\n  其他文本         发送给智能体")
+	return b.String()
 }
 
 // webFeedback mirrors dsh's /feedback <text> command: surrounding whitespace

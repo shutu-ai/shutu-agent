@@ -83,7 +83,8 @@ func TestWebCommandHelp(t *testing.T) {
 	if hasEvent(a.log, session.EventPlanCreate) {
 		t.Fatal("/help must not run plan_goal")
 	}
-	if text := assistantText(t, lastEvent(t, a.log).Data); !strings.Contains(text, "可用的斜杠命令") {
+	text := assistantText(t, lastEvent(t, a.log).Data)
+	if !strings.Contains(text, "可用的斜杠命令") || !strings.Contains(text, "/export") {
 		t.Fatalf("/help result = %q, want the command table", text)
 	}
 }
@@ -112,6 +113,13 @@ func TestWebCommandCatalogAppendsUserSkillsAfterCommands(t *testing.T) {
 	}
 	if catalog[len(commands)]["name"] != "review-bash" || catalog[len(commands)]["hint"] != "Skill: review bash scripts" {
 		t.Fatalf("skill catalog entry = %#v, want review-bash after commands", catalog[len(commands)])
+	}
+	help := a.webHelp()
+	if !strings.Contains(help, "/review-bash") || !strings.Contains(help, "review bash scripts") {
+		t.Fatalf("/help = %q, want the discovered skill", help)
+	}
+	if strings.Contains(help, "/private") {
+		t.Fatalf("/help exposed a non-user-invocable skill: %q", help)
 	}
 	for _, item := range catalog {
 		if item["name"] == "private" {
