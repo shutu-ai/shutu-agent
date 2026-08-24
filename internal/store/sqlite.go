@@ -27,7 +27,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     id         TEXT    NOT NULL PRIMARY KEY,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
-    title      TEXT
+    title      TEXT,
+    cwd        TEXT
 );
 CREATE TABLE IF NOT EXISTS events (
     session_id TEXT    NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -59,6 +60,7 @@ func migrateSchema(db *sql.DB) error {
 		{"sessions", "title", `ALTER TABLE sessions ADD COLUMN title TEXT`},
 		{"sessions", "title_source", `ALTER TABLE sessions ADD COLUMN title_source TEXT`},
 		{"sessions", "workspace_id", `ALTER TABLE sessions ADD COLUMN workspace_id TEXT`},
+		{"sessions", "cwd", `ALTER TABLE sessions ADD COLUMN cwd TEXT`},
 		{"sessions", "archived_at", `ALTER TABLE sessions ADD COLUMN archived_at INTEGER`},
 		{"sessions", "sort", `ALTER TABLE sessions ADD COLUMN sort INTEGER NOT NULL DEFAULT 0`},
 		{"sessions", "flat_sort", `ALTER TABLE sessions ADD COLUMN flat_sort INTEGER NOT NULL DEFAULT 0`},
@@ -97,6 +99,14 @@ type SQLiteStore struct {
 	db *sql.DB
 }
 
+func workingDirectory() any {
+	cwd, err := os.Getwd()
+	if err != nil || strings.TrimSpace(cwd) == "" {
+		return nil
+	}
+	return cwd
+}
+
 // OpenSQLite opens (creating if needed) the SQLite database at path, applies
 // the schema, and returns a ready store. The parent directory is created when
 // missing. Time values are stored as Unix nanoseconds (UTC) in INTEGER columns.
@@ -133,10 +143,11 @@ func OpenSQLite(path string) (*SQLiteStore, error) {
 // CreateSession inserts the session row, keeping any existing row untouched.
 func (s *SQLiteStore) CreateSession(ctx context.Context, id string, createdAt time.Time) error {
 	now := unixNano(createdAt)
+	cwd := workingDirectory()
 	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO sessions (id, created_at, updated_at) VALUES (?, ?, ?)
-		 ON CONFLICT(id) DO NOTHING`,
-		id, now, now); err != nil {
+		`INSERT INTO sessions (id, created_at, updated_at, cwd) VALUES (?, ?, ?, ?)
+			 ON CONFLICT(id) DO NOTHING`,
+		id, now, now, cwd); err != nil {
 		return fmt.Errorf("store: create session %q: %w", id, err)
 	}
 	return nil
@@ -199,9 +210,9 @@ func (s *SQLiteStore) AppendEvents(ctx context.Context, sessionID string, events
 
 	now := time.Now().UTC()
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO sessions (id, created_at, updated_at) VALUES (?, ?, ?)
-		 ON CONFLICT(id) DO NOTHING`,
-		sessionID, unixNano(now), unixNano(now)); err != nil {
+		`INSERT INTO sessions (id, created_at, updated_at, cwd) VALUES (?, ?, ?, ?)
+			 ON CONFLICT(id) DO NOTHING`,
+		sessionID, unixNano(now), unixNano(now), workingDirectory()); err != nil {
 		return fmt.Errorf("store: ensure session %q: %w", sessionID, err)
 	}
 	stmt, err := tx.PrepareContext(ctx,
@@ -267,7 +278,7 @@ func (s *SQLiteStore) LoadSession(ctx context.Context, sessionID string) ([]sess
 // manual drag order of the flat view.
 func (s *SQLiteStore) ListSessions(ctx context.Context) ([]SessionMeta, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT s.id, s.created_at, s.updated_at, s.title, s.title_source, s.workspace_id, s.archived_at, s.sort, s.flat_sort, s.last_viewed_at, COUNT(e.seq)
+		SELECT s.id, s.created_at, s.updated_at, s.title, s.title_source, s.workspace_id, s.cwd, s.archived_at, s.sort, s.flat_sort, s.last_viewed_at, COUNT(e.seq)
 		FROM sessions s LEFT JOIN events e ON e.session_id = s.id
 		GROUP BY s.id
 		ORDER BY s.updated_at DESC, s.created_at DESC`)
@@ -279,10 +290,10 @@ func (s *SQLiteStore) ListSessions(ctx context.Context) ([]SessionMeta, error) {
 	for rows.Next() {
 		var m SessionMeta
 		var created, updated int64
-		var title, titleSource, workspaceID sql.NullString
+		var title, titleSource, workspaceID, cwd sql.NullString
 		var archived, lastViewed sql.NullInt64
 		var count int
-		if err := rows.Scan(&m.ID, &created, &updated, &title, &titleSource, &workspaceID, &archived, &m.Sort, &m.FlatSort, &lastViewed, &count); err != nil {
+		if err := rows.Scan(&m.ID, &created, &updated, &title, &titleSource, &workspaceID, &cwd, &archived, &m.Sort, &m.FlatSort, &lastViewed, &count); err != nil {
 			return nil, fmt.Errorf("store: scan session meta: %w", err)
 		}
 		m.CreatedAt = time.Unix(0, created).UTC()
@@ -290,6 +301,7 @@ func (s *SQLiteStore) ListSessions(ctx context.Context) ([]SessionMeta, error) {
 		m.Title = title.String
 		m.TitleSource = titleSource.String
 		m.WorkspaceID = workspaceID.String
+		m.CWD = cwd.String
 		if archived.Valid {
 			m.ArchivedAt = time.Unix(0, archived.Int64).UTC()
 		}
@@ -412,6 +424,53 @@ func (s *SQLiteStore) SearchSessions(ctx context.Context, q string) ([]SearchHit
 	return hits, nil
 }
 
+// SearchSessionsPage returns one bounded page and whether more matching
+// sessions remain. Pages keep large histories out of one unbounded result
+// allocation; callers decide how many pages to collect.
+func (s *SQLiteStore) SearchSessionsPage(ctx context.Context, q string, offset, limit int) ([]SearchHit, bool, error) {
+	if offset < 0 || limit < 1 {
+		return nil, false, fmt.Errorf("store: invalid search page offset=%d limit=%d", offset, limit)
+	}
+	escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(q)
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT e.session_id, e.data, s.updated_at, s.title
+		FROM events e
+		JOIN sessions s ON s.id = e.session_id
+		JOIN (
+			SELECT session_id, MIN(seq) AS m FROM events
+			WHERE data LIKE ? ESCAPE '\'
+			GROUP BY session_id
+		) m ON m.session_id = e.session_id AND e.seq = m.m
+		ORDER BY s.updated_at DESC, e.session_id
+		LIMIT ? OFFSET ?`, "%"+escaped+"%", limit+1, offset)
+	if err != nil {
+		return nil, false, fmt.Errorf("store: search session page: %w", err)
+	}
+	defer rows.Close()
+	var hits []SearchHit
+	for rows.Next() {
+		var h SearchHit
+		var data []byte
+		var title sql.NullString
+		var updated int64
+		if err := rows.Scan(&h.SessionID, &data, &updated, &title); err != nil {
+			return nil, false, fmt.Errorf("store: scan search page hit: %w", err)
+		}
+		h.UpdatedAt = time.Unix(0, updated).UTC()
+		h.Title = title.String
+		h.Snippet = snippetFromEventData(data)
+		hits = append(hits, h)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("store: read search page: %w", err)
+	}
+	more := len(hits) > limit
+	if more {
+		hits = hits[:limit]
+	}
+	return hits, more, nil
+}
+
 // snippetFromEventData extracts a readable text line from an event's JSON body
 // for search previews (best effort, never returns an error).
 func snippetFromEventData(data []byte) string {
@@ -468,14 +527,14 @@ func (s *SQLiteStore) SetSessionTitle(ctx context.Context, sessionID, title, sou
 func (s *SQLiteStore) GetSessionMeta(ctx context.Context, sessionID string) (SessionMeta, error) {
 	var m SessionMeta
 	var created, updated int64
-	var title, titleSource, workspaceID sql.NullString
+	var title, titleSource, workspaceID, cwd sql.NullString
 	var archived, lastViewed sql.NullInt64
 	var count int
 	if err := s.db.QueryRowContext(ctx, `
-		SELECT s.id, s.created_at, s.updated_at, s.title, s.title_source, s.workspace_id, s.archived_at, s.sort, s.flat_sort, s.last_viewed_at, COUNT(e.seq)
+		SELECT s.id, s.created_at, s.updated_at, s.title, s.title_source, s.workspace_id, s.cwd, s.archived_at, s.sort, s.flat_sort, s.last_viewed_at, COUNT(e.seq)
 		FROM sessions s LEFT JOIN events e ON e.session_id = s.id
 		WHERE s.id = ?`, sessionID).Scan(
-		&m.ID, &created, &updated, &title, &titleSource, &workspaceID, &archived, &m.Sort, &m.FlatSort, &lastViewed, &count,
+		&m.ID, &created, &updated, &title, &titleSource, &workspaceID, &cwd, &archived, &m.Sort, &m.FlatSort, &lastViewed, &count,
 	); err != nil {
 		if err == sql.ErrNoRows {
 			return SessionMeta{}, fmt.Errorf("%w: %q", ErrNotFound, sessionID)
@@ -487,6 +546,7 @@ func (s *SQLiteStore) GetSessionMeta(ctx context.Context, sessionID string) (Ses
 	m.Title = title.String
 	m.TitleSource = titleSource.String
 	m.WorkspaceID = workspaceID.String
+	m.CWD = cwd.String
 	if archived.Valid {
 		m.ArchivedAt = time.Unix(0, archived.Int64).UTC()
 	}
@@ -495,6 +555,20 @@ func (s *SQLiteStore) GetSessionMeta(ctx context.Context, sessionID string) (Ses
 	}
 	m.EventCount = count
 	return m, nil
+}
+
+// SetSessionCWD records the immutable session-header working directory. The
+// setter is mainly useful for importers; normal creation captures it in the
+// INSERT path.
+func (s *SQLiteStore) SetSessionCWD(ctx context.Context, sessionID, cwd string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE sessions SET cwd = ? WHERE id = ?`, cwd, sessionID)
+	if err != nil {
+		return fmt.Errorf("store: set session cwd %q: %w", sessionID, err)
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return fmt.Errorf("%w: %q", ErrNotFound, sessionID)
+	}
+	return nil
 }
 
 // MarkSessionViewed records that a session was opened or messaged, clearing the

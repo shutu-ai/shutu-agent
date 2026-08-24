@@ -25,12 +25,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jabing/shutu-agent/internal/acp"
 	"github.com/jabing/shutu-agent/internal/attachment"
 	"github.com/jabing/shutu-agent/internal/code"
 	"github.com/jabing/shutu-agent/internal/compaction"
 	"github.com/jabing/shutu-agent/internal/config"
 	"github.com/jabing/shutu-agent/internal/eval"
 	"github.com/jabing/shutu-agent/internal/fs"
+	hookrunner "github.com/jabing/shutu-agent/internal/hooks"
 	"github.com/jabing/shutu-agent/internal/interact"
 	"github.com/jabing/shutu-agent/internal/jobs"
 	"github.com/jabing/shutu-agent/internal/kb"
@@ -54,6 +56,7 @@ import (
 func main() {
 	configPath := flag.String("config", "config.yaml", "path to the configuration file")
 	webOnly := flag.Bool("web-only", false, "serve the web portal only, without the REPL (blocks until interrupted)")
+	acpMode := flag.Bool("acp", false, "serve ACP JSON-RPC over stdin/stdout")
 	flag.Parse()
 
 	cfg, err := config.Load(*configPath)
@@ -401,6 +404,20 @@ func main() {
 		fmt.Fprintln(os.Stderr, "pa:", err)
 		os.Exit(1)
 	}
+	// P2 session-query: wire five read-only history tools when enabled.
+	if err := app.registerSessionQuery(); err != nil {
+		fmt.Fprintln(os.Stderr, "pa:", err)
+		os.Exit(1)
+	}
+	if err := app.registerLSP(); err != nil {
+		fmt.Fprintln(os.Stderr, "pa:", err)
+		os.Exit(1)
+	}
+	if err := app.registerHooks(); err != nil {
+		fmt.Fprintln(os.Stderr, "pa:", err)
+		os.Exit(1)
+	}
+	defer app.closeHooks()
 	// M7-2: wire the web seam 鈥?Engine + DeepSeek search provider (env key
 	// only) + HTTP fetch provider + the two web_* tools 鈥?when web.enabled
 	// (榛樿鍏抽棴, D10). config.applyDefaults already whitelisted web_search/
@@ -471,6 +488,20 @@ func main() {
 	// web_server.enabled (榛樿鍏?D10, no listener at all). An empty token fails
 	// closed at startup (no bare server). The deferred Close shuts the listener
 	// at shutdown so no port lingers.
+	if *acpMode {
+		server := &acp.Server{
+			Factory:      &acpFactory{app: app},
+			In:           os.Stdin,
+			Out:          os.Stdout,
+			AgentName:    "shutu-agent",
+			AgentVersion: "0.1",
+		}
+		if err := server.Run(ctx); err != nil {
+			fmt.Fprintln(os.Stderr, "pa: acp:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := app.registerWebServer(); err != nil {
 		fmt.Fprintln(os.Stderr, "pa:", err)
 		os.Exit(1)
@@ -585,6 +616,7 @@ type app struct {
 	mcp           []mcp.Client    // nil when mcp disabled (D10); one live bridged client per configured server
 	fs            fs.FileService  // nil when fs disabled (D10)
 	web           *web.Engine     // nil when web disabled (D10)
+	hooks         *hookrunner.Runner
 
 	// webserver is the M10a unified web portal (ADR 2026-08-20-m10-web-portal.md);
 	// nil when web_server disabled (D10).
@@ -764,6 +796,9 @@ func (a *app) attachSink(ctx context.Context) {
 		}
 		if a.hub != nil {
 			a.hub.Publish(id, ev)
+		}
+		if a.hooks != nil {
+			a.hooks.Notify(id, ev)
 		}
 		return nil
 	})

@@ -220,28 +220,31 @@ type Config struct {
 	// ReasoningEffort is the runtime thinking-effort selection (dsh 思考强度,
 	// ModelSelect effort): "" | "off" | "low" | "high" | "max". Runtime-only
 	// (like the live model switch) — it never enters config.yaml.
-	ReasoningEffort string           `yaml:"-"`          // runtime selection; empty keeps provider default
-	Tools           ToolsConfig      `yaml:"tools"`      // tool-execution policy (M3)
-	KB              KBConfig         `yaml:"kb"`         // knowledge-base policy (M4a kernel)
-	Jobs            JobsConfig       `yaml:"jobs"`       // background-job policy (M5a)
-	Subagent        SubagentConfig   `yaml:"subagent"`   // subagent policy (M5b)
-	Compaction      CompactionConfig `yaml:"compaction"` // context-compaction policy (M5c)
-	Skill           SkillConfig      `yaml:"skill"`      // skill policy (M5d)
-	Schedule        ScheduleConfig   `yaml:"schedule"`   // schedule policy (M6a)
-	Plan            PlanConfig       `yaml:"plan"`       // task-planning policy (M6b)
-	Spill           SpillConfig      `yaml:"spill"`      // long-term-memory policy (M6c)
-	Interact        InteractConfig   `yaml:"interact"`   // human-approval policy (M6d)
-	Code            CodeConfig       `yaml:"code"`       // code-sandbox policy (M6e)
-	Mcp             McpConfig        `yaml:"mcp"`        // MCP tool-ecosystem policy (M6f)
-	Fs              FsConfig         `yaml:"fs"`         // safe-file-operation policy (M6f)
-	Web             WebConfig        `yaml:"web"`        // web search/fetch policy (M7)
-	LLM             LLMConfig        `yaml:"llm"`        // LLM provider selection (M8-2)
-	Terminal        TerminalConfig   `yaml:"terminal"`   // persistent-shell terminal (M9)
-	Eval            EvalConfig       `yaml:"eval"`       // task-evaluation seam (eval)
-	Ralph           RalphConfig      `yaml:"ralph"`      // fresh-agent loop (D-GAP-3)
-	Workflow        WorkflowConfig   `yaml:"workflow"`   // task-DAG orchestration (D-GAP-2)
-	FsSearch        FsSearchConfig   `yaml:"fs_search"`  // file-content-search policy (D-GAP-1)
-	WebServer       WebServerConfig  `yaml:"web_server"` // unified web portal (M10a)
+	ReasoningEffort string             `yaml:"-"`             // runtime selection; empty keeps provider default
+	Tools           ToolsConfig        `yaml:"tools"`         // tool-execution policy (M3)
+	KB              KBConfig           `yaml:"kb"`            // knowledge-base policy (M4a kernel)
+	Jobs            JobsConfig         `yaml:"jobs"`          // background-job policy (M5a)
+	Subagent        SubagentConfig     `yaml:"subagent"`      // subagent policy (M5b)
+	Compaction      CompactionConfig   `yaml:"compaction"`    // context-compaction policy (M5c)
+	Skill           SkillConfig        `yaml:"skill"`         // skill policy (M5d)
+	Schedule        ScheduleConfig     `yaml:"schedule"`      // schedule policy (M6a)
+	Plan            PlanConfig         `yaml:"plan"`          // task-planning policy (M6b)
+	Spill           SpillConfig        `yaml:"spill"`         // long-term-memory policy (M6c)
+	Interact        InteractConfig     `yaml:"interact"`      // human-approval policy (M6d)
+	Code            CodeConfig         `yaml:"code"`          // code-sandbox policy (M6e)
+	Mcp             McpConfig          `yaml:"mcp"`           // MCP tool-ecosystem policy (M6f)
+	Fs              FsConfig           `yaml:"fs"`            // safe-file-operation policy (M6f)
+	Web             WebConfig          `yaml:"web"`           // web search/fetch policy (M7)
+	LLM             LLMConfig          `yaml:"llm"`           // LLM provider selection (M8-2)
+	Terminal        TerminalConfig     `yaml:"terminal"`      // persistent-shell terminal (M9)
+	Eval            EvalConfig         `yaml:"eval"`          // task-evaluation seam (eval)
+	Ralph           RalphConfig        `yaml:"ralph"`         // fresh-agent loop (D-GAP-3)
+	Workflow        WorkflowConfig     `yaml:"workflow"`      // task-DAG orchestration (D-GAP-2)
+	FsSearch        FsSearchConfig     `yaml:"fs_search"`     // file-content-search policy (D-GAP-1)
+	SessionQuery    SessionQueryConfig `yaml:"session_query"` // read-only session history queries (P2)
+	LSP             LSPConfig          `yaml:"lsp"`           // read-only language-server queries (P2)
+	Hooks           HooksConfig        `yaml:"hooks"`         // metadata-only event hooks (P2)
+	WebServer       WebServerConfig    `yaml:"web_server"`    // unified web portal (M10a)
 
 	// Mode selects the agent capability preset (D-MODE-1): minimal | standard
 	// | code; default standard. minimal is preset-first (D-MODE-6): 能力开关
@@ -294,6 +297,7 @@ type RetryConfig struct {
 // internal/terminal/scrubbedEnv.
 type TerminalConfig struct {
 	Enabled               *bool    `yaml:"enabled"`                 // default on (dsh 对齐); *bool distinguishes absent
+	ACPEnabled            *bool    `yaml:"acp_enabled"`             // default false; explicit opt-in for ACP shell tools
 	Shell                 string   `yaml:"shell"`                   // default "" → platform default (cmd.exe / /bin/sh)
 	Args                  []string `yaml:"args"`                    // extra shell args
 	Workdir               string   `yaml:"workdir"`                 // default "" → inherit agent cwd
@@ -425,6 +429,10 @@ type SubagentConfig struct {
 	// is created and the subagent_* tools are neither registered nor
 	// whitelisted (D10).
 	Enabled *bool `yaml:"enabled"`
+	// ACPEnabled is a second explicit opt-in: ACP sessions do not create a
+	// subagent runtime unless this is true, even when the normal subagent
+	// capability is enabled.
+	ACPEnabled *bool `yaml:"acp_enabled"`
 	// MaxDepth is the default delegation depth cap applied by subagent_spawn
 	// when the model omits max_depth; <= 0 means the default 8.
 	MaxDepth int `yaml:"max_depth"`
@@ -620,6 +628,10 @@ type McpConfig struct {
 	// created, the mcp_* tools are neither registered nor whitelisted, and no
 	// server is bridged (D10).
 	Enabled *bool `yaml:"enabled"`
+	// ACPEnabled is a second explicit opt-in: MCP subprocesses are not started
+	// for ACP sessions unless this is true, even when the REPL MCP capability
+	// is enabled.
+	ACPEnabled *bool `yaml:"acp_enabled"`
 	// Servers are the configured MCP servers (stdio, newline-delimited
 	// JSON-RPC). Each server's tools are bridged at startup with the
 	// mcp.<server>.<tool> prefix.
@@ -656,6 +668,40 @@ type FsConfig struct {
 // (D-MODE-2).
 type FsSearchConfig struct {
 	Enabled *bool `yaml:"enabled"` // default false (D10)
+}
+
+// SessionQueryConfig is the read-only dsh-aligned session history query
+// surface. It is opt-in because the local implementation remains deliberately
+// narrower than dsh's live/persisted dual-source provider.
+type SessionQueryConfig struct {
+	Enabled    bool `yaml:"enabled"`
+	MaxResults int  `yaml:"max_results"` // <= 0 means the default 20
+}
+
+// LSPConfig is the read-only language-server consumer (P2). It is explicit
+// opt-in because starting a configured executable is an external process
+// boundary; no server is started when Enabled is false.
+type LSPConfig struct {
+	Enabled          bool              `yaml:"enabled"`
+	Command          string            `yaml:"command"`
+	Args             []string          `yaml:"args"`
+	Extensions       map[string]string `yaml:"extensions"`
+	TimeoutMS        int               `yaml:"timeout_ms"`
+	MaxLocations     int               `yaml:"max_locations"`
+	MaxResultChars   int               `yaml:"max_result_chars"`
+	MaxDocumentBytes int               `yaml:"max_document_bytes"`
+}
+
+// HooksConfig enables one metadata-only executable observer for selected
+// committed session event types. Hook payloads exclude event data, message
+// text, tool arguments, and tool results.
+type HooksConfig struct {
+	Enabled    bool     `yaml:"enabled"`
+	Command    string   `yaml:"command"`
+	Args       []string `yaml:"args"`
+	Events     []string `yaml:"events"`
+	TimeoutMS  int      `yaml:"timeout_ms"`
+	WorkingDir string   `yaml:"working_dir"`
 }
 
 // WebConfig 是联网能力策略（ADR 2026-08-20-m7-web-search.md / dispatch-m7-2 §5）。
@@ -928,6 +974,9 @@ func applyDefaults(cfg *Config) {
 			}
 		}
 	}
+	if cfg.Subagent.ACPEnabled == nil {
+		cfg.Subagent.ACPEnabled = Bool(false)
+	}
 	// M5b subagent defaults: off by default; the delegation depth cap is 8;
 	// the default provider is "spawn".
 	if cfg.Subagent.MaxDepth <= 0 {
@@ -1077,6 +1126,9 @@ func applyDefaults(cfg *Config) {
 			}
 		}
 	}
+	if cfg.Mcp.ACPEnabled == nil {
+		cfg.Mcp.ACPEnabled = Bool(false)
+	}
 	// M6f-3 fs defaults: off by default (D10); root empty means the default
 	// <project> (the process working directory), resolved by the FileService
 	// constructor — there is nothing to default here. Enabling fs whitelists
@@ -1212,6 +1264,9 @@ func applyDefaults(cfg *Config) {
 	if cfg.Terminal.MaxConcurrentSessions <= 0 {
 		cfg.Terminal.MaxConcurrentSessions = DefaultTerminalMaxConcurrent
 	}
+	if cfg.Terminal.ACPEnabled == nil {
+		cfg.Terminal.ACPEnabled = Bool(false)
+	}
 	// Enabling terminal whitelists its single consumer tool (pwsh), so the
 	// one terminal.enabled switch turns the whole capability on (the
 	// fresh-process pwsh tool + the /term REPL); default on (dsh 对齐 opt-out,
@@ -1297,6 +1352,47 @@ func applyDefaults(cfg *Config) {
 	if cfg.Workflow.SyncTimeoutMS <= 0 {
 		cfg.Workflow.SyncTimeoutMS = DefaultWorkflowSyncTimeoutMS
 	}
+	// P2 session-query defaults: opt-in until the local store grows dsh's
+	// workspace/parent authorization metadata. Enabling it whitelists all five
+	// read-only consumers; the query package owns their schemas and bounds.
+	if cfg.SessionQuery.Enabled {
+		for _, name := range sessionQueryToolNames {
+			if !contains(cfg.Tools.Enabled, name) {
+				cfg.Tools.Enabled = append(cfg.Tools.Enabled, name)
+			}
+		}
+	}
+	if cfg.SessionQuery.MaxResults <= 0 || cfg.SessionQuery.MaxResults > 100 {
+		cfg.SessionQuery.MaxResults = 20
+	}
+	if cfg.LSP.Enabled {
+		for _, name := range lspToolNames {
+			if !contains(cfg.Tools.Enabled, name) {
+				cfg.Tools.Enabled = append(cfg.Tools.Enabled, name)
+			}
+		}
+	}
+	// P2 LSP defaults: explicit opt-in because it starts a configured stdio
+	// language-server process. The default route keeps the common Go setup
+	// useful while command selection remains user-owned.
+	if cfg.LSP.TimeoutMS <= 0 {
+		cfg.LSP.TimeoutMS = 60000
+	}
+	if cfg.LSP.MaxLocations <= 0 {
+		cfg.LSP.MaxLocations = 100
+	}
+	if cfg.LSP.MaxResultChars <= 0 {
+		cfg.LSP.MaxResultChars = 16000
+	}
+	if cfg.LSP.MaxDocumentBytes <= 0 {
+		cfg.LSP.MaxDocumentBytes = 4 << 20
+	}
+	if len(cfg.LSP.Extensions) == 0 {
+		cfg.LSP.Extensions = map[string]string{".go": "go"}
+	}
+	if cfg.Hooks.TimeoutMS <= 0 {
+		cfg.Hooks.TimeoutMS = 10000
+	}
 	// M10a web portal defaults (ADR 2026-08-20-m10-web-portal.md): addr defaults
 	// to the local-only personal portal; token is left for the composition root
 	// to fail closed on when enabled.
@@ -1330,6 +1426,7 @@ func ApplyModePreset(cfg *Config) {
 	cfg.Terminal.Enabled = Bool(true) // minimal 只保留持久 shell + 文件编辑 (D-MODE-2)
 	cfg.Fs.Enabled = Bool(true)
 	cfg.FsSearch.Enabled = Bool(false) // minimal 不含搜索 (D-MODE-2)
+	cfg.SessionQuery.Enabled = false   // minimal 不含历史查询 (P2)
 	cfg.Ralph.Enabled = Bool(false)    // minimal 不含 fresh-agent 循环 (D-MODE-2)
 	cfg.Workflow.Enabled = Bool(false) // minimal 不含 workflow DAG 编排 (D-MODE-2)
 	cfg.WebServer.Enabled = false      // minimal 不含 web 门户 (D-MODE-2)
@@ -1343,6 +1440,8 @@ func ApplyModePreset(cfg *Config) {
 	cfg.Spill.Enabled = Bool(false)
 	cfg.Interact.Enabled = Bool(false)
 	cfg.Code.Enabled = Bool(false)
+	cfg.LSP.Enabled = false
+	cfg.Hooks.Enabled = false
 	cfg.Mcp.Enabled = Bool(false)
 	cfg.Web.Enabled = Bool(false)
 	cfg.Eval.Enabled = Bool(false)
@@ -1432,6 +1531,12 @@ var fsToolNames = []string{"write", "list", "edit"}
 // "fs_search.enabled ⇒ 工具自动白名单" rule a single, tested fact shared by
 // applyDefaults and the composition root.
 var fsSearchToolNames = []string{"grep", "glob"}
+
+// sessionQueryToolNames are the five dsh-aligned read-only history consumers.
+var sessionQueryToolNames = []string{"session_search", "session_event_search", "session_trace", "session_event_trace", "session_event_read"}
+
+// lspToolNames is the single read-only language-server consumer.
+var lspToolNames = []string{"lsp"}
 
 // ralphToolNames are the fresh-agent-loop consumer tools (D-GAP-3). ralph is
 // registered and whitelisted only when ralph is enabled; keeping the name here

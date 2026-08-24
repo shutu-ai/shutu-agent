@@ -30,6 +30,9 @@ type SessionMeta struct {
 	// WorkspaceID is the owning workspace (P6 grouping), empty for the
 	// ungrouped bucket.
 	WorkspaceID string
+	// CWD is the working directory captured when the session was created.
+	// Empty means the session predates the session-header migration.
+	CWD string
 	// ArchivedAt is non-zero once the session is archived (P6.2 dsh archive):
 	// archived sessions leave the active sidebar list.
 	ArchivedAt time.Time
@@ -45,6 +48,20 @@ type SessionMeta struct {
 	// but-unviewed reminder (dsh status.completed) distinguish a session that
 	// finished work the user has not opened yet.
 	LastViewedAt time.Time
+}
+
+// SessionHeaderStore exposes the small durable header projection used by
+// read-only session-query consumers. It is deliberately optional so existing
+// Store implementations and test doubles remain source-compatible.
+type SessionHeaderStore interface {
+	SetSessionCWD(ctx context.Context, sessionID, cwd string) error
+}
+
+// SessionSearchPager is an optional bounded page reader for session search.
+// The model-facing tool collects these pages internally; the cursor/offset is
+// an implementation detail of the local provider.
+type SessionSearchPager interface {
+	SearchSessionsPage(ctx context.Context, q string, offset, limit int) ([]SearchHit, bool, error)
 }
 
 // SessionConfig is the per-session override for the mode preset, LLM provider /

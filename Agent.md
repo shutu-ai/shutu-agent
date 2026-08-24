@@ -236,7 +236,7 @@ go run ./cmd/pa       # 启动 REPL（M1 后可用，需 DEEPSEEK_API_KEY）
 | 6 | Plan tree 持久化 | ✅ 已实现并复核 | `plan/create` 写入可重建的 Goal/Plan/Todo 快照，`plan/status/delete` 可重放；启动与 session 切换从 event log 重建内存 projection，支持状态查询、继续执行、幂等 Restore 与 ID 接续；KB 直接功能与 `kb_import` 已移交外部项目 |
 | 7 | LLM 元数据与重试 | ✅ 已完成 | 四种流式 provider 均映射 provider-neutral `TokenUsage`；`assistant/message` 与 `llm/request_end` 落 usage/attempts；统一 request-level retry wrapper 覆盖所有 provider，DeepSeek 应用 wiring 关闭内置 retry 防重复；429/网络/5xx 重试、4xx fail-closed、context-aware backoff、`llm/retry` 事件均已接入。边界：流已开始输出后不重放，避免重复内容 |
 | 8 | Goal scheduler（dsh v1） | ✅ 已实现并复核 | `after_seconds` / `at` / `every_seconds`（固定周期最短 300 秒）；session-local `schedule/change` 事件折叠恢复；动态 next wake；one-shot 优先单条投递；every 逾期只投递最新 occurrence batch、不重放 backlog；成功 turn 后 dispatch，失败保留可重试；正常 `runTurn` 后接 Goal idle continuation |
-| 9 | 剩余能力复核 | ⚠️ 有明确偏差 | 已复核 session-query、LSP、rich ask-user、feedback/hooks、sandbox、ACP/SDK、Web UI：已有 Web 工作台/交互/沙箱等 Go 接缝；LSP、ACP/SDK、完整 dsh session-query/hooks 语义仍未实现。运行时 plugin/bundle/profile/self-modification 按 Go 编译期边界保留不引入 |
+| 9 | 剩余能力复核 | ✅ 已完成（ACP 高级能力边界审计） | ACP session 已注入独立 compaction、terminal、MCP client 集合与 subagent runtime；各能力均有显式 ACP 开关、session owner、独立 registry 和关闭生命周期。plugin/bundle/profile/self-modification 已明确保持 Go 编译期边界：不复制全局 registry/profile，不引入运行时插件或自修改执行协议；外部工具生态使用显式 MCP 接缝 |
 
 ### 文档
 
