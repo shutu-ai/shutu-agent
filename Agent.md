@@ -169,7 +169,7 @@ go run ./cmd/pa       # 启动 REPL（M1 后可用，需 DEEPSEEK_API_KEY）
 
 ## 9. 参考链接
 
-**2026-08-24 范围调整**：用户决定将 KB 全量内容层、`kb_import` 批量/大文档导入及其可恢复 Job 移出本项目，由另一个项目负责。本项目不再排期、实现或验收这些任务；本项目保留现有 KB 接缝仅作为兼容边界。Goal scheduler 仍是本项目未来自主任务候选，默认关闭。
+**2026-08-24 范围调整**：用户决定将 KB 全量内容层、`kb_import` 批量/大文档导入及其可恢复 Job 移出本项目，由另一个项目负责。本项目不再排期、实现或验收这些任务；本项目保留现有 KB 接缝仅作为兼容边界。Goal scheduler 已恢复为本项目当前自主任务能力，按 dsh v1 语义实现，仍由 schedule.enabled 控制。
 ## 10. dsh 对齐改进目标（2026-08-23，当前执行目标）
 
 本节是当前 Agent 实施与复核的目标清单，优先级高于历史里程碑中“loop 严格串行、不得修改”的旧约束。目标是逐步提高 `shutu-agent` 与当前 `deepseek-harness` 的行为一致性；不追求把 TypeScript/Cordis 插件运行时原样搬到 Go。
@@ -206,7 +206,7 @@ go run ./cmd/pa       # 启动 REPL（M1 后可用，需 DEEPSEEK_API_KEY）
 6. **Plan tree 持久化（P1）**
    - 将当前内存 plan tree 改为可由 session event log 重建的持久化投影，支持 Goal/Plan/Todo 的重启恢复、继续执行、状态查询和幂等更新。
    - KB 直接功能、`kb_import` 及批量/大文档导入 Job 已移出本项目，由另一个项目负责；本项不实现或验收这些内容。
-   - Goal scheduler 仍不在本项实现；scheduler 属于后续自主任务能力，默认关闭，只负责未来的定时/周期触发。
+   - Goal scheduler 不属于本项的 plan projection；其 dsh 对齐实现作为第 8 项单独目标，负责定时/周期触发与 Goal continuation。
 
 7. **LLM 请求元数据与重试（P1）**
    - 补充 message/source/usage/provider/model 元数据和请求终态事件。
@@ -231,11 +231,12 @@ go run ./cmd/pa       # 启动 REPL（M1 后可用，需 DEEPSEEK_API_KEY）
 | 1 | Loop 持久化与取消语义 | ✅ 已实现并复核 | 已完成 interrupted assistant、aborted tool result、turn/step 生命周期；并行/inbox 仍列入后续复核 |
 | 2 | 文件工具 dsh 语义 | ✅ 已实现并复核 | read window/root、write/edit observation、rich read_image 已通过定向测试 |
 | 3 | 可持续子 Agent | ✅ 已实现并复核 | child log + parent/depth 元数据持久化；Runtime.Resume/subagent_resume 支持冷恢复；continuable 子 Agent 支持 send/interrupt，report 记录 subagent/report；旧 status/cancel 保留兼容 |
-| 4 | Goal round driver | ✅ 已实现并复核 | `internal/goal` 已接入 cmd/pa CLI/Web 的外层 turn 完成→idle/followup 生命周期；同 session 逐轮调用 `runTurn`，通过 plan/create 事件定位当前 session 最新未完成 Goal，observer 汇总 plan/subagent/eval 状态；明确边界：不从工具 Execute 内递归进入 loop，不做后台 scheduler；plan tree 持久化移入第 6 项 |
+| 4 | Goal round driver | ✅ 已实现并复核 | `internal/goal` 已接入 cmd/pa CLI/Web 的外层 turn 完成→idle/followup 生命周期；同 session 逐轮调用 `runTurn`，通过 plan/create 事件定位当前 session 最新未完成 Goal，observer 汇总 plan/subagent/eval 状态；不从工具 Execute 内递归进入 loop；后台 scheduler 由第 8 项负责；plan tree 持久化已在第 6 项完成 |
 | 5 | Workflow/Ralph 协议对齐 | ✅ 已实现并复核 | Ralph 已补 dsh-compatible `summary/evidence/nextSteps/blocker` 状态语义、16K handoff 上限和旧 DONE/BLOCKED 兼容；workflow 已新增外部 Node runner、`meta/script/args`、`agent/parallel/pipeline/phase/log`、RPC、取消、并发/总量/item 上限和 `workflow/*` 生命周期事件；本地 spawn provider 已提供 scoped `structured_output` 工具，`agent({schema})` 会校验并返回结构化对象；JS 默认启用，Go-native DAG 保留兼容路径，Go 核心不依赖 Node.js |
-| 6 | Plan tree 持久化 | ✅ 已实现并复核 | `plan/create` 写入可重建的 Goal/Plan/Todo 快照，`plan/status/delete` 可重放；启动与 session 切换从 event log 重建内存 projection，支持状态查询、继续执行、幂等 Restore 与 ID 接续；KB 直接功能与 `kb_import` 已移交外部项目，Goal scheduler 仍后置 |
+| 6 | Plan tree 持久化 | ✅ 已实现并复核 | `plan/create` 写入可重建的 Goal/Plan/Todo 快照，`plan/status/delete` 可重放；启动与 session 切换从 event log 重建内存 projection，支持状态查询、继续执行、幂等 Restore 与 ID 接续；KB 直接功能与 `kb_import` 已移交外部项目 |
 | 7 | LLM 元数据与重试 | ✅ 已完成 | 四种流式 provider 均映射 provider-neutral `TokenUsage`；`assistant/message` 与 `llm/request_end` 落 usage/attempts；统一 request-level retry wrapper 覆盖所有 provider，DeepSeek 应用 wiring 关闭内置 retry 防重复；429/网络/5xx 重试、4xx fail-closed、context-aware backoff、`llm/retry` 事件均已接入。边界：流已开始输出后不重放，避免重复内容 |
-| 8 | 剩余能力复核 | ⚠️ 有明确偏差 | 已复核 session-query、LSP、rich ask-user、feedback/hooks、sandbox、ACP/SDK、Web UI：已有 Web 工作台/交互/沙箱等 Go 接缝；LSP、ACP/SDK、完整 dsh session-query/hooks 语义仍未实现。运行时 plugin/bundle/profile/self-modification 按 Go 编译期边界保留不引入 |
+| 8 | Goal scheduler（dsh v1） | ✅ 已实现并复核 | `after_seconds` / `at` / `every_seconds`（固定周期最短 300 秒）；session-local `schedule/change` 事件折叠恢复；动态 next wake；one-shot 优先单条投递；every 逾期只投递最新 occurrence batch、不重放 backlog；成功 turn 后 dispatch，失败保留可重试；正常 `runTurn` 后接 Goal idle continuation |
+| 9 | 剩余能力复核 | ⚠️ 有明确偏差 | 已复核 session-query、LSP、rich ask-user、feedback/hooks、sandbox、ACP/SDK、Web UI：已有 Web 工作台/交互/沙箱等 Go 接缝；LSP、ACP/SDK、完整 dsh session-query/hooks 语义仍未实现。运行时 plugin/bundle/profile/self-modification 按 Go 编译期边界保留不引入 |
 
 ### 文档
 

@@ -12,6 +12,8 @@ import (
 	"github.com/jabing/shutu-agent/internal/llm"
 )
 
+const EventScheduleChange = "schedule/change"
+
 // Event type discriminators (v1 vocabulary, see design.md §3).
 const (
 	EventTurnStart          = "turn/start"

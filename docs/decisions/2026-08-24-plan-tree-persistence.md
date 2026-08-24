@@ -17,7 +17,7 @@
 ## 与 dsh 的边界
 
 - 对齐点：状态和父子树从 append-only session facts 重建，重启后继续使用同一 session 的规划状态。
-- Go 实现保留现有 `Provider + Engine` 接缝，不复制 dsh 的独立 plan 数据库或后台 Goal scheduler；Goal scheduler 是本项目未来候选，KB 直接功能、`kb_import` 及批量导入由另一个项目负责。
+- Go 实现保留现有 `Provider + Engine` 接缝，不复制 dsh 的独立 plan 数据库；Goal scheduler 作为独立的第 8 项按 dsh v1 语义实现。KB 直接功能、`kb_import` 及批量导入由另一个项目负责。
 - 对旧版不完整 `plan/*` 事件采取确定性兼容回退：按事件顺序关联最近 Goal/Plan；新事件写入完整 detail，不再产生该缺口。
 
 ## 验收

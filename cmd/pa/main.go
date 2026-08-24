@@ -482,6 +482,12 @@ func main() {
 		fmt.Fprintln(os.Stderr, "pa:", err)
 		os.Exit(1)
 	}
+	app.startGoalScheduler(ctx)
+	defer func() {
+		if app.goalScheduler != nil {
+			_ = app.goalScheduler.Close()
+		}
+	}()
 	// M10 W3: --web-only serves the portal without the REPL (dsh-style
 	// standalone web). The signal ctx cancels on Ctrl+C/Ctrl+Break; the
 	// deferred webserver.Close shuts the listener so no port lingers.
@@ -566,16 +572,19 @@ type app struct {
 	// asynchronous model title has already been attempted (dsh-session-title
 	// alignment): the model title fires at most once per session per process,
 	// so a failed run never re-fires on every later turn.
-	titleMu   sync.Mutex
-	titleDone map[string]bool
-	schedules schedule.Engine // nil when schedule disabled (D10)
-	plans     plan.Engine     // nil when plan disabled (D10)
-	spills    spill.Engine    // nil when spill disabled (D10)
-	interacts interact.Engine // nil when interact disabled (D10)
-	code      code.Engine     // nil when code disabled (D10)
-	mcp       []mcp.Client    // nil when mcp disabled (D10); one live bridged client per configured server
-	fs        fs.FileService  // nil when fs disabled (D10)
-	web       *web.Engine     // nil when web disabled (D10)
+	titleMu       sync.Mutex
+	titleDone     map[string]bool
+	schedules     schedule.Engine // nil when schedule disabled (D10)
+	goalScheduler *schedule.DurableScheduler
+	scheduleRunMu sync.Mutex
+	scheduleWake  chan struct{}
+	plans         plan.Engine     // nil when plan disabled (D10)
+	spills        spill.Engine    // nil when spill disabled (D10)
+	interacts     interact.Engine // nil when interact disabled (D10)
+	code          code.Engine     // nil when code disabled (D10)
+	mcp           []mcp.Client    // nil when mcp disabled (D10); one live bridged client per configured server
+	fs            fs.FileService  // nil when fs disabled (D10)
+	web           *web.Engine     // nil when web disabled (D10)
 
 	// webserver is the M10a unified web portal (ADR 2026-08-20-m10-web-portal.md);
 	// nil when web_server disabled (D10).
@@ -685,6 +694,9 @@ func (a *app) newSession(ctx context.Context) error {
 	if err := a.restorePlans(); err != nil {
 		return err
 	}
+	if err := a.restoreGoalScheduler(); err != nil {
+		return err
+	}
 	a.attachSink(ctx)
 	a.bindSpillOwner()
 	a.markSessionViewed(ctx, id)
@@ -709,6 +721,9 @@ func (a *app) resumeSession(ctx context.Context, id string) error {
 	a.currentID = id
 	a.log = session.New()
 	if err := a.log.Restore(events); err != nil {
+		return err
+	}
+	if err := a.restoreGoalScheduler(); err != nil {
 		return err
 	}
 	if err := a.restorePlans(); err != nil {

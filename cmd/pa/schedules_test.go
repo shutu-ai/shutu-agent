@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/jabing/shutu-agent/internal/jobs"
 	"github.com/jabing/shutu-agent/internal/schedule"
 	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/jabing/shutu-agent/internal/store"
 	"github.com/jabing/shutu-agent/internal/tools"
 )
 
@@ -30,6 +32,30 @@ func makeScheduleApp(scheduleEnabled, jobsEnabled bool) *app {
 		reg:       tools.New(),
 		log:       session.New(),
 		currentID: "s-sched",
+	}
+}
+
+func TestRegisterSchedulesProductionUsesDurableDshSurface(t *testing.T) {
+	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "scheduler.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	a := makeScheduleApp(true, false)
+	a.store = st
+	a.reg.SetPolicy(schedulePolicy())
+	if err := a.registerSchedules(); err != nil {
+		t.Fatal(err)
+	}
+	defer a.goalScheduler.Close()
+	if a.schedules != nil || a.goalScheduler == nil {
+		t.Fatalf("legacy=%v durable=%v", a.schedules, a.goalScheduler)
+	}
+	if _, err := a.reg.Execute(context.Background(), "schedule_create", json.RawMessage(`{"prompt":"check","after_seconds":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	if !hasEvent(a.log, session.EventScheduleChange) {
+		t.Fatal("schedule/change missing")
 	}
 }
 
