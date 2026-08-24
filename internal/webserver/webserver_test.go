@@ -758,6 +758,35 @@ func TestEventsExtendedFields(t *testing.T) {
 	}
 }
 
+// TestEventViewToolError preserves the actionable tool error and correlates it
+// with the preceding tool/start row so the frontend can settle the same card.
+func TestEventViewToolError(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	seedSession(t, st, "s-1", []session.Event{
+		{Seq: 1, Type: "tool/start", At: time.Now(), Version: 1,
+			Data: mustData(t, session.NewToolStart("call-1", "grep", `{"pattern":"x"}`))},
+		{Seq: 2, Type: "tool/error", At: time.Now(), Version: 1,
+			Data: mustData(t, session.NewToolError("call-1", "grep", "grep: invalid arguments"))},
+	})
+	rec := doReq(t, srv.Handler(), "GET", "/api/sessions/s-1/events", "tok")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("events → %d, want 200", rec.Code)
+	}
+	var evs []eventView
+	if err := json.Unmarshal(rec.Body.Bytes(), &evs); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(evs) != 2 {
+		t.Fatalf("events = %d, want 2", len(evs))
+	}
+	if evs[1].ToolName != "grep" || evs[1].ToolOutput != "grep: invalid arguments" {
+		t.Fatalf("tool/error fields = %q/%q, want grep/grep: invalid arguments", evs[1].ToolName, evs[1].ToolOutput)
+	}
+	if evs[1].CallID != "call-1" {
+		t.Fatalf("tool/error call_id = %q, want call-1", evs[1].CallID)
+	}
+}
+
 // TestEventViewToolArgs verifies the details-panel input field: the events API
 // attaches a tool/result's arguments from the preceding assistant/message
 // toolCalls (read-only view field; the session log format is unchanged).

@@ -970,7 +970,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 // tool/error event; empty otherwise. It unmarshals only the leaf callId key.
 func callIDOf(ev session.Event) string {
 	switch ev.Type {
-	case "tool/start", "tool/result":
+	case "tool/start", "tool/result", "tool/error":
 		var d struct {
 			CallID string `json:"callId"`
 		}

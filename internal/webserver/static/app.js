@@ -630,8 +630,11 @@ function renderToolRow(ev) {
   node.dataset.state = state;
   node.dataset.seq = seq;
   const args = prettyToolArgs(ev.tool_args);
-  const output = isErr ? (ev.summary || "") : (ev.tool_output || "");
-  const failureLine = isErr ? firstLine(ev.summary || "") : "";
+  // tool/error carries the actionable tool error in tool_output. summary is
+  // the compact event label (for example, "tool grep error → .") and is only
+  // a compatibility fallback for older event payloads.
+  const output = isErr ? (ev.tool_output || ev.summary || "") : (ev.tool_output || "");
+  const failureLine = isErr ? firstLine(ev.tool_output || ev.summary || "") : "";
   const summary = failureLine || toolSummary(name, variant, ev.tool_args);
   // dsh: bash/pwsh rows expand into a TERMINAL card; read rows into a
   // line-numbered READ card; grep into a grouped SEARCH card; code rows show
