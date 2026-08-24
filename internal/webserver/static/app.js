@@ -530,6 +530,13 @@ function toolRowTitle(name, variant) {
 }
 function firstLine(text) { const i = text.indexOf("\n"); return i === -1 ? text : text.slice(0, i); }
 function latestLine(text) { const v = text.trimEnd(); const i = v.lastIndexOf("\n"); return i === -1 ? v : v.slice(i + 1); }
+function renderHelpBody(text) {
+  return String(text || "").split("\n").map((line) => {
+    const match = line.match(/^(\s*)(\/\S+)(\s+)(.*)$/);
+    if (!match) return `<div class="command-help-line">${esc(line)}</div>`;
+    return `<div class="command-help-line">${esc(match[1])}<strong>${esc(match[2])}</strong>${esc(match[3] + match[4])}</div>`;
+  }).join("");
+}
 function slashCommandName(text) {
   const match = String(text || "").trim().match(/^\/([^\s]+)/);
   return match ? match[1].toLowerCase() : "";
@@ -1086,7 +1093,9 @@ function addCommandRow(ev) {
       <span class="command-sep" aria-hidden="true"></span>
       <span class="command-summary${failed ? " command-summary-err" : ""}">${esc(summary)}</span>
     </button>
-    ${body ? `<pre class="command-body${expanded ? "" : " hidden"}">${esc(body)}</pre>` : ""}
+    ${body ? (command === "help"
+      ? `<div class="command-body command-help-body${expanded ? "" : " hidden"}">${renderHelpBody(body)}</div>`
+      : `<pre class="command-body${expanded ? "" : " hidden"}">${esc(body)}</pre>`) : ""}
   </div>`;
   const button = node.querySelector(".command-toggle");
   if (body) {

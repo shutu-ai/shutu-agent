@@ -390,7 +390,6 @@ func (a *app) webHelp() string {
 			fmt.Fprintf(&b, "  /%-16s %s\n", item[`name`], hint)
 		}
 	}
-	b.WriteString("\n  其他文本         发送给智能体")
 	return b.String()
 }
 

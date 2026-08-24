@@ -87,6 +87,9 @@ func TestWebCommandHelp(t *testing.T) {
 	if !strings.Contains(text, "可用的斜杠命令") || !strings.Contains(text, "/export") {
 		t.Fatalf("/help result = %q, want the command table", text)
 	}
+	if strings.Contains(text, "其他文本") {
+		t.Fatalf("/help contains the removed fallback row: %q", text)
+	}
 }
 
 func TestWebCommandCatalogAppendsUserSkillsAfterCommands(t *testing.T) {
