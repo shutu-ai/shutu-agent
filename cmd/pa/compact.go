@@ -122,8 +122,9 @@ func (a *app) preStepInjectors() []loop.PreStepInjector {
 // context (fail-open, the same contract as the kb recall injector).
 func (a *app) compactionInjector(est compactionEstimator) loop.PreStepInjector {
 	return loop.PreStepInjector{
-		Name:   "compaction",
-		Inject: a.compactionPreStep(est),
+		Name:        "compaction",
+		Inject:      a.compactionPreStep(est),
+		OncePerTurn: true,
 	}
 }
 

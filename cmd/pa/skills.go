@@ -69,13 +69,14 @@ func (a *app) registerSkills() error {
 }
 
 // skillCatalogInjector builds the "skill" pre-step injector (ADR 决策 ④ /
-// dispatch-m5d-2 §4): once per turn — after user/message is appended, before
-// the first step's model request — it re-reads the skill catalog and injects
-// the bounded catalog as a context message.
+// dispatch-m5d-2 §4): it re-reads the skill catalog at every step and projects
+// the bounded catalog as a durable context message; unchanged catalogs are
+// deduplicated against the visible session surface.
 func (a *app) skillCatalogInjector() loop.PreStepInjector {
 	return loop.PreStepInjector{
-		Name:   "skill",
-		Inject: a.skillCatalogPreStep,
+		Name:        "skill",
+		Inject:      a.skillCatalogPreStep,
+		Deduplicate: true,
 	}
 }
 
@@ -85,8 +86,9 @@ func (a *app) skillCatalogInjector() loop.PreStepInjector {
 // text remains unchanged in session history.
 func (a *app) skillInvocationInjector() loop.PreStepInjector {
 	return loop.PreStepInjector{
-		Name:   "skill-invocation",
-		Inject: a.skillInvocationPreStep,
+		Name:        "skill-invocation",
+		Inject:      a.skillInvocationPreStep,
+		OncePerTurn: true,
 	}
 }
 
@@ -188,19 +190,27 @@ func (a *app) skillCatalogPreStep(ctx context.Context, _ string) []llm.Message {
 	return []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text(text)}}}
 }
 
-// formatSkillCatalog renders the sorted skill catalog as model-facing context:
-// one "- <name>: <description>" line per skill (no bodies/paths/sources),
-// bounded to maxChars runes (Unicode-safe; the loop's per-injector budget is a
-// second, larger bound). maxChars <= 0 means no bound.
+// formatSkillCatalog renders the sorted skill catalog as dsh-compatible
+// model-facing context with <system-reminder>/<available_skills> framing and
+// one "- `<name>`: <description>" line per skill (no bodies/paths/sources).
+// It is bounded to maxChars runes (Unicode-safe; the loop's per-injector budget
+// is a second, larger bound). maxChars <= 0 means no bound.
 func formatSkillCatalog(cands []skill.Candidate, maxChars int) string {
 	if len(cands) == 0 {
 		return ""
 	}
 	var sb strings.Builder
+	sb.WriteString("<system-reminder>\n")
+	sb.WriteString("A skill is a reusable set of task-specific instructions. The following skills are available in this session:\n\n")
+	sb.WriteString("<available_skills>\n")
 	for _, c := range cands {
-		fmt.Fprintf(&sb, "- %s: %s\n", c.Name, c.Description)
+		fmt.Fprintf(&sb, "- `%s`: %s\n", c.Name, escapeSkillCatalogText(c.Description))
 	}
-	text := strings.TrimSuffix(sb.String(), "\n")
+	sb.WriteString("</available_skills>\n\n")
+	sb.WriteString("If the user names a skill, or the task clearly matches a skill's description, call the `skill` tool with the exact skill name before taking task actions. Load all applicable skills, then follow their full instructions. This catalog contains summaries only; do not infer or follow a skill's instructions until it has been loaded.\n")
+	sb.WriteString("A user may also invoke a skill directly; its <skill_content> block then appears in this conversation. Follow it, and do not call the `skill` tool again for that skill.\n")
+	sb.WriteString("</system-reminder>")
+	text := sb.String()
 	if maxChars <= 0 {
 		return text
 	}
@@ -209,6 +219,12 @@ func formatSkillCatalog(cands []skill.Candidate, maxChars int) string {
 		return text
 	}
 	return string(runes[:maxChars])
+}
+
+func escapeSkillCatalogText(text string) string {
+	text = strings.ReplaceAll(text, "&", "&amp;")
+	text = strings.ReplaceAll(text, "<", "&lt;")
+	return strings.ReplaceAll(text, ">", "&gt;")
 }
 
 // skillCatalogVersion returns a stable digest over the sorted catalog (name +

@@ -1994,22 +1994,21 @@ async function submitWsDialog() {
     loadSessions();
   } catch (e) { if (e.message !== "unauthorized") console.error(e); }
 }
-$("ws-add").addEventListener("click", () => $("ws-folder").click());
-// dsh add-workspace opens a folder dialog; the selected folder's name becomes
-// the new workspace title (the workspace itself stays a grouping bucket in the
-// local store — no directory is bound yet).
-$("ws-folder").addEventListener("change", async () => {
-  const f = $("ws-folder").files && $("ws-folder").files[0];
-  if (f && f.webkitRelativePath) {
-    const folderName = f.webkitRelativePath.split("/")[0];
-    try {
-      openWsDialog("create");
-      $("ws-dialog-input").value = folderName;
-    } catch (e) { if (e.message !== "unauthorized") console.error(e); }
-  }
-  $("ws-folder").value = "";
-  loadSessions();
+$("ws-dialog-pick").addEventListener("click", async () => {
+  try {
+    const res = await api("/api/workspaces/pick-directory", { method: "POST" });
+    const data = await res.json();
+    const pathInput = $("ws-dialog-path");
+    if (!pathInput || !data.path) return;
+    pathInput.value = data.path;
+    const titleInput = $("ws-dialog-input");
+    if (titleInput && !titleInput.value.trim()) {
+      const normalized = data.path.replace(/[\\/]+$/, "");
+      titleInput.value = normalized.split(/[\\/]/).pop() || "";
+    }
+  } catch (e) { if (e.message !== "unauthorized") console.error(e); }
 });
+$("ws-add").addEventListener("click", () => openWsDialog("create"));
 $("ws-dialog-ok").addEventListener("click", submitWsDialog);
 $("ws-dialog-cancel").addEventListener("click", closeWsDialog);
 $("ws-dialog-input").addEventListener("keydown", (e) => {

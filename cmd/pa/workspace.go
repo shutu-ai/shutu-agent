@@ -6,14 +6,21 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/jabing/shutu-agent/internal/llm"
 	"github.com/jabing/shutu-agent/internal/store"
 )
 
-// defaultWorkdir is the explicit fallback for ungrouped sessions. A bad or
-// stale config path fails open to the process cwd, just like dsh's default.
+// defaultWorkdir is the explicit fallback for ungrouped sessions. With no
+// configured override it creates and uses <user-home>/shudu.
 func (a *app) defaultWorkdir() string {
 	dir := strings.TrimSpace(a.cfg.Workspace.DefaultDir)
 	if dir == "" {
+		if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+			dir = filepath.Join(home, "shudu")
+			if err := os.MkdirAll(dir, 0o755); err == nil {
+				return filepath.Clean(dir)
+			}
+		}
 		dir, _ = os.Getwd()
 	}
 	if abs, err := filepath.Abs(dir); err == nil {
@@ -50,6 +57,21 @@ func (a *app) sessionCWD() string {
 		}
 	}
 	return a.defaultWorkdir()
+}
+
+// runtimeContext is the model-facing workspace snapshot. It follows dsh's
+// durable user-context shape and is intentionally explicit about authority:
+// relative paths and "current directory" refer to this session workspace.
+func (a *app) runtimeContext(_ context.Context, _ string) []llm.Message {
+	cwd := filepath.Clean(a.sessionCWD())
+	if cwd == "." || cwd == "" {
+		return nil
+	}
+	text := "Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\n" +
+		"Working directory: " + cwd + "\n" +
+		"Use this directory as the authoritative workspace for relative paths and current-directory questions.\n" +
+		"Do not infer repository type, files, or project metadata unless a tool result confirms them."
+	return []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text(text)}}}
 }
 
 func (a *app) setSessionCWD(ctx context.Context, sessionID, cwd string) error {

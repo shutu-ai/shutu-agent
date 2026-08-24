@@ -167,9 +167,8 @@ func TestFormatSkillCatalogBounded(t *testing.T) {
 		{Name: "beta", Description: "beta desc", Source: skill.SourceUserDSH, Rank: skill.RankUserDSH, Path: "/u/beta.md"},
 	}
 	full := formatSkillCatalog(cands, 0)
-	want := "- alpha: alpha desc\n- beta: beta desc"
-	if full != want {
-		t.Fatalf("full catalog = %q, want %q", full, want)
+	if !strings.Contains(full, "<available_skills>\n- `alpha`: alpha desc\n- `beta`: beta desc\n</available_skills>") {
+		t.Fatalf("full catalog = %q, want dsh available-skills framing", full)
 	}
 	if strings.Contains(full, "alpha.md") || strings.Contains(full, "project-dsh") || strings.Contains(full, "beta desc\nbody") {
 		t.Fatalf("catalog must not carry paths/sources/bodies: %q", full)
@@ -227,7 +226,7 @@ func TestSkillCatalogInjectorInjectsAndLogs(t *testing.T) {
 		t.Fatalf("injected = %+v, want exactly one user catalog message", msgs)
 	}
 	content := msgs[0].Text()
-	if !strings.Contains(content, "- alpha: alpha desc") || !strings.Contains(content, "- beta: beta desc") {
+	if !strings.Contains(content, "- `alpha`: alpha desc") || !strings.Contains(content, "- `beta`: beta desc") {
 		t.Fatalf("catalog = %q, want sorted name+description lines", content)
 	}
 	if strings.Contains(content, "alpha secret body") || strings.Contains(content, "beta secret body") ||

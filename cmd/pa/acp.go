@@ -285,7 +285,7 @@ func (s *acpSession) compactionPreSteps() []loop.PreStepInjector {
 	if s.compaction == nil {
 		return nil
 	}
-	return []loop.PreStepInjector{{Name: "compaction", Inject: s.compactionPreStep()}}
+	return []loop.PreStepInjector{{Name: "compaction", Inject: s.compactionPreStep(), OncePerTurn: true}}
 }
 
 func (s *acpSession) compactionPreStep() func(context.Context, string) []llm.Message {

@@ -194,7 +194,7 @@ func lastIndexSeqLE(events []session.Event, seq int64) int {
 func userMessageSeqs(events []session.Event) []int64 {
 	var out []int64
 	for _, ev := range events {
-		if ev.Type == session.EventUserMessage {
+		if ev.Type == session.EventUserMessage && !isSurfaceReplacement(ev) {
 			out = append(out, int64(ev.Seq))
 		}
 	}
@@ -218,11 +218,27 @@ func seqsInRange(events []session.Event, start, end int64) []int64 {
 func rangeHasUser(events []session.Event, start, end int64) bool {
 	for _, ev := range events {
 		seq := int64(ev.Seq)
-		if seq >= start && seq <= end && ev.Type == session.EventUserMessage {
+		if seq >= start && seq <= end && ev.Type == session.EventUserMessage && !isSurfaceReplacement(ev) {
 			return true
 		}
 	}
 	return false
+}
+
+// isSurfaceReplacement identifies a compaction checkpoint user/message. A
+// checkpoint is a replacement marker, not a new conversational turn, so it
+// must not displace the current user turn from the retained tail when pressure
+// compaction performs its follow-up attempt.
+func isSurfaceReplacement(ev session.Event) bool {
+	if ev.Type != session.EventUserMessage {
+		return false
+	}
+	var data struct {
+		SurfaceOp *struct {
+			Op string `json:"op"`
+		} `json:"surfaceOp,omitempty"`
+	}
+	return json.Unmarshal(ev.Data, &data) == nil && data.SurfaceOp != nil && data.SurfaceOp.Op == "replace"
 }
 
 // shadowedHistory folds the events in [start, end] into model-visible messages,

@@ -13,7 +13,8 @@ import (
 
 // minimalPersona is the minimal preset's fixed persona (D-MODE-3): 固定、完整、
 // 自包含, 不依赖 prompts_dir.
-const minimalPersona = `You are a minimal personal agent (mode: minimal).
+const minimalPersona = `You are an AI agent powered by SHUTU AI.
+You are a minimal personal agent (mode: minimal).
 
 You operate with exactly two tool families and nothing else:
 - PowerShell command execution: pwsh (each call runs in a fresh pwsh process — no state persists between calls; pass workdir instead of cd)

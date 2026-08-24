@@ -370,6 +370,7 @@ code { font-family: var(--dsw-font-code); background: var(--dsw-alias-markdown-i
   background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); font-size: 14px;
 }
 #ws-dialog-input:focus, #ws-dialog-path:focus, #sr-dialog-input:focus { border-color: var(--dsw-alias-state-business-primary); }
+.ws-dialog-card #ws-dialog-pick { align-self: flex-start; }
 .ws-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .ws-view-menu { min-width: 150px; }
 .ws-view-menu button { width: 100%; }

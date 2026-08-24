@@ -23,8 +23,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"sort"
 	"strconv"
@@ -303,6 +305,7 @@ func New(st store.Store, token, addr string) (*Server, error) {
 	// delete, order. The sessions list carries workspace_id so the sidebar groups.
 	mux.Handle("GET /api/workspaces", s.requireAuth(http.HandlerFunc(s.handleWorkspaces)))
 	mux.Handle("POST /api/workspaces", s.requireAuth(http.HandlerFunc(s.handleWorkspaceCreate)))
+	mux.Handle("POST /api/workspaces/pick-directory", s.requireAuth(http.HandlerFunc(s.handleWorkspacePickDirectory)))
 	mux.Handle("PATCH /api/workspaces/{id}", s.requireAuth(http.HandlerFunc(s.handleWorkspaceTitle)))
 	mux.Handle("DELETE /api/workspaces/{id}", s.requireAuth(http.HandlerFunc(s.handleWorkspaceDelete)))
 	mux.Handle("PATCH /api/workspaces/order", s.requireAuth(http.HandlerFunc(s.handleWorkspacesOrder)))
@@ -1323,14 +1326,18 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 // sessionDefaultWorkdir returns the configured fallback, resolving it once at
-// the API boundary so persisted session headers are always absolute.
+// the API boundary so persisted session headers are always absolute. With no
+// override it creates and uses <user-home>/shudu.
 func (s *Server) sessionDefaultWorkdir() (string, error) {
 	dir := strings.TrimSpace(s.defaultWorkdir)
 	if dir == "" {
-		var err error
-		dir, err = os.Getwd()
-		if err != nil {
-			return "", fmt.Errorf("webserver: resolve default workdir: %w", err)
+		home, err := os.UserHomeDir()
+		if err != nil || strings.TrimSpace(home) == "" {
+			return "", fmt.Errorf("webserver: resolve user home: %w", err)
+		}
+		dir = filepath.Join(home, "shudu")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return "", fmt.Errorf("webserver: create default workdir %q: %w", dir, err)
 		}
 	}
 	abs, err := filepath.Abs(dir)
@@ -1827,6 +1834,38 @@ func (s *Server) handleWorkspaceCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "title": title, "path": workspacePath})
+}
+
+// handleWorkspacePickDirectory opens a native directory chooser on the host
+// running the Web server. A browser upload control cannot expose the host's
+// absolute path, while dsh's directory flow returns that path to the server.
+func (s *Server) handleWorkspacePickDirectory(w http.ResponseWriter, r *http.Request) {
+	if runtime.GOOS != "windows" {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "native directory picker is available on Windows only; enter the path manually"})
+		return
+	}
+	const script = `Add-Type -AssemblyName System.Windows.Forms; $d=New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description='Select workspace directory'; $d.ShowNewFolderButton=$true; if($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK){[Console]::Write($d.SelectedPath)}`
+	cmd := exec.CommandContext(r.Context(), "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-WindowStyle", "Hidden", "-Command", script)
+	out, err := cmd.Output()
+	if err != nil {
+		if r.Context().Err() != nil {
+			writeJSON(w, http.StatusRequestTimeout, map[string]any{"error": "directory picker canceled"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": fmt.Sprintf("open directory picker: %v", err)})
+		return
+	}
+	selected := strings.TrimSpace(string(out))
+	if selected == "" {
+		writeJSON(w, http.StatusOK, map[string]any{"path": ""})
+		return
+	}
+	abs, err := filepath.Abs(selected)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"path": filepath.Clean(abs)})
 }
 
 // handleWorkspaceTitle implements PATCH /api/workspaces/{id} {"title":...}.

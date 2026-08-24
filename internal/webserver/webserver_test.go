@@ -38,6 +38,9 @@ func newTestServer(t *testing.T, token string) (*Server, *store.SQLiteStore) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	// Keep tests hermetic; production composition injects the user's
+	// ~/shudu fallback through cmd/pa.
+	srv.SetDefaultWorkdir(t.TempDir())
 	return srv, st
 }
 

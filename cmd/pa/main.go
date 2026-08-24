@@ -125,7 +125,12 @@ func main() {
 		}
 		dir := cfg.Workspace.DefaultDir
 		if dir == "" {
-			dir, _ = os.Getwd()
+			if home, err := os.UserHomeDir(); err == nil && home != "" {
+				dir = filepath.Join(home, "shudu")
+				_ = os.MkdirAll(dir, 0o755)
+			} else {
+				dir, _ = os.Getwd()
+			}
 		}
 		if abs, err := filepath.Abs(dir); err == nil {
 			dir = abs
@@ -907,6 +912,7 @@ func (a *app) buildLoop(onText func(string), onError func(error), provider, mode
 		Model:           model,
 		Provider:        provider,
 		ReasoningEffort: effort,
+		RuntimeContext:  a.runtimeContext,
 		Recall:          a.recall,
 		// M5c-2b: the "compaction" pre-step injector (auto token-pressure
 		// compaction) is appended when compaction is enabled; it runs after the

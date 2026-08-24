@@ -23,20 +23,22 @@ import (
 const maxSteps = 10
 
 // maxInjectorChars bounds the total context text a single pre-step injector may
-// contribute to the first request of a turn (ADR 2026-08-18-m5-agent-core.md
+// contribute to one step (ADR 2026-08-18-m5-agent-core.md
 // 总体决策: pre_step.max_chars_per_injector, default 4000). Over-budget context
 // is truncated UTF-8-safely (fail-open: it can never block the answer).
 const maxInjectorChars = 4000
 
 // PreStepInjector is one registered pre-step context injector (ADR 2026-08-18
 // -m5-agent-core.md 总体决策: the unified pre-step injection extension point that
-// supersedes the single M4b Recall hook). Inject is called once per turn —
-// after user/message is appended, before the first step's model request — and
-// returns extra context messages injected into that first request only.
-// tool-call follow-up steps never re-carry the injected context.
+// supersedes the single M4b Recall hook). Inject is called at each step after
+// user/message is appended, and its returned context is persisted before the
+// model request. OncePerTurn is used by side-effectful turn hooks such as
+// compaction and scheduling; Deduplicate is used by stable snapshots.
 type PreStepInjector struct {
-	Name   string // informational (logging/config); not a registration key
-	Inject func(ctx context.Context, userText string) []llm.Message
+	Name        string // informational (logging/config); not a registration key
+	Inject      func(ctx context.Context, userText string) []llm.Message
+	OncePerTurn bool // run only for the first step of a turn
+	Deduplicate bool // do not append an identical visible context message twice
 }
 
 // Loop drives one conversation turn against the session log.
@@ -50,6 +52,7 @@ type Loop struct {
 	provider               string
 	effort                 string
 	recall                 func(context.Context, string) []llm.Message // M4b hook, kept as the first injector
+	runtimeContext         func(context.Context, string) []llm.Message // dsh-style durable runtime snapshot
 	preStep                []PreStepInjector                           // additional injectors, in registration order
 	onText                 func(string)                                // optional sink for streamed assistant text (REPL)
 	onError                func(error)                                 // optional sink for stream errors (REPL)
@@ -78,19 +81,23 @@ type Config struct {
 	// Recall, if set, is the proactive knowledge recall extension point
 	// (design.md §8, D4: new features hang on extension points). It is the
 	// first pre-step injector ("recall", ADR 2026-08-18-m5-agent-core.md 总体
-	// 决策): called once at the start of each turn — after user/message is
-	// appended, before the first step's model request — and returns extra
-	// context messages injected into that first request only. The recall
+	// 决策): called after user/message is appended and returns extra context
+	// messages persisted into the session surface. The recall
 	// orchestration (query, KB.Recall, fail-open, kb/recall logging) lives
 	// entirely in cmd/pa; the loop just injects what it returns. Kept for
 	// backward compatibility with M4b; when both Recall and PreStep are set,
 	// Recall runs first and PreStep follows. The turn/step structure is
 	// unchanged.
 	Recall func(ctx context.Context, userText string) []llm.Message
+	// RuntimeContext supplies the dsh-style current runtime snapshot. It is
+	// projected after the current user message and deduplicated against the
+	// visible session surface.
+	RuntimeContext func(context.Context, string) []llm.Message
 	// PreStep registers additional pre-step context injectors beyond Recall
-	// (ADR 2026-08-18-m5-agent-core.md 总体决策). Each injector runs once per
-	// turn, in registration order after Recall, with its returned context
-	// bounded to maxInjectorChars; a panicking injector is skipped (fail-open).
+	// (ADR 2026-08-18-m5-agent-core.md 总体决策). Injectors run in registration
+	// order after Recall, with returned context bounded to maxInjectorChars;
+	// OncePerTurn and Deduplicate control their cadence. A panicking injector is
+	// skipped (fail-open).
 	PreStep []PreStepInjector
 	// OnText, if set, is called with each streamed assistant text delta.
 	OnText func(string)
@@ -114,6 +121,7 @@ func New(cfg Config) *Loop {
 		provider:               cfg.Provider,
 		effort:                 cfg.ReasoningEffort,
 		recall:                 cfg.Recall,
+		runtimeContext:         cfg.RuntimeContext,
 		preStep:                append([]PreStepInjector(nil), cfg.PreStep...),
 		onText:                 cfg.OnText,
 		onError:                cfg.OnError,
@@ -143,28 +151,34 @@ func (l *Loop) Run(ctx context.Context, userText string) (runErr error) {
 	if _, err := l.log.Append(session.EventUserMessage, session.NewUserMessage(userText)); err != nil {
 		return err
 	}
-	// The pre-step context is collected once per turn and applied to the first
-	// request only (the step === 1 gate below is unchanged): Recall (M4b) runs
-	// first as the "recall" injector, then the registered PreStep injectors in
-	// order. Each injector's contribution is bounded to maxInjectorChars and a
-	// panicking injector is skipped (fail-open), so a misbehaving injector can
-	// never block the answer or blow up the first request.
-	var contextMsgs []llm.Message
-	for _, inj := range l.effectiveInjectors() {
-		contextMsgs = append(contextMsgs, l.safeInject(inj, ctx, userText)...)
-	}
 	for step := 0; step < maxSteps; step++ {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("loop: cancelled: %w", err)
 		}
-		done, err := l.step(ctx, contextMsgs, step+1)
+		// dsh runs pre-step projection for every step and persists each returned
+		// user context message before deriving the request history. Injectors
+		// that are turn-scoped opt out after step one; stable snapshots opt out
+		// when the same visible message already exists.
+		for _, inj := range l.effectiveInjectors() {
+			if inj.OncePerTurn && step > 0 {
+				continue
+			}
+			for _, message := range l.safeInject(inj, ctx, userText) {
+				if inj.Deduplicate && l.visibleMessageExists(message) {
+					continue
+				}
+				if err := l.appendContextMessage(message); err != nil {
+					return err
+				}
+			}
+		}
+		done, err := l.step(ctx, step+1)
 		if err != nil {
 			return err
 		}
 		if done {
 			return nil
 		}
-		contextMsgs = nil // only the turn's first request carries the pre-step context
 	}
 	return fmt.Errorf("loop: exceeded %d steps per turn", maxSteps)
 }
@@ -177,10 +191,37 @@ func (l *Loop) Run(ctx context.Context, userText string) (runErr error) {
 func (l *Loop) effectiveInjectors() []PreStepInjector {
 	var out []PreStepInjector
 	if l.recall != nil {
-		out = append(out, PreStepInjector{Name: "recall", Inject: l.recall})
+		out = append(out, PreStepInjector{Name: "recall", Inject: l.recall, OncePerTurn: true})
 	}
 	out = append(out, l.preStep...)
+	// Append the runtime snapshot last. This keeps the current user message as
+	// the newest conversational turn while pressure compaction selects its
+	// retained tail; the request still derives as user → context → history.
+	if l.runtimeContext != nil {
+		out = append(out, PreStepInjector{Name: "runtime-context", Inject: l.runtimeContext, Deduplicate: true})
+	}
 	return out
+}
+
+// appendContextMessage persists one pre-step user context message. Context is
+// represented by the normal user/message event, as in dsh, so DeriveHistory is
+// the source of truth for the initial request and every follow-up request.
+func (l *Loop) appendContextMessage(message llm.Message) error {
+	if strings.TrimSpace(message.Text()) == "" && len(message.Content) == 0 {
+		return nil
+	}
+	_, err := l.log.Append(session.EventUserMessage,
+		session.NewUserMessageWithBlocks(message.Text(), message.Content))
+	return err
+}
+
+func (l *Loop) visibleMessageExists(message llm.Message) bool {
+	for _, existing := range l.log.DeriveHistory() {
+		if existing.Role == llm.RoleUser && existing.Text() == message.Text() {
+			return true
+		}
+	}
+	return false
 }
 
 // safeInject calls one injector and bounds its contribution, containing a
@@ -256,10 +297,10 @@ func isContextOverflowError(err error) bool {
 }
 
 // step performs one model request and its tool executions. It returns
-// (true, nil) when the turn is complete (no tool calls requested). contextMsgs
-// are prepended to the request (after the system prompt, before the derived
-// history).
-func (l *Loop) step(ctx context.Context, contextMsgs []llm.Message, stepNumber int) (done bool, stepErr error) {
+// (true, nil) when the turn is complete (no tool calls requested). Pre-step
+// context has already been persisted, so the request contains the system
+// prompt followed by the durable derived history.
+func (l *Loop) step(ctx context.Context, stepNumber int) (done bool, stepErr error) {
 	if _, err := l.log.Append(session.EventStepStart, session.NewStepStart(stepNumber)); err != nil {
 		return false, err
 	}
@@ -284,9 +325,8 @@ func (l *Loop) step(ctx context.Context, contextMsgs []llm.Message, stepNumber i
 		// registry (dsh assembly: native | code | both).
 		specs = l.toolSpecs()
 	}
-	messages := make([]llm.Message, 0, len(history)+1+len(contextMsgs))
+	messages := make([]llm.Message, 0, len(history)+1)
 	messages = append(messages, llm.Message{Role: llm.RoleSystem, Content: []llm.ContentBlock{llm.Text(l.prompt.Build())}})
-	messages = append(messages, contextMsgs...)
 	messages = append(messages, history...)
 
 	if l.provider != "" {
@@ -302,7 +342,6 @@ func (l *Loop) step(ctx context.Context, contextMsgs []llm.Message, stepNumber i
 		history = l.log.DeriveHistory()
 		messages = messages[:0]
 		messages = append(messages, llm.Message{Role: llm.RoleSystem, Content: []llm.ContentBlock{llm.Text(l.prompt.Build())}})
-		messages = append(messages, contextMsgs...)
 		messages = append(messages, history...)
 		if l.provider != "" {
 			if _, startErr := l.log.Append(session.EventLLMRequestStart, session.NewLLMRequestStart(l.provider, l.model, l.effort)); startErr != nil {

@@ -79,15 +79,14 @@
           <button data-order="manual">手动排序</button>
           <button data-order="updated">最近更新</button>
         </div>
-        <!-- Add-workspace opens the native folder picker (dsh directory flow):
-             selecting a folder creates a workspace named after it. -->
-        <input id="ws-folder" type="file" webkitdirectory hidden>
-        <!-- Workspace create/rename dialog. -->
+        <!-- Workspace create/rename dialog. It collects the server-side
+             directory path instead of using a browser upload control. -->
         <div id="ws-dialog" class="ws-dialog hidden">
           <div class="ws-dialog-card" role="dialog" aria-modal="true">
             <div class="ws-dialog-title" id="ws-dialog-title">新建工作区</div>
             <input id="ws-dialog-input" type="text" placeholder="工作区名称" maxlength="60" autocomplete="off">
             <input id="ws-dialog-path" type="text" placeholder="目录路径（例如 D:\\work\\project）" autocomplete="off">
+            <button id="ws-dialog-pick" class="btn-ghost" type="button">选择目录…</button>
             <div class="ws-dialog-actions">
               <button id="ws-dialog-cancel" class="btn-ghost" type="button">取消</button>
               <button id="ws-dialog-ok" class="sec-btn primary" type="button">创建</button>

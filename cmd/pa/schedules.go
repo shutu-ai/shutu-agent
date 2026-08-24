@@ -183,8 +183,9 @@ func scheduleReminderPrompt(due schedule.DurableDue) string {
 // is recall → compaction → skill → schedule.
 func (a *app) scheduleInjector() loop.PreStepInjector {
 	return loop.PreStepInjector{
-		Name:   "schedule",
-		Inject: a.schedulePreStep,
+		Name:        "schedule",
+		Inject:      a.schedulePreStep,
+		OncePerTurn: true,
 	}
 }
 

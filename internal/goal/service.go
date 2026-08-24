@@ -132,7 +132,7 @@ func findGoal(ctx context.Context, e plan.Engine, id string) (plan.Goal, error) 
 
 func renderPrompt(goal plan.Goal, round, max int, observer Observer, ctx context.Context) string {
 	data, _ := json.Marshal(goal.Objective)
-	prompt := fmt.Sprintf("<goal_round>\nObjective: %s\nRound: %d/%d\n\nContinue working toward this objective in this same session. Treat the current workspace, tool results, and durable plan state as authoritative. Verify evidence before marking the goal done; leave it active if work remains.\n", data, round, max)
+	prompt := fmt.Sprintf("<goal_round>\nObjective: %s\nRound: %d/%d\n\nContinue working toward the objective in this same session. Treat the current workspace, tool results, and durable session state as authoritative; inspect them instead of assuming earlier narration is still current. Make concrete progress and verify the result. Before claiming completion, gather evidence that the whole objective is achieved, read the current goal, and mark it complete. If work remains, leave the goal active for the next round. Follow the configured goal-tool policy before reporting a blocker.\n", data, round, max)
 	if observer != nil {
 		state, err := observer(ctx, goal)
 		if err != nil {

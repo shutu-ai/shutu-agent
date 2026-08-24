@@ -348,12 +348,12 @@ func TestSummaryContextIsShadowedPart(t *testing.T) {
 		t.Fatalf("model called %d times, want 1", len(fake.reqs))
 	}
 	msgs := fake.reqs[0].Messages
-	// system prompt + shadowed [q1 a1 q2 a2]
+	// shadowed [q1 a1 q2 a2] + final dsh compaction instruction
 	if len(msgs) != 5 {
 		t.Fatalf("summary request has %d messages, want 5: %+v", len(msgs), msgs)
 	}
-	if msgs[0].Role != llm.RoleSystem {
-		t.Fatalf("msg0 role = %q, want system", msgs[0].Role)
+	if msgs[0].Role != llm.RoleUser || msgs[len(msgs)-1].Role != llm.RoleUser {
+		t.Fatalf("summary request boundary roles = %q..%q, want user conversation + final user instruction", msgs[0].Role, msgs[len(msgs)-1].Role)
 	}
 	want := []llm.Message{
 		{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("q1")}},
@@ -362,9 +362,12 @@ func TestSummaryContextIsShadowedPart(t *testing.T) {
 		{Role: llm.RoleAssistant, Content: []llm.ContentBlock{llm.Text("a2")}},
 	}
 	for i := range want {
-		if msgs[i+1].Role != want[i].Role || msgs[i+1].Text() != want[i].Text() {
-			t.Fatalf("shadowed msg %d = %+v, want %+v", i, msgs[i+1], want[i])
+		if msgs[i].Role != want[i].Role || msgs[i].Text() != want[i].Text() {
+			t.Fatalf("shadowed msg %d = %+v, want %+v", i, msgs[i], want[i])
 		}
+	}
+	if !strings.Contains(msgs[len(msgs)-1].Text(), "compaction engine") {
+		t.Fatalf("final summary instruction = %q, want dsh compaction instruction", msgs[len(msgs)-1].Text())
 	}
 	// The retained tail must not leak into the summary context.
 	var sb strings.Builder

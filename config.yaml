@@ -10,7 +10,7 @@ model: deepseek-v4-flash
 base_url: ""
 
 # Session workspace fallback. Ungrouped sessions and legacy title-only
-# workspaces use this directory; empty falls back to the agent process cwd.
+# workspaces use this directory; empty creates and uses ~/shudu.
 workspace:
   default_dir: ""
 

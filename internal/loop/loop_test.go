@@ -296,12 +296,10 @@ func TestRunUnknownToolLogsErrorAndContinues(t *testing.T) {
 	}
 }
 
-// TestRunRecallHookInjectedIntoFirstRequestOnly verifies the M4b recall
-// extension point (dispatch-m4b §2, D4): the Recall hook is called once per
-// turn, its context messages are injected into the first request only, and the
-// second (tool-result) request does not re-carry the recall — the loop's
-// turn/step structure is unchanged.
-func TestRunRecallHookInjectedIntoFirstRequestOnly(t *testing.T) {
+// TestRunRecallHookIsDurable verifies the M4b recall extension point: the
+// Recall hook remains turn-scoped, while its context is durable and is carried
+// into the tool-result follow-up request.
+func TestRunRecallHookIsDurable(t *testing.T) {
 	model := &scriptedLLM{steps: [][]llm.StreamEvent{
 		{ // step 1: model asks for get_time
 			{Kind: llm.StreamFinish, FinishReason: "tool_calls", ToolCalls: []llm.ToolCall{
@@ -340,13 +338,17 @@ func TestRunRecallHookInjectedIntoFirstRequestOnly(t *testing.T) {
 		t.Fatalf("llm calls = %d, want 2", len(model.calls))
 	}
 	first := model.calls[0].Messages
-	if len(first) < 3 || first[0].Role != llm.RoleSystem || first[1].Role != llm.RoleUser || first[1].Text() != "KB snippet: <架构决策记录>" || first[2].Role != llm.RoleUser {
-		t.Fatalf("first request messages = %+v, want system + recall + user history", first)
+	if len(first) < 3 || first[0].Role != llm.RoleSystem || first[1].Role != llm.RoleUser || first[1].Text() != "what time is it" || first[2].Text() != "KB snippet: <架构决策记录>" {
+		t.Fatalf("first request messages = %+v, want system + user + durable recall", first)
 	}
+	found := false
 	for _, m := range model.calls[1].Messages {
 		if strings.Contains(m.Text(), "KB snippet") {
-			t.Fatalf("second request must not carry the recall: %+v", model.calls[1].Messages)
+			found = true
 		}
+	}
+	if !found {
+		t.Fatalf("second request must carry the durable recall: %+v", model.calls[1].Messages)
 	}
 }
 

@@ -12,8 +12,8 @@ import (
 )
 
 // TestRunPreStepInjectorsInOrder verifies that multiple PreStep injectors run
-// in registration order and their context messages are injected into the first
-// request after the system prompt and before the user history (ADR
+// in registration order and their context messages are persisted after the
+// current user message (ADR
 // 2026-08-18-m5-agent-core.md 总体决策: unified pre-step injection).
 func TestRunPreStepInjectorsInOrder(t *testing.T) {
 	model := &scriptedLLM{steps: [][]llm.StreamEvent{{
@@ -52,17 +52,17 @@ func TestRunPreStepInjectorsInOrder(t *testing.T) {
 	if len(msgs) != 4 {
 		t.Fatalf("first request messages = %+v, want system + ctx-a + ctx-b + user", msgs)
 	}
-	if msgs[0].Role != llm.RoleSystem || msgs[1].Role != llm.RoleUser || msgs[1].Text() != "ctx-a" ||
-		msgs[2].Role != llm.RoleUser || msgs[2].Text() != "ctx-b" || msgs[3].Role != llm.RoleUser {
+	if msgs[0].Role != llm.RoleSystem || msgs[1].Role != llm.RoleUser || msgs[1].Text() != "hello" ||
+		msgs[2].Role != llm.RoleUser || msgs[2].Text() != "ctx-a" ||
+		msgs[3].Role != llm.RoleUser || msgs[3].Text() != "ctx-b" {
 		t.Fatalf("first request messages out of order: %+v", msgs)
 	}
 }
 
-// TestRunPreStepInjectedIntoFirstRequestOnly verifies the step === 1 gate for
-// PreStep injectors: the injected context is carried by the first request of a
-// turn only, and a tool-call follow-up request never re-carries it (turn/step
-// structure unchanged, D4).
-func TestRunPreStepInjectedIntoFirstRequestOnly(t *testing.T) {
+// TestRunPreStepIsRebuiltForEveryStep verifies dsh-style pre-step projection:
+// the injector is called for every step and its durable context remains in the
+// derived history of the tool-call follow-up request.
+func TestRunPreStepIsRebuiltForEveryStep(t *testing.T) {
 	model := &scriptedLLM{steps: [][]llm.StreamEvent{
 		{ // step 1: model asks for get_time
 			{Kind: llm.StreamFinish, FinishReason: "tool_calls", ToolCalls: []llm.ToolCall{
@@ -90,20 +90,24 @@ func TestRunPreStepInjectedIntoFirstRequestOnly(t *testing.T) {
 	if err := loop.Run(context.Background(), "what time is it"); err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if injectCalls != 1 {
-		t.Fatalf("pre-step injector called %d times, want 1 (once per turn)", injectCalls)
+	if injectCalls != 2 {
+		t.Fatalf("pre-step injector called %d times, want 2 (once per step)", injectCalls)
 	}
 	if len(model.calls) != 2 {
 		t.Fatalf("llm calls = %d, want 2", len(model.calls))
 	}
 	first := model.calls[0].Messages
-	if len(first) < 3 || first[0].Role != llm.RoleSystem || first[1].Text() != "KEEP-ME" {
-		t.Fatalf("first request messages = %+v, want system + injected + user history", first)
+	if len(first) < 3 || first[0].Role != llm.RoleSystem || first[1].Text() != "what time is it" || first[2].Text() != "KEEP-ME" {
+		t.Fatalf("first request messages = %+v, want system + user + injected context", first)
 	}
+	found := false
 	for _, m := range model.calls[1].Messages {
 		if strings.Contains(m.Text(), "KEEP-ME") {
-			t.Fatalf("second request must not carry the pre-step context: %+v", model.calls[1].Messages)
+			found = true
 		}
+	}
+	if !found {
+		t.Fatalf("second request must carry the durable pre-step context: %+v", model.calls[1].Messages)
 	}
 }
 
@@ -135,7 +139,7 @@ func TestRunRecallRunsBeforePreStep(t *testing.T) {
 	if len(msgs) != 4 {
 		t.Fatalf("first request messages = %+v, want system + recall-msg + extra-msg + user", msgs)
 	}
-	if msgs[1].Text() != "recall-msg" || msgs[2].Text() != "extra-msg" {
+	if msgs[1].Text() != "hi" || msgs[2].Text() != "recall-msg" || msgs[3].Text() != "extra-msg" {
 		t.Fatalf("recall must precede pre-step injectors: %+v", msgs)
 	}
 }
@@ -166,7 +170,7 @@ func TestRunPreStepBudgetTruncation(t *testing.T) {
 	if len(msgs) != 3 {
 		t.Fatalf("first request messages = %+v, want system + truncated + user", msgs)
 	}
-	got := msgs[1].Text()
+	got := msgs[2].Text()
 	if utf8.RuneCountInString(got) != maxInjectorChars {
 		t.Fatalf("truncated content has %d runes, want %d", utf8.RuneCountInString(got), maxInjectorChars)
 	}
@@ -209,16 +213,16 @@ func TestRunPreStepAggregateBudget(t *testing.T) {
 	if len(msgs) != 4 {
 		t.Fatalf("first request messages = %+v, want system + first(whole) + second(truncated) + user", msgs)
 	}
-	if msgs[1].Text() != first {
-		t.Fatalf("first message must be kept whole, got %d runes", utf8.RuneCountInString(msgs[1].Text()))
+	if msgs[2].Text() != first {
+		t.Fatalf("first message must be kept whole, got %d runes", utf8.RuneCountInString(msgs[2].Text()))
 	}
 	// 3000 + 1000 = 4000 budget; the second message is truncated to the remainder.
-	if utf8.RuneCountInString(msgs[2].Text()) != maxInjectorChars-3000 {
+	if utf8.RuneCountInString(msgs[3].Text()) != maxInjectorChars-3000 {
 		t.Fatalf("second message truncated to %d runes, want %d",
-			utf8.RuneCountInString(msgs[2].Text()), maxInjectorChars-3000)
+			utf8.RuneCountInString(msgs[3].Text()), maxInjectorChars-3000)
 	}
-	if msgs[2].Text() != second[:maxInjectorChars-3000] {
-		t.Fatalf("second message must be the UTF-8-safe head: %q", msgs[2].Text())
+	if msgs[3].Text() != second[:maxInjectorChars-3000] {
+		t.Fatalf("second message must be the UTF-8-safe head: %q", msgs[3].Text())
 	}
 }
 
@@ -249,7 +253,7 @@ func TestRunPreStepPanicContained(t *testing.T) {
 		t.Fatalf("run must survive an injector panic, got %v", err)
 	}
 	msgs := model.calls[0].Messages
-	if len(msgs) != 3 || msgs[1].Text() != "after-boom" {
+	if len(msgs) != 3 || msgs[2].Text() != "after-boom" {
 		t.Fatalf("panicking injector must be skipped and the rest kept: %+v", msgs)
 	}
 }
