@@ -485,7 +485,8 @@ type feedbackRecordData struct {
 }
 
 type webCommandResultData struct {
-	Text string `json:"text"`
+	Text    string `json:"text"`
+	Command string `json:"command,omitempty"`
 }
 
 type turnStartData struct{}
@@ -634,9 +635,16 @@ func NewUserMessage(text string) any { return userMessageData{Text: text} }
 // deliberately not a user/message, so feedback never enters model history.
 func NewFeedbackRecord(text string) any { return feedbackRecordData{Text: text} }
 
-// NewWebCommandResult builds a Web-only acknowledgement event. The frontend
-// renders it, while DeriveHistory ignores it like other log-only projections.
-func NewWebCommandResult(text string) any { return webCommandResultData{Text: text} }
+// NewWebCommandResult builds a Web-only acknowledgement event. command is an
+// optional browser-side action such as export; DeriveHistory ignores it like
+// other log-only projections.
+func NewWebCommandResult(text string, command ...string) any {
+	data := webCommandResultData{Text: text}
+	if len(command) > 0 {
+		data.Command = command[0]
+	}
+	return data
+}
 
 // NewUserMessageWithBlocks builds a user/message payload carrying explicit
 // content blocks (M8-3, /attach; dispatch-m8-3 §4): the image attachment lands

@@ -316,6 +316,12 @@ func (a *app) webCommand(ctx context.Context, line string) error {
 		_, err := a.webPlanCommand(ctx, strings.TrimSpace(line[len(name):]))
 		return err
 	}
+	if name == "/export" {
+		if len(args) > 0 {
+			return a.appendWebCommandResult("The Web /export command does not accept a path.")
+		}
+		return a.appendWebCommandResult("Session log download requested.", "export")
+	}
 	if _, err := a.log.Append(session.EventUserMessage, session.NewUserMessage(line)); err != nil {
 		return err
 	}
@@ -349,6 +355,11 @@ func (a *app) execWebCommand(ctx context.Context, name string, args []string) (s
 	case "/plan":
 		_, err := a.webPlanCommand(ctx, strings.Join(args, " "))
 		return "", err
+	case "/export":
+		if len(args) > 0 {
+			return "", errors.New("The Web /export command does not accept a path.")
+		}
+		return "Session log download requested.", nil
 	default:
 		return "", fmt.Errorf("unknown command %q (try /help)", name)
 	}
@@ -356,6 +367,10 @@ func (a *app) execWebCommand(ctx context.Context, name string, args []string) (s
 
 // webHelp returns the web composer's slash-command table (dsh 输入条命令对齐).
 func (a *app) webHelp() string {
+	return a.webHelpText() + "\n  /export             Download current Session log as ZIP"
+}
+
+func (a *app) webHelpText() string {
 	return "可用的斜杠命令:\n" +
 		"  /help               显示本命令表\n" +
 		"  /status             显示当前 provider / model / mode\n" +
@@ -512,6 +527,10 @@ func (a *app) webCommandCatalog() []map[string]string {
 	out[6] = make(map[string]string)
 	out[6][`name`] = `plan`
 	out[6][`hint`] = `Plan mode: /plan [off|message]`
+	out = append(out, map[string]string{
+		`name`: `export`,
+		`hint`: `Download Session log: /export`,
+	})
 	return out
 }
 
@@ -549,11 +568,11 @@ func (a *app) webPlanCommand(ctx context.Context, suffix string) (bool, error) {
 	return true, a.appendWebCommandResult("Plan mode already active. Submitting the message in plan mode.")
 }
 
-func (a *app) appendWebCommandResult(text string) error {
+func (a *app) appendWebCommandResult(text string, command ...string) error {
 	if a.log == nil {
 		return errors.New("no active session")
 	}
-	_, err := a.log.Append(session.EventWebCommandResult, session.NewWebCommandResult(text))
+	_, err := a.log.Append(session.EventWebCommandResult, session.NewWebCommandResult(text, command...))
 	return err
 }
 

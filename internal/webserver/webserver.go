@@ -7,6 +7,8 @@
 package webserver
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -20,6 +22,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"path"
 	"path/filepath"
 	"runtime/debug"
 	"sort"
@@ -265,6 +268,9 @@ func New(st store.Store, token, addr string) (*Server, error) {
 	mux.Handle("GET /api/kb/{rest...}", s.requireAuth(http.HandlerFunc(s.handleKBStub)))
 	mux.Handle("GET /api/sessions", s.requireAuth(http.HandlerFunc(s.handleSessions)))
 	mux.Handle("GET /api/sessions/{id}/events", s.requireAuth(http.HandlerFunc(s.handleEvents)))
+	// dsh /export compatibility: the browser downloads the current Session log
+	// as a ZIP and keeps the command outside model history.
+	mux.Handle("GET /api/session.export", s.requireAuth(http.HandlerFunc(s.handleSessionExport)))
 	mux.Handle("GET /api/sessions/{id}/feedback", s.requireAuth(http.HandlerFunc(s.handleFeedbackList)))
 	mux.Handle("PUT /api/sessions/{id}/feedback/{seq}", s.requireAuth(http.HandlerFunc(s.handleFeedbackPut)))
 	mux.Handle("DELETE /api/sessions/{id}/feedback/{seq}", s.requireAuth(http.HandlerFunc(s.handleFeedbackDelete)))
@@ -843,6 +849,7 @@ type imageView struct {
 // messages (bytes never leave the attachment store; the browser fetches them
 // through the authorized echo endpoint).
 type eventView struct {
+	Command    string      `json:"command,omitempty"` // browser-side web command action
 	Seq        uint64      `json:"seq"`
 	Type       string      `json:"type"`
 	Time       time.Time   `json:"time"`
@@ -862,7 +869,21 @@ func toEventView(ev session.Event) eventView {
 	v.Reasoning, v.ToolName, v.ToolOutput = extraFields(ev)
 	v.Images = extractImages(ev)
 	v.CallID = callIDOf(ev)
+	v.Command = commandOf(ev)
 	return v
+}
+
+func commandOf(ev session.Event) string {
+	if ev.Type != session.EventWebCommandResult {
+		return ""
+	}
+	var data struct {
+		Command string `json:"command"`
+	}
+	if json.Unmarshal(ev.Data, &data) != nil {
+		return ""
+	}
+	return data.Command
 }
 
 // extractImages pulls the image refs out of a user/assistant message's content
@@ -968,6 +989,65 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		out = append(out, v)
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// handleSessionExport serves a portable ZIP containing the current session's
+// append-only events. It accepts dsh's sessionId/includeDescendants query
+// shape; Shutu currently exports the selected session only.
+func (s *Server) handleSessionExport(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.URL.Query().Get("sessionId"))
+	if id == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "sessionId is required"})
+		return
+	}
+	events, err := s.store.LoadSession(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	entry, err := zw.Create(path.Join("session", "events.jsonl"))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	for _, ev := range events {
+		row := struct {
+			Seq     uint64          `json:"seq"`
+			Type    string          `json:"type"`
+			Version int             `json:"version"`
+			At      time.Time       `json:"at"`
+			Data    json.RawMessage `json:"data"`
+		}{ev.Seq, ev.Type, ev.Version, ev.At, ev.Data}
+		raw, marshalErr := json.Marshal(row)
+		if marshalErr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": marshalErr.Error()})
+			return
+		}
+		if _, writeErr := entry.Write(append(raw, '\n')); writeErr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": writeErr.Error()})
+			return
+		}
+	}
+	if err := zw.Close(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	filename := "shutu-session-" + strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			return r
+		}
+		return '_'
+	}, id) + ".zip"
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(buf.Bytes())
 }
 
 func (s *Server) feedbackStore(w http.ResponseWriter) (store.MessageFeedbackStore, bool) {

@@ -304,6 +304,37 @@ func TestWebCommandCatalogIncludesFeedback(t *testing.T) {
 	t.Fatal("backend command catalog is missing feedback")
 }
 
+func TestWebCommandExportMatchesDSH(t *testing.T) {
+	a := makePlanApp(true)
+	a.currentID = "s-export"
+	if err := a.webCommand(context.Background(), "/export"); err != nil {
+		t.Fatalf("/export: %v", err)
+	}
+	evs := a.log.Events()
+	if len(evs) != 1 || evs[0].Type != session.EventWebCommandResult {
+		t.Fatalf("export events = %+v, want one web/command-result", evs)
+	}
+	var result struct {
+		Text    string `json:"text"`
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal(evs[0].Data, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Text != "Session log download requested." || result.Command != "export" {
+		t.Fatalf("export result = %+v", result)
+	}
+	if len(a.log.DeriveHistory()) != 0 {
+		t.Fatal("/export entered model history")
+	}
+	if err := a.webCommand(context.Background(), "/export output.zip"); err != nil {
+		t.Fatalf("/export path: %v", err)
+	}
+	if countEvent(a.log, session.EventUserMessage) != 0 {
+		t.Fatal("/export path entered model history")
+	}
+}
+
 // TestWebCommandUnknown verifies an unknown command answers with the /help
 // guidance inside the assistant reply (the user message is still logged).
 func TestWebCommandUnknown(t *testing.T) {

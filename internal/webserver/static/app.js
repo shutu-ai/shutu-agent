@@ -3098,6 +3098,28 @@ async function loadEvents(id) {
   } catch (e) { if (e.message !== "unauthorized") console.error(e); }
 }
 
+async function downloadSessionExport() {
+  if (!currentID) return;
+  try {
+    const res = await api(`/api/session.export?sessionId=${encodeURIComponent(currentID)}&includeDescendants=true`);
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || ("HTTP " + res.status));
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `shutu-session-${currentID.replace(/[^A-Za-z0-9_-]/g, "_")}.zip`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    if (e.message !== "unauthorized") addErrorRow({ summary: "Session export failed: " + e.message });
+  }
+}
+
 function renderEvent(ev, replay) {
   // First event of an empty session: the turn has begun, so leave the centered
   // hero and dock the composer (dsh: 第一次输入提交后输入条下移).
@@ -3128,6 +3150,7 @@ function renderEvent(ev, replay) {
       break;
     case "web/command-result":
       addAssistant(ev.summary || "", ev.time, null);
+      if (!replay && ev.command === "export") void downloadSessionExport();
       break;
     case "tool/start":
     case "tool/result":
