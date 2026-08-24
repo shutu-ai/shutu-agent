@@ -93,6 +93,36 @@
             </div>
           </div>
         </div>
+        <!-- dsh directory-browser flow: the server owns absolute paths and
+             the browser only renders the current level and breadcrumbs. -->
+        <div id="ws-dir-dialog" class="ws-dialog hidden">
+          <div class="ws-dialog-card ws-dir-card" role="dialog" aria-modal="true" aria-labelledby="ws-dir-title">
+            <div class="ws-dialog-title" id="ws-dir-title">选择工作区目录</div>
+            <div class="ws-dir-path-row">
+              <input id="ws-dir-path" type="text" autocomplete="off" spellcheck="false" aria-label="目录路径">
+              <button id="ws-dir-go" class="btn-ghost" type="button">前往</button>
+            </div>
+            <div id="ws-dir-crumbs" class="ws-dir-crumbs" aria-label="目录层级"></div>
+            <div id="ws-dir-list" class="ws-dir-list" role="listbox" aria-label="子目录"></div>
+            <p id="ws-dir-error" class="ws-dir-error hidden" role="alert"></p>
+            <div class="ws-dialog-actions">
+              <button id="ws-dir-cancel" class="btn-ghost" type="button">取消</button>
+              <button id="ws-dir-new" class="btn-ghost" type="button">新建文件夹</button>
+              <button id="ws-dir-ok" class="sec-btn primary" type="button">选择此目录</button>
+            </div>
+          </div>
+        </div>
+        <div id="ws-dir-new-dialog" class="ws-dialog hidden">
+          <div class="ws-dialog-card" role="dialog" aria-modal="true" aria-labelledby="ws-dir-new-title">
+            <div class="ws-dialog-title" id="ws-dir-new-title">新建文件夹</div>
+            <input id="ws-dir-new-input" type="text" maxlength="120" placeholder="文件夹名称" autocomplete="off">
+            <p id="ws-dir-new-error" class="ws-dir-error hidden" role="alert"></p>
+            <div class="ws-dialog-actions">
+              <button id="ws-dir-new-cancel" class="btn-ghost" type="button">取消</button>
+              <button id="ws-dir-new-ok" class="sec-btn primary" type="button">创建</button>
+            </div>
+          </div>
+        </div>
         <!-- Session rename dialog (dsh browser-owned Modal): pins the title. -->
         <div id="sr-dialog" class="ws-dialog hidden">
           <div class="ws-dialog-card" role="dialog" aria-modal="true">

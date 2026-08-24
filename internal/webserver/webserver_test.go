@@ -15,7 +15,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1124,6 +1126,15 @@ func TestWorkspaceAPI(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &sc); err != nil || sc.WorkspaceID != created.ID {
 		t.Fatalf("session create resp = %s", rec.Body.String())
 	}
+	// dsh connectWorkspace reuses the existing blank session in the selected
+	// workspace instead of asking the session manager to mint a duplicate.
+	rec = doReqBody(t, h, "POST", "/api/sessions", "", `{"workspace_id":"`+created.ID+`"}`)
+	var reused struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &reused); err != nil || reused.ID != "s3" {
+		t.Fatalf("reused workspace session = %s", rec.Body.String())
+	}
 
 	// Delete w1 → s1 and s3 return to ungrouped.
 	rec = doReq(t, h, "DELETE", "/api/workspaces/"+created.ID, "")
@@ -1152,6 +1163,46 @@ func TestWorkspaceAPI(t *testing.T) {
 	}
 	if len(list.UngroupedIDs) != 3 {
 		t.Fatalf("ungrouped after delete = %v, want all 3 sessions", list.UngroupedIDs)
+	}
+}
+
+func TestWorkspaceDirectoryBrowserAPI(t *testing.T) {
+	srv, _ := newTestServer(t, "")
+	parent := t.TempDir()
+	if err := os.Mkdir(filepath.Join(parent, "existing"), 0o755); err != nil {
+		t.Fatalf("seed directory: %v", err)
+	}
+	h := srv.Handler()
+	rec := doReq(t, h, "GET", "/api/workspaces/directories?path="+url.QueryEscape(parent), "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list directory = %d: %s", rec.Code, rec.Body.String())
+	}
+	var listing struct {
+		Path   string `json:"path"`
+		Crumbs []struct {
+			Path string `json:"path"`
+		} `json:"crumbs"`
+		Entries []struct {
+			Name string `json:"name"`
+			Path string `json:"path"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &listing); err != nil {
+		t.Fatalf("list directory decode: %v", err)
+	}
+	if listing.Path != parent || len(listing.Crumbs) == 0 || len(listing.Entries) != 1 || listing.Entries[0].Name != "existing" {
+		t.Fatalf("directory listing = %+v", listing)
+	}
+	rec = doReqBody(t, h, "POST", "/api/workspaces/directories", "", `{"path":`+strconv.Quote(parent)+`,"name":"created"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create directory = %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(parent, "created")); err != nil {
+		t.Fatalf("created directory missing: %v", err)
+	}
+	rec = doReqBody(t, h, "POST", "/api/workspaces/directories", "", `{"path":`+strconv.Quote(parent)+`,"name":"bad/name"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid directory name = %d, want 400", rec.Code)
 	}
 }
 

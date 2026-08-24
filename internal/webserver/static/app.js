@@ -137,6 +137,18 @@ async function api(path, opts = {}) {
   if (res.status === 401) { showLogin("令牌无效或已过期"); throw new Error("unauthorized"); }
   return res;
 }
+// apiOk is used by workspace mutations so a 4xx/5xx response cannot be
+// mistaken for a successful create/rename/delete and then hidden by a refresh.
+async function apiOk(path, opts = {}) {
+  const res = await api(path, opts);
+  if (res.ok) return res;
+  let message = `${res.status} ${res.statusText || "请求失败"}`;
+  try {
+    const body = await res.json();
+    if (body && body.error) message = String(body.error);
+  } catch (_) { /* keep the HTTP status when the error body is not JSON */ }
+  throw new Error(message);
+}
 
 // ---- login ---------------------------------------------------------------
 function showLogin(msg) {
@@ -1357,10 +1369,11 @@ async function loadSessions() {
   try {
     res = await api("/api/sessions");
   } catch (e) { if (e.message !== "unauthorized") console.error(e); return; }
-  const list = await res.json();
+  let list = await res.json();
+  if (!Array.isArray(list)) list = [];
   sessionList.textContent = "";
   closeAnyMenu();
-  if (!Array.isArray(list) || list.length === 0) {
+  if (list.length === 0 && groupBy !== "workspace") {
     const li = document.createElement("li");
     li.className = "session-item";
     li.innerHTML = `<span class="si-title empty">还没有会话，点「新会话」开始</span>`;
@@ -1632,7 +1645,9 @@ function renderGrouped(list) {
   if (unIds.length > 0) groups.push({ key: "__u", title: "未分组", ws: false, ids: unIds });
   let any = false;
   for (const g of groups) {
-    if (g.ids.length === 0) continue;
+    // Keep empty workspaces visible. A newly created workspace has no session
+    // yet, but dsh still shows its project row so it can be selected or used
+    // to create the first session from the sidebar.
     any = true;
     const wrap = document.createElement("div");
     wrap.className = "ws-group" + (wsOpenState(g.key) ? "" : " closed");
@@ -1891,8 +1906,9 @@ async function onDrop(e) {
       order.splice(from, 1);
       const to = order.indexOf(pos.el.dataset.key);
       order.splice(to + (pos.anchor === "after" ? 1 : 0), 0, d.id);
-      await api("/api/workspaces/order", { method: "PATCH", body: JSON.stringify({ ids: order }) });
-      loadSessions();
+      await apiOk("/api/workspaces/order", { method: "PATCH", body: JSON.stringify({ ids: order }) });
+      await loadSessions();
+      await loadWorkspaces();
       return;
     }
     if (d.kind === "session" && pos.kind === "session-flat") {
@@ -1949,9 +1965,18 @@ sessionList.addEventListener("dragend", onDragEnd);
 async function deleteWorkspace(id) {
   if (!confirm("删除工作区？其中的会话将移回「未分组」，会话本身不会被删除。")) return;
   try {
-    await api(`/api/workspaces/${encodeURIComponent(id)}`, { method: "DELETE" });
-  } catch (e) { if (e.message !== "unauthorized") console.error(e); }
-  loadSessions();
+    await apiOk(`/api/workspaces/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (heroWorkspace === id) {
+      heroWorkspace = "";
+      toggleHeroMenu(false);
+    }
+    await loadSessions();
+    await loadWorkspaces();
+    renderHeroMenu();
+    syncHeroChip();
+  } catch (e) {
+    if (e.message !== "unauthorized") { console.error(e); toast(`删除工作区失败：${e.message}`); }
+  }
 }
 
 // ---- workspace create / rename dialog (dsh browser-owned Modal) ------------
@@ -1981,32 +2006,156 @@ async function submitWsDialog() {
   if (!title) return;
   try {
     if (wsDialogMode.mode === "rename") {
-      await api(`/api/workspaces/${encodeURIComponent(wsDialogMode.id)}`, {
+      const duplicate = wsGroups.some((w) => w.id !== wsDialogMode.id && w.title === title);
+      if (duplicate) {
+        toast("已有同名工作区");
+        return;
+      }
+      await apiOk(`/api/workspaces/${encodeURIComponent(wsDialogMode.id)}`, {
         method: "PATCH", body: JSON.stringify({ title }),
       });
     } else {
       const path = $("ws-dialog-path")?.value.trim() || "";
-      await api("/api/workspaces", { method: "POST", body: JSON.stringify({ title, path }) });
+      await apiOk("/api/workspaces", { method: "POST", body: JSON.stringify({ title, path }) });
       groupBy = "workspace";
       localStorage.setItem("pa_groupby", "workspace");
     }
     closeWsDialog();
-    loadSessions();
-  } catch (e) { if (e.message !== "unauthorized") console.error(e); }
-}
-$("ws-dialog-pick").addEventListener("click", async () => {
-  try {
-    const res = await api("/api/workspaces/pick-directory", { method: "POST" });
-    const data = await res.json();
-    const pathInput = $("ws-dialog-path");
-    if (!pathInput || !data.path) return;
-    pathInput.value = data.path;
-    const titleInput = $("ws-dialog-input");
-    if (titleInput && !titleInput.value.trim()) {
-      const normalized = data.path.replace(/[\\/]+$/, "");
-      titleInput.value = normalized.split(/[\\/]/).pop() || "";
+    // Refresh both sidebar grouping and the hero workspace picker. Awaiting
+    // the reload prevents the newly created workspace from being hidden by a
+    // stale empty-session view.
+    await loadSessions();
+    await loadWorkspaces();
+    renderHeroMenu();
+    syncHeroChip();
+  } catch (e) {
+    if (e.message !== "unauthorized") {
+      console.error(e);
+      toast(`${wsDialogMode?.mode === "rename" ? "重命名" : "创建"}工作区失败：${e.message}`);
     }
-  } catch (e) { if (e.message !== "unauthorized") console.error(e); }
+  }
+}
+let wsDirPath = "";
+let wsDirSelected = "";
+function setWsDirError(message) {
+  const el = $("ws-dir-error");
+  if (!el) return;
+  el.textContent = message || "";
+  el.classList.toggle("hidden", !message);
+}
+function renderWsDir(data) {
+  wsDirPath = data.path || "";
+  wsDirSelected = wsDirPath;
+  $("ws-dir-path").value = wsDirPath;
+  const crumbs = $("ws-dir-crumbs");
+  crumbs.textContent = "";
+  for (const crumb of (data.crumbs || [])) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = crumb.name || crumb.path;
+    button.title = crumb.path;
+    button.addEventListener("click", () => loadWsDir(crumb.path));
+    crumbs.appendChild(button);
+  }
+  const list = $("ws-dir-list");
+  list.textContent = "";
+  const entries = (data.entries || []).filter((entry) => !entry.hidden);
+  if (entries.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "ws-dir-empty";
+    empty.textContent = "此目录没有可进入的子目录";
+    list.appendChild(empty);
+    return;
+  }
+  for (const entry of entries) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = `📁 ${entry.name}`;
+    button.title = entry.path;
+    button.addEventListener("click", () => loadWsDir(entry.path));
+    list.appendChild(button);
+  }
+}
+async function loadWsDir(path) {
+  setWsDirError("");
+  try {
+    const query = path ? `?path=${encodeURIComponent(path)}` : "";
+    const res = await apiOk("/api/workspaces/directories" + query);
+    renderWsDir(await res.json());
+  } catch (e) {
+    if (e.message !== "unauthorized") { console.error(e); setWsDirError(`无法读取目录：${e.message}`); }
+  }
+}
+function openWsDirDialog() {
+  wsDirPath = $("ws-dialog-path")?.value.trim() || "";
+  wsDirSelected = wsDirPath;
+  $("ws-dir-dialog").classList.remove("hidden");
+  loadWsDir(wsDirPath);
+}
+function closeWsDirDialog() {
+  $("ws-dir-dialog").classList.add("hidden");
+  setWsDirError("");
+}
+$("ws-dialog-pick").addEventListener("click", openWsDirDialog);
+$("ws-dir-go").addEventListener("click", () => loadWsDir($("ws-dir-path").value.trim()));
+$("ws-dir-path").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); loadWsDir(e.currentTarget.value.trim()); }
+  if (e.key === "Escape") { e.preventDefault(); closeWsDirDialog(); }
+});
+function setWsDirNewError(message) {
+  const el = $("ws-dir-new-error");
+  el.textContent = message || "";
+  el.classList.toggle("hidden", !message);
+}
+function openWsDirNewDialog() {
+  setWsDirNewError("");
+  $("ws-dir-new-input").value = "";
+  $("ws-dir-new-dialog").classList.remove("hidden");
+  $("ws-dir-new-input").focus();
+}
+function closeWsDirNewDialog() {
+  $("ws-dir-new-dialog").classList.add("hidden");
+  setWsDirNewError("");
+}
+async function createWsDir() {
+  const name = $("ws-dir-new-input").value.trim();
+  if (!name) return;
+  try {
+    const res = await apiOk("/api/workspaces/directories", {
+      method: "POST", body: JSON.stringify({ path: wsDirPath, name: name.trim() }),
+    });
+    const data = await res.json();
+    closeWsDirNewDialog();
+    await loadWsDir(data.path);
+  } catch (e) {
+    if (e.message !== "unauthorized") { console.error(e); setWsDirNewError(`新建文件夹失败：${e.message}`); }
+  }
+}
+$("ws-dir-new").addEventListener("click", openWsDirNewDialog);
+$("ws-dir-new-ok").addEventListener("click", createWsDir);
+$("ws-dir-new-cancel").addEventListener("click", closeWsDirNewDialog);
+$("ws-dir-new-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); createWsDir(); }
+  if (e.key === "Escape") { e.preventDefault(); closeWsDirNewDialog(); }
+});
+$("ws-dir-new-dialog").addEventListener("click", (e) => {
+  if (e.target === $("ws-dir-new-dialog")) closeWsDirNewDialog();
+});
+$("ws-dir-ok").addEventListener("click", () => {
+  const path = wsDirSelected || wsDirPath;
+  if (!path) return;
+  const pathInput = $("ws-dialog-path");
+  pathInput.value = path;
+  const titleInput = $("ws-dialog-input");
+  if (titleInput && !titleInput.value.trim()) {
+    const normalized = path.replace(/[\\/]+$/, "");
+    titleInput.value = normalized.split(/[\\/]/).pop() || "";
+  }
+  closeWsDirDialog();
+});
+$("ws-dir-cancel").addEventListener("click", closeWsDirDialog);
+$("ws-dir-dialog").addEventListener("click", (e) => {
+  if (e.target === $("ws-dir-dialog")) closeWsDirDialog();
 });
 $("ws-add").addEventListener("click", () => openWsDialog("create"));
 $("ws-dialog-ok").addEventListener("click", submitWsDialog);

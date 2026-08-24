@@ -306,6 +306,8 @@ func New(st store.Store, token, addr string) (*Server, error) {
 	mux.Handle("GET /api/workspaces", s.requireAuth(http.HandlerFunc(s.handleWorkspaces)))
 	mux.Handle("POST /api/workspaces", s.requireAuth(http.HandlerFunc(s.handleWorkspaceCreate)))
 	mux.Handle("POST /api/workspaces/pick-directory", s.requireAuth(http.HandlerFunc(s.handleWorkspacePickDirectory)))
+	mux.Handle("GET /api/workspaces/directories", s.requireAuth(http.HandlerFunc(s.handleWorkspaceDirectoryList)))
+	mux.Handle("POST /api/workspaces/directories", s.requireAuth(http.HandlerFunc(s.handleWorkspaceDirectoryCreate)))
 	mux.Handle("PATCH /api/workspaces/{id}", s.requireAuth(http.HandlerFunc(s.handleWorkspaceTitle)))
 	mux.Handle("DELETE /api/workspaces/{id}", s.requireAuth(http.HandlerFunc(s.handleWorkspaceDelete)))
 	mux.Handle("PATCH /api/workspaces/order", s.requireAuth(http.HandlerFunc(s.handleWorkspacesOrder)))
@@ -1293,10 +1295,40 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "unknown permission: " + body.Permission})
 		return
 	}
-	id, err := s.sessFn(r.Context(), "new", "")
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
+	// dsh connectWorkspace reuses an existing, unarchived blank session that
+	// already belongs to the selected workspace. This prevents repeated clicks
+	// on a workspace row or picker from creating hidden duplicate sessions.
+	id := ""
+	var err error
+	if body.WorkspaceID != "" {
+		metas, listErr := s.store.ListSessions(r.Context())
+		if listErr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": listErr.Error()})
+			return
+		}
+		for _, m := range metas {
+			if m.ID == "" || m.WorkspaceID != body.WorkspaceID || m.EventCount != 0 || !m.ArchivedAt.IsZero() {
+				continue
+			}
+			// A persisted cwd is authoritative when available. Legacy test
+			// doubles and old rows may not have one, so membership remains the
+			// fallback for those records.
+			if m.CWD != "" {
+				workspaceCWD, cwdErr := s.workspaceWorkdir(r.Context(), body.WorkspaceID)
+				if cwdErr != nil || !sameWorkspacePath(m.CWD, workspaceCWD) {
+					continue
+				}
+			}
+			id = m.ID
+			break
+		}
+	}
+	if id == "" {
+		id, err = s.sessFn(r.Context(), "new", "")
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
 	}
 	if body.WorkspaceID != "" {
 		if err := s.store.SetSessionWorkspace(r.Context(), id, body.WorkspaceID); err != nil {
@@ -1399,6 +1431,18 @@ func (s *Server) syncSessionCWD(ctx context.Context, sessionID, workspaceID stri
 		return err
 	}
 	return hs.SetSessionCWD(ctx, sessionID, cwd)
+}
+
+// sameWorkspacePath compares persisted and resolved workspace directories in
+// the platform form used by the file system. Windows paths are case-insensitive
+// while POSIX paths preserve case.
+func sameWorkspacePath(a, b string) bool {
+	a = filepath.Clean(a)
+	b = filepath.Clean(b)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
 }
 
 // handleSessionConfigGet implements GET /api/sessions/{id}/config: the raw
@@ -1866,6 +1910,129 @@ func (s *Server) handleWorkspacePickDirectory(w http.ResponseWriter, r *http.Req
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"path": filepath.Clean(abs)})
+}
+
+type workspaceDirectoryEntry struct {
+	Name   string `json:"name"`
+	Path   string `json:"path"`
+	Hidden bool   `json:"hidden"`
+}
+
+type workspaceDirectoryListing struct {
+	Path      string                    `json:"path"`
+	Home      string                    `json:"home"`
+	Crumbs    []workspaceDirectoryEntry `json:"crumbs"`
+	Entries   []workspaceDirectoryEntry `json:"entries"`
+	Truncated bool                      `json:"truncated"`
+}
+
+// handleWorkspaceDirectoryList implements the dsh directory-browser read
+// used by the workspace picker. The browser receives absolute paths from the
+// server and never joins path segments in JavaScript.
+func (s *Server) handleWorkspaceDirectoryList(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimSpace(r.URL.Query().Get("path"))
+	if path == "" {
+		var err error
+		path, err = os.UserHomeDir()
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "resolve home: " + err.Error()})
+			return
+		}
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "resolve directory: " + err.Error()})
+		return
+	}
+	abs = filepath.Clean(abs)
+	info, err := os.Stat(abs)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("directory %q: %v", abs, err)})
+		return
+	}
+	if !info.IsDir() {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("directory %q is not a directory", abs)})
+		return
+	}
+	entries, err := os.ReadDir(abs)
+	if err != nil {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": fmt.Sprintf("read directory %q: %v", abs, err)})
+		return
+	}
+	children := make([]workspaceDirectoryEntry, 0, len(entries))
+	for _, entry := range entries {
+		childInfo, infoErr := entry.Info()
+		if infoErr != nil || !childInfo.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		children = append(children, workspaceDirectoryEntry{
+			Name: name, Path: filepath.Join(abs, name), Hidden: strings.HasPrefix(name, "."),
+		})
+	}
+	home, _ := os.UserHomeDir()
+	writeJSON(w, http.StatusOK, workspaceDirectoryListing{
+		Path: abs, Home: home, Crumbs: workspaceDirectoryCrumbs(abs), Entries: children,
+	})
+}
+
+// handleWorkspaceDirectoryCreate implements the dsh directory-browser
+// New-folder action. Creation is deliberately one level deep beneath the
+// directory currently shown by the picker.
+func (s *Server) handleWorkspaceDirectoryCreate(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Path string `json:"path"`
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "bad request: " + err.Error()})
+		return
+	}
+	parent, err := filepath.Abs(strings.TrimSpace(body.Path))
+	if err != nil || strings.TrimSpace(body.Path) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "parent directory is required"})
+		return
+	}
+	parent = filepath.Clean(parent)
+	info, err := os.Stat(parent)
+	if err != nil || !info.IsDir() {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": fmt.Sprintf("parent directory %q is unavailable", parent)})
+		return
+	}
+	name := strings.TrimSpace(body.Name)
+	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\\`) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "folder name must be one path segment"})
+		return
+	}
+	target := filepath.Join(parent, name)
+	if err := os.Mkdir(target, 0o755); err != nil {
+		status := http.StatusInternalServerError
+		if os.IsExist(err) {
+			status = http.StatusConflict
+		}
+		writeJSON(w, status, map[string]any{"error": fmt.Sprintf("create directory %q: %v", target, err)})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"path": filepath.Clean(target)})
+}
+
+func workspaceDirectoryCrumbs(path string) []workspaceDirectoryEntry {
+	var reversed []workspaceDirectoryEntry
+	for current := filepath.Clean(path); ; current = filepath.Dir(current) {
+		name := filepath.Base(current)
+		if parent := filepath.Dir(current); parent == current {
+			name = current
+		}
+		reversed = append(reversed, workspaceDirectoryEntry{Name: name, Path: current})
+		if filepath.Dir(current) == current {
+			break
+		}
+	}
+	crumbs := make([]workspaceDirectoryEntry, len(reversed))
+	for i := range reversed {
+		crumbs[len(reversed)-1-i] = reversed[i]
+	}
+	return crumbs
 }
 
 // handleWorkspaceTitle implements PATCH /api/workspaces/{id} {"title":...}.
