@@ -65,6 +65,30 @@ func (e *engine) CreateGoal(ctx context.Context, title, objective string) (Goal,
 	return g, nil
 }
 
+// UpdateGoal edits an existing goal while preserving its id, status and plan
+// links. The caller owns the durable plan/update event.
+func (e *engine) UpdateGoal(ctx context.Context, id, title, objective string) (Goal, error) {
+	if err := ctx.Err(); err != nil {
+		return Goal{}, err
+	}
+	if err := e.checkOpen(); err != nil {
+		return Goal{}, err
+	}
+	if title == "" {
+		return Goal{}, fmt.Errorf("%w: title is empty", ErrInvalidTitle)
+	}
+	g, err := e.prov.GetGoal(ctx, id)
+	if err != nil {
+		return Goal{}, err
+	}
+	g.Title = title
+	g.Objective = objective
+	if err := e.prov.PutGoal(ctx, g); err != nil {
+		return Goal{}, err
+	}
+	return g, nil
+}
+
 // CreatePlan creates a pending plan under goalID — one pending todo per step —
 // and links it into the goal's Plans list. An unknown goalID is rejected; an
 // empty goalID creates a standalone plan.
@@ -317,7 +341,7 @@ func applyCompletedAt(dst **time.Time, st Status) {
 // validStatus reports whether s is one of the five supported statuses.
 func validStatus(s Status) bool {
 	switch s {
-	case StatusPending, StatusInProgress, StatusBlocked, StatusDone, StatusCancelled:
+	case StatusPending, StatusInProgress, StatusPaused, StatusBlocked, StatusDone, StatusCancelled:
 		return true
 	default:
 		return false

@@ -27,6 +27,13 @@ type planCreateEvent struct {
 	Detail     map[string]any `json:"detail"`
 }
 
+type planUpdateEvent struct {
+	Scope     string `json:"scope"`
+	ID        string `json:"id"`
+	Title     string `json:"title"`
+	Objective string `json:"objective"`
+}
+
 type planSnapshot struct {
 	Objective string    `json:"objective"`
 	GoalID    string    `json:"goalId"`
@@ -165,6 +172,21 @@ func restoreEvents(events []session.Event) (map[string]Goal, map[string]Plan, er
 							plans[pid] = p
 						}
 					}
+				}
+			}
+
+		case session.EventPlanUpdate:
+			var data planUpdateEvent
+			if err := json.Unmarshal(ev.Data, &data); err != nil {
+				return nil, nil, fmt.Errorf("plan: decode %s: %w", ev.Type, err)
+			}
+			if data.Scope == string(ScopeGoal) {
+				if g, ok := goals[data.ID]; ok {
+					if data.Title != "" {
+						g.Title = data.Title
+					}
+					g.Objective = data.Objective
+					goals[data.ID] = g
 				}
 			}
 

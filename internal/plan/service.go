@@ -32,6 +32,7 @@ type Status string
 const (
 	StatusPending    Status = "pending"     // created, not started
 	StatusInProgress Status = "in-progress" // actively being worked on
+	StatusPaused     Status = "paused"      // intentionally paused by the user
 	StatusBlocked    Status = "blocked"     // waiting on something outside the task
 	StatusDone       Status = "done"        // finished; stamps CompletedAt
 	StatusCancelled  Status = "cancelled"   // abandoned before completion
@@ -124,6 +125,8 @@ type Engine interface {
 	// CreateGoal validates the title and creates a pending goal with a fresh
 	// engine-issued id, returning it.
 	CreateGoal(ctx context.Context, title, objective string) (Goal, error)
+	// UpdateGoal edits the title and objective of an existing goal.
+	UpdateGoal(ctx context.Context, id, title, objective string) (Goal, error)
 	// CreatePlan creates a pending plan under goalID — one pending todo per
 	// step — and links it into the goal's Plans list. An unknown goalID is
 	// rejected; an empty goalID creates a standalone plan.

@@ -25,6 +25,7 @@ import (
 	"github.com/jabing/shutu-agent/internal/compaction"
 	"github.com/jabing/shutu-agent/internal/config"
 	"github.com/jabing/shutu-agent/internal/llm"
+	"github.com/jabing/shutu-agent/internal/plan"
 	"github.com/jabing/shutu-agent/internal/session"
 	"github.com/jabing/shutu-agent/internal/store"
 	"github.com/jabing/shutu-agent/internal/webserver"
@@ -222,8 +223,23 @@ func (a *app) webMessage(ctx context.Context, sessionID, text string, images []l
 	// commands (/new, /resume) stay on the sidebar/+ menu, which already drive
 	// them through the session manager.
 	if len(images) == 0 && strings.HasPrefix(strings.TrimSpace(text), "/") {
+		trimmed := strings.TrimSpace(text)
+		if strings.HasPrefix(trimmed, "/plan") && (len(trimmed) == len("/plan") || trimmed[len("/plan")] == ' ' || trimmed[len("/plan")] == '\t') {
+			a.turnMu.Lock()
+			submit, err := a.webPlanCommand(ctx, strings.TrimSpace(trimmed[len("/plan"):]))
+			a.turnMu.Unlock()
+			if err != nil {
+				return err
+			}
+			if submit {
+				if err := a.runTurn(ctx, strings.TrimSpace(trimmed[len("/plan"):]), false); err != nil {
+					return err
+				}
+			}
+			return a.runIdleGoal(ctx, false)
+		}
 		a.turnMu.Lock()
-		err := a.webCommand(ctx, strings.TrimSpace(text))
+		err := a.webCommand(ctx, trimmed)
 		a.turnMu.Unlock()
 		if err != nil {
 			return err
@@ -280,6 +296,9 @@ func (a *app) webMessage(ctx context.Context, sessionID, text string, images []l
 // menu already drive them through the session manager.
 func (a *app) webCommand(ctx context.Context, line string) error {
 	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return errors.New("empty command")
+	}
 	name := fields[0]
 	args := fields[1:]
 	if name == "/feedback" {
@@ -292,6 +311,10 @@ func (a *app) webCommand(ctx context.Context, line string) error {
 			return appendErr
 		}
 		return nil
+	}
+	if name == "/plan" {
+		_, err := a.webPlanCommand(ctx, strings.TrimSpace(line[len(name):]))
+		return err
 	}
 	if _, err := a.log.Append(session.EventUserMessage, session.NewUserMessage(line)); err != nil {
 		return err
@@ -321,8 +344,11 @@ func (a *app) execWebCommand(ctx context.Context, name string, args []string) (s
 		return a.webPermission(ctx, args)
 	case "/feedback":
 		return a.webFeedback(ctx, strings.Join(args, " "))
-	case "/goal", "/plan":
-		return a.webPlanGoal(ctx, args)
+	case "/goal":
+		return a.webGoalCommand(ctx, strings.Join(args, " "))
+	case "/plan":
+		_, err := a.webPlanCommand(ctx, strings.Join(args, " "))
+		return "", err
 	default:
 		return "", fmt.Errorf("unknown command %q (try /help)", name)
 	}
@@ -336,8 +362,8 @@ func (a *app) webHelp() string {
 		"  /compact [region <start> <end>]  手动压缩上下文\n" +
 		"  /permission [readonly|standard|full]  查看或切换权限\n" +
 		"  /feedback <text>   记录对本次会话的反馈\n" +
-		"  /goal <标题> [说明]   创建目标 (plan_goal)\n" +
-		"  /plan <标题> [说明]   创建目标 (plan 模式入口)\n" +
+		"  /goal [目标|clear|edit <目标>|pause|resume]   管理当前目标\n" +
+		"  /plan [off|消息]      进入/退出计划模式，附消息时提交给模型\n" +
 		"  其他文本             发送给智能体"
 }
 
@@ -482,11 +508,183 @@ func (a *app) webCommandCatalog() []map[string]string {
 	out[4][`hint`] = `Record feedback: /feedback <text>`
 	out[5] = make(map[string]string)
 	out[5][`name`] = `goal`
-	out[5][`hint`] = `Create a goal: /goal title [details]`
+	out[5][`hint`] = `Manage the goal: /goal [objective|clear|edit <objective>|pause|resume]`
 	out[6] = make(map[string]string)
 	out[6][`name`] = `plan`
-	out[6][`hint`] = `Create a goal in plan mode`
+	out[6][`hint`] = `Plan mode: /plan [off|message]`
 	return out
+}
+
+// webPlanCommand mirrors dsh's plan-mode command. The mode switch is a
+// durable session fact and the acknowledgement is Web-only, so it never
+// becomes model history. A non-empty suffix tells webMessage to submit that
+// suffix as the next ordinary user turn after enabling plan mode.
+func (a *app) webPlanCommand(ctx context.Context, suffix string) (bool, error) {
+	if a.log == nil {
+		return false, errors.New("no active session")
+	}
+	active := session.FoldPlanMode(a.log.Events())
+	trimmed := strings.TrimSpace(suffix)
+	if trimmed == "off" {
+		if !active {
+			return false, a.appendWebCommandResult("Plan mode is already inactive.")
+		}
+		if _, err := a.log.Append(session.EventPlanMode, session.NewPlanMode(false)); err != nil {
+			return false, err
+		}
+		return false, a.appendWebCommandResult("Plan mode off.")
+	}
+	if !active {
+		if _, err := a.log.Append(session.EventPlanMode, session.NewPlanMode(true)); err != nil {
+			return false, err
+		}
+		if trimmed == "" {
+			return false, a.appendWebCommandResult("Plan mode on. Use /plan off to leave.")
+		}
+		return true, a.appendWebCommandResult("Plan mode on. Use /plan off to leave.")
+	}
+	if trimmed == "" {
+		return false, a.appendWebCommandResult("Plan mode is already active. Use /plan off to leave.")
+	}
+	return true, a.appendWebCommandResult("Plan mode already active. Submitting the message in plan mode.")
+}
+
+func (a *app) appendWebCommandResult(text string) error {
+	if a.log == nil {
+		return errors.New("no active session")
+	}
+	_, err := a.log.Append(session.EventWebCommandResult, session.NewWebCommandResult(text))
+	return err
+}
+
+// currentGoal returns the newest non-terminal goal in the current session.
+func (a *app) currentGoal(ctx context.Context) (plan.Goal, bool, error) {
+	if a.plans == nil {
+		return plan.Goal{}, false, errors.New("planning is disabled")
+	}
+	goals, err := a.plans.List(ctx)
+	if err != nil {
+		return plan.Goal{}, false, err
+	}
+	byID := make(map[string]plan.Goal, len(goals))
+	for _, g := range goals {
+		byID[g.ID] = g
+	}
+	if a.log != nil {
+		events := a.log.Events()
+		for i := len(events) - 1; i >= 0; i-- {
+			if events[i].Type != session.EventPlanCreate {
+				continue
+			}
+			var data struct {
+				Scope string `json:"scope"`
+				ID    string `json:"id"`
+			}
+			if json.Unmarshal(events[i].Data, &data) == nil && data.Scope == string(plan.ScopeGoal) {
+				g, ok := byID[data.ID]
+				if ok && g.Status != plan.StatusDone && g.Status != plan.StatusCancelled {
+					return g, true, nil
+				}
+			}
+		}
+	}
+	return plan.Goal{}, false, nil
+}
+
+func renderWebGoal(g plan.Goal) string {
+	status := string(g.Status)
+	switch g.Status {
+	case plan.StatusPending, plan.StatusInProgress:
+		status = "active"
+	case plan.StatusDone, plan.StatusCancelled:
+		status = "complete"
+	}
+	return fmt.Sprintf("Goal\nStatus: %s\nObjective: %s\nID: %s\nPlans: %d\nCommands: /goal edit <objective> | /goal pause | /goal resume | /goal clear", status, g.Objective, g.ID, len(g.Plans))
+}
+
+// webGoalCommand follows dsh's /goal grammar while using the existing plan
+// engine as the durable projection.
+func (a *app) webGoalCommand(ctx context.Context, input string) (string, error) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		g, ok, err := a.currentGoal(ctx)
+		if err != nil {
+			return "", err
+		}
+		if !ok {
+			return "No goal is currently set.\nUsage: /goal [<objective>|clear|edit <objective>|pause|resume]", nil
+		}
+		return renderWebGoal(g), nil
+	}
+	if input == "clear" {
+		g, ok, err := a.currentGoal(ctx)
+		if err != nil {
+			return "", err
+		}
+		if !ok {
+			return "No goal to clear.", nil
+		}
+		if err := a.plans.Remove(ctx, string(plan.ScopeGoal), g.ID); err != nil {
+			return "", err
+		}
+		if _, err := a.log.Append(session.EventPlanDelete, session.NewPlanDelete(string(plan.ScopeGoal), g.ID)); err != nil {
+			return "", err
+		}
+		return "Goal cleared.", nil
+	}
+	if input == "pause" || input == "resume" {
+		g, ok, err := a.currentGoal(ctx)
+		if err != nil {
+			return "", err
+		}
+		if !ok {
+			return "No goal is currently set.", nil
+		}
+		st := plan.StatusPaused
+		message := "Goal paused."
+		if input == "resume" {
+			st = plan.StatusInProgress
+			message = "Goal resumed."
+		}
+		if err := a.plans.SetStatus(ctx, string(plan.ScopeGoal), g.ID, st); err != nil {
+			return "", err
+		}
+		if _, err := a.log.Append(session.EventPlanStatus, session.NewPlanStatus(string(plan.ScopeGoal), g.ID, string(st))); err != nil {
+			return "", err
+		}
+		return message, nil
+	}
+	if input == "edit" {
+		return "", errors.New("usage: /goal edit <objective>")
+	}
+	if strings.HasPrefix(input, "edit ") {
+		g, ok, err := a.currentGoal(ctx)
+		if err != nil {
+			return "", err
+		}
+		if !ok {
+			return "No goal is currently set.", nil
+		}
+		objective := strings.TrimSpace(strings.TrimPrefix(input, "edit "))
+		title := strings.Fields(objective)[0]
+		updated, err := a.plans.UpdateGoal(ctx, g.ID, title, objective)
+		if err != nil {
+			return "", err
+		}
+		if _, err := a.log.Append(session.EventPlanUpdate, session.NewPlanUpdate(string(plan.ScopeGoal), updated.ID, map[string]string{"title": updated.Title, "objective": updated.Objective})); err != nil {
+			return "", err
+		}
+		return "Goal updated.\n" + renderWebGoal(updated), nil
+	}
+	if _, ok, err := a.currentGoal(ctx); err != nil {
+		return "", err
+	} else if ok {
+		return "", errors.New("a goal is already active; use /goal edit <objective> or /goal clear")
+	}
+	fields := strings.Fields(input)
+	title := fields[0]
+	res, err := a.webPlanGoal(ctx, []string{title, strings.TrimSpace(strings.TrimPrefix(input, title))})
+	return res, err
 }
 
 // webPlanGoal creates a goal via the plan_goal tool (dsh /goal /plan entry). It

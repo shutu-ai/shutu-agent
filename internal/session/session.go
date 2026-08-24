@@ -180,6 +180,7 @@ const (
 	EventPlanDelete = "plan/delete"
 	EventPlanStatus = "plan/status"
 	EventPlanList   = "plan/list"
+	EventPlanMode   = "plan/mode"
 
 	// M6c-2 spill events (design.md §3 / ADR 2026-08-19-m6-agent-full.md
 	// 决策 M6c / dispatch-m6c-2 §1): spill/write lands when spill_write stores
@@ -1191,8 +1192,10 @@ type planCreateData struct {
 // vocabulary (the constructor is exported so a future edit tool can emit it).
 // DeriveHistory treats it as opaque data.
 type planUpdateData struct {
-	Scope string `json:"scope"`
-	ID    string `json:"id"`
+	Scope     string `json:"scope"`
+	ID        string `json:"id"`
+	Title     string `json:"title,omitempty"`
+	Objective string `json:"objective,omitempty"`
 }
 
 // planDeleteData is the plan/delete payload: the tree level and id of the
@@ -1230,8 +1233,36 @@ func NewPlanCreate(scope, id, title string, acceptance []string, detail ...map[s
 
 // NewPlanUpdate builds the plan/update payload — reserved vocabulary for a
 // future plan-editing tool (dispatch-m6b-2 §1 / D3).
-func NewPlanUpdate(scope, id string) any {
-	return planUpdateData{Scope: scope, ID: id}
+func NewPlanUpdate(scope, id string, detail ...map[string]string) any {
+	data := planUpdateData{Scope: scope, ID: id}
+	if len(detail) > 0 {
+		data.Title = detail[0]["title"]
+		data.Objective = detail[0]["objective"]
+	}
+	return data
+}
+
+type planModeData struct {
+	Active bool `json:"active"`
+}
+
+// NewPlanMode records the durable per-session plan-mode switch.
+func NewPlanMode(active bool) any { return planModeData{Active: active} }
+
+// FoldPlanMode returns the last plan-mode value in an event stream. Plan mode
+// is session state, so a missing event means the default inactive state.
+func FoldPlanMode(events []Event) bool {
+	active := false
+	for _, ev := range events {
+		if ev.Type != EventPlanMode {
+			continue
+		}
+		var data planModeData
+		if json.Unmarshal(ev.Data, &data) == nil {
+			active = data.Active
+		}
+	}
+	return active
 }
 
 // NewPlanDelete builds the plan/delete payload recorded when plan_remove

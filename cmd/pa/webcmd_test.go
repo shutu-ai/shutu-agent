@@ -134,6 +134,89 @@ func TestWebCommandFeedbackMatchesDSH(t *testing.T) {
 	}
 }
 
+func TestWebCommandPlanModeMatchesDSH(t *testing.T) {
+	a := makePlanApp(true)
+	a.currentID = "s-plan-mode"
+	if err := a.webCommand(context.Background(), "/plan"); err != nil {
+		t.Fatalf("/plan: %v", err)
+	}
+	if !session.FoldPlanMode(a.log.Events()) {
+		t.Fatal("/plan did not activate plan mode")
+	}
+	if hasEvent(a.log, session.EventUserMessage) || hasEvent(a.log, session.EventAssistantMessage) {
+		t.Fatal("/plan polluted model history")
+	}
+	if err := a.webCommand(context.Background(), "/plan off"); err != nil {
+		t.Fatalf("/plan off: %v", err)
+	}
+	if session.FoldPlanMode(a.log.Events()) {
+		t.Fatal("/plan off did not deactivate plan mode")
+	}
+}
+
+func TestWebMessagePlanModeSubmitsOnlySuffix(t *testing.T) {
+	llm := &turnLLM{}
+	a := makeTurnApp()
+	a.llm = llm
+	a.currentID = "s-plan-turn"
+	if err := a.webMessage(context.Background(), "s-plan-turn", "/plan design the change", nil); err != nil {
+		t.Fatalf("webMessage /plan: %v", err)
+	}
+	if llm.calls != 1 {
+		t.Fatalf("LLM calls = %d, want 1", llm.calls)
+	}
+	history := a.log.DeriveHistory()
+	if len(history) == 0 || history[0].Text() != "design the change" {
+		t.Fatalf("plan message history = %+v, want only the suffix", history)
+	}
+	if !session.FoldPlanMode(a.log.Events()) {
+		t.Fatal("plan mode was not persisted")
+	}
+}
+
+func TestWebGoalLifecycleMatchesDSH(t *testing.T) {
+	a := makePlanApp(true)
+	a.reg.SetPolicy(planPolicy())
+	if err := a.registerPlans(); err != nil {
+		t.Fatalf("registerPlans: %v", err)
+	}
+	defer a.plans.Close()
+	ctx := context.Background()
+	for _, command := range []string{"/goal Ship release", "/goal pause"} {
+		if err := a.webCommand(ctx, command); err != nil {
+			t.Fatalf("%s: %v", command, err)
+		}
+	}
+	goals, err := a.plans.List(ctx)
+	if err != nil || len(goals) != 1 || string(goals[0].Status) != "paused" {
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Fatalf("paused goals = %+v", goals)
+	}
+	if err := a.webCommand(ctx, "/goal edit Ship updated release"); err != nil {
+		t.Fatalf("/goal edit: %v", err)
+	}
+	if err := a.webCommand(ctx, "/goal resume"); err != nil {
+		t.Fatalf("/goal resume: %v", err)
+	}
+	if err := a.webCommand(ctx, "/goal clear"); err != nil {
+		t.Fatalf("/goal clear: %v", err)
+	}
+	goals, err = a.plans.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(goals) != 0 {
+		t.Fatalf("goals after clear = %+v", goals)
+	}
+	for _, typ := range []string{session.EventPlanCreate, session.EventPlanUpdate, session.EventPlanStatus, session.EventPlanDelete} {
+		if !hasEvent(a.log, typ) {
+			t.Fatalf("goal lifecycle missing %s", typ)
+		}
+	}
+}
+
 // TestWebCommandCompact verifies /compact uses the manual compaction engine
 // and returns its report as the Web assistant message.
 func TestWebCommandCompact(t *testing.T) {

@@ -328,7 +328,7 @@ type PlanStatusTool struct {
 func (PlanStatusTool) Name() string { return ToolStatusName }
 
 func (PlanStatusTool) Description() string {
-	return "set the status of a goal, plan or todo (pending, in-progress, blocked, done, cancelled); done stamps its completion time"
+	return "set the status of a goal, plan or todo (pending, in-progress, paused, blocked, done, cancelled); done stamps its completion time"
 }
 
 func (PlanStatusTool) Schema() map[string]any {
@@ -348,10 +348,10 @@ func (PlanStatusTool) Schema() map[string]any {
 			"status": map[string]any{
 				"type": "string",
 				"enum": []string{
-					string(StatusPending), string(StatusInProgress), string(StatusBlocked),
+					string(StatusPending), string(StatusInProgress), string(StatusPaused), string(StatusBlocked),
 					string(StatusDone), string(StatusCancelled),
 				},
-				"description": "new status: pending, in-progress, blocked, done or cancelled",
+				"description": "new status: pending, in-progress, paused, blocked, done or cancelled",
 			},
 		},
 		"required":             []string{"scope", "id", "status"},
@@ -373,7 +373,7 @@ func (t PlanStatusTool) Execute(ctx context.Context, args json.RawMessage) (stri
 	}
 	st := Status(a.Status)
 	if !validStatus(st) {
-		return "", fmt.Errorf("plan_status: invalid status %q (expected pending, in-progress, blocked, done or cancelled)", a.Status)
+		return "", fmt.Errorf("plan_status: invalid status %q (expected pending, in-progress, paused, blocked, done or cancelled)", a.Status)
 	}
 	if err := t.t.e.SetStatus(ctx, a.Scope, a.ID, st); err != nil {
 		return "", fmt.Errorf("plan_status: %w", err)

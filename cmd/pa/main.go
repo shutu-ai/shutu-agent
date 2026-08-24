@@ -937,6 +937,9 @@ func (a *app) applySessionRuntime(id string) (sessionRuntime, func()) {
 		}
 	}
 	rt.mode = mode
+	if a.log != nil && session.FoldPlanMode(a.log.Events()) {
+		rt.prompt = rt.prompt.Clone().Add(prompt.Section{Name: "plan-mode", Order: 900, Text: planModeSection})
+	}
 	// Every turn projects the session's mode onto the full base whitelist and
 	// swaps it in for the turn's duration (dsh: the executor honors the same
 	// presentation mode; standard never executes run_code, PTC only run_code,

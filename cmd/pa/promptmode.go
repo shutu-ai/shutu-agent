@@ -29,6 +29,12 @@ const codeModeSection = `## 程序化操作（Code Mode）
 工具往返。仅当操作无法程序化、或单次操作依赖前一次的人工可观察结果时才逐个
 调用工具。`
 
+const planModeSection = `## Plan mode
+The user has entered planning mode. Focus on understanding the request, exploring the
+available context, identifying constraints, and proposing a complete ordered plan.
+Do not perform irreversible execution merely because a plan is requested. Keep the
+plan concrete, with assumptions and verification steps.`
+
 // buildPrompt assembles the per-mode system-prompt builder (D-MODE-3).
 // standard (默认) → LoadDir(promptsDir); minimal → 固定 persona; code →
 // LoadDir + 追加 code-mode 段. 返回的 Builder 尚未安装工具目录 (调用方 SetTools).

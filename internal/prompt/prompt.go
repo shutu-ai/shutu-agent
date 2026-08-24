@@ -79,6 +79,15 @@ func (b *Builder) SetTools(provider func() []llm.ToolSchema) *Builder {
 	return b
 }
 
+// Clone returns an independent builder with the same sections and tool
+// provider. Per-session overlays can add sections without mutating the base.
+func (b *Builder) Clone() *Builder {
+	if b == nil {
+		return NewBuilder()
+	}
+	return &Builder{sections: append([]Section(nil), b.sections...), tools: b.tools}
+}
+
 // Build renders the system prompt: sections ordered by Order then Name, empty
 // sections skipped, joined by blank lines, with the tool catalog appended last
 // when a provider is installed and returns schemas.
