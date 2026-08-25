@@ -349,6 +349,9 @@ body[data-theme="light"] .attach-button { border-color: #d4e0e8; color: #496177;
 
 .workspace-group { margin: 8px 0; }
 .workspace-group-head { position: relative; display: flex; align-items: center; gap: 4px; min-height: 30px; padding: 0 5px; color: #9fb0c2; }
+.workspace-group-head[draggable="true"] { cursor: grab; }
+.workspace-group-head[draggable="true"]:active { cursor: grabbing; }
+.workspace-group.dragging { opacity: .55; }
 .workspace-toggle { min-width: 0; flex: 1; display: flex; align-items: center; gap: 5px; border: 0; padding: 4px 5px; color: inherit; background: transparent; text-align: left; cursor: pointer; }
 .workspace-chevron { width: 12px; color: #678098; }
 .workspace-title, .workspace-label { overflow: hidden; color: #b8c7d7; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
@@ -359,6 +362,9 @@ body[data-theme="light"] .attach-button { border-color: #d4e0e8; color: #496177;
 .workspace-menu button { border: 0; border-radius: 4px; padding: 7px 9px; color: #c0d0df; background: transparent; text-align: left; cursor: pointer; }
 .workspace-menu button:hover { background: #1d3143; }
 .workspace-empty { padding: 6px 30px; color: #65798d; font-size: 12px; }
+.session-row[draggable="true"] { cursor: grab; }
+.session-row[draggable="true"]:active { cursor: grabbing; }
+.session-row.dragging { opacity: .45; }
 .ungrouped-group { border-top: 1px solid #1d2b39; padding-top: 7px; }
 .remote-search-results { display: grid; gap: 4px; margin: 4px 5px 10px; }
 .remote-search-hit { display: grid; gap: 2px; border: 1px solid #2b3c4f; border-radius: 7px; padding: 7px 9px; color: #dce7f2; background: #142231; text-align: left; cursor: pointer; }

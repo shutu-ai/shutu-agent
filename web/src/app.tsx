@@ -155,6 +155,8 @@ function SessionBrowser({
   const [remoteHits, setRemoteHits] = useState<SessionSearchHit[]>([])
   const [remoteLoading, setRemoteLoading] = useState(false)
   const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Record<string, boolean>>({})
+  const [draggedWorkspaceId, setDraggedWorkspaceId] = useState<string | null>(null)
+  const [draggedSessionId, setDraggedSessionId] = useState<string | null>(null)
   const filtered = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase()
     if (!needle) return sessions
@@ -185,17 +187,39 @@ function SessionBrowser({
 
   const run = async (operation: () => Promise<void>): Promise<void> => {
     setWorking(true)
-    try { await operation(); setDialog(null); setMenuId(null) }
+    try { await operation(); setDialog(null); setMenuId(null); setWorkspaceMenuId(null) }
     catch (error) { onError(error) }
     finally { setWorking(false) }
   }
 
   const sessionById = useMemo(() => new Map(sessions.map(session => [session.id, session])), [sessions])
   const visibleIds = useMemo(() => new Set(visible.map(session => session.id)), [visible])
-  const renderSession = (session: SessionSummary) => {
+  const sessionIdsForWorkspace = (workspaceId: string): string[] => workspaceId === ''
+    ? workspaces.ungrouped_ids
+    : workspaces.workspaces.find(workspace => workspace.id === workspaceId)?.session_ids ?? []
+
+  const dropWorkspace = async (targetId: string): Promise<void> => {
+    if (draggedWorkspaceId === null || draggedWorkspaceId === targetId) return
+    const ids = workspaces.workspaces.map(workspace => workspace.id).filter(id => id !== draggedWorkspaceId)
+    const targetIndex = ids.indexOf(targetId)
+    ids.splice(targetIndex < 0 ? ids.length : targetIndex, 0, draggedWorkspaceId)
+    setDraggedWorkspaceId(null)
+    await run(() => store.reorderWorkspaces(ids))
+  }
+
+  const dropSession = async (workspaceId: string, targetId?: string): Promise<void> => {
+    if (draggedSessionId === null) return
+    const ids = sessionIdsForWorkspace(workspaceId).filter(id => id !== draggedSessionId)
+    const targetIndex = targetId === undefined ? ids.length : Math.max(0, ids.indexOf(targetId))
+    ids.splice(targetIndex, 0, draggedSessionId)
+    setDraggedSessionId(null)
+    await run(() => store.reorderSessions(workspaceId, ids))
+  }
+
+  const renderSession = (session: SessionSummary, workspaceId: string) => {
     const status = sessionStatus(session)
     const menuOpen = menuId === session.id
-    return <div className={`session-row ${session.id === selectedId ? 'active' : ''}`} key={session.id} role="treeitem" aria-selected={session.id === selectedId}>
+    return <div className={`session-row ${session.id === selectedId ? 'active' : ''} ${draggedSessionId === session.id ? 'dragging' : ''}`} key={session.id} role="treeitem" aria-selected={session.id === selectedId} draggable onDragStart={event => { event.stopPropagation(); setDraggedSessionId(session.id); event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', session.id) }} onDragEnd={() => setDraggedSessionId(null)} onDragOver={event => { event.preventDefault(); event.dataTransfer.dropEffect = 'move' }} onDrop={event => { event.preventDefault(); event.stopPropagation(); void dropSession(workspaceId, session.id) }}>
       <button className="session" type="button" onClick={() => { setMenuId(null); void store.open(session.id) }}>
         <span className={`session-state ${status.tone}`} aria-label={status.label} title={status.label} />
         <span className="session-copy"><span className="session-title">{sessionTitle(session)}</span><small>{relativeTime(session.updated_at)} · {session.event_count} events</small></span>
@@ -213,8 +237,8 @@ function SessionBrowser({
     const ids = workspace.session_ids.filter(id => visibleIds.has(id))
     const isCollapsed = collapsedWorkspaces[workspace.id] === true
     const menuOpen = workspaceMenuId === workspace.id
-    return <section className="workspace-group" key={workspace.id}>
-      <div className="workspace-group-head">
+    return <section className={`workspace-group ${draggedWorkspaceId === workspace.id ? 'dragging' : ''}`} key={workspace.id}>
+      <div className="workspace-group-head" draggable onDragStart={event => { setDraggedWorkspaceId(workspace.id); event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', workspace.id) }} onDragEnd={() => setDraggedWorkspaceId(null)} onDragOver={event => { event.preventDefault(); event.dataTransfer.dropEffect = 'move' }} onDrop={event => { event.preventDefault(); void (draggedWorkspaceId !== null ? dropWorkspace(workspace.id) : dropSession(workspace.id)) }}>
         <button type="button" className="workspace-toggle" onClick={() => setCollapsedWorkspaces(previous => ({ ...previous, [workspace.id]: !isCollapsed }))} aria-expanded={!isCollapsed}>
           <span className="workspace-chevron">{isCollapsed ? '›' : '⌄'}</span><span className="workspace-title">{workspace.title}</span><small>{ids.length}</small>
         </button>
@@ -222,7 +246,7 @@ function SessionBrowser({
         <button type="button" className="workspace-actions" onClick={() => setWorkspaceMenuId(menuOpen ? null : workspace.id)} aria-label={`Actions for ${workspace.title}`} aria-expanded={menuOpen}>⋯</button>
         {menuOpen && <div className="workspace-menu" role="menu"><button type="button" role="menuitem" onClick={() => { setWorkspaceMenuId(null); setWorkspaceDialog({ kind: 'rename', workspace }) }}>Rename</button><button type="button" role="menuitem" className="danger-action" onClick={() => { setWorkspaceMenuId(null); setWorkspaceDialog({ kind: 'delete', workspace }) }}>Delete</button></div>}
       </div>
-      {!isCollapsed && ids.map(id => { const session = sessionById.get(id); return session ? renderSession(session) : null })}
+      {!isCollapsed && ids.map(id => { const session = sessionById.get(id); return session ? renderSession(session, workspace.id) : null })}
       {!isCollapsed && ids.length === 0 && <div className="workspace-empty">No sessions</div>}
     </section>
   }
@@ -249,8 +273,8 @@ function SessionBrowser({
         {remoteLoading && query.trim() !== '' && <div className="workspace-empty">Searching history…</div>}
         {workspaces.workspaces.map(renderWorkspace)}
         <section className="workspace-group ungrouped-group">
-          <div className="workspace-group-head"><span className="workspace-label">Ungrouped</span><small>{workspaces.ungrouped_ids.filter(id => visibleIds.has(id)).length}</small></div>
-          {workspaces.ungrouped_ids.filter(id => visibleIds.has(id)).map(id => { const session = sessionById.get(id); return session ? renderSession(session) : null })}
+          <div className="workspace-group-head" onDragOver={event => { event.preventDefault(); event.dataTransfer.dropEffect = 'move' }} onDrop={event => { event.preventDefault(); void dropSession('') }}><span className="workspace-label">Ungrouped</span><small>{workspaces.ungrouped_ids.filter(id => visibleIds.has(id)).length}</small></div>
+          {workspaces.ungrouped_ids.filter(id => visibleIds.has(id)).map(id => { const session = sessionById.get(id); return session ? renderSession(session, '') : null })}
         </section>
         {overflow > 0 && !expanded && query.trim() === '' && <button className="session-overflow" type="button" onClick={() => setExpanded(true)}>Show {overflow} more sessions</button>}
         {expanded && query.trim() === '' && overflow > 0 && <button className="session-overflow" type="button" onClick={() => setExpanded(false)}>Show fewer sessions</button>}
