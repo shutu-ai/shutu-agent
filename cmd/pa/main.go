@@ -660,11 +660,16 @@ type app struct {
 	goalActivation   map[string]bool
 	spills           spill.Engine    // nil when spill disabled (D10)
 	interacts        interact.Engine // nil when interact disabled (D10)
-	code             code.Engine     // nil when code disabled (D10)
-	mcp              []mcp.Client    // nil when mcp disabled (D10); one live bridged client per configured server
-	fs               fs.FileService  // nil when fs disabled (D10)
-	web              *web.Engine     // nil when web disabled (D10)
-	hooks            *hookrunner.Runner
+	// interactionSessions keeps the owner session for live Web approval
+	// requests. DSH scopes interaction surfaces to the addressed conversation;
+	// the engine itself remains process-wide for CLI compatibility.
+	interactionMu       sync.RWMutex
+	interactionSessions map[string]string
+	code                code.Engine    // nil when code disabled (D10)
+	mcp                 []mcp.Client   // nil when mcp disabled (D10); one live bridged client per configured server
+	fs                  fs.FileService // nil when fs disabled (D10)
+	web                 *web.Engine    // nil when web disabled (D10)
+	hooks               *hookrunner.Runner
 
 	// webserver is the M10a unified web portal (ADR 2026-08-20-m10-web-portal.md);
 	// nil when web_server disabled (D10).

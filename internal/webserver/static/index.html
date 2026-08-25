@@ -240,6 +240,10 @@
                child of the milieu so one element is centered in the hero phase
                (below the headline/workspace row) and docked at the bottom in the
                active phase — the column's data-phase drives both postures. -->
+          <div id="queue-root" class="queue-root hidden" aria-live="polite"></div>
+          <div id="deliverables-root" class="deliverables-root hidden" aria-live="polite"></div>
+          <div id="approval-root" class="approval-root hidden" aria-live="polite"></div>
+          <div id="goal-bar" class="goal-bar hidden" aria-live="polite"></div>
           <div id="session-state" class="session-state hidden" aria-live="polite"></div>
           <div class="composer-card">
             <div id="composer" class="composer">
@@ -248,6 +252,7 @@
                 <div class="mirror" aria-hidden="true"></div>
               </div>
               <div id="slash-menu" class="ws-menu slash-menu hidden" role="listbox" aria-label="Slash commands"></div>
+              <div id="reference-menu" class="ws-menu reference-menu hidden" role="listbox" aria-label="文件引用"></div>
               <div class="composer-tools">
                 <div class="ct-left">
                   <button id="cmd-btn" class="tool-btn" type="button" title="命令" aria-haspopup="menu" aria-expanded="false">
@@ -260,6 +265,10 @@
                     <span class="ps-caret" data-icon="caretdown" aria-hidden="true"></span>
                   </button>
                   <div id="perm-menu" class="ws-menu perm-menu hidden" role="menu"></div>
+                  <button id="plan-seat" class="plan-seat" type="button" aria-pressed="false" title="计划模式">
+                    <span class="plan-seat-icon" aria-hidden="true">☷</span>
+                    <span id="plan-seat-label">计划</span>
+                  </button>
                 </div>
                 <div class="ct-right">
                   <button id="model-seat" class="model-seat" type="button" aria-haspopup="menu" aria-expanded="false" title="选择模型">

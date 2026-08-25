@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/jabing/shutu-agent/internal/attachment"
+	"github.com/jabing/shutu-agent/internal/interact"
 	"github.com/jabing/shutu-agent/internal/llm"
 	"github.com/jabing/shutu-agent/internal/session"
 	"github.com/jabing/shutu-agent/internal/store"
@@ -118,6 +119,86 @@ func TestAuthRequired(t *testing.T) {
 	// holds no data; only the API routes are gated.
 	if rec := doReq(t, h, "GET", "/", ""); rec.Code != http.StatusOK {
 		t.Fatalf("static / without token → %d, want 200 (login shell must load)", rec.Code)
+	}
+}
+
+func TestInteractionsAPI(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+	eng := interact.NewEngine(nil)
+	t.Cleanup(func() { _ = eng.Close() })
+	request, err := eng.Request(context.Background(), "Allow the sensitive tool?", "write_file", `{"path":"/tmp/demo"}`)
+	if err != nil {
+		t.Fatalf("Request: %v", err)
+	}
+	srv.SetInteractionManager(
+		func(ctx context.Context, sessionID string) ([]interact.Request, error) {
+			if sessionID == "other-session" {
+				return []interact.Request{}, nil
+			}
+			return eng.List(ctx)
+		},
+		func(ctx context.Context, sessionID, id string, status interact.ApprovalStatus) error {
+			if sessionID == "other-session" {
+				return interact.ErrUnknownRequest
+			}
+			_, err := eng.Resolve(ctx, id, status)
+			return err
+		},
+	)
+	rec := doReq(t, srv.Handler(), "GET", "/api/interactions?session_id=other-session", "tok")
+	if rec.Code != http.StatusOK || rec.Body.String() != `{"interactions":[]}`+"\n" {
+		t.Fatalf("session-scoped GET = %d %s, want empty queue", rec.Code, rec.Body.String())
+	}
+
+	rec = doReq(t, srv.Handler(), "GET", "/api/interactions?session_id=owner-session", "tok")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/interactions = %d, want 200", rec.Code)
+	}
+	var listed struct {
+		Interactions []map[string]any `json:"interactions"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &listed); err != nil {
+		t.Fatalf("decode interactions: %v", err)
+	}
+	if len(listed.Interactions) != 1 || listed.Interactions[0]["id"] != request.ID {
+		t.Fatalf("listed interactions = %+v, want request %s", listed.Interactions, request.ID)
+	}
+	if listed.Interactions[0]["args"] != `{"path":"/tmp/demo"}` {
+		t.Fatalf("listed args = %v, want bounded JSON args", listed.Interactions[0]["args"])
+	}
+
+	rec = doReqBody(t, srv.Handler(), "POST", "/api/interactions/"+request.ID+"/resolve?session_id=other-session", "tok", `{"status":"approved"}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("wrong-session resolve = %d, want 409", rec.Code)
+	}
+	rec = doReqBody(t, srv.Handler(), "POST", "/api/interactions/"+request.ID+"/resolve?session_id=owner-session", "tok", `{"status":"approved"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST interaction resolve = %d: %s", rec.Code, rec.Body.String())
+	}
+	resolved, err := eng.List(context.Background())
+	if err != nil || len(resolved) != 1 || resolved[0].Status != interact.StatusApproved {
+		t.Fatalf("resolved interactions = %+v, err=%v", resolved, err)
+	}
+
+	rec = doReqBody(t, srv.Handler(), "POST", "/api/interactions/"+request.ID+"/resolve", "tok", `{"status":"maybe"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid interaction status = %d, want 400", rec.Code)
+	}
+}
+
+func TestEventDetailsAllowlist(t *testing.T) {
+	ev := session.Event{
+		Type: session.EventPlanCreate,
+		Data: mustData(t, map[string]any{
+			"scope": "goal", "id": "goal-1", "title": "Ship", "secret": "must not leave the server",
+		}),
+	}
+	details := eventDetails(ev)
+	if details["scope"] != "goal" || details["id"] != "goal-1" || details["title"] != "Ship" {
+		t.Fatalf("event details = %+v, want safe plan fields", details)
+	}
+	if _, ok := details["secret"]; ok {
+		t.Fatalf("event details leaked non-allow-listed field: %+v", details)
 	}
 }
 

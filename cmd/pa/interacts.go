@@ -13,7 +13,7 @@
 // caller-driven poll — the resolution made here is visible on the next probe).
 // Approved lets the tool run; rejected returns a denial the model sees as a
 // tool/error. The loop's turn/step structure is untouched (D4): the gate hangs
-// off the tools registry's pre-execution hook (tools.SetGate), not the loop.
+// off the tools registry's pre-execution hook (tools.AddPreExecuteHook), not the loop.
 package main
 
 import (
@@ -31,6 +31,17 @@ import (
 	"github.com/jabing/shutu-agent/internal/session"
 	"github.com/jabing/shutu-agent/internal/tools"
 )
+
+type webApprovalContextKey struct{}
+
+func withWebApprovalContext(ctx context.Context) context.Context {
+	return context.WithValue(ctx, webApprovalContextKey{}, true)
+}
+
+func isWebApprovalContext(ctx context.Context) bool {
+	value, _ := ctx.Value(webApprovalContextKey{}).(bool)
+	return value
+}
 
 // approveArgsBound mirrors the approval engine's stored-args bound (interact
 // maxArgsLen, 200 runes): the gate trims an over-long tool args payload to it
@@ -56,6 +67,22 @@ func (a *app) registerInteracts() error {
 	// call time, so a session switch (/new, /resume) is honored the same way
 	// as the kb/jobs/subagent/skill wiring.
 	onEvent := func(typ string, data any) {
+		if typ == session.EventInteractRequest {
+			var request struct {
+				ID string `json:"id"`
+			}
+			if raw, err := json.Marshal(data); err == nil {
+				_ = json.Unmarshal(raw, &request)
+			}
+			if request.ID != "" {
+				a.interactionMu.Lock()
+				if a.interactionSessions == nil {
+					a.interactionSessions = make(map[string]string)
+				}
+				a.interactionSessions[request.ID] = a.currentID
+				a.interactionMu.Unlock()
+			}
+		}
 		if _, err := a.log.Append(typ, data); err != nil {
 			fmt.Fprintln(os.Stderr, "pa: "+typ+" event:", err)
 		}
@@ -73,9 +100,25 @@ func (a *app) registerInteracts() error {
 	// sensitive_tools is non-empty (an enabled interact with an empty list
 	// registers only the interact_* tools — no gating).
 	if len(a.cfg.Interact.SensitiveTools) > 0 {
-		a.reg.SetGate(a.sensitiveGate(eng, onEvent))
+		gate := a.sensitiveGate(eng, onEvent)
+		a.reg.AddPreExecuteHook(func(ctx context.Context, exec tools.Execution) (tools.PreToolDecision, error) {
+			if err := gate(ctx, exec.Name, exec.Arguments); err != nil {
+				return tools.PreToolDecision{Kind: "deny", Reason: err.Error()}, nil
+			}
+			return tools.PreToolDecision{Kind: "allow"}, nil
+		})
 	}
 	return nil
+}
+
+func (a *app) interactionBelongsTo(id, sessionID string) bool {
+	if sessionID == "" {
+		return true
+	}
+	a.interactionMu.RLock()
+	owner, known := a.interactionSessions[id]
+	a.interactionMu.RUnlock()
+	return known && owner == sessionID
 }
 
 // sensitiveGate returns the registry pre-execution gate for the configured
@@ -88,34 +131,47 @@ func (a *app) registerInteracts() error {
 // visible on the next probe). Approved returns nil and the tool runs; rejected
 // appends the interact/deny fact and returns a denial the model sees as a
 // tool/error.
-func (a *app) sensitiveGate(eng interact.Engine, onEvent func(string, any)) func(context.Context, string, json.RawMessage) error {
+func (a *app) sensitiveGate(eng interact.Engine, onEvent func(string, any)) func(context.Context, string, any) error {
 	sensitive := a.cfg.Interact.SensitiveTools
-	return func(ctx context.Context, name string, args json.RawMessage) error {
+	return func(ctx context.Context, name string, args any) error {
 		if !containsSensitive(sensitive, name) {
 			return nil // not a sensitive tool; no approval needed
 		}
-		argsText := boundRunes(string(args))
+		rawArgs, _ := json.Marshal(args)
+		argsText := boundRunes(string(rawArgs))
 		prompt := fmt.Sprintf("Allow the sensitive tool %s to run? args: %s", name, argsText)
 		req, err := eng.Request(ctx, prompt, name, argsText)
 		if err != nil {
 			return fmt.Errorf("interact: %s approval request failed: %w", name, err)
 		}
 		onEvent(session.EventInteractRequest, session.NewInteractRequest(req.ID, name))
-		approved, err := a.approvePrompt(req.ID, prompt)
-		if err != nil {
-			return fmt.Errorf("interact: %s approval read failed: %w", name, err)
+		approved := false
+		if isWebApprovalContext(ctx) {
+			// The browser resolves the same engine through /api/interactions;
+			// Await keeps the serial tool path blocked until that decision arrives.
+			resolved, awaitErr := eng.Await(ctx, req.ID)
+			if awaitErr != nil {
+				return fmt.Errorf("interact: %s web approval wait failed: %w", name, awaitErr)
+			}
+			approved = resolved.Status == interact.StatusApproved
+		} else {
+			var err error
+			approved, err = a.approvePrompt(req.ID, prompt)
+			if err != nil {
+				return fmt.Errorf("interact: %s approval read failed: %w", name, err)
+			}
+			status := interact.StatusRejected
+			if approved {
+				status = interact.StatusApproved
+			}
+			if _, err := eng.Resolve(ctx, req.ID, status); err != nil {
+				return fmt.Errorf("interact: %s resolve failed: %w", name, err)
+			}
+			if _, err := eng.Await(ctx, req.ID); err != nil {
+				return fmt.Errorf("interact: %s approval wait failed: %w", name, err)
+			}
+			onEvent(session.EventInteractResolve, session.NewInteractResolve(req.ID, approved))
 		}
-		status := interact.StatusRejected
-		if approved {
-			status = interact.StatusApproved
-		}
-		if _, err := eng.Resolve(ctx, req.ID, status); err != nil {
-			return fmt.Errorf("interact: %s resolve failed: %w", name, err)
-		}
-		if _, err := eng.Await(ctx, req.ID); err != nil {
-			return fmt.Errorf("interact: %s await failed: %w", name, err)
-		}
-		onEvent(session.EventInteractResolve, session.NewInteractResolve(req.ID, approved))
 		if !approved {
 			onEvent(session.EventInteractDeny, session.NewInteractDeny(req.ID))
 			return fmt.Errorf("interact: %s denied by user (request %s)", name, req.ID)

@@ -24,6 +24,7 @@ import (
 
 	"github.com/jabing/shutu-agent/internal/compaction"
 	"github.com/jabing/shutu-agent/internal/config"
+	"github.com/jabing/shutu-agent/internal/interact"
 	"github.com/jabing/shutu-agent/internal/llm"
 	"github.com/jabing/shutu-agent/internal/plan"
 	"github.com/jabing/shutu-agent/internal/session"
@@ -196,6 +197,40 @@ func (a *app) registerWebServer() error {
 	// manager is created lazily (independent of skill.enabled) so the page
 	// always lists the skill files it manages.
 	srv.SetSkillManager(a.webSkills)
+	// DSH Web approval surface: resolve the same live interact engine that the
+	// sensitive-tool gate is waiting on. The engine is optional by capability;
+	// an unconfigured interact seam answers 501 from the generic server.
+	if a.interacts != nil {
+		srv.SetInteractionManager(
+			func(ctx context.Context, sessionID string) ([]interact.Request, error) {
+				items, err := a.interacts.List(ctx)
+				if err != nil || sessionID == "" {
+					return items, err
+				}
+				filtered := make([]interact.Request, 0, len(items))
+				for _, item := range items {
+					if a.interactionBelongsTo(item.ID, sessionID) {
+						filtered = append(filtered, item)
+					}
+				}
+				return filtered, nil
+			},
+			func(ctx context.Context, sessionID, id string, status interact.ApprovalStatus) error {
+				if !a.interactionBelongsTo(id, sessionID) {
+					return interact.ErrUnknownRequest
+				}
+				_, err := a.interacts.Resolve(ctx, id, status)
+				if err != nil {
+					return err
+				}
+				if a.log != nil {
+					approved := status == interact.StatusApproved
+					_, _ = a.log.Append(session.EventInteractResolve, session.NewInteractResolve(id, approved))
+				}
+				return nil
+			},
+		)
+	}
 	a.webserver = srv
 	go func() {
 		if err := srv.Serve(); err != nil {
@@ -282,6 +317,9 @@ func (a *app) webMessage(ctx context.Context, sessionID, text string, images []l
 	if strings.TrimSpace(text) == "" && len(images) == 0 {
 		return errors.New("empty message text")
 	}
+	// Sensitive-tool approvals raised during a Web turn are resolved by the
+	// browser approval card, not by the REPL stdin prompt.
+	ctx = withWebApprovalContext(ctx)
 	if sessionID != "" && sessionID != a.currentID {
 		if err := a.resumeSession(ctx, sessionID); err != nil {
 			return err

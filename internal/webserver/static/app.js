@@ -52,6 +52,12 @@ const permSeat = $("perm-seat"), permSeatLabel = $("perm-seat-label"), permSeatI
 const modelSeat = $("model-seat"), modelSeatLabel = $("model-seat-label"), modelMenu = $("model-menu");
 const contextMeter = $("context-meter");
 const sessionStateEl = $("session-state");
+const approvalRoot = $("approval-root");
+const goalBar = $("goal-bar");
+const queueRoot = $("queue-root");
+const deliverablesRoot = $("deliverables-root");
+const referenceMenu = $("reference-menu");
+const planSeat = $("plan-seat"), planSeatLabel = $("plan-seat-label");
 const detailsPanel = $("details-panel"), detailsTitle = $("details-title"),
   detailsCloseBtn = $("details-close"), detailsEmptyEl = $("details-empty"), detailsSelEl = $("details-selection");
 
@@ -96,6 +102,15 @@ let runningTimer = null;        // 1s ticker for the elapsed clock
 let pollTimer = null;           // session-list refresh
 let config = {};                // cached GET /api/config view
 let pendingSlashCommands = [];  // built-in slash inputs waiting for their result
+let sessionProjection = null;
+let pendingInteractions = [];
+let interactionPollTimer = null;
+let queuedMessages = [];
+let queueFlushBusy = false;
+let sessionReferences = [];
+let sessionOutputs = [];
+let referenceMenuOpen = false;
+let referenceHighlight = 0;
 
 // The web command catalog is loaded from the backend config.commands response.
 // The server remains authoritative and still handles unknown commands. The
@@ -3238,15 +3253,69 @@ async function loadSessionConfig(id) {
 // The backend state projection mirrors dsh's session-level plan/goal/todo and
 // memory indicators. Keep it compact so it remains useful while the transcript
 // grows, and refresh it only on session open and after a completed turn.
+function currentGoalFromProjection(state) {
+  const goals = Array.isArray(state?.goals) ? state.goals : [];
+  return goals.find((goal) => !["complete", "completed", "cancelled"].includes(String(goal.status || "").toLowerCase())) || null;
+}
+
+function planStatusLabel(status) {
+  return ({ pending: "待处理", "in-progress": "进行中", done: "已完成", completed: "已完成", blocked: "已阻塞", paused: "已暂停", cancelled: "已取消" })[status] || status || "未知";
+}
+
+function syncPlanSeat(state = sessionProjection) {
+  if (!planSeat || !currentID) return;
+  const active = !!state?.plan_mode;
+  planSeat.classList.toggle("active", active);
+  planSeat.setAttribute("aria-pressed", String(active));
+  planSeatLabel.textContent = active ? "计划中" : "计划";
+}
+
+function renderGoalBar(state) {
+  if (!goalBar) return;
+  const goal = currentGoalFromProjection(state);
+  const plans = Array.isArray(state?.plans) ? state.plans : [];
+  const goalPlans = goal ? plans.filter((plan) => (goal.plans || []).includes(plan.id)) : [];
+  if (!goal && !state?.plan_mode) {
+    goalBar.classList.add("hidden");
+    goalBar.textContent = "";
+    return;
+  }
+  const steps = goalPlans.flatMap((plan) => Array.isArray(plan.steps) ? plan.steps : []);
+  const done = steps.filter((step) => ["done", "completed"].includes(step.status)).length;
+  const status = goal ? planStatusLabel(goal.status) : "计划模式";
+  const objective = goal ? (goal.objective || goal.title || "当前目标") : "当前回合将优先建立可执行计划";
+  goalBar.innerHTML = `
+    <div class="goal-bar-main">
+      <span class="goal-bar-mark" aria-hidden="true">◎</span>
+      <div class="goal-bar-copy">
+        <div class="goal-bar-title">${esc(goal ? (goal.title || "当前目标") : "计划模式")} <span class="goal-bar-status">${esc(status)}</span></div>
+        <div class="goal-bar-objective">${esc(objective)}</div>
+        ${steps.length ? `<div class="goal-bar-progress"><span style="width:${Math.round(done / steps.length * 100)}%"></span></div><span class="goal-bar-count">${done}/${steps.length} 个步骤</span>` : ""}
+      </div>
+      <div class="goal-bar-actions">
+        ${goal ? `<button type="button" data-goal-action="${goal.status === "paused" ? "resume" : "pause"}">${goal.status === "paused" ? "继续" : "暂停"}</button><button type="button" data-goal-action="clear" class="quiet-danger">清除</button>` : ""}
+      </div>
+    </div>
+    ${goalPlans.length ? `<div class="goal-bar-plans">${goalPlans.map((plan) => `<div class="goal-plan-row"><span class="goal-plan-dot" data-status="${esc(plan.status || "pending")}"></span><span>${esc(plan.title || "计划")}</span><span class="goal-plan-status">${esc(planStatusLabel(plan.status))}</span></div>`).join("")}</div>` : ""}`;
+  goalBar.classList.remove("hidden");
+  goalBar.querySelectorAll("[data-goal-action]").forEach((button) => {
+    button.addEventListener("click", () => runQuickCommand(`/goal ${button.dataset.goalAction}`));
+  });
+}
+
 async function loadSessionState(id) {
   if (!sessionStateEl) return;
   sessionStateEl.classList.add("hidden");
   sessionStateEl.textContent = "";
-  if (!id) return;
+  sessionProjection = null;
+  if (!id) { renderGoalBar(null); syncPlanSeat(null); return; }
   try {
     const res = await api(`/api/sessions/${encodeURIComponent(id)}/state`);
     if (res.status === 401 || !res.ok || currentID !== id) return;
     const state = await res.json();
+    sessionProjection = state;
+    renderGoalBar(state);
+    syncPlanSeat(state);
     const goals = Array.isArray(state.goals) ? state.goals : [];
     const plans = Array.isArray(state.plans) ? state.plans : [];
     const steps = plans.flatMap((plan) => Array.isArray(plan.steps) ? plan.steps : []);
@@ -3289,6 +3358,164 @@ async function loadFeedback(id) {
   } catch (e) {
     if (e.message !== "unauthorized") console.error("session feedback", e);
   }
+}
+
+function renderApprovalRoot() {
+  if (!approvalRoot) return;
+  const pending = pendingInteractions.filter((item) => item && item.status === "pending");
+  if (!pending.length) {
+    approvalRoot.classList.add("hidden");
+    approvalRoot.textContent = "";
+    return;
+  }
+  approvalRoot.innerHTML = `<div class="approval-heading"><span class="approval-pulse"></span><strong>需要你的确认</strong><span class="approval-count">${pending.length}</span></div>${pending.map((item) => `
+    <div class="approval-card" data-interaction-id="${esc(item.id)}">
+      <div class="approval-copy"><div class="approval-prompt">${esc(item.prompt || `允许 ${item.tool_name || "工具"} 执行？`)}</div><div class="approval-meta">${esc(item.tool_name || "敏感操作")} · ${esc(item.id)}</div>${item.args ? `<details><summary>查看参数</summary><pre>${esc(item.args)}</pre></details>` : ""}</div>
+      <div class="approval-actions"><button type="button" data-approval="rejected" class="approval-deny">拒绝</button><button type="button" data-approval="approved" class="approval-allow">允许</button></div>
+    </div>`).join("")}`;
+  approvalRoot.classList.remove("hidden");
+  approvalRoot.querySelectorAll("[data-approval]").forEach((button) => {
+    button.addEventListener("click", () => resolveInteraction(button.closest("[data-interaction-id]").dataset.interactionId, button.dataset.approval));
+  });
+}
+
+async function loadInteractions() {
+  try {
+    const suffix = currentID ? `?session_id=${encodeURIComponent(currentID)}` : "";
+    const res = await api(`/api/interactions${suffix}`);
+    if (res.status === 501) { pendingInteractions = []; renderApprovalRoot(); return; }
+    if (!res.ok) return;
+    const body = await res.json();
+    pendingInteractions = Array.isArray(body.interactions) ? body.interactions : [];
+    renderApprovalRoot();
+  } catch (e) {
+    if (e.message !== "unauthorized") console.error("interactions", e);
+  }
+}
+
+async function resolveInteraction(id, status) {
+  const card = approvalRoot?.querySelector(`[data-interaction-id="${CSS.escape(id)}"]`);
+  card?.classList.add("busy");
+  try {
+    const suffix = currentID ? `?session_id=${encodeURIComponent(currentID)}` : "";
+    const res = await api(`/api/interactions/${encodeURIComponent(id)}/resolve${suffix}`, {
+      method: "POST", body: JSON.stringify({ status }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || `HTTP ${res.status}`);
+    }
+    await loadInteractions();
+  } catch (e) {
+    if (e.message !== "unauthorized") {
+      toast(`审批处理失败：${e.message}`);
+      await loadInteractions();
+    }
+  }
+}
+
+function eventDetails(ev) {
+  if (!ev) return {};
+  if (ev.details && typeof ev.details === "object") return ev.details;
+  if (typeof ev.details === "string") {
+    try { return JSON.parse(ev.details) || {}; } catch (_) { return {}; }
+  }
+  return {};
+}
+function artifactPath(ev) {
+  const d = eventDetails(ev);
+  const value = d.path || d.file || d.filename || d.file_path || ev.path || "";
+  return typeof value === "string" ? value.trim() : "";
+}
+function syncSessionArtifacts(evs) {
+  const refs = new Set();
+  const outputs = new Set();
+  for (const ev of (Array.isArray(evs) ? evs : [])) {
+    const path = artifactPath(ev);
+    if (!path) continue;
+    if (String(ev.type || "").startsWith("fs/")) refs.add(path);
+    if (ev.type === "fs/write" || ev.type === "file/write") outputs.add(path);
+  }
+  sessionReferences = [...refs].slice(-80);
+  sessionOutputs = [...outputs].slice(-20);
+  renderReferenceMenu();
+  renderDeliverables();
+}
+function noteSessionArtifact(ev) {
+  const path = artifactPath(ev);
+  if (!path || !String(ev.type || "").startsWith("fs/")) return;
+  if (!sessionReferences.includes(path)) sessionReferences.push(path);
+  if ((ev.type === "fs/write" || ev.type === "file/write") && !sessionOutputs.includes(path)) sessionOutputs.push(path);
+  sessionReferences = sessionReferences.slice(-80);
+  sessionOutputs = sessionOutputs.slice(-20);
+  renderReferenceMenu();
+  renderDeliverables();
+}
+function insertFileReference(path) {
+  if (!path) return;
+  const end = composerText.selectionEnd ?? composerText.value.length;
+  const before = composerText.value.slice(0, end);
+  const match = /(?:^|\s)@([^\s]*)$/.exec(before);
+  const start = match ? end - match[1].length - 1 : end;
+  composerText.setRangeText(`@${path} `, start, end, "end");
+  syncGrow();
+  updateReferenceMenu();
+  composerText.focus();
+}
+function referenceQueryAtCaret() {
+  const end = composerText.selectionEnd ?? composerText.value.length;
+  const before = composerText.value.slice(0, end);
+  const match = /(?:^|\s)@([^\s]*)$/.exec(before);
+  return match ? { query: match[1].toLowerCase(), start: end - match[1].length - 1, end } : null;
+}
+function renderReferenceMenu() {
+  if (!referenceMenu) return;
+  const hit = referenceQueryAtCaret();
+  if (!hit || slashMenuOpen || !currentID) {
+    referenceMenuOpen = false;
+    referenceMenu.classList.add("hidden");
+    return;
+  }
+  const items = sessionReferences.filter((path) => path.toLowerCase().includes(hit.query)).slice(0, 8);
+  referenceHighlight = Math.min(referenceHighlight, Math.max(0, items.length - 1));
+  referenceMenu.innerHTML = items.length
+    ? items.map((path, i) => `<button type="button" class="hm-item${i === referenceHighlight ? " hm-active" : ""}" role="option" data-reference="${esc(path)}"><span class="hm-ico">@</span><span class="reference-path">${esc(path)}</span></button>`).join("")
+    : `<div class="reference-empty">暂无已发现文件，可继续输入完整路径</div>`;
+  referenceMenu.classList.remove("hidden");
+  referenceMenuOpen = true;
+  const rect = composerText.getBoundingClientRect();
+  referenceMenu.style.left = `${rect.left}px`;
+  referenceMenu.style.bottom = `${Math.max(12, window.innerHeight - rect.top + 8)}px`;
+  referenceMenu.style.width = `${Math.min(Math.max(rect.width, 280), 520)}px`;
+  referenceMenu.querySelectorAll("[data-reference]").forEach((button) => {
+    button.addEventListener("mousedown", (e) => e.preventDefault());
+    button.addEventListener("click", () => insertFileReference(button.dataset.reference));
+  });
+}
+function updateReferenceMenu() {
+  referenceHighlight = 0;
+  renderReferenceMenu();
+}
+function moveReferenceHighlight(delta) {
+  const items = referenceMenu?.querySelectorAll("[data-reference]") || [];
+  if (!items.length) return;
+  referenceHighlight = (referenceHighlight + delta + items.length) % items.length;
+  items.forEach((item, i) => item.classList.toggle("hm-active", i === referenceHighlight));
+}
+function closeReferenceMenu() {
+  referenceMenuOpen = false;
+  referenceMenu?.classList.add("hidden");
+}
+function renderDeliverables() {
+  if (!deliverablesRoot) return;
+  if (!currentID || !sessionOutputs.length) {
+    deliverablesRoot.classList.add("hidden");
+    deliverablesRoot.innerHTML = "";
+    return;
+  }
+  deliverablesRoot.innerHTML = `<span class="deliverables-heading">产出文件</span>${sessionOutputs.map((path) => `<button type="button" class="deliverable-item" title="引用 ${esc(path)}" data-output="${esc(path)}">${esc(path)}</button>`).join("")}`;
+  deliverablesRoot.classList.remove("hidden");
+  deliverablesRoot.querySelectorAll("[data-output]").forEach((button) => button.addEventListener("click", () => insertFileReference(button.dataset.output)));
 }
 // Composer pref loading: the mode comes from the config view (loadConfigLabels);
 // the permission preset is a persisted setting (fallback localStorage).
@@ -3411,6 +3638,13 @@ function openSession(id) {
   messagesEl.querySelector(".messages-inner")?.remove();
   syncSessionTitle();
   toolMeta = {};
+  queuedMessages = [];
+  queueFlushBusy = false;
+  sessionReferences = [];
+  sessionOutputs = [];
+  closeReferenceMenu();
+  renderQueue();
+  renderDeliverables();
   sessionEmpty = !id;
   heroEl.classList.toggle("hidden", !!id);
   // A real session re-enables the composer; the hero phase keeps it gated on a
@@ -3442,6 +3676,7 @@ async function loadEvents(id) {
     const grewFrom = renderedSeqs.size;
     const res = await api(`/api/sessions/${encodeURIComponent(id)}/events`);
     const evs = await res.json();
+    syncSessionArtifacts(evs);
     if (renderedSeqs.size > grewFrom) {
       sessionEmpty = evs.length === 0;
       setHeroPhase();
@@ -3490,6 +3725,42 @@ async function downloadSessionExport() {
   } catch (e) {
     if (e.message !== "unauthorized") addErrorRow({ summary: "Session export failed: " + e.message });
   }
+}
+
+const DSH_LIFECYCLE_TYPES = new Set([
+  "plan/create", "plan/update", "plan/delete", "plan/status", "plan/mode",
+  "goal/round_start", "goal/round_end", "interact/request", "interact/resolve", "interact/deny", "interact/status",
+  "workflow/run", "workflow/start", "workflow/phase", "workflow/log", "workflow/agent-start", "workflow/agent-end", "workflow/end",
+  "ralph/run", "eval/run", "code/run", "fs/read", "fs/write", "fs/list",
+  "terminal/start", "terminal/stop", "schedule/create", "schedule/list", "schedule/delete", "schedule/fire",
+  "spill/write", "spill/recall", "spill/list", "spill/delete",
+]);
+
+function lifecycleTitle(type) {
+  const [scope, action] = String(type || "").split("/");
+  const labels = {
+    plan: "计划", goal: "目标回合", interact: "需要确认", workflow: "工作流",
+    ralph: "Ralph", eval: "评估", code: "代码运行", fs: "文件操作",
+    terminal: "终端", schedule: "定时任务", spill: "记忆",
+  };
+  const verbs = { create: "创建", update: "更新", delete: "删除", status: "状态", mode: "模式", start: "开始", end: "完成", run: "完成", phase: "阶段", log: "日志", request: "请求", resolve: "已处理", deny: "已拒绝", read: "读取", write: "写入", list: "列表", recall: "召回", fire: "触发" };
+  return `${labels[scope] || scope} · ${verbs[action] || action || "事件"}`;
+}
+
+function renderLifecycleEvent(ev) {
+  if (!DSH_LIFECYCLE_TYPES.has(ev.type) || !ev.details) return false;
+  const inner = msgInner();
+  const node = document.createElement("div");
+  node.className = "msg lifecycle-card";
+  node.dataset.lifecycleType = ev.type;
+  const details = Object.entries(ev.details).map(([key, value]) => {
+    const text = Array.isArray(value) ? value.join(", ") : String(value);
+    return `<span class="lifecycle-detail"><span>${esc(key)}</span>${esc(text)}</span>`;
+  }).join("");
+  const summary = ev.summary || details || "";
+  node.innerHTML = `<div class="lifecycle-head"><span class="lifecycle-icon">✦</span><strong>${esc(lifecycleTitle(ev.type))}</strong><span class="lifecycle-time">${esc(fmtShort(ev.time))}</span></div><div class="lifecycle-summary">${esc(summary)}</div>${details ? `<div class="lifecycle-details">${details}</div>` : ""}`;
+  inner.appendChild(node);
+  return true;
 }
 
 function renderEvent(ev, replay) {
@@ -3565,7 +3836,9 @@ function renderEvent(ev, replay) {
       addCompactionEvent(ev);
       if (!replay && ev.type === "compaction/end") refreshContextMeter();
       break;
-    default: break;
+    default:
+      renderLifecycleEvent(ev);
+      break;
   }
 }
 
@@ -3623,6 +3896,8 @@ function handleStreamEvent(ev) {
   if (ev.seq != null) {
     if (renderedSeqs.has(ev.seq)) return;
   }
+  noteSessionArtifact(ev);
+  if (ev.type && ev.type.startsWith("interact/")) loadInteractions();
   if (ev.type === "assistant/chunk") {
     appendAssistantStreaming(ev.summary || "", ev.seq);
     noteRendered(ev.seq);
@@ -3673,6 +3948,42 @@ async function reconcileEvents() {
   } catch (e) { if (e.message !== "unauthorized") console.error("reconcile", e); }
 }
 
+function renderQueue() {
+  if (!queueRoot) return;
+  if (!currentID || !queuedMessages.length) {
+    queueRoot.classList.add("hidden");
+    queueRoot.innerHTML = "";
+    return;
+  }
+  queueRoot.innerHTML = `<div class="queue-heading"><span>排队消息</span><span class="queue-count">${queuedMessages.length}</span><span>当前回合结束后按顺序发送</span></div>${queuedMessages.map((item, i) => `<div class="queue-row" data-queue-index="${i}"><span class="queue-row-text" title="${esc(item.text)}">${esc(item.text)}</span><button type="button" data-queue-move="${i}">移到最前</button><button type="button" class="queue-remove" data-queue-remove="${i}">删除</button></div>`).join("")}`;
+  queueRoot.classList.remove("hidden");
+  queueRoot.querySelectorAll("[data-queue-move]").forEach((button) => button.addEventListener("click", () => {
+    const index = Number(button.dataset.queueMove);
+    if (index > 0 && queuedMessages[index]) queuedMessages.unshift(queuedMessages.splice(index, 1)[0]);
+    renderQueue();
+  }));
+  queueRoot.querySelectorAll("[data-queue-remove]").forEach((button) => button.addEventListener("click", () => {
+    queuedMessages.splice(Number(button.dataset.queueRemove), 1);
+    renderQueue();
+  }));
+}
+async function flushQueuedMessages() {
+  if (queueFlushBusy || turnRunning || !currentID) return;
+  queueFlushBusy = true;
+  try {
+    while (queuedMessages.length && currentID && !turnRunning) {
+      const next = queuedMessages.shift();
+      renderQueue();
+      composerText.value = next.text;
+      syncGrow();
+      await sendMessage();
+    }
+  } finally {
+    queueFlushBusy = false;
+    renderQueue();
+  }
+}
+
 // ---- composer ---------------------------------------------------------------
 function syncGrow() {
   // The hidden ::after replica layer (grow-wrap) sizes the textarea; it reads
@@ -3680,15 +3991,18 @@ function syncGrow() {
   growWrapEl.dataset.replicatedValue = composerText.value + "\n";
 }
 function setComposerDisabled(disabled) {
-  if (disabled) closeSlashMenu();
-  composerBox.classList.toggle("disabled", disabled);
+  if (disabled && !turnRunning) { closeSlashMenu(); closeReferenceMenu(); }
+  // DSH keeps the InputBar writable while a turn is active: Enter places the
+  // draft in the queued lane, while the primary seat remains STOP.
+  const lockInput = disabled && !turnRunning;
+  composerBox.classList.toggle("disabled", lockInput);
   // The send seat becomes the STOP control while a turn runs (dsh): it must
   // stay clickable in the running state even though the composer is locked.
   sendBtn.disabled = disabled && !turnRunning;
-  composerText.disabled = disabled;
+  composerText.disabled = lockInput;
   // The toolbar controls follow the same lock (dsh: the model seat stays live
   // only while a session exists; here the whole toolbar locks while inert).
-  [permSeat, modelSeat, cmdBtn].forEach((el) => { if (el) el.disabled = disabled; });
+  [permSeat, modelSeat, cmdBtn, planSeat].forEach((el) => { if (el) el.disabled = disabled; });
 }
 function placeholderFor() {
   if (currentID) return "给智能体发消息…";
@@ -3702,11 +4016,36 @@ composerText.addEventListener("input", () => {
   syncGrow();
   updatePlaceholder();
   updateSlashMenu();
+  updateReferenceMenu();
 });
+
+async function runQuickCommand(command) {
+  if (!currentID || turnRunning) return;
+  const previous = composerText.value;
+  composerText.value = command;
+  syncGrow();
+  try {
+    await sendMessage();
+  } finally {
+    if (!composerText.value) composerText.value = previous;
+    syncGrow();
+    await loadSessionState(currentID);
+  }
+}
 
 async function sendMessage() {
   const text = composerText.value.trim();
   if ((!text && drafts.length === 0) || !currentID) return;
+  if (turnRunning) {
+    if (drafts.length) { toast("当前回合运行中暂不支持图片排队，请稍后发送"); return; }
+    queuedMessages.push({ text });
+    composerText.value = "";
+    syncGrow();
+    closeSlashMenu();
+    closeReferenceMenu();
+    renderQueue();
+    return;
+  }
   setComposerDisabled(true);
   try {
     // No optimistic bubble: the backend appends user/message and streams it
@@ -3717,6 +4056,7 @@ async function sendMessage() {
     addRunning();
     streamActive = true;
     turnRunning = true;
+    setComposerDisabled(true);
     syncSendButton();
     sendBtn.disabled = false; // running → the button is the STOP control (dsh)
     loadSessions(); // blue running dot on the current row
@@ -3786,6 +4126,8 @@ async function sendMessage() {
     });
     loadSessionState(currentID);
     refreshContextMeter();
+    renderQueue();
+    if (!turnRunning && queuedMessages.length) void flushQueuedMessages();
   }
 }
 
@@ -3902,6 +4244,19 @@ function toast(msg) {
   toastTimer = setTimeout(() => t.classList.remove("show"), 2600);
 }
 composerText.addEventListener("keydown", (e) => {
+  if (referenceMenuOpen) {
+    if (e.key === "ArrowDown") { e.preventDefault(); moveReferenceHighlight(1); return; }
+    if (e.key === "ArrowUp") { e.preventDefault(); moveReferenceHighlight(-1); return; }
+    if ((e.key === "Tab" || e.key === "Enter") && !e.isComposing) {
+      const items = referenceMenu.querySelectorAll("[data-reference]");
+      if (items[referenceHighlight]) {
+        e.preventDefault();
+        insertFileReference(items[referenceHighlight].dataset.reference);
+        return;
+      }
+    }
+    if (e.key === "Escape") { e.preventDefault(); closeReferenceMenu(); return; }
+  }
   if (slashMenuOpen) {
     if (e.key === "ArrowDown") {
       e.preventDefault();
@@ -3940,6 +4295,10 @@ composerText.addEventListener("keydown", (e) => {
   }
 });
 sendBtn.addEventListener("click", () => { if (turnRunning) stopTurn(); else sendMessage(); });
+if (planSeat) planSeat.addEventListener("click", () => {
+  if (!currentID || turnRunning) return;
+  runQuickCommand(sessionProjection?.plan_mode ? "/plan off" : "/plan");
+});
 
 // ---- topbar / config ----------------------------------------------------------
 // loadConfigLabels fills the topbar mode badge + the composer seats from the
@@ -5413,6 +5772,7 @@ function boot() {
   updatePlaceholder();
   syncPermSelect();
   syncSendButton();
+  loadInteractions();
   loadConfig();
   loadComposerPrefs();
   loadSessions();
@@ -5424,6 +5784,7 @@ function boot() {
     syncHeroPickState();
   }
   pollTimer = setInterval(() => loadSessions(), 30000);
+  if (!interactionPollTimer) interactionPollTimer = setInterval(() => loadInteractions(), 2000);
   route();
 }
 
@@ -5463,6 +5824,7 @@ document.addEventListener("click", (e) => {
   if (heroModeOpen && !e.target.closest("#hero-mode-chip, #hero-mode-menu")) toggleModeMenu(false);
   if (cmdMenuOpen && !e.target.closest("#cmd-btn, #cmd-menu")) toggleCmdMenu(false);
   if (slashMenuOpen && !e.target.closest("#composer, #slash-menu")) closeSlashMenu();
+  if (referenceMenuOpen && !e.target.closest("#composer, #reference-menu")) closeReferenceMenu();
   if (permMenuOpen && !e.target.closest("#perm-seat, #perm-menu")) togglePermMenu(false);
   if (modelMenuOpen && !e.target.closest("#model-seat, #model-menu")) toggleModelMenu(false);
 });

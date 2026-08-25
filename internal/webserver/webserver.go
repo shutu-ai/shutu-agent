@@ -1,8 +1,9 @@
 // webserver.go — the M10 unified web portal (ADR 2026-08-20-m10-web-portal.md
 // D-WEB-1~7): a single net/http server carrying the dsh-style session/event
 // browsing entry (M10a), the dashboard stats API (M10c) and later KB admin
-// (M10b). The API is read-only (D-WEB-4): it never writes the session log.
-// Every route sits behind the bearer-token middleware; the frontend is vanilla
+// (M10b). Data views are read-only (D-WEB-4); injected workspace actions
+// (messages, session controls and approval decisions) are explicit exceptions.
+// Every API route sits behind the bearer-token middleware; the frontend is vanilla
 // JS embedded into the binary (go:embed) — zero new dependencies.
 package webserver
 
@@ -34,6 +35,7 @@ import (
 	"time"
 
 	"github.com/jabing/shutu-agent/internal/attachment"
+	"github.com/jabing/shutu-agent/internal/interact"
 	"github.com/jabing/shutu-agent/internal/llm"
 	"github.com/jabing/shutu-agent/internal/session"
 	"github.com/jabing/shutu-agent/internal/store"
@@ -138,6 +140,12 @@ type Server struct {
 	// the two scopes and persists display groups. nil (the default) makes every
 	// /api/config/skills route answer 501.
 	skillsFn func(ctx context.Context, action string, req SkillRequest) (map[string]any, error)
+
+	// interactionFn/resolverFn expose the live DSH-style approval surface. The
+	// engine remains owned by cmd/pa; this server only transports request views
+	// and a resolve command.
+	interactionFn        func(ctx context.Context, sessionID string) ([]interact.Request, error)
+	resolveInteractionFn func(ctx context.Context, sessionID, id string, status interact.ApprovalStatus) error
 }
 
 // ProviderEdit is the M11 provider-management payload shared by POST and DELETE
@@ -221,6 +229,15 @@ func (s *Server) SetSkillManager(fn func(ctx context.Context, action string, req
 	s.skillsFn = fn
 }
 
+// SetInteractionManager wires the live approval surface used by DSH Web.
+func (s *Server) SetInteractionManager(
+	list func(ctx context.Context, sessionID string) ([]interact.Request, error),
+	resolve func(ctx context.Context, sessionID, id string, status interact.ApprovalStatus) error,
+) {
+	s.interactionFn = list
+	s.resolveInteractionFn = resolve
+}
+
 // SetAttachmentStore wires the image-attachment store (P5): POST/GET
 // /api/sessions/{id}/attachments and the images field of POST /api/sessions/
 // {id}/message. Called by the composition root; nil (default) keeps the
@@ -285,6 +302,8 @@ func New(st store.Store, token, addr string) (*Server, error) {
 	mux.Handle("GET /api/sessions", s.requireAuth(http.HandlerFunc(s.handleSessions)))
 	mux.Handle("GET /api/sessions/{id}/events", s.requireAuth(http.HandlerFunc(s.handleEvents)))
 	mux.Handle("GET /api/sessions/{id}/state", s.requireAuth(http.HandlerFunc(s.handleSessionState)))
+	mux.Handle("GET /api/interactions", s.requireAuth(http.HandlerFunc(s.handleInteractions)))
+	mux.Handle("POST /api/interactions/{id}/resolve", s.requireAuth(http.HandlerFunc(s.handleInteractionResolve)))
 	// dsh /export compatibility: the browser downloads the current Session log
 	// as a ZIP and keeps the command outside model history.
 	mux.Handle("GET /api/session.export", s.requireAuth(http.HandlerFunc(s.handleSessionExport)))
@@ -876,24 +895,25 @@ type imageView struct {
 // messages (bytes never leave the attachment store; the browser fetches them
 // through the authorized echo endpoint).
 type eventView struct {
-	Command           string      `json:"command,omitempty"` // browser-side web command action
-	Seq               uint64      `json:"seq"`
-	Type              string      `json:"type"`
-	Time              time.Time   `json:"time"`
-	Summary           string      `json:"summary"`
-	ContextMessage    bool        `json:"context_message,omitempty"` // model-only runtime/skill context; never a user bubble
-	CompactionID      string      `json:"compaction_id,omitempty"`
-	CompactionSummary string      `json:"compaction_summary,omitempty"`
-	CompactionItems   int         `json:"compaction_items,omitempty"`
-	CompactionTokens  int         `json:"compaction_tokens,omitempty"`
-	CompactionError   string      `json:"compaction_error,omitempty"`
-	CompactionMarker  bool        `json:"compaction_marker,omitempty"`
-	Reasoning         string      `json:"reasoning,omitempty"`   // assistant/message 的思维链（有界）
-	ToolName          string      `json:"tool_name,omitempty"`   // tool/start、tool/result、tool/error 的工具名
-	ToolOutput        string      `json:"tool_output,omitempty"` // tool/result 的有界输出
-	ToolArgs          string      `json:"tool_args,omitempty"`   // 该调用名对应的工具入参（来自 assistant 的 toolCall；只读展示用）
-	CallID            string      `json:"call_id,omitempty"`     // 工具调用关联 id（tool/start → tool/result/error 配对）
-	Images            []imageView `json:"images,omitempty"`      // P5: 该消息携带的图片引用
+	Details           map[string]any `json:"details,omitempty"`
+	Command           string         `json:"command,omitempty"` // browser-side web command action
+	Seq               uint64         `json:"seq"`
+	Type              string         `json:"type"`
+	Time              time.Time      `json:"time"`
+	Summary           string         `json:"summary"`
+	ContextMessage    bool           `json:"context_message,omitempty"` // model-only runtime/skill context; never a user bubble
+	CompactionID      string         `json:"compaction_id,omitempty"`
+	CompactionSummary string         `json:"compaction_summary,omitempty"`
+	CompactionItems   int            `json:"compaction_items,omitempty"`
+	CompactionTokens  int            `json:"compaction_tokens,omitempty"`
+	CompactionError   string         `json:"compaction_error,omitempty"`
+	CompactionMarker  bool           `json:"compaction_marker,omitempty"`
+	Reasoning         string         `json:"reasoning,omitempty"`   // assistant/message 的思维链（有界）
+	ToolName          string         `json:"tool_name,omitempty"`   // tool/start、tool/result、tool/error 的工具名
+	ToolOutput        string         `json:"tool_output,omitempty"` // tool/result 的有界输出
+	ToolArgs          string         `json:"tool_args,omitempty"`   // 该调用名对应的工具入参（来自 assistant 的 toolCall；只读展示用）
+	CallID            string         `json:"call_id,omitempty"`     // 工具调用关联 id（tool/start → tool/result/error 配对）
+	Images            []imageView    `json:"images,omitempty"`      // P5: 该消息携带的图片引用
 }
 
 // toEventView builds the public view for one event (bounded summary + the W4
@@ -913,6 +933,7 @@ func toEventView(ev session.Event) eventView {
 	v.Images = extractImages(ev)
 	v.CallID = callIDOf(ev)
 	v.Command = commandOf(ev)
+	v.Details = eventDetails(ev)
 	return v
 }
 
@@ -2641,6 +2662,133 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		items = []map[string]any{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"jobs": items})
+}
+
+// handleInteractions exposes the live approval queue used by the DSH Web
+// approval composer. Prompt and args are already bounded by interact.Engine;
+// the response is still shaped explicitly so the engine's internal type never
+// becomes a wire contract.
+func (s *Server) handleInteractions(w http.ResponseWriter, r *http.Request) {
+	if s.interactionFn == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "interaction manager not wired"})
+		return
+	}
+	items, err := s.interactionFn(r.Context(), r.URL.Query().Get("session_id"))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	views := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		view := map[string]any{
+			"id": item.ID, "prompt": item.Prompt, "tool_name": item.ToolName,
+			"args": item.Args, "status": string(item.Status), "created_at": item.CreatedAt,
+		}
+		if item.ResolvedAt != nil {
+			view["resolved_at"] = item.ResolvedAt
+		}
+		views = append(views, view)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"interactions": views})
+}
+
+// handleInteractionResolve applies one browser decision to a pending request.
+func (s *Server) handleInteractionResolve(w http.ResponseWriter, r *http.Request) {
+	if s.resolveInteractionFn == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "interaction resolver not wired"})
+		return
+	}
+	var body struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON body"})
+		return
+	}
+	status := interact.ApprovalStatus(body.Status)
+	if status != interact.StatusApproved && status != interact.StatusRejected {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "status must be approved or rejected"})
+		return
+	}
+	if err := s.resolveInteractionFn(r.Context(), r.URL.Query().Get("session_id"), r.PathValue("id"), status); err != nil {
+		if errors.Is(err, interact.ErrUnknownRequest) || errors.Is(err, interact.ErrAlreadyResolved) {
+			writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": r.PathValue("id"), "status": string(status)})
+}
+
+// eventDetails exposes only allow-listed, bounded fields for DSH lifecycle
+// cards. Raw event payloads never cross this boundary: tool arguments, model
+// context and other opaque data remain private.
+func eventDetails(ev session.Event) map[string]any {
+	allowed := map[string][]string{
+		session.EventPlanCreate:         {"scope", "id", "title", "goalId", "status"},
+		session.EventPlanUpdate:         {"scope", "id", "title", "objective"},
+		session.EventPlanDelete:         {"scope", "id"},
+		session.EventPlanStatus:         {"scope", "id", "status", "reason"},
+		session.EventPlanMode:           {"active"},
+		session.EventGoalRoundStart:     {"goalId", "round"},
+		session.EventGoalRoundEnd:       {"goalId", "round", "status", "error"},
+		session.EventInteractRequest:    {"id", "toolName"},
+		session.EventInteractResolve:    {"id", "approved"},
+		session.EventInteractDeny:       {"id"},
+		session.EventInteractStatus:     {"id", "status"},
+		session.EventWorkflowRun:        {"total", "completed", "failed"},
+		session.EventWorkflowStart:      {"runId", "label"},
+		session.EventWorkflowPhase:      {"title", "phase"},
+		session.EventWorkflowLog:        {"message"},
+		session.EventWorkflowAgentStart: {"seq", "label", "phase"},
+		session.EventWorkflowAgentEnd:   {"seq", "label", "outcome", "child_id"},
+		session.EventWorkflowEnd:        {"stop_reason", "agents_started", "error"},
+		session.EventRalphRun:           {"objective", "rounds", "done", "blocked"},
+		session.EventEvalRun:            {"id", "taskId", "verdict", "reason", "evaluatorKind", "criteriaCount"},
+		session.EventCodeRun:            {"lang", "exitCode", "timedOut", "truncated"},
+		session.EventFsRead:             {"path", "size"},
+		session.EventFsWrite:            {"path"},
+		session.EventFsList:             {"dir", "count"},
+		session.EventTerminalStart:      {"id", "owner"},
+		session.EventTerminalStop:       {"id", "reason"},
+		session.EventScheduleCreate:     {"id", "kind", "spec"},
+		session.EventScheduleList:       {"count"},
+		session.EventScheduleDelete:     {"id"},
+		session.EventScheduleFire:       {"id", "action"},
+		session.EventSpillWrite:         {"id", "content"},
+		session.EventSpillRecall:        {"query", "count"},
+		session.EventSpillList:          {"count"},
+		session.EventSpillDelete:        {"id"},
+		session.EventKBRecall:           {"query"},
+		session.EventKBAdd:              {"entryId", "title", "type"},
+		session.EventKBExtract:          {"status", "session", "turn", "reason"},
+	}
+	keys, ok := allowed[ev.Type]
+	if !ok {
+		return nil
+	}
+	var raw map[string]any
+	if json.Unmarshal(ev.Data, &raw) != nil {
+		return nil
+	}
+	out := make(map[string]any, len(keys))
+	for _, key := range keys {
+		value, exists := raw[key]
+		if !exists {
+			continue
+		}
+		switch typed := value.(type) {
+		case string:
+			out[key] = boundRunes(typed, maxSummary)
+		case bool, float64:
+			out[key] = typed
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // summarize extracts a bounded, safe one-line summary for an event by
