@@ -627,9 +627,65 @@ function renderHelpBody(text) {
   }).join("");
 }
 function currentLanguage() { return localStorage.getItem(KEY_LANG) === "en" ? "en" : "zh"; }
+function localeText(zh, en) { return currentLanguage() === "en" ? en : zh; }
 function applyLanguage() {
-  document.documentElement.lang = currentLanguage() === "en" ? "en" : "zh-CN";
-  document.documentElement.dataset.locale = currentLanguage();
+  const en = currentLanguage() === "en";
+  document.documentElement.lang = en ? "en" : "zh-CN";
+  document.documentElement.dataset.locale = en ? "en" : "zh";
+  const text = (selector, zh, english) => {
+    const node = $(selector);
+    if (node) node.textContent = en ? english : zh;
+  };
+  const attr = (selector, name, zh, english) => {
+    const node = $(selector);
+    if (node) node.setAttribute(name, en ? english : zh);
+  };
+  text("#login h1", "数驼 AI Agent", "DSH AI Agent");
+  text("#login .muted", "输入 web_server.token 进入工作台（令牌仅保存在本机浏览器）", "Enter web_server.token to open the workspace (the token stays in this browser)");
+  text("#login button[type='submit']", "进入", "Enter");
+  text("#ws-label", "工作区", "Workspace");
+  text("#settings-link", "⚙", "⚙");
+  text("#settings-back", "← 返回聊天", "← Back to chat");
+  text("#settings-sec-title", "通用设置", "General");
+  text("#hero-ws-label", "选择工作区", "Select workspace");
+  text("#hero-mode-label", "标准模式", "Standard mode");
+  attr("#sidebar-toggle", "title", "折叠侧栏", "Collapse sidebar");
+  attr("#brand", "title", "新建会话", "New session");
+  attr("#new-session", "title", "新建会话", "New session");
+  attr("#search-toggle", "title", "搜索会话", "Search sessions");
+  attr("#session-search", "placeholder", "搜索会话…", "Search sessions…");
+  attr("#composer-text", "placeholder", "给智能体发消息…", "Message the agent…");
+  attr("#settings-link", "title", "设置", "Settings");
+  attr("#theme-toggle", "title", "切换主题", "Toggle theme");
+  attr("#theme-toggle-settings", "title", "切换主题", "Toggle theme");
+  translateSettingsGeneral();
+}
+function translateSettingsGeneral() {
+  if (location.hash !== "#/settings" || settingsSec !== "general") return;
+  const sec = $("settings-sec");
+  if (!sec) return;
+  const en = currentLanguage() === "en";
+  const title = sec.querySelector("h2");
+  if (title) title.textContent = en ? "General settings" : "通用设置";
+  const rowTitles = sec.querySelectorAll(".row-title");
+  const zhTitles = ["外观", "语言", "Agent 预设", "权限", "默认终端", "回车发送"];
+  const enTitles = ["Appearance", "Language", "Agent preset", "Permissions", "Default terminal", "Enter behavior"];
+  rowTitles.forEach((node, i) => { if (zhTitles[i]) node.textContent = en ? enTitles[i] : zhTitles[i]; });
+  const descs = sec.querySelectorAll(".row-desc");
+  const enDescs = [
+    "Default mode for new sessions; takes effect after restart.",
+    "Default tool permissions for new sessions; takes effect after restart.",
+    "Choose the shell used by the terminal; takes effect after restart.",
+    "Enter sends; Shift+Enter inserts a newline, or use Ctrl+Enter to send.",
+  ];
+  descs.forEach((node, i) => { if (en && enDescs[i]) node.textContent = enDescs[i]; });
+  const cubes = sec.querySelectorAll(".theme-cube span");
+  ["Light", "Dark", "Follow system"].forEach((label, i) => { if (en && cubes[i]) cubes[i].textContent = label; });
+  const lang = sec.querySelector("#lang-select");
+  if (lang) {
+    lang.options[0].textContent = en ? "中文" : "中文";
+    lang.options[1].textContent = "English";
+  }
 }
 function slashCommandName(text) {
   const match = String(text || "").trim().match(/^\/([^\s]+)/);
@@ -4540,11 +4596,11 @@ async function loadConfig() {
 // uniform 16px SVGs (dsh SettingsRoot navIcon: models → data outline, unknown →
 // settings gear), so every nav glyph renders at the same size.
 const SETTINGS_SECTIONS = [
-  { id: "general", label: "通用设置", icon: PA_ICONS.settings },
-  { id: "model", label: "模型", icon: PA_ICONS.data },
-  { id: "caps", label: "能力开关", icon: PA_ICONS.personalization },
-  { id: "plugins", label: "运行时清单", icon: PA_ICONS.personalization },
-  { id: "skills", label: "技能", icon: PA_ICONS.skills },
+  { id: "general", label: "通用设置", en: "General", icon: PA_ICONS.settings },
+  { id: "model", label: "模型", en: "Models", icon: PA_ICONS.data },
+  { id: "caps", label: "能力开关", en: "Capabilities", icon: PA_ICONS.personalization },
+  { id: "plugins", label: "运行时清单", en: "Runtime inventory", icon: PA_ICONS.personalization },
+  { id: "skills", label: "技能", en: "Skills", icon: PA_ICONS.skills },
 ];
 const CAPABILITY_NAMES = {
   terminal: "终端", fs: "文件系统", fs_search: "全文检索", ralph: "Ralph 循环",
@@ -4575,7 +4631,7 @@ function renderSettingsNav() {
     const btn = document.createElement("button");
     btn.className = "nav-cell" + (s.id === settingsSec ? " active" : "");
     btn.setAttribute("aria-current", s.id === settingsSec ? "true" : "false");
-    btn.innerHTML = `<span class="nav-ico">${s.icon}</span><span>${esc(s.label)}</span>`;
+    btn.innerHTML = `<span class="nav-ico">${s.icon}</span><span>${esc(localeText(s.label, s.en))}</span>`;
     btn.addEventListener("click", () => { settingsSec = s.id; renderSettingsNav(); renderSettingsSec(); });
     nav.appendChild(btn);
   }
@@ -4603,7 +4659,7 @@ function renderGeneral(c) {
   const sec = settingsSectionEl();
   sec.innerHTML = `<h2>通用设置</h2>` +
     appearance +
-    // dsh LanguageRow: title + selector pill (English is planned, not shipped).
+    // dsh LanguageRow: persist the locale and update the shell immediately.
     `<div class="settings-row">
       <div class="row-text"><div class="row-title">语言</div></div>
       <select id="lang-select" class="row-select">
@@ -4653,11 +4709,11 @@ function renderGeneral(c) {
     languageSelect.addEventListener("change", async () => {
       const next = languageSelect.value === "en" ? "en" : "zh";
       localStorage.setItem(KEY_LANG, next);
-      applyLanguage();
       try {
         await api("/api/settings", { method: "PATCH", body: JSON.stringify({ language: next }) });
       } catch (e) { if (e.message !== "unauthorized") console.debug("save language", e); }
       renderGeneral(c);
+      applyLanguage();
     });
   }
   const enter = sec.querySelector("#enter-select");
@@ -4683,7 +4739,10 @@ function renderGeneral(c) {
       const res = await api("/api/settings");
       const d = await res.json();
       if (d.language === "en" || d.language === "zh") {
+        const changed = currentLanguage() !== d.language;
         localStorage.setItem(KEY_LANG, d.language);
+        if (changed) renderGeneral(c);
+        if (changed) renderSettingsNav();
         applyLanguage();
       }
       if (d.agent_preset && sec.querySelector("#agent-preset-select")) sec.querySelector("#agent-preset-select").value = d.agent_preset;
@@ -5384,14 +5443,20 @@ function renderMCPManager(sec, c) {
   box.innerHTML = `<h3 class="plugin-list-title">MCP 配置</h3><p class="intro">新增、编辑或删除 stdio 服务。配置会持久化，重启后启动新服务。</p><div class="mcp-form"><input data-mcp-name placeholder="名称"><input data-mcp-cmd placeholder="命令，例如 npx"><input data-mcp-args placeholder="参数，按空格分隔"><button type="button" class="sec-btn" data-mcp-add>新增服务</button></div><div class="plugin-list mcp-config-list">${servers.length ? servers.map((item) => `<div class="plugin-row"><span>${esc(item.name || "")}</span><code>${esc(item.cmd || "")}</code><span>${esc((item.args || []).join(" "))}</span><button type="button" class="sec-btn" data-mcp-edit="${esc(item.name || "")}">编辑</button><button type="button" class="sec-btn danger" data-mcp-delete="${esc(item.name || "")}">删除</button></div>`).join("") : `<div class="plugin-empty">暂无 MCP 配置</div>`}</div>`;
   sec.appendChild(box);
   const name = box.querySelector("[data-mcp-name]"), cmd = box.querySelector("[data-mcp-cmd]"), args = box.querySelector("[data-mcp-args]");
-  box.querySelector("[data-mcp-add]")?.addEventListener("click", () => void mcpManage("add", { name: name.value.trim(), cmd: cmd.value.trim(), args: args.value.trim() ? args.value.trim().split(/\s+/) : [] }));
+  const addButton = box.querySelector("[data-mcp-add]");
+  let editingOriginal = "";
+  addButton?.addEventListener("click", () => void mcpManage(editingOriginal ? "update" : "add", {
+    original_name: editingOriginal,
+    name: name.value.trim(),
+    cmd: cmd.value.trim(),
+    args: args.value.trim() ? args.value.trim().split(/\s+/) : [],
+  }));
   box.querySelectorAll("[data-mcp-edit]").forEach((button) => button.addEventListener("click", () => {
     const item = servers.find((entry) => entry.name === button.dataset.mcpEdit);
     if (!item) return;
     name.value = item.name || ""; cmd.value = item.cmd || ""; args.value = (item.args || []).join(" ");
-    name.dataset.originalName = item.name || "";
-    box.querySelector("[data-mcp-add]").textContent = "保存修改";
-    box.querySelector("[data-mcp-add]").onclick = () => void mcpManage("update", { original_name: name.dataset.originalName, name: name.value.trim(), cmd: cmd.value.trim(), args: args.value.trim() ? args.value.trim().split(/\s+/) : [] });
+    editingOriginal = item.name || "";
+    if (addButton) addButton.textContent = "保存修改";
   }));
   box.querySelectorAll("[data-mcp-delete]").forEach((button) => button.addEventListener("click", () => void mcpManage("delete", { original_name: button.dataset.mcpDelete })));
 }
@@ -5834,7 +5899,8 @@ function renderSettingsSec() {
   const c = settingsConfig;
   const sec = settingsSectionEl();
   sec.textContent = "";
-  $("settings-sec-title").textContent = SETTINGS_SECTIONS.find((s) => s.id === settingsSec)?.label || "";
+  const sectionMeta = SETTINGS_SECTIONS.find((s) => s.id === settingsSec);
+  $("settings-sec-title").textContent = sectionMeta ? localeText(sectionMeta.label, sectionMeta.en) : "";
   if (!c) { sec.innerHTML = `<div class="muted">加载中…</div>`; return; }
   if (settingsSec === "general") renderGeneral(c);
   else if (settingsSec === "model") renderModel(c);
