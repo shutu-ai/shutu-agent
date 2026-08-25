@@ -16,6 +16,24 @@ describe('ShutuApi', () => {
     expect(requestHeaders?.get('Authorization')).toBe('Bearer secret')
   })
 
+  it('loads session-scoped subagents and jobs', async () => {
+    const requests: string[] = []
+    const api = new ShutuApi('https://shutu.test', '', async input => {
+      requests.push(String(input))
+      const body = String(input).includes('/subagents')
+        ? { subagents: [{ id: 'a-1', label: '分析', running: true }] }
+        : { jobs: [{ id: 'j-1', kind: 'workflow', label: '构建', status: 'running' }] }
+      return new Response(JSON.stringify(body), { status: 200 })
+    })
+
+    await expect(api.listSubagents('session/1')).resolves.toEqual([{ id: 'a-1', label: '分析', running: true }])
+    await expect(api.listJobs('session/1')).resolves.toEqual([{ id: 'j-1', kind: 'workflow', label: '构建', status: 'running' }])
+    expect(requests).toEqual([
+      'https://shutu.test/api/subagents?session_id=session%2F1',
+      'https://shutu.test/api/jobs?session_id=session%2F1',
+    ])
+  })
+
   it('builds encoded cursor requests with bearer authentication', async () => {
     let requestURL = ''
     let requestHeaders: Headers | undefined

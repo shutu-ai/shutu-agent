@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
-import type { ConfigView, EventDetails, EventView, SessionSummary } from './api'
+import type { ConfigView, EventDetails, EventView, JobView, RunningSnapshot, SessionSummary, SubagentView } from './api'
 import { projectDshConversation, type DshConversationNode, type DshConversationSnapshot } from './dsh-conversation'
 import { projectDshTrajectory, type DshTimelineMode } from './dsh-trajectory'
 import { WebStore } from './store'
@@ -426,6 +426,94 @@ function VirtualEvents({ events, onReachTop, loadingOlder, focusSeq }: {
   </div>
 }
 
+function runningJobLabel(status: string | undefined): string {
+  switch (status?.toLowerCase()) {
+    case 'running': case 'ongoing': return '运行中'
+    case 'queued': case 'pending': return '排队中'
+    case 'completed': case 'done': case 'success': return '已完成'
+    case 'failed': case 'error': return '失败'
+    case 'cancelled': case 'canceled': return '已取消'
+    default: return status || '未知状态'
+  }
+}
+
+function runningJobTone(status: string | undefined): 'running' | 'done' | 'danger' | 'idle' {
+  switch (status?.toLowerCase()) {
+    case 'running': case 'ongoing': return 'running'
+    case 'completed': case 'done': case 'success': return 'done'
+    case 'failed': case 'error': return 'danger'
+    default: return 'idle'
+  }
+}
+
+function RunningSummary({ data }: { data: RunningSnapshot }) {
+  const runningSubagents = data.subagents.filter(item => item.running).length
+  const runningJobs = data.jobs.filter(item => ['running', 'ongoing'].includes(item.status?.toLowerCase() ?? '')).length
+  return <div className="running-summary" aria-label="运行状态摘要">
+    <div className="running-metric"><span>活动子代理</span><strong>{runningSubagents}</strong><small>/{data.subagents.length} 个</small></div>
+    <div className="running-metric"><span>运行中任务</span><strong>{runningJobs}</strong><small>/{data.jobs.length} 个</small></div>
+    <div className="running-metric"><span>总活动项</span><strong>{runningSubagents + runningJobs}</strong><small>实时同步</small></div>
+  </div>
+}
+
+function SubagentList({ items }: { items: readonly SubagentView[] }) {
+  return <section className="running-section"><div className="running-section-head"><div><h3>子代理</h3><span>当前会话的代理树</span></div><strong>{items.length}</strong></div>{items.length === 0 ? <div className="running-empty">当前没有活动子代理。</div> : <div className="running-list">{items.map(item => <article className="running-row" key={item.id}><span className={`running-state-dot ${item.running ? 'active' : ''}`} /><div className="running-row-copy"><strong>{item.label || item.id}</strong><span>{item.id}</span></div><span className={`running-pill ${item.running ? 'running' : 'idle'}`}>{item.running ? '运行中' : '已结束'}</span></article>)}</div>}</section>
+}
+
+function JobList({ items }: { items: readonly JobView[] }) {
+  return <section className="running-section"><div className="running-section-head"><div><h3>后台任务</h3><span>工作流与异步执行</span></div><strong>{items.length}</strong></div>{items.length === 0 ? <div className="running-empty">当前没有后台任务。</div> : <div className="running-list">{items.map(item => { const tone = runningJobTone(item.status); return <article className="running-row" key={item.id}><span className={`running-state-dot ${tone}`} /><div className="running-row-copy"><strong>{item.label || item.kind || item.id}</strong><span>{item.kind || item.id}{item.detail ? ` · ${item.detail}` : ''}</span></div><span className={`running-pill ${tone}`}>{runningJobLabel(item.status)}</span>{item.started_at && <time>{relativeTime(item.started_at)}</time>}</article> })}</div>}</section>
+}
+
+function RunningPanel({ store, sessionId }: { store: WebStore; sessionId: string | null }) {
+  const [data, setData] = useState<RunningSnapshot | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
+  const [refreshKey, setRefreshKey] = useState(0)
+
+  useEffect(() => {
+    if (sessionId === null) {
+      setData(null)
+      setLoading(false)
+      setError(null)
+      return
+    }
+    const abort = new AbortController()
+    let firstLoad = true
+    const refresh = async (): Promise<void> => {
+      if (firstLoad) setLoading(true)
+      try {
+        const next = await store.loadRunning(sessionId, abort.signal)
+        if (abort.signal.aborted) return
+        setData(next)
+        setError(null)
+        setLastUpdated(new Date())
+      } catch (reason) {
+        if (!abort.signal.aborted) setError(reason instanceof Error ? reason.message : String(reason))
+      } finally {
+        if (!abort.signal.aborted) {
+          setLoading(false)
+          firstLoad = false
+        }
+      }
+    }
+    void refresh()
+    const timer = setInterval(() => { void refresh() }, 5000)
+    return () => { abort.abort(); clearInterval(timer) }
+  }, [refreshKey, sessionId, store])
+
+  if (sessionId === null) return <div className="running-panel"><div className="running-empty-state"><strong>选择一个会话</strong><span>运行中面板会显示该会话的子代理和后台任务。</span></div></div>
+  if (loading && data === null) return <div className="running-panel"><div className="running-empty-state"><div className="spinner" /><span>正在加载运行状态…</span></div></div>
+  if (error && data === null) return <div className="running-panel"><div className="running-empty-state running-error"><strong>运行状态读取失败</strong><span>{error}</span><button type="button" onClick={() => setRefreshKey(value => value + 1)}>重试</button></div></div>
+  const snapshot = data ?? { subagents: [], jobs: [] }
+  return <div className="running-panel">
+    <div className="running-panel-head"><div><span className="eyebrow">LIVE STATUS</span><h2>运行中</h2><p>自动刷新当前会话的子代理和后台任务。</p></div><div className="running-actions"><span className="running-refresh">{lastUpdated ? `刚刚更新 · 每 5 秒` : '等待更新'}</span><button type="button" onClick={() => setRefreshKey(value => value + 1)} aria-label="刷新运行状态">刷新</button></div></div>
+    {error && <div className="running-inline-error" role="status">本次刷新失败：{error}</div>}
+    <RunningSummary data={snapshot} />
+    <div className="running-columns"><SubagentList items={snapshot.subagents} /><JobList items={snapshot.jobs} /></div>
+  </div>
+}
+
 function isConversationEvent(event: EventView): boolean {
   return event.type.startsWith('user/') || event.type.startsWith('assistant/') ||
     event.type.startsWith('tool/') || event.type.startsWith('interact/') ||
@@ -434,7 +522,7 @@ function isConversationEvent(event: EventView): boolean {
 
 export function App({ store }: { store: WebStore }) {
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
-  const [tab, setTab] = useState<'chat' | 'trajectory'>('chat')
+  const [tab, setTab] = useState<'chat' | 'trajectory' | 'running'>('chat')
   const [draft, setDraft] = useState('')
   const [search, setSearch] = useState('')
   const [sendError, setSendError] = useState<string | null>(null)
@@ -513,11 +601,11 @@ export function App({ store }: { store: WebStore }) {
         <div><h1>{selected?.title || (state.selectedId ? state.selectedId : 'Conversation')}</h1><div className="status-line"><span className={state.connected ? 'status-dot online' : 'status-dot'} />{state.connected ? 'Live' : 'Reconnecting'}</div></div>
         <label className="search-box"><span>⌕</span><input aria-label="Search trajectory" placeholder="Search events" value={search} onChange={event => setSearch(event.target.value)} />{search && <button type="button" onClick={() => setSearch('')} aria-label="Clear search">×</button>}</label>
       </header>
-      <nav className="tabs" role="tablist"><button role="tab" aria-selected={tab === 'chat'} className={tab === 'chat' ? 'tab selected' : 'tab'} onClick={() => setTab('chat')}>Conversation</button><button role="tab" aria-selected={tab === 'trajectory'} className={tab === 'trajectory' ? 'tab selected' : 'tab'} onClick={() => setTab('trajectory')}>Trajectory <span>{state.events.length}</span></button></nav>
+      <nav className="tabs" role="tablist"><button role="tab" aria-selected={tab === 'chat'} className={tab === 'chat' ? 'tab selected' : 'tab'} onClick={() => setTab('chat')}>Conversation</button><button role="tab" aria-selected={tab === 'trajectory'} className={tab === 'trajectory' ? 'tab selected' : 'tab'} onClick={() => setTab('trajectory')}>Trajectory <span>{state.events.length}</span></button><button role="tab" aria-selected={tab === 'running'} className={tab === 'running' ? 'tab selected' : 'tab'} onClick={() => setTab('running')}>运行中</button></nav>
       {search.trim() !== '' && <div className="search-status" role="status" aria-live="polite">{filtered.length} matching loaded events{state.hasOlder ? ' · scroll to load older history' : ''}</div>}
       {(state.error || sendError) && <div className="error-banner"><span>{state.error || sendError}</span><button onClick={() => { setSendError(null); void store.start() }}>Retry</button></div>}
       <section className="content-panel">
-        {state.authRequired ? <form className="auth-card" onSubmit={event => { event.preventDefault(); void authenticate() }}><strong>Authentication required</strong><span>Enter the bearer token configured for the Shutu web server.</span><input aria-label="Bearer token" type="password" autoComplete="current-password" value={token} onChange={event => setToken(event.target.value)} placeholder="Bearer token" /><button type="submit" disabled={token.trim() === ''}>Connect</button></form> : state.loading ? <div className="empty"><div className="spinner" />Loading session…</div> : state.selectedId === null ? <div className="empty"><strong>Start a new conversation</strong><span>Select a session or send a message from the agent.</span></div> : filtered.length === 0 ? <div className="empty"><strong>{search ? 'No matching events' : 'No events yet'}</strong><span>{search ? 'Try a different search term.' : 'Events will appear here as the session runs.'}</span></div> : tab === 'trajectory' ? <><DshTimeline events={filtered} onSelectSeq={setFocusedSeq} /><VirtualEvents events={filtered} focusSeq={focusedSeq} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} /></> : <DshConversation events={filtered} sessionId={state.selectedId} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} />}
+        {state.authRequired ? <form className="auth-card" onSubmit={event => { event.preventDefault(); void authenticate() }}><strong>Authentication required</strong><span>Enter the bearer token configured for the Shutu web server.</span><input aria-label="Bearer token" type="password" autoComplete="current-password" value={token} onChange={event => setToken(event.target.value)} placeholder="Bearer token" /><button type="submit" disabled={token.trim() === ''}>Connect</button></form> : state.loading ? <div className="empty"><div className="spinner" />Loading session…</div> : tab === 'running' ? <RunningPanel store={store} sessionId={state.selectedId} /> : state.selectedId === null ? <div className="empty"><strong>Start a new conversation</strong><span>Select a session or send a message from the agent.</span></div> : filtered.length === 0 ? <div className="empty"><strong>{search ? 'No matching events' : 'No events yet'}</strong><span>{search ? 'Try a different search term.' : 'Events will appear here as the session runs.'}</span></div> : tab === 'trajectory' ? <><DshTimeline events={filtered} onSelectSeq={setFocusedSeq} /><VirtualEvents events={filtered} focusSeq={focusedSeq} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} /></> : <DshConversation events={filtered} sessionId={state.selectedId} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} />}
       </section>
       <form className="composer" onSubmit={event => { event.preventDefault(); if (state.sending) void stopRun(); else void submit() }}><textarea value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); if (!state.sending) void submit() } }} placeholder={state.sending ? 'Agent is running…' : 'Send a message…'} rows={2} /><button type="submit" disabled={state.selectedId === null || (!state.sending && draft.trim() === '')}>{state.sending ? 'Stop' : 'Send'} <span>{state.sending ? '■' : '↵'}</span></button></form>
     </main>

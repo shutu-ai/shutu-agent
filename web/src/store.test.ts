@@ -34,6 +34,8 @@ describe('WebStore', () => {
     let emitted = false
     const api: WebApi = {
       getConfig: async () => ({}),
+      listSubagents: async () => [],
+      listJobs: async () => [],
       listSessions: async () => [session('one')],
       createSession: async () => ({ id: 'new' }),
       resumeSession: async () => undefined,
@@ -68,6 +70,8 @@ describe('WebStore', () => {
     const olderPage = new Promise<EventPage>(resolve => { resolveOlder = resolve })
     const api: WebApi = {
       getConfig: async () => ({}),
+      listSubagents: async () => [],
+      listJobs: async () => [],
       listSessions: async () => [],
       createSession: async () => ({ id: 'new' }),
       resumeSession: async () => undefined,
@@ -100,6 +104,8 @@ describe('WebStore', () => {
     let authorized = false
     const api: WebApi = {
       getConfig: async () => ({}),
+      listSubagents: async () => [],
+      listJobs: async () => [],
       listSessions: async () => {
         if (!authorized) throw new ShutuApiError('unauthorized', 401)
         return [session('secure')]

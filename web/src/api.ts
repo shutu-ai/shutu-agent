@@ -67,10 +67,33 @@ export interface ConfigView {
   [key: string]: unknown
 }
 
+export interface SubagentView {
+  id: string
+  label?: string
+  running: boolean
+}
+
+export interface JobView {
+  id: string
+  kind?: string
+  label?: string
+  status?: string
+  detail?: string
+  started_at?: string
+  finished_at?: string
+}
+
+export interface RunningSnapshot {
+  subagents: SubagentView[]
+  jobs: JobView[]
+}
+
 export type EventListener = (event: EventView) => void
 
 export interface WebApi {
   getConfig(signal?: AbortSignal): Promise<ConfigView>
+  listSubagents(sessionId: string, signal?: AbortSignal): Promise<SubagentView[]>
+  listJobs(sessionId: string, signal?: AbortSignal): Promise<JobView[]>
   listSessions(signal?: AbortSignal): Promise<SessionSummary[]>
   createSession(signal?: AbortSignal): Promise<{ id: string }>
   resumeSession(sessionId: string, signal?: AbortSignal): Promise<void>
@@ -126,6 +149,16 @@ export class ShutuApi implements WebApi {
 
   getConfig(signal?: AbortSignal): Promise<ConfigView> {
     return this.json<ConfigView>('/api/config', { signal })
+  }
+
+  listSubagents(sessionId: string, signal?: AbortSignal): Promise<SubagentView[]> {
+    const query = new URLSearchParams({ session_id: sessionId })
+    return this.json<{ subagents: SubagentView[] }>(`/api/subagents?${query}`, { signal }).then(result => result.subagents ?? [])
+  }
+
+  listJobs(sessionId: string, signal?: AbortSignal): Promise<JobView[]> {
+    const query = new URLSearchParams({ session_id: sessionId })
+    return this.json<{ jobs: JobView[] }>(`/api/jobs?${query}`, { signal }).then(result => result.jobs ?? [])
   }
 
   async createSession(signal?: AbortSignal): Promise<{ id: string }> {

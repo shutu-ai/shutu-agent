@@ -1,4 +1,4 @@
-import type { ConfigView, EventView, SessionSummary, WebApi } from './api'
+import type { ConfigView, EventView, RunningSnapshot, SessionSummary, WebApi } from './api'
 import { ShutuApiError } from './api'
 
 export interface WebState {
@@ -195,6 +195,14 @@ export class WebStore {
 
   getConfig(signal?: AbortSignal): Promise<ConfigView> {
     return this.api.getConfig(signal)
+  }
+
+  async loadRunning(sessionId: string, signal?: AbortSignal): Promise<RunningSnapshot> {
+    const [subagents, jobs] = await Promise.all([
+      this.api.listSubagents(sessionId, signal),
+      this.api.listJobs(sessionId, signal),
+    ])
+    return { subagents, jobs }
   }
 
   async authenticate(token: string): Promise<void> {
