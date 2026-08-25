@@ -73,6 +73,59 @@ export interface SessionSearchHit {
   snippet: string
 }
 
+export interface ProviderModelView {
+  id: string
+  name?: string
+  context_window?: number
+  max_tokens?: number
+}
+
+export interface ProviderView {
+  id: string
+  name?: string
+  custom?: boolean
+  available?: boolean
+  configured?: boolean
+  model?: string
+  base_url?: string
+  candidates?: string[]
+  models?: ProviderModelView[]
+  protocol?: string
+  protocol_label?: string
+  reasoning?: Record<string, unknown> | null
+}
+
+export interface MCPServerView {
+  name?: string
+  cmd?: string
+  args?: string[]
+  connected?: boolean
+  tool_count?: number
+  enabled?: boolean
+  [key: string]: unknown
+}
+
+export interface SettingsView {
+  agent_preset?: string
+  permission_preset?: string
+  terminal_shell?: string
+  language?: string
+  mode_current?: string
+  terminal_current?: boolean
+  mode_options?: string[]
+  permission_options?: string[]
+  terminal_options?: string[]
+  restart_required?: boolean
+}
+
+export interface SessionConfigView {
+  agent_preset?: string
+  provider?: string
+  model?: string
+  reasoning_effort?: string
+  permission?: string
+}
+
 export interface EventDetails {
   [key: string]: unknown
 }
@@ -141,8 +194,8 @@ export interface ConfigView {
   web_server_addr?: string
   tools_enabled?: string[]
   tools_enabled_count?: number
-  providers?: unknown[]
-  mcp_servers?: unknown[]
+  providers?: ProviderView[]
+  mcp_servers?: MCPServerView[]
   commands?: CommandView[]
   [key: string]: unknown
 }
@@ -207,6 +260,14 @@ export type EventListener = (event: EventView) => void
 
 export interface WebApi {
   getConfig(signal?: AbortSignal): Promise<ConfigView>
+  getSettings(signal?: AbortSignal): Promise<SettingsView>
+  updateSettings(values: Partial<Pick<SettingsView, 'agent_preset' | 'permission_preset' | 'terminal_shell' | 'language'>>, signal?: AbortSignal): Promise<{ ok: true; restart_required?: boolean }>
+  switchModel(provider?: string, model?: string, reasoningEffort?: string, signal?: AbortSignal): Promise<{ ok: true }>
+  saveProvider(provider: { id: string; name?: string; base_url?: string; model?: string; api_key?: string; protocol?: string; models?: ProviderModelView[]; custom?: boolean }, signal?: AbortSignal): Promise<void>
+  deleteProvider(id: string, signal?: AbortSignal): Promise<void>
+  discoverProvider(values: { provider: string; base_url?: string; protocol?: string; api_key?: string }, signal?: AbortSignal): Promise<ProviderModelView[]>
+  manageMcp(action: 'add' | 'update' | 'delete', values: { original_name?: string; name?: string; cmd?: string; args?: string[] }, signal?: AbortSignal): Promise<MCPServerView[]>
+  refreshMcp(signal?: AbortSignal): Promise<MCPServerView[]>
   listSubagents(sessionId: string, signal?: AbortSignal): Promise<SubagentView[]>
   listJobs(sessionId: string, signal?: AbortSignal): Promise<JobView[]>
   listFeedback(sessionId: string, signal?: AbortSignal): Promise<FeedbackView[]>
@@ -226,6 +287,9 @@ export interface WebApi {
   searchSessions(query: string, signal?: AbortSignal): Promise<SessionSearchHit[]>
   listFiles(sessionId: string, path?: string, query?: string, signal?: AbortSignal): Promise<SessionFilesView>
   previewFile(sessionId: string, path: string, start?: number, end?: number, signal?: AbortSignal): Promise<FilePreview>
+  getSessionConfig(sessionId: string, signal?: AbortSignal): Promise<SessionConfigView>
+  updateSessionConfig(sessionId: string, values: Partial<SessionConfigView>, signal?: AbortSignal): Promise<SessionConfigView>
+  exportSession(sessionId: string, signal?: AbortSignal): Promise<Blob>
   forkSession(sessionId: string, signal?: AbortSignal): Promise<{ id: string }>
   listQueue(sessionId: string, signal?: AbortSignal): Promise<QueueItem[]>
   enqueueQueue(sessionId: string, text: string, signal?: AbortSignal): Promise<QueueItem>
@@ -295,6 +359,42 @@ export class ShutuApi implements WebApi {
 
   getConfig(signal?: AbortSignal): Promise<ConfigView> {
     return this.json<ConfigView>('/api/config', { signal })
+  }
+
+  getSettings(signal?: AbortSignal): Promise<SettingsView> {
+    return this.json<SettingsView>('/api/settings', { signal })
+  }
+
+  updateSettings(values: Partial<Pick<SettingsView, 'agent_preset' | 'permission_preset' | 'terminal_shell' | 'language'>>, signal?: AbortSignal): Promise<{ ok: true; restart_required?: boolean }> {
+    return this.json<{ ok: true; restart_required?: boolean }>('/api/settings', {
+      method: 'PATCH', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(values),
+    })
+  }
+
+  switchModel(provider = '', model = '', reasoningEffort = '', signal?: AbortSignal): Promise<{ ok: true }> {
+    return this.json<{ ok: true }>('/api/config/model', {
+      method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider, model, reasoning_effort: reasoningEffort }),
+    })
+  }
+
+  async saveProvider(provider: { id: string; name?: string; base_url?: string; model?: string; api_key?: string; protocol?: string; models?: ProviderModelView[]; custom?: boolean }, signal?: AbortSignal): Promise<void> {
+    await this.json<{ ok: true }>('/api/config/provider', { method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(provider) })
+  }
+
+  async deleteProvider(id: string, signal?: AbortSignal): Promise<void> {
+    await this.json<{ ok: true }>('/api/config/provider', { method: 'DELETE', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) })
+  }
+
+  discoverProvider(values: { provider: string; base_url?: string; protocol?: string; api_key?: string }, signal?: AbortSignal): Promise<ProviderModelView[]> {
+    return this.json<{ models: ProviderModelView[] }>('/api/config/provider/discover', { method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(values) }).then(result => result.models ?? [])
+  }
+
+  manageMcp(action: 'add' | 'update' | 'delete', values: { original_name?: string; name?: string; cmd?: string; args?: string[] }, signal?: AbortSignal): Promise<MCPServerView[]> {
+    return this.json<{ servers: MCPServerView[] }>('/api/config/mcp', { method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, ...values }) }).then(result => result.servers ?? [])
+  }
+
+  refreshMcp(signal?: AbortSignal): Promise<MCPServerView[]> {
+    return this.json<{ servers: MCPServerView[] }>('/api/config/mcp/refresh', { method: 'POST', signal }).then(result => result.servers ?? [])
   }
 
   listSubagents(sessionId: string, signal?: AbortSignal): Promise<SubagentView[]> {
@@ -376,6 +476,18 @@ export class ShutuApi implements WebApi {
     if (start !== undefined) params.set('start', String(start))
     if (end !== undefined) params.set('end', String(end))
     return this.json<FilePreview>(`/api/sessions/${encodeURIComponent(sessionId)}/file?${params}`, { signal })
+  }
+
+  getSessionConfig(sessionId: string, signal?: AbortSignal): Promise<SessionConfigView> {
+    return this.json<SessionConfigView>(`/api/sessions/${encodeURIComponent(sessionId)}/config`, { signal })
+  }
+
+  updateSessionConfig(sessionId: string, values: Partial<SessionConfigView>, signal?: AbortSignal): Promise<SessionConfigView> {
+    return this.json<SessionConfigView>(`/api/sessions/${encodeURIComponent(sessionId)}/config`, { method: 'PATCH', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(values) })
+  }
+
+  exportSession(sessionId: string, signal?: AbortSignal): Promise<Blob> {
+    return this.blob(`/api/session.export?${new URLSearchParams({ sessionId, includeDescendants: 'true' })}`, { signal })
   }
 
   forkSession(sessionId: string, signal?: AbortSignal): Promise<{ id: string }> {

@@ -1,4 +1,4 @@
-import type { AttachmentView, ConfigView, EventView, FeedbackView, FilePreview, InteractionView, QueueItem, RunningSnapshot, SessionFilesView, SessionSearchHit, SessionSummary, WebApi, WorkspaceList } from './api'
+import type { AttachmentView, ConfigView, EventView, FeedbackView, FilePreview, InteractionView, MCPServerView, ProviderModelView, QueueItem, RunningSnapshot, SessionConfigView, SessionFilesView, SessionSearchHit, SessionSummary, SettingsView, WebApi, WorkspaceList } from './api'
 import { ShutuApiError } from './api'
 
 export interface WebState {
@@ -200,6 +200,38 @@ export class WebStore {
     return this.api.getConfig(signal)
   }
 
+  getSettings(signal?: AbortSignal): Promise<SettingsView> {
+    return this.api.getSettings(signal)
+  }
+
+  updateSettings(values: Partial<Pick<SettingsView, 'agent_preset' | 'permission_preset' | 'terminal_shell' | 'language'>>): Promise<{ ok: true; restart_required?: boolean }> {
+    return this.api.updateSettings(values)
+  }
+
+  async switchModel(provider = '', model = '', reasoningEffort = ''): Promise<void> {
+    await this.api.switchModel(provider, model, reasoningEffort)
+  }
+
+  async saveProvider(provider: { id: string; name?: string; base_url?: string; model?: string; api_key?: string; protocol?: string; models?: ProviderModelView[]; custom?: boolean }): Promise<void> {
+    await this.api.saveProvider(provider)
+  }
+
+  async deleteProvider(id: string): Promise<void> {
+    await this.api.deleteProvider(id)
+  }
+
+  discoverProvider(values: { provider: string; base_url?: string; protocol?: string; api_key?: string }, signal?: AbortSignal): Promise<ProviderModelView[]> {
+    return this.api.discoverProvider(values, signal)
+  }
+
+  manageMcp(action: 'add' | 'update' | 'delete', values: { original_name?: string; name?: string; cmd?: string; args?: string[] }): Promise<MCPServerView[]> {
+    return this.api.manageMcp(action, values)
+  }
+
+  refreshMcp(signal?: AbortSignal): Promise<MCPServerView[]> {
+    return this.api.refreshMcp(signal)
+  }
+
   listFeedback(sessionId: string, signal?: AbortSignal): Promise<FeedbackView[]> {
     return this.api.listFeedback(sessionId, signal)
   }
@@ -271,6 +303,18 @@ export class WebStore {
 
   previewFile(sessionId: string, path: string, start?: number, end?: number, signal?: AbortSignal): Promise<FilePreview> {
     return this.api.previewFile(sessionId, path, start, end, signal)
+  }
+
+  getSessionConfig(sessionId: string, signal?: AbortSignal): Promise<SessionConfigView> {
+    return this.api.getSessionConfig(sessionId, signal)
+  }
+
+  updateSessionConfig(sessionId: string, values: Partial<SessionConfigView>): Promise<SessionConfigView> {
+    return this.api.updateSessionConfig(sessionId, values)
+  }
+
+  exportSession(sessionId: string, signal?: AbortSignal): Promise<Blob> {
+    return this.api.exportSession(sessionId, signal)
   }
 
   async forkSession(sessionId: string): Promise<void> {

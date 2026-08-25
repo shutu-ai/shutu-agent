@@ -181,4 +181,37 @@ describe('ShutuApi', () => {
       { path: '/api/interactions/i1/resolve?session_id=s%2F1', method: 'POST', body: '{"status":"approved","answer":"yes"}' },
     ])
   })
+
+  it('maps P8 settings, model, session-config and export APIs', async () => {
+    const requests: { path: string; method: string; body?: string }[] = []
+    const api = new ShutuApi('https://shutu.test', '', async (input, init) => {
+      const url = new URL(String(input))
+      requests.push({ path: `${url.pathname}${url.search}`, method: init?.method ?? 'GET', body: typeof init?.body === 'string' ? init.body : undefined })
+      if (url.pathname === '/api/session.export') return new Response(new Blob(['zip']), { status: 200 })
+      if (url.pathname === '/api/settings' && (init?.method ?? 'GET') === 'GET') return new Response(JSON.stringify({ agent_preset: 'standard' }), { status: 200 })
+      if (url.pathname === '/api/config/provider/discover') return new Response(JSON.stringify({ models: [{ id: 'model-a' }] }), { status: 200 })
+      if (url.pathname === '/api/config/mcp/refresh' || url.pathname === '/api/config/mcp') return new Response(JSON.stringify({ servers: [{ name: 'fs' }] }), { status: 200 })
+      if (url.pathname.endsWith('/config') && (init?.method ?? 'GET') === 'GET') return new Response(JSON.stringify({ provider: 'deepseek-official' }), { status: 200 })
+      if (url.pathname.endsWith('/config')) return new Response(JSON.stringify({ provider: 'deepseek-official', model: 'model-a' }), { status: 200 })
+      return new Response(JSON.stringify({ ok: true }), { status: 200 })
+    })
+
+    await expect(api.getSettings()).resolves.toMatchObject({ agent_preset: 'standard' })
+    await api.updateSettings({ permission_preset: 'full' })
+    await api.switchModel('deepseek-official', 'model-a', 'high')
+    await api.saveProvider({ id: 'custom', custom: true, base_url: 'https://provider.test', model: 'model-a' })
+    await api.deleteProvider('custom')
+    await expect(api.discoverProvider({ provider: 'custom', base_url: 'https://provider.test' })).resolves.toEqual([{ id: 'model-a' }])
+    await expect(api.manageMcp('add', { name: 'fs', cmd: 'npx', args: ['server'] })).resolves.toEqual([{ name: 'fs' }])
+    await expect(api.refreshMcp()).resolves.toEqual([{ name: 'fs' }])
+    await expect(api.getSessionConfig('s1')).resolves.toMatchObject({ provider: 'deepseek-official' })
+    await expect(api.updateSessionConfig('s1', { model: 'model-a' })).resolves.toMatchObject({ model: 'model-a' })
+    await expect(api.exportSession('s1')).resolves.toBeInstanceOf(Blob)
+
+    expect(requests.map(item => `${item.method} ${item.path}`)).toEqual([
+      'GET /api/settings', 'PATCH /api/settings', 'POST /api/config/model', 'POST /api/config/provider', 'DELETE /api/config/provider',
+      'POST /api/config/provider/discover', 'POST /api/config/mcp', 'POST /api/config/mcp/refresh', 'GET /api/sessions/s1/config',
+      'PATCH /api/sessions/s1/config', 'GET /api/session.export?sessionId=s1&includeDescendants=true',
+    ])
+  })
 })

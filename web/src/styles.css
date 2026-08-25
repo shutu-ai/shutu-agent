@@ -280,6 +280,7 @@ body[data-theme="light"] .tool-chip { border-color: #d4e0e8; color: #42576c; bac
 .command-menu { position: absolute; z-index: 12; right: 9px; bottom: calc(100% - 1px); left: 9px; display: grid; max-height: 260px; overflow: auto; border: 1px solid #30465a; border-radius: 9px; padding: 5px; background: #12202e; box-shadow: 0 -12px 30px #0006; }
 .command-menu button { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 10px; border: 0; border-radius: 6px; padding: 8px 10px; color: #c8d7e5; background: transparent; text-align: left; cursor: pointer; }
 .command-menu button:hover, .command-menu button:focus-visible { background: #1d3143; outline: 0; }
+.command-menu button.active { background: #1d3a4e; }
 .command-menu strong { color: #9de9bd; }
 .command-menu span { overflow: hidden; color: #8196aa; text-overflow: ellipsis; white-space: nowrap; }
 .composer { position: relative; }
@@ -303,6 +304,7 @@ body[data-theme="light"] .tool-chip { border-color: #d4e0e8; color: #42576c; bac
 .interaction-question { display: grid; gap: 5px; color: #a9bfd1; font-size: 12px; }
 body[data-theme="light"] .command-menu, body[data-theme="light"] .queue-panel, body[data-theme="light"] .interaction-panel { border-color: #ccd9e4; background: #f8fbfd; box-shadow: 0 -12px 30px #8aa0b522; }
 body[data-theme="light"] .command-menu button:hover, body[data-theme="light"] .command-menu button:focus-visible { background: #e7f0f6; }
+body[data-theme="light"] .command-menu button.active { background: #dcecf5; }
 body[data-theme="light"] .command-menu span, body[data-theme="light"] .queue-head span, body[data-theme="light"] .interaction-head span, body[data-theme="light"] .queue-item small { color: #6d8295; }
 body[data-theme="light"] .queue-item, body[data-theme="light"] .interaction-card { border-color: #e0e8ef; }
 body[data-theme="light"] .queue-item span, body[data-theme="light"] .interaction-copy p { color: #304d65; }
@@ -311,6 +313,29 @@ body[data-theme="light"] .queue-actions button, body[data-theme="light"] .intera
 @media (max-width: 700px) {
   .queue-panel, .interaction-panel { margin-left: 10px; margin-right: 10px; }
   .queue-item { align-items: flex-start; flex-direction: column; }
+}
+
+.export-toggle { border: 1px solid #30465a; border-radius: 6px; padding: 7px 10px; color: #bcd0e3; background: #152535; cursor: pointer; }
+.export-toggle:disabled { cursor: not-allowed; opacity: .45; }
+.settings-controls { display: grid; gap: 12px; margin-bottom: 16px; border: 1px solid #2b4054; border-radius: 9px; padding: 13px; background: #101c29; }
+.settings-control-head { display: flex; justify-content: space-between; gap: 12px; }
+.settings-control-head div { display: grid; gap: 3px; }
+.settings-control-head strong { color: #e4eef6; }
+.settings-control-head span { color: #8298ad; font-size: 12px; }
+.settings-control-notice { color: #9de9bd !important; }
+.settings-control-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.settings-control-grid label { display: grid; align-content: start; gap: 5px; color: #9ab0c2; font-size: 12px; }
+.settings-control-grid select { min-width: 0; border: 1px solid #30465a; border-radius: 5px; padding: 7px; color: #dce8f2; background: #152535; }
+.settings-control-grid button { justify-self: start; border: 1px solid #39536a; border-radius: 5px; padding: 5px 8px; color: #b9d3e6; background: #162838; cursor: pointer; }
+.settings-control-grid button:disabled { cursor: not-allowed; opacity: .45; }
+.settings-control-grid small { color: #71879b; }
+body[data-theme="light"] .settings-controls { border-color: #ccd9e4; background: #f8fbfd; }
+body[data-theme="light"] .settings-control-head strong { color: #29455d; }
+body[data-theme="light"] .settings-control-head span, body[data-theme="light"] .settings-control-grid small { color: #6d8295; }
+body[data-theme="light"] .settings-control-grid select, body[data-theme="light"] .settings-control-grid button { border-color: #b8cbd9; color: #365a73; background: #edf4f8; }
+
+@media (max-width: 800px) {
+  .settings-control-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 .running-panel { display: flex; min-height: 0; flex: 1; flex-direction: column; overflow: auto; padding: 2px 9px 24px 18px; }

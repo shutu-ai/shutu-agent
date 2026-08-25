@@ -1,5 +1,5 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
-import type { AttachmentView, CommandView, ConfigView, DirectoryListing, EventDetails, EventView, FeedbackView, ImageView, InteractionView, JobView, QueueItem, RunningSnapshot, SessionSearchHit, SessionSummary, SubagentView, WorkspaceView } from './api'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent } from 'react'
+import type { AttachmentView, CommandView, ConfigView, DirectoryListing, EventDetails, EventView, FeedbackView, ImageView, InteractionView, JobView, ProviderView, QueueItem, RunningSnapshot, SessionSearchHit, SessionSummary, SettingsView, SubagentView, WorkspaceView } from './api'
 import { projectDshConversation, type DshConversationNode, type DshConversationSnapshot } from './dsh-conversation'
 import { projectDshTrajectory, type DshTimelineMode } from './dsh-trajectory'
 import { WebStore } from './store'
@@ -305,6 +305,53 @@ function configText(config: ConfigView | null, key: string, fallback = '—'): s
   return typeof value === 'string' && value !== '' ? value : fallback
 }
 
+function SettingsControls({ store, config, settings, onSaved }: { store: WebStore; config: ConfigView; settings: SettingsView; onSaved: () => void }) {
+  const providers = config.providers ?? []
+  const [provider, setProvider] = useState(config.llm_provider ?? providers[0]?.id ?? '')
+  const [model, setModel] = useState(config.model ?? providers[0]?.model ?? providers[0]?.candidates?.[0] ?? '')
+  const [busy, setBusy] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [values, setValues] = useState({ agent_preset: settings.agent_preset ?? '', permission_preset: settings.permission_preset ?? '', terminal_shell: settings.terminal_shell ?? '' })
+  const currentProvider = providers.find(item => item.id === provider) ?? providers[0]
+  const modelOptions = useMemo(() => currentProvider?.models?.map(item => item.id) ?? currentProvider?.candidates ?? [], [currentProvider])
+
+  useEffect(() => {
+    setProvider(config.llm_provider ?? providers[0]?.id ?? '')
+    setModel(config.model ?? providers[0]?.model ?? providers[0]?.candidates?.[0] ?? '')
+    setValues({ agent_preset: settings.agent_preset ?? '', permission_preset: settings.permission_preset ?? '', terminal_shell: settings.terminal_shell ?? '' })
+  }, [config.llm_provider, config.model, providers, settings.agent_preset, settings.permission_preset, settings.terminal_shell])
+
+  useEffect(() => {
+    if (modelOptions.length > 0 && !modelOptions.includes(model)) setModel(modelOptions[0])
+  }, [model, modelOptions])
+
+  const saveSetting = async (key: 'agent_preset' | 'permission_preset' | 'terminal_shell'): Promise<void> => {
+    setBusy(key); setNotice(null)
+    try { await store.updateSettings({ [key]: values[key] }); setNotice('已保存，重启服务后生效'); onSaved() }
+    catch (error) { setNotice(error instanceof Error ? error.message : String(error)) }
+    finally { setBusy(null) }
+  }
+
+  const saveModel = async (): Promise<void> => {
+    if (provider === '' || model === '') return
+    setBusy('model'); setNotice(null)
+    try { await store.switchModel(provider, model, config.reasoning_effort); setNotice('模型已切换'); onSaved() }
+    catch (error) { setNotice(error instanceof Error ? error.message : String(error)) }
+    finally { setBusy(null) }
+  }
+
+  return <section className="settings-controls" aria-label="Editable settings">
+    <div className="settings-control-head"><div><strong>快速配置</strong><span>可直接应用的运行时选择；持久化项会标记重启要求。</span></div>{notice && <span className="settings-control-notice" role="status">{notice}</span>}</div>
+    <div className="settings-control-grid">
+      <label><span>Agent preset</span><select value={values.agent_preset} onChange={event => setValues(previous => ({ ...previous, agent_preset: event.target.value }))}>{(settings.mode_options ?? ['minimal', 'standard', 'code']).map(item => <option key={item} value={item}>{item}</option>)}</select><button type="button" disabled={busy !== null || values.agent_preset === ''} onClick={() => void saveSetting('agent_preset')}>{busy === 'agent_preset' ? '保存中…' : '保存'}</button></label>
+      <label><span>Permission</span><select value={values.permission_preset} onChange={event => setValues(previous => ({ ...previous, permission_preset: event.target.value }))}>{(settings.permission_options ?? ['readonly', 'standard', 'full']).map(item => <option key={item} value={item}>{item}</option>)}</select><button type="button" disabled={busy !== null || values.permission_preset === ''} onClick={() => void saveSetting('permission_preset')}>{busy === 'permission_preset' ? '保存中…' : '保存'}</button></label>
+      <label><span>Terminal shell</span><select value={values.terminal_shell} onChange={event => setValues(previous => ({ ...previous, terminal_shell: event.target.value }))}>{(settings.terminal_options ?? ['off', 'powershell', 'gitbash', 'wsl']).map(item => <option key={item} value={item}>{item}</option>)}</select><button type="button" disabled={busy !== null || values.terminal_shell === ''} onClick={() => void saveSetting('terminal_shell')}>{busy === 'terminal_shell' ? '保存中…' : '保存'}</button></label>
+      <label><span>Provider</span><select value={provider} onChange={event => { setProvider(event.target.value); const next = providers.find(item => item.id === event.target.value); setModel(next?.model ?? next?.candidates?.[0] ?? '') }}>{providers.length > 0 ? providers.map(item => <option key={item.id} value={item.id}>{item.name || item.id}</option>) : <option value="">服务端未返回 Provider</option>}</select><small>当前：{provider || '—'}</small></label>
+      <label><span>Model</span><select value={model} onChange={event => setModel(event.target.value)}>{modelOptions.length > 0 ? modelOptions.map(item => <option key={item} value={item}>{item}</option>) : <option value={model}>{model || '服务端未返回模型'}</option>}</select><button type="button" disabled={busy !== null || provider === '' || model === ''} onClick={() => void saveModel()}>{busy === 'model' ? '切换中…' : '应用模型'}</button></label>
+    </div>
+  </section>
+}
+
 function SettingsPage({ store, theme, onThemeChange, onBack }: {
   store: WebStore
   theme: ThemePreference
@@ -313,6 +360,7 @@ function SettingsPage({ store, theme, onThemeChange, onBack }: {
 }) {
   const [section, setSection] = useState<SettingsSection>('general')
   const [config, setConfig] = useState<ConfigView | null>(null)
+  const [settings, setSettings] = useState<SettingsView | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [reload, setReload] = useState(0)
@@ -321,8 +369,10 @@ function SettingsPage({ store, theme, onThemeChange, onBack }: {
     const abort = new AbortController()
     setLoading(true)
     setError(null)
-    void store.getConfig(abort.signal).then(value => {
-      if (!abort.signal.aborted) setConfig(value)
+    void Promise.all([store.getConfig(abort.signal), store.getSettings(abort.signal)]).then(([value, nextSettings]) => {
+      if (abort.signal.aborted) return
+      setConfig(value)
+      setSettings(nextSettings)
     }).catch(reason => {
       if (!abort.signal.aborted) setError(reason instanceof Error ? reason.message : String(reason))
     }).finally(() => {
@@ -356,6 +406,7 @@ function SettingsPage({ store, theme, onThemeChange, onBack }: {
       <div className="settings-layout">
         <nav className="settings-nav" aria-label="设置分区">{sections.map(item => <button key={item.id} type="button" className={section === item.id ? 'selected' : ''} onClick={() => setSection(item.id)}><strong>{item.label}</strong><span>{item.hint}</span></button>)}</nav>
         <section className="settings-content" aria-live="polite">
+          {!loading && !error && config !== null && settings !== null && <SettingsControls store={store} config={config} settings={settings} onSaved={() => setReload(value => value + 1)} />}
           {loading && <div className="settings-state"><div className="spinner" />正在加载配置…</div>}
           {!loading && error && <div className="settings-state settings-error"><strong>配置读取失败</strong><span>{error}</span><button type="button" onClick={() => setReload(value => value + 1)}>重试</button></div>}
           {!loading && !error && config !== null && section === 'general' && <div className="settings-section"><h2>通用设置</h2><p className="settings-description">这些选项描述当前 Web 工作区的运行方式。</p><div className="setting-group"><h3>外观</h3><div className="appearance-options"><button type="button" className={theme === 'light' ? 'selected' : ''} onClick={() => onThemeChange('light')}><span className="appearance-swatch light-swatch" />浅色</button><button type="button" className={theme === 'dark' ? 'selected' : ''} onClick={() => onThemeChange('dark')}><span className="appearance-swatch dark-swatch" />深色</button><button type="button" className={theme === 'system' ? 'selected' : ''} onClick={() => onThemeChange('system')}><span className="appearance-swatch system-swatch" />系统</button></div></div><div className="setting-row"><div><strong>运行模式</strong><span>当前 Agent 的默认权限与行为模式</span></div><code>{configText(config, 'mode')}</code></div><div className="setting-row"><div><strong>Web 地址</strong><span>当前服务监听地址</span></div><code>{configText(config, 'web_server_addr')}</code></div><div className="setting-row"><div><strong>配置文件</strong><span>配置由服务启动时加载，Web 端只读展示</span></div><span className="readonly-badge">只读</span></div><div className="settings-note">修改配置文件或能力开关后，重启 Shutu 服务才能生效。</div></div>}
@@ -765,12 +816,13 @@ const DEFAULT_COMMANDS: CommandView[] = [
   { name: 'export', hint: 'Download session log', kind: 'command' },
 ]
 
-function CommandMenu({ commands, query, onSelect }: { commands: readonly CommandView[]; query: string; onSelect: (command: CommandView) => void }) {
+function CommandMenu({ commands, query, activeIndex, onSelect }: { commands: readonly CommandView[]; query: string; activeIndex: number; onSelect: (command: CommandView) => void }) {
+  if (query === '' && activeIndex < 0) return null
   const normalized = query.toLocaleLowerCase()
   const items = commands.filter(command => command.name.toLocaleLowerCase().includes(normalized)).slice(0, 8)
   if (items.length === 0) return null
   return <div className="command-menu" role="listbox" aria-label="Slash commands">
-    {items.map(command => <button type="button" role="option" key={`${command.kind ?? 'command'}:${command.name}`} onMouseDown={event => event.preventDefault()} onClick={() => onSelect(command)}><strong>/{command.name}</strong><span>{command.hint ?? command.kind ?? ''}</span></button>)}
+    {items.map((command, index) => <button type="button" role="option" aria-selected={index === activeIndex} className={index === activeIndex ? 'active' : ''} key={`${command.kind ?? 'command'}:${command.name}`} onMouseDown={event => event.preventDefault()} onClick={() => onSelect(command)}><strong>/{command.name}</strong><span>{command.hint ?? command.kind ?? ''}</span></button>)}
   </div>
 }
 
@@ -837,6 +889,7 @@ export function App({ store }: { store: WebStore }) {
   const [tab, setTab] = useState<'chat' | 'trajectory' | 'running'>('chat')
   const [draft, setDraft] = useState('')
   const [commands, setCommands] = useState<CommandView[]>(DEFAULT_COMMANDS)
+  const [commandIndex, setCommandIndex] = useState(-1)
   const [search, setSearch] = useState('')
   const [sendError, setSendError] = useState<string | null>(null)
   const [focusedSeq, setFocusedSeq] = useState<number | null>(null)
@@ -865,6 +918,7 @@ export function App({ store }: { store: WebStore }) {
   }, [search, state.events, tab])
 
   const commandQuery = draft.match(/^\/([^\s]*)$/)?.[1] ?? null
+  const commandItems = useMemo(() => commandQuery === null ? [] : commands.filter(command => command.name.toLocaleLowerCase().includes(commandQuery.toLocaleLowerCase())).slice(0, 8), [commandQuery, commands])
 
   useEffect(() => { void store.start() }, [store])
 
@@ -964,8 +1018,54 @@ export function App({ store }: { store: WebStore }) {
     catch (error) { setSendError(error instanceof Error ? error.message : String(error)) }
   }
 
+  const downloadExport = async (): Promise<void> => {
+    if (state.selectedId === null) return
+    setSendError(null)
+    try {
+      const blob = await store.exportSession(state.selectedId)
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = `shutu-session-${state.selectedId.replace(/[^A-Za-z0-9_-]/g, '_')}.zip`
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(url)
+    } catch (error) { setSendError(error instanceof Error ? error.message : String(error)) }
+  }
+
   const selectCommand = (command: CommandView): void => {
     setDraft(`/${command.name} `)
+    setCommandIndex(-1)
+  }
+
+  const handleDraftChange = (value: string): void => {
+    setDraft(value)
+    setCommandIndex(/^\/[^\s]*$/.test(value) ? 0 : -1)
+  }
+
+  const handleComposerKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
+    if (commandQuery !== null && commandItems.length > 0) {
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault()
+        setCommandIndex(previous => (previous + (event.key === 'ArrowDown' ? 1 : commandItems.length - 1)) % commandItems.length)
+        return
+      }
+      if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault()
+        selectCommand(commandItems[commandIndex] ?? commandItems[0])
+        return
+      }
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        setDraft('')
+        return
+      }
+    }
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault()
+      if (!state.sending) void submit()
+    }
   }
 
   const attachFiles = async (files: FileList | null): Promise<void> => {
@@ -1039,6 +1139,7 @@ export function App({ store }: { store: WebStore }) {
     <SessionBrowser sessions={state.sessions} workspaces={state.workspaces} selectedId={state.selectedId} store={store} onError={error => setSendError(error instanceof Error ? error.message : String(error))} onSettings={() => setSettingsRoute(true)} />
     <main className="main-panel">
       <header className="topbar">
+        <button type="button" className="export-toggle" onClick={() => void downloadExport()} disabled={state.selectedId === null}>Export</button>
         <div><h1>{selected?.title || (state.selectedId ? state.selectedId : 'Conversation')}</h1><div className="status-line"><span className={state.connected ? 'status-dot online' : 'status-dot'} />{state.connected ? 'Live' : 'Reconnecting'}</div></div>
         <div className="topbar-actions"><button type="button" className="files-toggle" onClick={() => setFilesOpen(value => !value)} disabled={state.selectedId === null} aria-pressed={filesOpen}>Files</button><label className="search-box"><span>⌕</span><input aria-label="Search trajectory" placeholder="Search events" value={search} onChange={event => setSearch(event.target.value)} />{search && <button type="button" onClick={() => setSearch('')} aria-label="Clear search">×</button>}</label></div>
       </header>
@@ -1050,7 +1151,7 @@ export function App({ store }: { store: WebStore }) {
       <section className="content-panel">
         {filesOpen && state.selectedId !== null ? <FilesPanel store={store} sessionId={state.selectedId} onClose={() => setFilesOpen(false)} onReference={path => { setDraft(previous => `${previous}${previous.trim() === '' ? '' : ' '}@${path}`); setFilesOpen(false) }} /> : state.authRequired ? <form className="auth-card" onSubmit={event => { event.preventDefault(); void authenticate() }}><strong>Authentication required</strong><span>Enter the bearer token configured for the Shutu web server.</span><input aria-label="Bearer token" type="password" autoComplete="current-password" value={token} onChange={event => setToken(event.target.value)} placeholder="Bearer token" /><button type="submit" disabled={token.trim() === ''}>Connect</button></form> : state.loading ? <div className="empty"><div className="spinner" />Loading session…</div> : tab === 'running' ? <RunningPanel store={store} sessionId={state.selectedId} /> : state.selectedId === null ? <div className="empty"><strong>Start a new conversation</strong><span>Select a session or send a message from the agent.</span></div> : filtered.length === 0 ? <div className="empty"><strong>{search ? 'No matching events' : 'No events yet'}</strong><span>{search ? 'Try a different search term.' : 'Events will appear here as the session runs.'}</span></div> : tab === 'trajectory' ? <><DshTimeline events={filtered} onSelectSeq={setFocusedSeq} /><VirtualEvents events={filtered} store={store} sessionId={state.selectedId} feedbackBySeq={feedbackBySeq} onFeedback={submitFeedback} focusSeq={focusedSeq} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} /></> : <DshConversation events={filtered} sessionId={state.selectedId} store={store} feedbackBySeq={feedbackBySeq} onFeedback={submitFeedback} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} />}
       </section>
-      <form className="composer" onSubmit={event => { event.preventDefault(); if (state.sending) void stopRun(); else void submit() }}>{pendingImages.length > 0 && <div className="attachment-preview-list">{pendingImages.map(item => <div className="attachment-preview" key={item.ref.id}><img src={item.previewUrl} alt="待发送图片" /><button type="button" onClick={() => removePendingImage(item.ref.id)} aria-label="移除附件">×</button></div>)}</div>}<div className="composer-row"><label className="attach-button" aria-label="添加图片"><input type="file" accept="image/*" multiple disabled={state.selectedId === null || state.sending || uploading} onChange={event => { void attachFiles(event.currentTarget.files); event.currentTarget.value = '' }} />📎</label><textarea value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); if (!state.sending) void submit() } }} placeholder={uploading ? '正在上传图片…' : state.sending ? 'Agent is running…' : 'Send a message…'} rows={2} /><button type="submit" disabled={state.selectedId === null || uploading || (!state.sending && draft.trim() === '' && pendingImages.length === 0)}>{state.sending ? 'Stop' : 'Send'} <span>{state.sending ? '■' : '↵'}</span></button></div></form>
+      <form className="composer" onSubmit={event => { event.preventDefault(); if (state.sending && draft.trim() === '' && pendingImages.length === 0) void stopRun(); else void submit() }}><CommandMenu commands={commands} query={commandQuery ?? ''} activeIndex={commandIndex} onSelect={selectCommand} />{pendingImages.length > 0 && <div className="attachment-preview-list">{pendingImages.map(item => <div className="attachment-preview" key={item.ref.id}><img src={item.previewUrl} alt="待发送图片" /><button type="button" onClick={() => removePendingImage(item.ref.id)} aria-label="移除附件">×</button></div>)}</div>}<div className="composer-row"><label className="attach-button" aria-label="添加图片"><input type="file" accept="image/*" multiple disabled={state.selectedId === null || state.sending || uploading} onChange={event => { void attachFiles(event.currentTarget.files); event.currentTarget.value = '' }} />📎</label><textarea value={draft} onChange={event => handleDraftChange(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder={uploading ? '正在上传图片…' : state.sending ? 'Agent is running…' : 'Send a message…'} rows={2} /><button type="submit" disabled={state.selectedId === null || uploading || (!state.sending && draft.trim() === '' && pendingImages.length === 0)}>{state.sending ? (draft.trim() ? 'Queue' : 'Stop') : 'Send'} <span>{state.sending ? '■' : '↵'}</span></button></div></form>
     </main>
   </div>
 }
