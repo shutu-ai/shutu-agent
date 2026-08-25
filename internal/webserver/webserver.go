@@ -92,6 +92,11 @@ type Server struct {
 	// means the server falls back to its default.
 	contextWindowFn func(sessionID string) int
 
+	// stateFn returns the durable per-session state projection (plan mode,
+	// goals/plans and memory summary). The webserver only transports the
+	// projection; the composition root owns replay and capability policy.
+	stateFn func(ctx context.Context, sessionID string) (map[string]any, error)
+
 	// stopFn cancels a running turn for a session (POST
 	// /api/sessions/{id}/stop, dsh 停止按钮). nil makes the API answer 501.
 	stopFn func(sessionID string) error
@@ -279,6 +284,7 @@ func New(st store.Store, token, addr string) (*Server, error) {
 	mux.Handle("GET /api/kb/{rest...}", s.requireAuth(http.HandlerFunc(s.handleKBStub)))
 	mux.Handle("GET /api/sessions", s.requireAuth(http.HandlerFunc(s.handleSessions)))
 	mux.Handle("GET /api/sessions/{id}/events", s.requireAuth(http.HandlerFunc(s.handleEvents)))
+	mux.Handle("GET /api/sessions/{id}/state", s.requireAuth(http.HandlerFunc(s.handleSessionState)))
 	// dsh /export compatibility: the browser downloads the current Session log
 	// as a ZIP and keeps the command outside model history.
 	mux.Handle("GET /api/session.export", s.requireAuth(http.HandlerFunc(s.handleSessionExport)))
@@ -415,6 +421,13 @@ func (s *Server) SetConfigProvider(fn func() map[string]any) {
 // composition root; nil keeps the default budget.
 func (s *Server) SetContextWindow(fn func(sessionID string) int) {
 	s.contextWindowFn = fn
+}
+
+// SetSessionStateProvider wires the durable per-session state projection. A
+// nil provider leaves the endpoint at 501, preserving the generic server's
+// optional-composition behavior.
+func (s *Server) SetSessionStateProvider(fn func(ctx context.Context, sessionID string) (map[string]any, error)) {
+	s.stateFn = fn
 }
 
 // SetTurnStopper wires the running-turn cancel for POST
@@ -2513,6 +2526,26 @@ func (s *Server) handleSessionContext(w http.ResponseWriter, r *http.Request) {
 		"context_window": window,
 		"percent":        percent,
 	})
+}
+
+// handleSessionState exposes state rebuilt from the target session's durable
+// event log. It is intentionally separate from /events: clients can refresh
+// status/projections without re-rendering the conversation transcript.
+func (s *Server) handleSessionState(w http.ResponseWriter, r *http.Request) {
+	if s.stateFn == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "session state provider not wired"})
+		return
+	}
+	state, err := s.stateFn(r.Context(), r.PathValue("id"))
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, state)
 }
 
 // estimateContextTokens mirrors compaction.defaultTokenEstimate over the

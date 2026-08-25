@@ -65,3 +65,20 @@ func TestSessionStatusPendingInteraction(t *testing.T) {
 		t.Fatalf("pending status = %+v", st)
 	}
 }
+
+func TestSessionStatusIgnoresResolvedInteraction(t *testing.T) {
+	prov := interact.NewMemProvider()
+	eng := interact.NewEngine(prov)
+	req, err := eng.Request(context.Background(), "allow run_command?", "bash", "{}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := eng.Resolve(context.Background(), req.ID, interact.StatusApproved); err != nil {
+		t.Fatal(err)
+	}
+	a := &app{interacts: eng}
+	st := a.sessionStatus(context.Background(), store.SessionMeta{ID: "s1", EventCount: 2})
+	if st.State == "warning" {
+		t.Fatalf("resolved interaction still warns: %+v", st)
+	}
+}

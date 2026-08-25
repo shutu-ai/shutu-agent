@@ -51,6 +51,7 @@ const cmdBtn = $("cmd-btn"), cmdMenu = $("cmd-menu");
 const permSeat = $("perm-seat"), permSeatLabel = $("perm-seat-label"), permSeatIcon = $("perm-seat-icon"), permMenu = $("perm-menu");
 const modelSeat = $("model-seat"), modelSeatLabel = $("model-seat-label"), modelMenu = $("model-menu");
 const contextMeter = $("context-meter");
+const sessionStateEl = $("session-state");
 const detailsPanel = $("details-panel"), detailsTitle = $("details-title"),
   detailsCloseBtn = $("details-close"), detailsEmptyEl = $("details-empty"), detailsSelEl = $("details-selection");
 
@@ -3234,6 +3235,36 @@ async function loadSessionConfig(id) {
   syncModelSeat();
 }
 
+// The backend state projection mirrors dsh's session-level plan/goal/todo and
+// memory indicators. Keep it compact so it remains useful while the transcript
+// grows, and refresh it only on session open and after a completed turn.
+async function loadSessionState(id) {
+  if (!sessionStateEl) return;
+  sessionStateEl.classList.add("hidden");
+  sessionStateEl.textContent = "";
+  if (!id) return;
+  try {
+    const res = await api(`/api/sessions/${encodeURIComponent(id)}/state`);
+    if (res.status === 401 || !res.ok || currentID !== id) return;
+    const state = await res.json();
+    const goals = Array.isArray(state.goals) ? state.goals : [];
+    const plans = Array.isArray(state.plans) ? state.plans : [];
+    const steps = plans.flatMap((plan) => Array.isArray(plan.steps) ? plan.steps : []);
+    const done = steps.filter((step) => step.status === "done" || step.status === "completed").length;
+    const activeGoal = goals.find((goal) => !["complete", "completed", "cancelled", "blocked"].includes(goal.status));
+    const parts = [];
+    if (state.plan_mode) parts.push("计划模式");
+    if (activeGoal) parts.push(`目标：${esc(activeGoal.objective || activeGoal.title || "进行中")}`);
+    if (steps.length) parts.push(`任务 ${done}/${steps.length}`);
+    if (state.memory_enabled) parts.push(`记忆 ${Array.isArray(state.memories) ? state.memories.length : 0}`);
+    if (!parts.length) return;
+    sessionStateEl.innerHTML = parts.map((part) => `<span class="session-state-item">${part}</span>`).join("");
+    sessionStateEl.classList.remove("hidden");
+  } catch (e) {
+    if (e.message !== "unauthorized") console.error("session state", e);
+  }
+}
+
 async function loadFeedback(id) {
   if (!id || currentID !== id) return;
   feedbackBySeq = new Map();
@@ -3380,8 +3411,15 @@ function openSession(id) {
   setComposerDisabled(!id);
   updatePlaceholder();
   syncHeaderActions();
-  if (!id) { sessionCfg = { model: "", permission: "" }; setHeroPhase(); if (contextMeter) { contextMeter.textContent = ""; cmOpen = false; } return; }
+  if (!id) {
+    sessionCfg = { model: "", permission: "" };
+    setHeroPhase();
+    if (contextMeter) { contextMeter.textContent = ""; cmOpen = false; }
+    loadSessionState("");
+    return;
+  }
   loadSessionConfig(id);
+  loadSessionState(id);
   return loadFeedback(id).then(() => Promise.all([loadEvents(id), connectStream(id)]));
 }
 
@@ -3738,6 +3776,7 @@ async function sendMessage() {
         if (lead) lead.innerHTML = '<span class="dsh-statedot dsh-statedot-warn"></span>';
       }
     });
+    loadSessionState(currentID);
     refreshContextMeter();
   }
 }

@@ -651,6 +651,39 @@ func TestSessionContextAPI(t *testing.T) {
 	}
 }
 
+func TestSessionStateAPI(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+	srv.SetSessionStateProvider(func(ctx context.Context, sessionID string) (map[string]any, error) {
+		if sessionID != "s-state" {
+			t.Fatalf("state session id = %q, want s-state", sessionID)
+		}
+		return map[string]any{
+			"session_id":     sessionID,
+			"plan_mode":      true,
+			"memory_enabled": true,
+			"goals":          []string{"goal-1"},
+			"plans":          []string{"plan-1"},
+			"memories":       []string{"memo-1"},
+		}, nil
+	})
+	rec := doReq(t, srv.Handler(), "GET", "/api/sessions/s-state/state", "tok")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("state = %d, want 200", rec.Code)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode state: %v", err)
+	}
+	if got["session_id"] != "s-state" || got["plan_mode"] != true {
+		t.Fatalf("state = %#v", got)
+	}
+
+	plain, _ := newTestServer(t, "tok")
+	if rec := doReq(t, plain.Handler(), "GET", "/api/sessions/s-state/state", "tok"); rec.Code != http.StatusNotImplemented {
+		t.Fatalf("unwired state = %d, want 501", rec.Code)
+	}
+}
+
 // TestTurnStopAPI verifies POST /api/sessions/{id}/stop (dsh 停止按钮): a wired
 // stopper forwards the session id and returns 200, an unwired server answers
 // 501, and the route is auth-guarded.

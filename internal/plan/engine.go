@@ -24,6 +24,19 @@ type engine struct {
 	closed  bool
 }
 
+// ProviderPlans returns the full plan projection, including standalone plans.
+// It is intentionally an engine-only read seam used by the Web state snapshot;
+// normal model consumers continue to use the goal-rooted Engine.List API.
+func (e *engine) ProviderPlans(ctx context.Context) ([]Plan, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := e.checkOpen(); err != nil {
+		return nil, err
+	}
+	return e.prov.ListPlans(ctx)
+}
+
 // NewEngine returns an engine backed by prov; a nil prov selects the default
 // in-memory Provider (newMemProvider). Each engine should own its provider:
 // Close releases it.

@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/jabing/shutu-agent/internal/config"
 	"github.com/jabing/shutu-agent/internal/session"
@@ -25,15 +26,28 @@ import (
 	"github.com/jabing/shutu-agent/internal/tools"
 )
 
-// registerSpills creates the in-memory Provider + Engine and registers the
-// four spill_* tools when spill.enabled, and wires the D3 event sink. When
+// registerSpills creates the configured durable Provider + Engine and registers
+// the four spill_* tools when spill.enabled, and wires the D3 event sink. Bare
+// test composition without DataDir intentionally falls back to memory. When
 // spill is disabled it creates nothing and registers nothing (D10, mirrors
 // registerJobs/registerSchedules/registerPlans).
 func (a *app) registerSpills() error {
 	if !config.Enabled(a.cfg.Spill.Enabled) {
 		return nil
 	}
-	prov := spill.NewMemProvider()
+	var prov spill.Provider
+	if a.cfg.DataDir == "" {
+		// Bare composition-root tests intentionally omit runtime paths. Keep
+		// those isolated in memory; loaded production configs always carry a
+		// data directory and therefore use the durable backend below.
+		prov = spill.NewMemProvider()
+	} else {
+		var err error
+		prov, err = spill.NewFileProvider(filepath.Join(a.cfg.DataDir, "memory.json"))
+		if err != nil {
+			return fmt.Errorf("pa: open memory store: %w", err)
+		}
+	}
 	eng := spill.NewEngine(prov)
 	a.spills = eng
 	// D3 event sink: spill/* events are appended to the active session log.

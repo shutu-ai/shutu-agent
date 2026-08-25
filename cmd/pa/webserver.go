@@ -27,6 +27,7 @@ import (
 	"github.com/jabing/shutu-agent/internal/llm"
 	"github.com/jabing/shutu-agent/internal/plan"
 	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/jabing/shutu-agent/internal/spill"
 	"github.com/jabing/shutu-agent/internal/store"
 	"github.com/jabing/shutu-agent/internal/webserver"
 )
@@ -135,6 +136,7 @@ func (a *app) registerWebServer() error {
 	// exposes web_server.token or any key — the webserver only forwards it.
 	srv.SetConfigProvider(a.webConfig)
 	srv.SetContextWindow(a.contextWindowOf)
+	srv.SetSessionStateProvider(a.webSessionState)
 	srv.SetTurnStopper(a.stopTurn)
 	// M10 W4 (ADR D-WEB2-H): inject the read-only subagent and background-job
 	// panels. Each provider returns sanitized views (id/status/timestamps only);
@@ -201,6 +203,72 @@ func (a *app) registerWebServer() error {
 		}
 	}()
 	return nil
+}
+
+// webSessionState reconstructs the durable state projection for an arbitrary
+// session without switching the process's active session. This is important
+// for the Web sidebar: opening a state card must not redirect tool events or
+// the next turn to another session.
+func (a *app) webSessionState(ctx context.Context, sessionID string) (map[string]any, error) {
+	events, err := a.store.LoadSession(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	state := map[string]any{
+		"session_id":   sessionID,
+		"plan_mode":    session.FoldPlanMode(events),
+		"plan_enabled": a.plans != nil,
+	}
+	if a.plans != nil {
+		projection := plan.NewEngine(plan.NewMemProvider())
+		restorer, ok := any(projection).(plan.EventRestorer)
+		if !ok {
+			return nil, errors.New("plan projection cannot restore session state")
+		}
+		if err := restorer.Restore(events); err != nil {
+			return nil, err
+		}
+		goals, err := projection.List(ctx)
+		if err != nil {
+			return nil, err
+		}
+		plans, err := projectionProviderPlans(ctx, projection)
+		if err != nil {
+			return nil, err
+		}
+		state["goals"] = goals
+		state["plans"] = plans
+		_ = projection.Close()
+	} else {
+		state["goals"] = []plan.Goal{}
+		state["plans"] = []plan.Plan{}
+	}
+	if a.spills == nil {
+		state["memory_enabled"] = false
+		state["memories"] = []spill.Memo{}
+	} else {
+		memories, err := a.spills.List(ctx)
+		if err != nil {
+			return nil, err
+		}
+		state["memory_enabled"] = true
+		state["memories"] = memories
+	}
+	return state, nil
+}
+
+// projectionProviderPlans reads the disposable provider behind a replay-only
+// plan engine. The public Engine intentionally exposes the goal-rooted tree;
+// the Web state snapshot also needs standalone plans, so the provider remains
+// the narrow read boundary here.
+func projectionProviderPlans(ctx context.Context, engine plan.Engine) ([]plan.Plan, error) {
+	providerEngine, ok := engine.(interface {
+		ProviderPlans(context.Context) ([]plan.Plan, error)
+	})
+	if ok {
+		return providerEngine.ProviderPlans(ctx)
+	}
+	return []plan.Plan{}, nil
 }
 
 // webMessage handles one web chat message for a session (ADR D-WEB2-A): when
@@ -271,6 +339,10 @@ func (a *app) webMessage(ctx context.Context, sessionID, text string, images []l
 	if err := a.runTurn(turnCtx, text, false); err != nil {
 		return err
 	}
+	// Keep Web and REPL turn completion identical: extract explicit knowledge
+	// and sediment long-term memories before title/goal continuation runs.
+	a.extractTurn(ctx, text)
+	a.spillAutoSpill(ctx)
 	// session-title alignment (dsh): after the first eligible message, the
 	// deterministic fallback is stored and the asynchronous model title is
 	// scheduled. This runs after the turn, outside turnMu, so it never delays

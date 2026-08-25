@@ -264,9 +264,9 @@ plan:
 # 决策 M6c). Off by default (D10): when disabled no Provider/Engine is
 # initialized, no spill_* tool is registered or whitelisted, and no
 # auto-sedimentation path is wired. When enabled, spill_write explicitly
-# stores a conversation-derived memory, spill_recall recalls by query,
-# spill_list enumerates memories, spill_delete removes one (in-memory only,
-# cleared on restart), and — when auto_spill is on — every completed turn's
+  # stores a conversation-derived memory, spill_recall recalls by query,
+  # spill_list enumerates memories, spill_delete removes one (persisted under
+  # <data_dir>/memory.json), and — when auto_spill is on — every completed turn's
 # event log is folded into new memories on the serial path (D5). Memories are
 # logged as facts: spill/write, spill/recall, spill/list and spill/delete (D3).
 # The kb seam stays separate: kb is the explicit, user-queryable knowledge

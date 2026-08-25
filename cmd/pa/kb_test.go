@@ -17,6 +17,7 @@ import (
 	"github.com/jabing/shutu-agent/internal/config"
 	"github.com/jabing/shutu-agent/internal/kb"
 	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/jabing/shutu-agent/internal/spill"
 	"github.com/jabing/shutu-agent/internal/tools"
 )
 
@@ -85,6 +86,26 @@ func TestRecallContextFailOpen(t *testing.T) {
 		if ev.Type == session.EventKBRecall {
 			t.Fatalf("kb/recall must not be appended on fail-open paths: %s", ev.Data)
 		}
+	}
+}
+
+func TestSpillRecallContextInjectsAndLogs(t *testing.T) {
+	mem := spill.NewMemProvider()
+	engine := spill.NewEngine(mem)
+	defer engine.Close()
+	if _, err := engine.Spill(context.Background(), "The user prefers durable Go memory", "session:7"); err != nil {
+		t.Fatal(err)
+	}
+	log := session.New()
+	msgs, err := spillRecallContext(context.Background(), engine, log, "durable Go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 || !strings.Contains(msgs[0].Text(), "durable Go memory") {
+		t.Fatalf("memory context = %+v", msgs)
+	}
+	if countEvents(log, session.EventSpillRecall) != 1 {
+		t.Fatalf("spill/recall events = %d, want 1", countEvents(log, session.EventSpillRecall))
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jabing/shutu-agent/internal/interact"
 	"github.com/jabing/shutu-agent/internal/store"
 	"github.com/jabing/shutu-agent/internal/webserver"
 )
@@ -95,7 +96,12 @@ func (a *app) pendingInteraction(ctx context.Context, sessionID string) string {
 	if err != nil || len(reqs) == 0 {
 		return ""
 	}
-	return "approval"
+	for _, req := range reqs {
+		if req.Status == interact.StatusPending {
+			return "approval"
+		}
+	}
+	return ""
 }
 
 // pendingLabel maps a dsh pending-status key to the localized status label.
