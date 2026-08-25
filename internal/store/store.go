@@ -165,6 +165,9 @@ type Store interface {
 	// LoadSession replays all of a session's events in Seq order. It returns
 	// ErrNotFound when the session id has no row.
 	LoadSession(ctx context.Context, sessionID string) ([]session.Event, error)
+	// LoadSessionPage reads one bounded event window. before and after are
+	// exclusive sequence cursors; zero cursors select the newest page.
+	LoadSessionPage(ctx context.Context, sessionID string, before, after uint64, limit int) (events []session.Event, hasMore bool, err error)
 	// ListSessions returns every session's metadata, most recently updated
 	// first.
 	ListSessions(ctx context.Context) ([]SessionMeta, error)
@@ -233,16 +236,4 @@ type Store interface {
 
 	// Close releases the backend's resources.
 	Close() error
-}
-
-// SessionEventPageStore is the optional, cursor-based history surface used by
-// the React/Cordis web client. Keeping it separate from Store preserves source
-// compatibility with small test stores and older integrations while allowing
-// SQLite to avoid loading an entire long-running session into memory.
-//
-// before and after are exclusive sequence cursors. A zero cursor means the
-// newest page (when both are zero) or the oldest page in the requested
-// direction. Implementations return events in ascending sequence order.
-type SessionEventPageStore interface {
-	LoadSessionPage(ctx context.Context, sessionID string, before, after uint64, limit int) (events []session.Event, hasMore bool, err error)
 }

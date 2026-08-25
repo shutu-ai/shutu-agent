@@ -1065,9 +1065,7 @@ type eventView struct {
 	Images            []imageView    `json:"images,omitempty"`      // P5: 该消息携带的图片引用
 }
 
-// eventPageView is the cursor envelope consumed by the React/Cordis adapter.
-// The legacy unpaged endpoint remains an array so the current portal and older
-// clients keep working during the migration.
+// eventPageView is the cursor envelope consumed by the React/Cordis client.
 type eventPageView struct {
 	Events        []eventView `json:"events"`
 	HasMore       bool        `json:"has_more"`
@@ -1295,12 +1293,12 @@ func extraFields(ev session.Event) (reasoning, toolName, toolOutput string) {
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	before, after, limit, paged, err := parseEventPageQuery(r)
+	before, after, limit, err := parseEventPageQuery(r)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
-	events, hasMore, err := s.loadEventWindow(r.Context(), id, before, after, limit, paged)
+	events, hasMore, err := s.loadEventWindow(r.Context(), id, before, after, limit)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
@@ -1318,10 +1316,6 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			v.ToolArgs = argsByCall[callID]
 		}
 		out = append(out, v)
-	}
-	if !paged {
-		writeJSON(w, http.StatusOK, out)
-		return
 	}
 	page := eventPageView{Events: out, HasMore: hasMore}
 	if len(out) > 0 {
@@ -1343,71 +1337,35 @@ const (
 	maxEventPageLimit     = 500
 )
 
-func parseEventPageQuery(r *http.Request) (before, after uint64, limit int, paged bool, err error) {
+func parseEventPageQuery(r *http.Request) (before, after uint64, limit int, err error) {
 	query := r.URL.Query()
-	paged = query.Has("before_seq") || query.Has("after_seq") || query.Has("limit")
 	limit = defaultEventPageLimit
 	if raw := strings.TrimSpace(query.Get("limit")); raw != "" {
 		limit, err = strconv.Atoi(raw)
 		if err != nil || limit < 1 || limit > maxEventPageLimit {
-			return 0, 0, 0, false, fmt.Errorf("limit must be between 1 and %d", maxEventPageLimit)
+			return 0, 0, 0, fmt.Errorf("limit must be between 1 and %d", maxEventPageLimit)
 		}
 	}
 	if raw := strings.TrimSpace(query.Get("before_seq")); raw != "" {
 		before, err = strconv.ParseUint(raw, 10, 64)
 		if err != nil || before == 0 {
-			return 0, 0, 0, false, fmt.Errorf("before_seq must be a positive integer")
+			return 0, 0, 0, fmt.Errorf("before_seq must be a positive integer")
 		}
 	}
 	if raw := strings.TrimSpace(query.Get("after_seq")); raw != "" {
 		after, err = strconv.ParseUint(raw, 10, 64)
 		if err != nil || after == 0 {
-			return 0, 0, 0, false, fmt.Errorf("after_seq must be a positive integer")
+			return 0, 0, 0, fmt.Errorf("after_seq must be a positive integer")
 		}
 	}
 	if before != 0 && after != 0 {
-		return 0, 0, 0, false, fmt.Errorf("before_seq and after_seq are mutually exclusive")
+		return 0, 0, 0, fmt.Errorf("before_seq and after_seq are mutually exclusive")
 	}
-	return before, after, limit, paged, nil
+	return before, after, limit, nil
 }
 
-func (s *Server) loadEventWindow(ctx context.Context, id string, before, after uint64, limit int, paged bool) ([]session.Event, bool, error) {
-	if !paged {
-		events, err := s.store.LoadSession(ctx, id)
-		return events, false, err
-	}
-	if pageStore, ok := s.store.(store.SessionEventPageStore); ok {
-		return pageStore.LoadSessionPage(ctx, id, before, after, limit)
-	}
-	// Compatibility fallback for custom stores. The SQLite implementation above
-	// is the production path; this branch keeps existing test doubles usable.
-	events, err := s.store.LoadSession(ctx, id)
-	if err != nil {
-		return nil, false, err
-	}
-	if after != 0 {
-		start := 0
-		for start < len(events) && events[start].Seq <= after {
-			start++
-		}
-		end := start + limit
-		if end > len(events) {
-			end = len(events)
-		}
-		return events[start:end], end < len(events), nil
-	}
-	end := len(events)
-	if before != 0 {
-		end = 0
-		for end < len(events) && events[end].Seq < before {
-			end++
-		}
-	}
-	start := end - limit
-	if start < 0 {
-		start = 0
-	}
-	return events[start:end], start > 0, nil
+func (s *Server) loadEventWindow(ctx context.Context, id string, before, after uint64, limit int) ([]session.Event, bool, error) {
+	return s.store.LoadSessionPage(ctx, id, before, after, limit)
 }
 
 // handleSessionExport serves a portable ZIP containing the current session's

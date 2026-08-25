@@ -58,6 +58,15 @@ func doReq(t *testing.T, h http.Handler, method, path, token string) *httptest.R
 	return rec
 }
 
+func decodeEventPage(t *testing.T, rec *httptest.ResponseRecorder) eventPageView {
+	t.Helper()
+	var page eventPageView
+	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode event page: %v", err)
+	}
+	return page
+}
+
 // doReqBody issues a request carrying a JSON body (used by the message API).
 func doReqBody(t *testing.T, h http.Handler, method, path, token, body string) *httptest.ResponseRecorder {
 	t.Helper()
@@ -266,10 +275,7 @@ func TestSessionEvents(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("events → %d, want 200", rec.Code)
 	}
-	var evs []eventView
-	if err := json.Unmarshal(rec.Body.Bytes(), &evs); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	evs := decodeEventPage(t, rec).Events
 	if len(evs) != 3 {
 		t.Fatalf("events = %d, want 3", len(evs))
 	}
@@ -433,10 +439,7 @@ func TestSummaryBound(t *testing.T) {
 		{Seq: 1, Type: "tool/result", At: time.Now(), Version: 1, Data: mustData(t, map[string]any{"CallID": "c1", "Name": "get_time", "Output": long})},
 	})
 	rec := doReq(t, srv.Handler(), "GET", "/api/sessions/s-1/events", "tok")
-	var evs []eventView
-	if err := json.Unmarshal(rec.Body.Bytes(), &evs); err != nil {
-		t.Fatal(err)
-	}
+	evs := decodeEventPage(t, rec).Events
 	prefix := "tool get_time → "
 	s := evs[0].Summary
 	if len([]rune(s)) != len([]rune(prefix))+maxSummary+1 { // prefix + 200 runes + "…"
@@ -458,10 +461,7 @@ func TestMessageSummaryFull(t *testing.T) {
 		{Seq: 2, Type: "assistant/message", At: time.Now(), Version: 1, Data: mustData(t, map[string]any{"Text": long})},
 	})
 	rec := doReq(t, srv.Handler(), "GET", "/api/sessions/s-1/events", "tok")
-	var evs []eventView
-	if err := json.Unmarshal(rec.Body.Bytes(), &evs); err != nil {
-		t.Fatal(err)
-	}
+	evs := decodeEventPage(t, rec).Events
 	for i, ev := range evs {
 		if ev.Summary != long {
 			t.Fatalf("events[%d] (%s) summary = %d runes, want the full 500", i, ev.Type, len([]rune(ev.Summary)))
@@ -1191,10 +1191,7 @@ func TestEventsExtendedFields(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("events → %d, want 200", rec.Code)
 	}
-	var evs []eventView
-	if err := json.Unmarshal(rec.Body.Bytes(), &evs); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	evs := decodeEventPage(t, rec).Events
 	if len(evs) != 3 {
 		t.Fatalf("events = %d, want 3", len(evs))
 	}
@@ -1223,10 +1220,7 @@ func TestEventViewToolError(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("events → %d, want 200", rec.Code)
 	}
-	var evs []eventView
-	if err := json.Unmarshal(rec.Body.Bytes(), &evs); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	evs := decodeEventPage(t, rec).Events
 	if len(evs) != 2 {
 		t.Fatalf("events = %d, want 2", len(evs))
 	}
@@ -1257,10 +1251,7 @@ func TestEventViewToolArgs(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("events → %d, want 200", rec.Code)
 	}
-	var evs []eventView
-	if err := json.Unmarshal(rec.Body.Bytes(), &evs); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	evs := decodeEventPage(t, rec).Events
 	if len(evs) != 3 {
 		t.Fatalf("events = %d, want 3", len(evs))
 	}
@@ -2037,10 +2028,7 @@ func TestEventViewImages(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("events → %d, want 200", rec.Code)
 	}
-	var evs []eventView
-	if err := json.Unmarshal(rec.Body.Bytes(), &evs); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
+	evs := decodeEventPage(t, rec).Events
 	if len(evs) != 1 || len(evs[0].Images) != 1 {
 		t.Fatalf("images = %d, want 1 (event %+v)", len(evs[0].Images), evs[0])
 	}
@@ -2065,10 +2053,7 @@ func TestEventViewHidesInternalContextMessages(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("events = %d: %s", rec.Code, rec.Body.String())
 	}
-	var events []eventView
-	if err := json.Unmarshal(rec.Body.Bytes(), &events); err != nil {
-		t.Fatalf("decode events: %v", err)
-	}
+	events := decodeEventPage(t, rec).Events
 	if len(events) != 4 || events[0].ContextMessage || events[0].Summary != "当前目录" {
 		t.Fatalf("human event = %+v", events[0])
 	}
