@@ -2,6 +2,7 @@ package loop
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -136,6 +137,56 @@ func TestRunPreStepOrdering(t *testing.T) {
 	}
 	if msgs[1].Text() != "hi" || msgs[2].Text() != "extra-msg" {
 		t.Fatalf("pre-step injector ordering is wrong: %+v", msgs)
+	}
+}
+
+// TestRuntimeContextUsesDshOrderAndSource verifies the core dsh projection:
+// the runtime snapshot is inserted before plugin pre-step context, and its
+// durable event carries the source used by the Web context-injection row.
+func TestRuntimeContextUsesDshOrderAndSource(t *testing.T) {
+	model := &scriptedLLM{steps: [][]llm.StreamEvent{{
+		{Kind: llm.StreamFinish, FinishReason: "stop"},
+	}}}
+	log := session.New()
+	loop := New(Config{
+		LLM:    model,
+		Log:    log,
+		Tools:  newTestRegistry(t),
+		Prompt: prompt.New("You are helpful."),
+		Model:  "deepseek-chat",
+		RuntimeContext: func(context.Context, string) []llm.Message {
+			return []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("runtime")}}}
+		},
+		PreStep: []PreStepInjector{{Name: "skill", Inject: func(context.Context, string) []llm.Message {
+			return []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("catalog")}}}
+		}}},
+	})
+
+	if err := loop.Run(context.Background(), "hello"); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	msgs := model.calls[0].Messages
+	if len(msgs) != 4 || msgs[1].Text() != "hello" || msgs[2].Text() != "runtime" || msgs[3].Text() != "catalog" {
+		t.Fatalf("request order = %+v, want user → runtime → catalog", msgs)
+	}
+
+	var runtimeSource, catalogSource struct {
+		Source *struct {
+			Kind   string `json:"kind"`
+			Plugin string `json:"plugin"`
+		} `json:"source"`
+	}
+	if err := json.Unmarshal(log.Events()[2].Data, &runtimeSource); err != nil {
+		t.Fatalf("runtime event: %v", err)
+	}
+	if err := json.Unmarshal(log.Events()[3].Data, &catalogSource); err != nil {
+		t.Fatalf("catalog event: %v", err)
+	}
+	if runtimeSource.Source == nil || runtimeSource.Source.Kind != "plugin" || runtimeSource.Source.Plugin != "@deepseek-ai/dsh-system-prompt" {
+		t.Fatalf("runtime source = %+v", runtimeSource.Source)
+	}
+	if catalogSource.Source == nil || catalogSource.Source.Kind != "skill-catalog" {
+		t.Fatalf("catalog source = %+v", catalogSource.Source)
 	}
 }
 

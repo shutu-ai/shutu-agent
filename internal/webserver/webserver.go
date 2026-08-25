@@ -1001,6 +1001,7 @@ type eventView struct {
 	Time              time.Time      `json:"time"`
 	Summary           string         `json:"summary"`
 	ContextMessage    bool           `json:"context_message,omitempty"` // model-only runtime/skill context; never a user bubble
+	ContextSource     string         `json:"context_source,omitempty"`  // dsh source label for model-only context
 	CompactionID      string         `json:"compaction_id,omitempty"`
 	CompactionSummary string         `json:"compaction_summary,omitempty"`
 	CompactionItems   int            `json:"compaction_items,omitempty"`
@@ -1019,14 +1020,15 @@ type eventView struct {
 // extra fields + the P5 image refs).
 func toEventView(ev session.Event) eventView {
 	contextMessage := isInternalContextMessage(ev)
+	contextSource := internalContextSource(ev)
 	summary := summarize(ev)
 	if contextMessage {
 		// Context is sent to the model, but must not cross the Web conversation
-		// surface as a raw user message. The marker lets the browser advance its
-		// rendered sequence without rendering the internal text.
-		summary = ""
+		// surface as a raw user message. Keep only the dsh source label for the
+		// context-injection row; never expose the injected prompt body.
+		summary = "上下文注入 " + contextSource
 	}
-	v := eventView{Seq: ev.Seq, Type: ev.Type, Time: ev.At, Summary: summary, ContextMessage: contextMessage}
+	v := eventView{Seq: ev.Seq, Type: ev.Type, Time: ev.At, Summary: summary, ContextMessage: contextMessage, ContextSource: contextSource}
 	v.CompactionID, v.CompactionSummary, v.CompactionItems, v.CompactionTokens, v.CompactionError, v.CompactionMarker = compactionFields(ev)
 	v.Reasoning, v.ToolName, v.ToolOutput = extraFields(ev)
 	v.Images = extractImages(ev)
@@ -1045,14 +1047,54 @@ func isInternalContextMessage(ev session.Event) bool {
 		return false
 	}
 	var d struct {
-		Text string `json:"text"`
+		Text   string         `json:"text"`
+		Source *messageSource `json:"source"`
 	}
 	if json.Unmarshal(ev.Data, &d) != nil {
 		return false
 	}
+	if d.Source != nil && (d.Source.Kind == "skill-catalog" ||
+		(d.Source.Kind == "plugin" && d.Source.Plugin == "@deepseek-ai/dsh-system-prompt")) {
+		return true
+	}
 	return strings.HasPrefix(d.Text, "<system-reminder>\n") ||
 		strings.HasPrefix(d.Text, "Current runtime context.") ||
 		strings.HasPrefix(d.Text, "<skill_content name=\"")
+}
+
+type messageSource struct {
+	Kind   string `json:"kind"`
+	Plugin string `json:"plugin,omitempty"`
+}
+
+func internalContextSource(ev session.Event) string {
+	if ev.Type != session.EventUserMessage {
+		return ""
+	}
+	var d struct {
+		Text   string         `json:"text"`
+		Source *messageSource `json:"source"`
+	}
+	if json.Unmarshal(ev.Data, &d) == nil && d.Source != nil {
+		if d.Source.Kind == "skill-catalog" {
+			return "skill-catalog"
+		}
+		if d.Source.Kind == "plugin" && d.Source.Plugin != "" {
+			return d.Source.Plugin
+		}
+	}
+	// Backwards-compatible source attribution for logs written before source
+	// metadata was added.
+	switch {
+	case strings.HasPrefix(d.Text, "Current runtime context."):
+		return "@deepseek-ai/dsh-system-prompt"
+	case strings.HasPrefix(d.Text, "<system-reminder>\n"):
+		return "skill-catalog"
+	case strings.HasPrefix(d.Text, "<skill_content name=\""):
+		return "skill-invocation"
+	default:
+		return ""
+	}
 }
 
 // compactionFields exposes the bounded, display-oriented compaction
@@ -3182,12 +3224,7 @@ func summarize(ev session.Event) string {
 			return "tool " + d.Name + " error → " + boundRunes(d.Err, maxSummary)
 		}
 	case "skill/catalog":
-		var d struct {
-			EntryCount int `json:"entryCount"`
-		}
-		if json.Unmarshal(ev.Data, &d) == nil {
-			return fmt.Sprintf("上下文注入: 技能目录 (%d 个技能)", d.EntryCount)
-		}
+		return "上下文注入 skill-catalog"
 	case "compaction/summary":
 		var d struct {
 			Summary string `json:"summary"`

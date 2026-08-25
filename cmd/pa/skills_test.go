@@ -333,6 +333,34 @@ func TestSkillCatalogEventDedupByVersion(t *testing.T) {
 	}
 }
 
+// TestSkillCatalogEventIsSessionScoped verifies that the same catalog is
+// published again for a fresh session instead of inheriting an app-global
+// digest from a previous session.
+func TestSkillCatalogEventIsSessionScoped(t *testing.T) {
+	a, proj := skillFixture(t, true)
+	writeSkill(t, filepath.Join(proj, ".dsh", "skills"), "alpha", "alpha desc", "alpha body\n")
+	if err := a.registerSkills(); err != nil {
+		t.Fatalf("registerSkills: %v", err)
+	}
+	defer a.skills.Close()
+
+	inj := a.skillCatalogInjector()
+	if got := inj.Inject(context.Background(), "hi"); len(got) != 1 {
+		t.Fatalf("first session injection = %+v, want one", got)
+	}
+	if countEvent(a.log, session.EventSkillCatalog) != 1 {
+		t.Fatalf("first session catalog events = %d, want 1", countEvent(a.log, session.EventSkillCatalog))
+	}
+
+	a.log = session.New()
+	if got := inj.Inject(context.Background(), "hi"); len(got) != 1 {
+		t.Fatalf("fresh session injection = %+v, want one", got)
+	}
+	if countEvent(a.log, session.EventSkillCatalog) != 1 {
+		t.Fatalf("fresh session catalog events = %d, want 1", countEvent(a.log, session.EventSkillCatalog))
+	}
+}
+
 // TestSkillCatalogInjectorNilRegistryNoOp verifies the injector is inert when
 // the registry is absent (the disabled guard, D10).
 func TestSkillCatalogInjectorNilRegistryNoOp(t *testing.T) {

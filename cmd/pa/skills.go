@@ -15,6 +15,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -187,13 +188,34 @@ func (a *app) skillCatalogPreStep(ctx context.Context, _ string) []llm.Message {
 		return nil
 	}
 	version := skillCatalogVersion(modelCands)
-	if version != a.skillCatalogVersion {
-		a.skillCatalogVersion = version
+	// Catalog publication is session-scoped. A process-level digest would make
+	// a new session with the same skills silently lose its skill/catalog row,
+	// even though dsh publishes the initial catalog for every session.
+	if skillCatalogEventVersion(a.log) != version {
 		if _, err := a.log.Append(session.EventSkillCatalog, session.NewSkillCatalog(len(modelCands), version)); err != nil {
 			fmt.Fprintln(os.Stderr, "pa: skill/catalog event:", err)
 		}
 	}
 	return []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text(text)}}}
+}
+
+func skillCatalogEventVersion(log *session.Log) string {
+	if log == nil {
+		return ""
+	}
+	for i := len(log.Events()) - 1; i >= 0; i-- {
+		ev := log.Events()[i]
+		if ev.Type != session.EventSkillCatalog {
+			continue
+		}
+		var data struct {
+			Version string `json:"version"`
+		}
+		if json.Unmarshal(ev.Data, &data) == nil {
+			return data.Version
+		}
+	}
+	return ""
 }
 
 // formatSkillCatalog renders the sorted skill catalog as dsh-compatible

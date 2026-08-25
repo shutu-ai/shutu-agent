@@ -166,7 +166,7 @@ func (l *Loop) Run(ctx context.Context, userText string) (runErr error) {
 				if inj.Deduplicate && l.visibleMessageExists(message) {
 					continue
 				}
-				if err := l.appendContextMessage(message); err != nil {
+				if err := l.appendContextMessage(inj.Name, message); err != nil {
 					return err
 				}
 			}
@@ -184,12 +184,30 @@ func (l *Loop) Run(ctx context.Context, userText string) (runErr error) {
 
 // effectiveInjectors returns the ordered pre-step injector list for one turn.
 func (l *Loop) effectiveInjectors() []PreStepInjector {
-	out := append([]PreStepInjector(nil), l.preStep...)
-	// Append the runtime snapshot last. This keeps the current user message as
-	// the newest conversational turn while pressure compaction selects its
-	// retained tail; the request still derives as user → context → history.
-	if l.runtimeContext != nil {
-		out = append(out, PreStepInjector{Name: "runtime-context", Inject: l.runtimeContext, Deduplicate: true})
+	// dsh's normal path is user → system-prompt context → skill catalog →
+	// other plugin context. Pressure compaction remains the first hook when it
+	// is registered, so its pressure estimate does not include the snapshot it
+	// may itself cause to be replaced.
+	runtime := PreStepInjector{
+		Name:        "runtime-context",
+		Inject:      l.runtimeContext,
+		Deduplicate: true,
+	}
+	var out []PreStepInjector
+	for _, inj := range l.preStep {
+		if inj.Name == "compaction" {
+			out = append(out, inj)
+			continue
+		}
+		if l.runtimeContext != nil && len(out) == 0 {
+			out = append(out, runtime)
+		}
+		out = append(out, inj)
+	}
+	if l.runtimeContext != nil && len(out) == 0 {
+		out = append(out, runtime)
+	} else if l.runtimeContext != nil && len(out) > 0 && out[0].Name == "compaction" {
+		out = append([]PreStepInjector{out[0], runtime}, out[1:]...)
 	}
 	return out
 }
@@ -197,13 +215,31 @@ func (l *Loop) effectiveInjectors() []PreStepInjector {
 // appendContextMessage persists one pre-step user context message. Context is
 // represented by the normal user/message event, as in dsh, so DeriveHistory is
 // the source of truth for the initial request and every follow-up request.
-func (l *Loop) appendContextMessage(message llm.Message) error {
+func (l *Loop) appendContextMessage(injectorName string, message llm.Message) error {
 	if strings.TrimSpace(message.Text()) == "" && len(message.Content) == 0 {
 		return nil
 	}
+	sourceKind, sourcePlugin := contextSource(injectorName)
+	var payload any
+	if sourceKind != "" {
+		payload = session.NewContextMessage(message.Text(), message.Content, sourceKind, sourcePlugin)
+	} else {
+		payload = session.NewUserMessageWithBlocks(message.Text(), message.Content)
+	}
 	_, err := l.log.Append(session.EventUserMessage,
-		session.NewUserMessageWithBlocks(message.Text(), message.Content))
+		payload)
 	return err
+}
+
+func contextSource(injectorName string) (kind, plugin string) {
+	switch injectorName {
+	case "runtime-context":
+		return "plugin", "@deepseek-ai/dsh-system-prompt"
+	case "skill":
+		return "skill-catalog", ""
+	default:
+		return "", ""
+	}
 }
 
 func (l *Loop) visibleMessageExists(message llm.Message) bool {

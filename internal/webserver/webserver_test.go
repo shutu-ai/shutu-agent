@@ -1960,8 +1960,17 @@ func TestEventViewHidesInternalContextMessages(t *testing.T) {
 	if len(events) != 4 || events[0].ContextMessage || events[0].Summary != "当前目录" {
 		t.Fatalf("human event = %+v", events[0])
 	}
+	if events[1].Summary != "上下文注入 skill-catalog" || events[1].ContextSource != "skill-catalog" {
+		t.Fatalf("skill catalog context event = %+v", events[1])
+	}
+	if events[2].Summary != "上下文注入 @deepseek-ai/dsh-system-prompt" || events[2].ContextSource != "@deepseek-ai/dsh-system-prompt" {
+		t.Fatalf("runtime context event = %+v", events[2])
+	}
+	if events[3].Summary != "上下文注入 skill-invocation" || events[3].ContextSource != "skill-invocation" {
+		t.Fatalf("skill invocation context event = %+v", events[3])
+	}
 	for _, ev := range events[1:] {
-		if !ev.ContextMessage || ev.Summary != "" {
+		if !ev.ContextMessage || ev.Summary == "" {
 			t.Fatalf("internal context event = %+v", ev)
 		}
 	}

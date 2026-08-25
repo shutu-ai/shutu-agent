@@ -511,7 +511,16 @@ func derive(events []Event) []llm.Message {
 type userMessageData struct {
 	Text      string             `json:"text"`
 	Content   []llm.ContentBlock `json:"content,omitempty"`   // M8-3 reservation: content blocks (images); not written this milestone
+	Source    *messageSource     `json:"source,omitempty"`    // dsh-style origin for model-only context messages
 	SurfaceOp *SurfaceReplace    `json:"surfaceOp,omitempty"` // set by compaction summaries (M5c)
+}
+
+// messageSource identifies a model-only context message without changing its
+// user-role wire representation. It is intentionally small: the Web layer
+// only needs the stable source label, while DeriveHistory ignores it.
+type messageSource struct {
+	Kind   string `json:"kind"`
+	Plugin string `json:"plugin,omitempty"`
 }
 
 type feedbackRecordData struct {
@@ -727,6 +736,17 @@ func NewWebCommandResult(text string, command ...string) any {
 // history. Constructed in the same New* style as NewAssistantMessage.
 func NewUserMessageWithBlocks(text string, blocks []llm.ContentBlock) any {
 	return userMessageData{Text: text, Content: blocks}
+}
+
+// NewContextMessage builds a durable model-only user-role context message with
+// its dsh-compatible source metadata. sourceKind is typically "plugin" for a
+// plugin-owned snapshot or a concrete source kind such as "skill-catalog".
+func NewContextMessage(text string, blocks []llm.ContentBlock, sourceKind, sourcePlugin string) any {
+	return userMessageData{
+		Text:    text,
+		Content: blocks,
+		Source:  &messageSource{Kind: sourceKind, Plugin: sourcePlugin},
+	}
 }
 
 // NewUserMessageReplace builds a user/message payload for a compaction summary

@@ -1536,7 +1536,8 @@ async function loadSessions() {
   try {
     const wr = await api("/api/workspaces");
     const data = await wr.json();
-    wsGroups = data.workspaces || [];
+     wsGroups = data.workspaces || [];
+     wsList = wsGroups;
     wsUngrouped = data.ungrouped_ids || [];
   } catch (e) { if (e.message !== "unauthorized") console.error(e); }
   autoExpandCurrentGroup(list, "workspace");
@@ -2606,6 +2607,8 @@ async function createSessionInWorkspace(wsId) {
     if (!b.id) throw new Error("no id");
     currentID = b.id;
     localStorage.setItem(KEY_CURRENT, b.id);
+    heroWorkspace = wsId;
+    syncHeroChip();
     await openSession(b.id);
     if (wsId) setWsOpen(wsId, true);
     await loadSessions();
@@ -3979,10 +3982,13 @@ function renderLifecycleEvent(ev) {
 }
 
 function renderEvent(ev, replay) {
-  // Runtime/skill projections are durable model context, not conversation
-  // turns. They remain in the event stream for sequence reconciliation but
-  // must never be rendered as user bubbles.
-  if (ev.context_message) return;
+  // Runtime context is a dsh context-injection row. The skill catalog has a
+  // separate skill/catalog observation event, so its durable user-role copy
+  // is hidden here to avoid rendering the same injection twice.
+  if (ev.context_message) {
+    if (ev.context_source !== "skill-catalog") addContextInjection(ev);
+    return;
+  }
   // First event of an empty session: the turn has begun, so leave the centered
   // hero and dock the composer (dsh: 第一次输入提交后输入条下移).
   if (sessionEmpty) { sessionEmpty = false; setHeroPhase(); }
@@ -4045,6 +4051,8 @@ function renderEvent(ev, replay) {
       else renderToolRow(ev);
       break;
     case "skill/catalog":
+      addContextInjection(ev);
+      break;
     case "compaction/summary":
     case "compaction/end":
       addCompactionEvent(ev);
@@ -6184,7 +6192,7 @@ $("theme-toggle").addEventListener("click", toggleTheme);
 $("theme-toggle-settings").addEventListener("click", toggleTheme);
 $("settings-back").addEventListener("click", () => location.hash = "#/chat");
 $("settings-close").addEventListener("click", () => location.hash = "#/chat");
-$("back").addEventListener("click", () => location.hash = "#/chat");
+$("back")?.addEventListener("click", () => location.hash = "#/chat");
 
 // New-session hero workspace chip: opens the picker popover (dsh WorkspaceChip).
 if (heroWsChip) heroWsChip.addEventListener("click", (e) => {

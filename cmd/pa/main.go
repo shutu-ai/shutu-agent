@@ -625,10 +625,6 @@ type app struct {
 
 	compaction compaction.Engine // nil when compaction disabled (D10)
 	skills     skill.Registry    // nil when skill disabled (D10)
-	// skillCatalogVersion is the digest of the last skill/catalog event logged
-	// (dsh digest semantics): the catalog event fires once per catalog, and
-	// again only when the catalog changes — never every turn.
-	skillCatalogVersion string
 	// skillManager is the web settings-page skill manager (dsh-skill-mcp-panel
 	// 瀵归綈). It is created whenever the web server runs 鈥?independent of
 	// skill.enabled 鈥?so the 鎶€鑳?settings page can list/enable/disable/delete/
