@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
-import type { AttachmentView, ConfigView, DirectoryListing, EventDetails, EventView, FeedbackView, ImageView, JobView, RunningSnapshot, SessionSearchHit, SessionSummary, SubagentView, WorkspaceView } from './api'
+import type { AttachmentView, CommandView, ConfigView, DirectoryListing, EventDetails, EventView, FeedbackView, ImageView, InteractionView, JobView, QueueItem, RunningSnapshot, SessionSearchHit, SessionSummary, SubagentView, WorkspaceView } from './api'
 import { projectDshConversation, type DshConversationNode, type DshConversationSnapshot } from './dsh-conversation'
 import { projectDshTrajectory, type DshTimelineMode } from './dsh-trajectory'
 import { WebStore } from './store'
@@ -456,7 +456,7 @@ function EventImages({ store, sessionId, images }: { store: WebStore; sessionId:
   return <div className="event-images">{images.map(image => urls[image.id] ? <img key={image.id} src={urls[image.id]} alt="消息附件" /> : <span className="event-image-loading" key={image.id}>图片加载中…</span>)}</div>
 }
 
-function EventCard({ event, store, sessionId, feedback, onFeedback }: { event: EventView; store: WebStore; sessionId: string; feedback?: FeedbackView; onFeedback: (seq: number, rating: 'positive' | 'negative') => void }) {
+function EventCard({ event, store, sessionId, feedback, onFeedback, onCopy, onRetry, onFork }: { event: EventView; store: WebStore; sessionId: string; feedback?: FeedbackView; onFeedback: (seq: number, rating: 'positive' | 'negative') => void; onCopy?: (text: string) => void; onRetry?: (text: string) => void; onFork?: () => void }) {
   const [expanded, setExpanded] = useState(false)
   const text = event.tool_output || event.reasoning || event.summary || event.compaction_summary || 'No content'
   const entries = detailEntries(event.details)
@@ -477,6 +477,7 @@ function EventCard({ event, store, sessionId, feedback, onFeedback }: { event: E
       <div className="event-content">
         {event.call_id && <span className="call-id">call {event.call_id}</span>}
         <div className="event-text">{text}</div>
+        {event.type === 'assistant/message' && <div className="event-actions message-actions" aria-label="Message actions"><button type="button" onClick={() => onCopy ? onCopy(text) : void navigator.clipboard?.writeText(text)}>Copy</button><button type="button" onClick={() => onRetry ? onRetry(text) : void store.send(text)}>Retry</button><button type="button" onClick={() => onFork ? onFork() : void store.forkSession(sessionId)}>Fork</button></div>}
         {event.images && event.images.length > 0 && <EventImages store={store} sessionId={sessionId} images={event.images} />}
         {event.tool_args && <div className="code-block"><span>Input</span><pre>{event.tool_args}</pre></div>}
         {tokenUsage !== undefined && <span className="token-chip">Tokens {detailText(tokenUsage)}</span>}
@@ -529,12 +530,15 @@ function conversationNodeLabel(node: DshConversationNode): string {
   }
 }
 
-function DshConversation({ events, sessionId, store, feedbackBySeq, onFeedback, onReachTop, loadingOlder }: {
+function DshConversation({ events, sessionId, store, feedbackBySeq, onFeedback, onCopy, onRetry, onFork, onReachTop, loadingOlder }: {
   events: readonly EventView[]
   sessionId: string
   store: WebStore
   feedbackBySeq: Readonly<Record<number, FeedbackView>>
   onFeedback: (seq: number, rating: 'positive' | 'negative') => void
+  onCopy?: (text: string) => void
+  onRetry?: (text: string) => void
+  onFork?: () => void
   onReachTop: () => void
   loadingOlder: boolean
 }) {
@@ -581,7 +585,7 @@ function DshConversation({ events, sessionId, store, feedbackBySeq, onFeedback, 
         if (raw === undefined) return null
         return <section className={`conversation-node conversation-virtual-row ${node.kind}`} key={`${node.kind}:${node.seq}`} style={{ transform: `translateY(${(start + index) * CONVERSATION_ROW_HEIGHT}px)` }}>
           <div className="conversation-node-head"><span>{conversationNodeLabel(node)}</span><span>#{node.seq}</span></div>
-          <EventCard event={raw} store={store} sessionId={sessionId} feedback={feedbackBySeq[raw.seq]} onFeedback={onFeedback} />
+          <EventCard event={raw} store={store} sessionId={sessionId} feedback={feedbackBySeq[raw.seq]} onFeedback={onFeedback} onCopy={onCopy} onRetry={onRetry} onFork={onFork} />
         </section>
       })}
     </div>
@@ -598,12 +602,15 @@ function DshConversationHeader({ snapshot }: { snapshot: DshConversationSnapshot
   </div>
 }
 
-function VirtualEvents({ events, store, sessionId, feedbackBySeq, onFeedback, onReachTop, loadingOlder, focusSeq }: {
+function VirtualEvents({ events, store, sessionId, feedbackBySeq, onFeedback, onCopy, onRetry, onFork, onReachTop, loadingOlder, focusSeq }: {
   events: readonly EventView[]
   store: WebStore
   sessionId: string
   feedbackBySeq: Readonly<Record<number, FeedbackView>>
   onFeedback: (seq: number, rating: 'positive' | 'negative') => void
+  onCopy?: (text: string) => void
+  onRetry?: (text: string) => void
+  onFork?: () => void
   onReachTop: () => void
   loadingOlder: boolean
   focusSeq: number | null
@@ -653,7 +660,7 @@ function VirtualEvents({ events, store, sessionId, feedbackBySeq, onFeedback, on
     {loadingOlder && <div className="history-loading">Loading earlier events…</div>}
     <div className="virtual-canvas" style={{ height: events.length * ROW_HEIGHT }}>
       {visible.map((event, index) => <div className="virtual-row" key={event.seq} style={{ transform: `translateY(${(start + index) * ROW_HEIGHT}px)` }}>
-        <EventCard event={event} store={store} sessionId={sessionId} feedback={feedbackBySeq[event.seq]} onFeedback={onFeedback} />
+        <EventCard event={event} store={store} sessionId={sessionId} feedback={feedbackBySeq[event.seq]} onFeedback={onFeedback} onCopy={onCopy} onRetry={onRetry} onFork={onFork} />
       </div>)}
     </div>
   </div>
@@ -747,6 +754,78 @@ function RunningPanel({ store, sessionId }: { store: WebStore; sessionId: string
   </div>
 }
 
+const DEFAULT_COMMANDS: CommandView[] = [
+  { name: 'help', hint: 'Show available slash commands', kind: 'command' },
+  { name: 'status', hint: 'Show provider, model and mode', kind: 'command' },
+  { name: 'compact', hint: 'Compact context', kind: 'command' },
+  { name: 'permission', hint: 'Show or set permission', kind: 'command' },
+  { name: 'feedback', hint: 'Record feedback', kind: 'command' },
+  { name: 'goal', hint: 'Manage the goal', kind: 'command' },
+  { name: 'plan', hint: 'Plan mode', kind: 'command' },
+  { name: 'export', hint: 'Download session log', kind: 'command' },
+]
+
+function CommandMenu({ commands, query, onSelect }: { commands: readonly CommandView[]; query: string; onSelect: (command: CommandView) => void }) {
+  const normalized = query.toLocaleLowerCase()
+  const items = commands.filter(command => command.name.toLocaleLowerCase().includes(normalized)).slice(0, 8)
+  if (items.length === 0) return null
+  return <div className="command-menu" role="listbox" aria-label="Slash commands">
+    {items.map(command => <button type="button" role="option" key={`${command.kind ?? 'command'}:${command.name}`} onMouseDown={event => event.preventDefault()} onClick={() => onSelect(command)}><strong>/{command.name}</strong><span>{command.hint ?? command.kind ?? ''}</span></button>)}
+  </div>
+}
+
+function QueuePanel({ store, sessionId, active, onError }: { store: WebStore; sessionId: string | null; active: boolean; onError: (error: unknown) => void }) {
+  const [items, setItems] = useState<QueueItem[]>([])
+  const [busy, setBusy] = useState<string | null>(null)
+  const [refreshKey, setRefreshKey] = useState(0)
+  useEffect(() => {
+    if (sessionId === null) { setItems([]); return }
+    const abort = new AbortController()
+    const refresh = async () => {
+      try { const next = await store.listQueue(sessionId, abort.signal); if (!abort.signal.aborted) setItems(next) }
+      catch (error) { if (!abort.signal.aborted) onError(error) }
+    }
+    void refresh()
+    const timer = window.setInterval(() => { void refresh() }, active ? 1500 : 5000)
+    return () => { abort.abort(); window.clearInterval(timer) }
+  }, [active, onError, refreshKey, sessionId, store])
+  const update = async (item: QueueItem, action: 'move_first' | 'delete' | 'steer') => {
+    if (sessionId === null) return
+    setBusy(`${item.id}:${action}`)
+    try { await store.updateQueue(sessionId, item.id, action); setRefreshKey(value => value + 1) }
+    catch (error) { onError(error) }
+    finally { setBusy(null) }
+  }
+  if (sessionId === null || items.length === 0) return null
+  return <section className="queue-panel" aria-label="Queued messages"><div className="queue-head"><strong>Queue</strong><span>{items.length} waiting</span></div><div className="queue-list">{items.map(item => <article className="queue-item" key={item.id}><div><span>{item.text}</span><small>{item.placement || 'queued'}{item.created_at ? ` · ${relativeTime(item.created_at)}` : ''}</small></div><div className="queue-actions"><button type="button" disabled={busy !== null} onClick={() => void update(item, 'move_first')}>First</button><button type="button" disabled={busy !== null} onClick={() => void update(item, 'steer')}>Steer</button><button type="button" disabled={busy !== null} onClick={() => void update(item, 'delete')}>Remove</button></div></article>)}</div></section>
+}
+
+function InteractionPanel({ store, sessionId, onError }: { store: WebStore; sessionId: string | null; onError: (error: unknown) => void }) {
+  const [items, setItems] = useState<InteractionView[]>([])
+  const [busy, setBusy] = useState<string | null>(null)
+  const [refreshKey, setRefreshKey] = useState(0)
+  useEffect(() => {
+    if (sessionId === null) { setItems([]); return }
+    const abort = new AbortController()
+    const refresh = async () => {
+      try { const next = await store.listInteractions(sessionId, abort.signal); if (!abort.signal.aborted) setItems(next.filter(item => !['approved', 'rejected', 'canceled', 'cancelled'].includes(item.status.toLowerCase()))) }
+      catch (error) { if (!abort.signal.aborted) onError(error) }
+    }
+    void refresh()
+    const timer = window.setInterval(() => { void refresh() }, 1500)
+    return () => { abort.abort(); window.clearInterval(timer) }
+  }, [onError, refreshKey, sessionId, store])
+  const resolve = async (item: InteractionView, status: 'approved' | 'rejected' | 'canceled', answer = '') => {
+    if (sessionId === null) return
+    setBusy(item.id)
+    try { await store.resolveInteraction(sessionId, item.id, status, answer); setRefreshKey(value => value + 1) }
+    catch (error) { onError(error) }
+    finally { setBusy(null) }
+  }
+  if (sessionId === null || items.length === 0) return null
+  return <section className="interaction-panel" aria-label="Approval requests"><div className="interaction-head"><strong>Approval required</strong><span>{items.length} pending</span></div>{items.map(item => <article className="interaction-card" key={item.id}><div className="interaction-copy"><strong>{item.tool_name || 'Agent request'}</strong><p>{item.prompt}</p>{item.args && <pre>{item.args}</pre>}</div>{item.questions?.map(question => <div className="interaction-question" key={question.id ?? question.question}><span>{question.question}</span><div>{question.options?.map(option => <button type="button" key={option.label} disabled={busy !== null} onClick={() => void resolve(item, 'approved', option.label)}>{option.label}</button>)}</div></div>)}<div className="interaction-actions"><button type="button" disabled={busy !== null} onClick={() => void resolve(item, 'approved')}>Approve</button><button type="button" disabled={busy !== null} onClick={() => void resolve(item, 'rejected')}>Reject</button><button type="button" disabled={busy !== null} onClick={() => void resolve(item, 'canceled')}>Cancel</button></div></article>)}</section>
+}
+
 function isConversationEvent(event: EventView): boolean {
   return event.type.startsWith('user/') || event.type.startsWith('assistant/') ||
     event.type.startsWith('tool/') || event.type.startsWith('interact/') ||
@@ -757,6 +836,7 @@ export function App({ store }: { store: WebStore }) {
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
   const [tab, setTab] = useState<'chat' | 'trajectory' | 'running'>('chat')
   const [draft, setDraft] = useState('')
+  const [commands, setCommands] = useState<CommandView[]>(DEFAULT_COMMANDS)
   const [search, setSearch] = useState('')
   const [sendError, setSendError] = useState<string | null>(null)
   const [focusedSeq, setFocusedSeq] = useState<number | null>(null)
@@ -784,7 +864,17 @@ export function App({ store }: { store: WebStore }) {
     })
   }, [search, state.events, tab])
 
+  const commandQuery = draft.match(/^\/([^\s]*)$/)?.[1] ?? null
+
   useEffect(() => { void store.start() }, [store])
+
+  useEffect(() => {
+    const abort = new AbortController()
+    void store.getConfig(abort.signal).then(config => {
+      if (!abort.signal.aborted && Array.isArray(config.commands) && config.commands.length > 0) setCommands(config.commands)
+    }).catch(() => undefined)
+    return () => abort.abort()
+  }, [store])
 
   useEffect(() => {
     if (state.selectedId === null) {
@@ -840,13 +930,42 @@ export function App({ store }: { store: WebStore }) {
     setDraft('')
     setSendError(null)
     try {
-      await store.send(value, pendingImages.map(item => item.ref.id))
+      if (state.sending) {
+        if (pendingImages.length > 0) throw new Error('Queued messages currently support text only.')
+        if (state.selectedId !== null) await store.enqueueQueue(state.selectedId, value)
+      } else {
+        await store.send(value, pendingImages.map(item => item.ref.id))
+      }
       pendingImages.forEach(item => URL.revokeObjectURL(item.previewUrl))
       setPendingImages([])
     } catch (error) {
       setDraft(value)
       setSendError(error instanceof Error ? error.message : String(error))
     }
+  }
+
+  const copyMessage = async (text: string): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setSendError(null)
+    } catch (error) { setSendError(error instanceof Error ? error.message : String(error)) }
+  }
+
+  const retryMessage = async (text: string): Promise<void> => {
+    setSendError(null)
+    try { await store.send(text) }
+    catch (error) { setSendError(error instanceof Error ? error.message : String(error)) }
+  }
+
+  const forkSession = async (): Promise<void> => {
+    if (state.selectedId === null) return
+    setSendError(null)
+    try { await store.forkSession(state.selectedId) }
+    catch (error) { setSendError(error instanceof Error ? error.message : String(error)) }
+  }
+
+  const selectCommand = (command: CommandView): void => {
+    setDraft(`/${command.name} `)
   }
 
   const attachFiles = async (files: FileList | null): Promise<void> => {
@@ -892,7 +1011,15 @@ export function App({ store }: { store: WebStore }) {
 
   const stopRun = async (): Promise<void> => {
     setSendError(null)
-    try { await store.stop() } catch (error) {
+    try {
+      if (state.sending && state.selectedId !== null && draft.trim() !== '') {
+        if (pendingImages.length > 0) throw new Error('Queued messages currently support text only.')
+        await store.enqueueQueue(state.selectedId, draft.trim())
+        setDraft('')
+        return
+      }
+      await store.stop()
+    } catch (error) {
       setSendError(error instanceof Error ? error.message : String(error))
     }
   }
@@ -918,6 +1045,8 @@ export function App({ store }: { store: WebStore }) {
       <nav className="tabs" role="tablist"><button role="tab" aria-selected={tab === 'chat'} className={tab === 'chat' ? 'tab selected' : 'tab'} onClick={() => setTab('chat')}>Conversation</button><button role="tab" aria-selected={tab === 'trajectory'} className={tab === 'trajectory' ? 'tab selected' : 'tab'} onClick={() => setTab('trajectory')}>Trajectory <span>{state.events.length}</span></button><button role="tab" aria-selected={tab === 'running'} className={tab === 'running' ? 'tab selected' : 'tab'} onClick={() => setTab('running')}>运行中</button></nav>
       {search.trim() !== '' && <div className="search-status" role="status" aria-live="polite">{filtered.length} matching loaded events{state.hasOlder ? ' · scroll to load older history' : ''}</div>}
       {(state.error || sendError) && <div className="error-banner"><span>{state.error || sendError}</span><button onClick={() => { setSendError(null); void store.start() }}>Retry</button></div>}
+      <InteractionPanel store={store} sessionId={state.selectedId} onError={error => setSendError(error instanceof Error ? error.message : String(error))} />
+      <QueuePanel store={store} sessionId={state.selectedId} active={state.sending} onError={error => setSendError(error instanceof Error ? error.message : String(error))} />
       <section className="content-panel">
         {filesOpen && state.selectedId !== null ? <FilesPanel store={store} sessionId={state.selectedId} onClose={() => setFilesOpen(false)} onReference={path => { setDraft(previous => `${previous}${previous.trim() === '' ? '' : ' '}@${path}`); setFilesOpen(false) }} /> : state.authRequired ? <form className="auth-card" onSubmit={event => { event.preventDefault(); void authenticate() }}><strong>Authentication required</strong><span>Enter the bearer token configured for the Shutu web server.</span><input aria-label="Bearer token" type="password" autoComplete="current-password" value={token} onChange={event => setToken(event.target.value)} placeholder="Bearer token" /><button type="submit" disabled={token.trim() === ''}>Connect</button></form> : state.loading ? <div className="empty"><div className="spinner" />Loading session…</div> : tab === 'running' ? <RunningPanel store={store} sessionId={state.selectedId} /> : state.selectedId === null ? <div className="empty"><strong>Start a new conversation</strong><span>Select a session or send a message from the agent.</span></div> : filtered.length === 0 ? <div className="empty"><strong>{search ? 'No matching events' : 'No events yet'}</strong><span>{search ? 'Try a different search term.' : 'Events will appear here as the session runs.'}</span></div> : tab === 'trajectory' ? <><DshTimeline events={filtered} onSelectSeq={setFocusedSeq} /><VirtualEvents events={filtered} store={store} sessionId={state.selectedId} feedbackBySeq={feedbackBySeq} onFeedback={submitFeedback} focusSeq={focusedSeq} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} /></> : <DshConversation events={filtered} sessionId={state.selectedId} store={store} feedbackBySeq={feedbackBySeq} onFeedback={submitFeedback} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} />}
       </section>

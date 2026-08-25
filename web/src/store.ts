@@ -1,4 +1,4 @@
-import type { AttachmentView, ConfigView, EventView, FeedbackView, FilePreview, RunningSnapshot, SessionFilesView, SessionSearchHit, SessionSummary, WebApi, WorkspaceList } from './api'
+import type { AttachmentView, ConfigView, EventView, FeedbackView, FilePreview, InteractionView, QueueItem, RunningSnapshot, SessionFilesView, SessionSearchHit, SessionSummary, WebApi, WorkspaceList } from './api'
 import { ShutuApiError } from './api'
 
 export interface WebState {
@@ -271,6 +271,32 @@ export class WebStore {
 
   previewFile(sessionId: string, path: string, start?: number, end?: number, signal?: AbortSignal): Promise<FilePreview> {
     return this.api.previewFile(sessionId, path, start, end, signal)
+  }
+
+  async forkSession(sessionId: string): Promise<void> {
+    const result = await this.api.forkSession(sessionId)
+    await this.refreshSessions()
+    await this.open(result.id)
+  }
+
+  listQueue(sessionId: string, signal?: AbortSignal): Promise<QueueItem[]> {
+    return this.api.listQueue(sessionId, signal)
+  }
+
+  enqueueQueue(sessionId: string, text: string): Promise<QueueItem> {
+    return this.api.enqueueQueue(sessionId, text)
+  }
+
+  updateQueue(sessionId: string, itemId: string, action: 'move_first' | 'delete' | 'steer'): Promise<void> {
+    return this.api.updateQueue(sessionId, itemId, action)
+  }
+
+  listInteractions(sessionId: string, signal?: AbortSignal): Promise<InteractionView[]> {
+    return this.api.listInteractions(sessionId, signal)
+  }
+
+  resolveInteraction(sessionId: string, interactionId: string, status: 'approved' | 'rejected' | 'canceled', answer = ''): Promise<void> {
+    return this.api.resolveInteraction(sessionId, interactionId, status, answer)
   }
 
   async loadRunning(sessionId: string, signal?: AbortSignal): Promise<RunningSnapshot> {

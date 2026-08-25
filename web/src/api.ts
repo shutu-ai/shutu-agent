@@ -143,7 +143,43 @@ export interface ConfigView {
   tools_enabled_count?: number
   providers?: unknown[]
   mcp_servers?: unknown[]
+  commands?: CommandView[]
   [key: string]: unknown
+}
+
+export interface CommandView {
+  name: string
+  hint?: string
+  kind?: 'command' | 'skill' | string
+}
+
+export interface QueueItem {
+  id: string
+  text: string
+  created_at?: string
+  placement?: string
+}
+
+export interface InteractionQuestionOption {
+  label: string
+  description?: string
+}
+
+export interface InteractionQuestion {
+  id?: string
+  question: string
+  options?: InteractionQuestionOption[]
+}
+
+export interface InteractionView {
+  id: string
+  prompt: string
+  tool_name?: string
+  args?: string
+  status: string
+  created_at?: string
+  questions?: InteractionQuestion[]
+  resolved_at?: string
 }
 
 export interface SubagentView {
@@ -190,6 +226,12 @@ export interface WebApi {
   searchSessions(query: string, signal?: AbortSignal): Promise<SessionSearchHit[]>
   listFiles(sessionId: string, path?: string, query?: string, signal?: AbortSignal): Promise<SessionFilesView>
   previewFile(sessionId: string, path: string, start?: number, end?: number, signal?: AbortSignal): Promise<FilePreview>
+  forkSession(sessionId: string, signal?: AbortSignal): Promise<{ id: string }>
+  listQueue(sessionId: string, signal?: AbortSignal): Promise<QueueItem[]>
+  enqueueQueue(sessionId: string, text: string, signal?: AbortSignal): Promise<QueueItem>
+  updateQueue(sessionId: string, itemId: string, action: 'move_first' | 'delete' | 'steer', signal?: AbortSignal): Promise<void>
+  listInteractions(sessionId: string, signal?: AbortSignal): Promise<InteractionView[]>
+  resolveInteraction(sessionId: string, interactionId: string, status: 'approved' | 'rejected' | 'canceled', answer?: string, signal?: AbortSignal): Promise<void>
   listSessions(signal?: AbortSignal): Promise<SessionSummary[]>
   createSession(workspaceId?: string, signal?: AbortSignal): Promise<{ id: string; workspace_id?: string }>
   resumeSession(sessionId: string, signal?: AbortSignal): Promise<void>
@@ -334,6 +376,38 @@ export class ShutuApi implements WebApi {
     if (start !== undefined) params.set('start', String(start))
     if (end !== undefined) params.set('end', String(end))
     return this.json<FilePreview>(`/api/sessions/${encodeURIComponent(sessionId)}/file?${params}`, { signal })
+  }
+
+  forkSession(sessionId: string, signal?: AbortSignal): Promise<{ id: string }> {
+    return this.json<{ id: string }>(`/api/sessions/${encodeURIComponent(sessionId)}/fork`, { method: 'POST', signal })
+  }
+
+  listQueue(sessionId: string, signal?: AbortSignal): Promise<QueueItem[]> {
+    return this.json<QueueItem[]>(`/api/sessions/${encodeURIComponent(sessionId)}/queue`, { signal })
+  }
+
+  async enqueueQueue(sessionId: string, text: string, signal?: AbortSignal): Promise<QueueItem> {
+    return this.json<QueueItem>(`/api/sessions/${encodeURIComponent(sessionId)}/queue`, {
+      method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }),
+    })
+  }
+
+  async updateQueue(sessionId: string, itemId: string, action: 'move_first' | 'delete' | 'steer', signal?: AbortSignal): Promise<void> {
+    await this.json<{ ok: true }>(`/api/sessions/${encodeURIComponent(sessionId)}/queue/${encodeURIComponent(itemId)}`, {
+      method: 'PATCH', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action }),
+    })
+  }
+
+  listInteractions(sessionId: string, signal?: AbortSignal): Promise<InteractionView[]> {
+    const query = new URLSearchParams({ session_id: sessionId })
+    return this.json<{ interactions: InteractionView[] }>(`/api/interactions?${query}`, { signal }).then(result => result.interactions ?? [])
+  }
+
+  async resolveInteraction(sessionId: string, interactionId: string, status: 'approved' | 'rejected' | 'canceled', answer = '', signal?: AbortSignal): Promise<void> {
+    const query = new URLSearchParams({ session_id: sessionId })
+    await this.json<{ ok: true }>(`/api/interactions/${encodeURIComponent(interactionId)}/resolve?${query}`, {
+      method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status, answer }),
+    })
   }
 
   putFeedback(sessionId: string, seq: number, rating: 'positive' | 'negative', note = '', signal?: AbortSignal): Promise<FeedbackView> {

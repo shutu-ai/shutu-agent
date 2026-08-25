@@ -153,4 +153,32 @@ describe('ShutuApi', () => {
       { path: '/api/sessions/session-1', method: 'DELETE' },
     ])
   })
+
+  it('maps fork, queue and interaction controls to session-scoped endpoints', async () => {
+    const requests: { path: string; method: string; body?: string }[] = []
+    const api = new ShutuApi('https://shutu.test', '', async (input, init) => {
+      const url = new URL(String(input))
+      requests.push({ path: `${url.pathname}${url.search}`, method: init?.method ?? 'GET', body: typeof init?.body === 'string' ? init.body : undefined })
+      if (url.pathname.endsWith('/queue') && (init?.method ?? 'GET') === 'GET') return new Response(JSON.stringify([{ id: 'q1', text: 'next', placement: 'queued' }]), { status: 200 })
+      if (url.pathname.endsWith('/queue') && init?.method === 'POST') return new Response(JSON.stringify({ id: 'q2', text: 'next', placement: 'queued' }), { status: 202 })
+      if (url.pathname === '/api/interactions') return new Response(JSON.stringify({ interactions: [{ id: 'i1', prompt: 'Allow?', status: 'pending' }] }), { status: 200 })
+      return new Response(JSON.stringify({ id: 'fork-1', ok: true }), { status: 200 })
+    })
+
+    await expect(api.forkSession('s/1')).resolves.toMatchObject({ id: 'fork-1' })
+    await expect(api.listQueue('s/1')).resolves.toEqual([{ id: 'q1', text: 'next', placement: 'queued' }])
+    await expect(api.enqueueQueue('s/1', 'next')).resolves.toMatchObject({ id: 'q2' })
+    await api.updateQueue('s/1', 'q1', 'steer')
+    await expect(api.listInteractions('s/1')).resolves.toMatchObject([{ id: 'i1', status: 'pending' }])
+    await api.resolveInteraction('s/1', 'i1', 'approved', 'yes')
+
+    expect(requests).toEqual([
+      { path: '/api/sessions/s%2F1/fork', method: 'POST' },
+      { path: '/api/sessions/s%2F1/queue', method: 'GET' },
+      { path: '/api/sessions/s%2F1/queue', method: 'POST', body: '{"text":"next"}' },
+      { path: '/api/sessions/s%2F1/queue/q1', method: 'PATCH', body: '{"action":"steer"}' },
+      { path: '/api/interactions?session_id=s%2F1', method: 'GET' },
+      { path: '/api/interactions/i1/resolve?session_id=s%2F1', method: 'POST', body: '{"status":"approved","answer":"yes"}' },
+    ])
+  })
 })

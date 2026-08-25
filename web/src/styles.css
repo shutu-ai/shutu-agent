@@ -277,6 +277,42 @@ body[data-theme="light"] .tool-chip { border-color: #d4e0e8; color: #42576c; bac
   .model-fields { grid-template-columns: 1fr; }
 }
 
+.command-menu { position: absolute; z-index: 12; right: 9px; bottom: calc(100% - 1px); left: 9px; display: grid; max-height: 260px; overflow: auto; border: 1px solid #30465a; border-radius: 9px; padding: 5px; background: #12202e; box-shadow: 0 -12px 30px #0006; }
+.command-menu button { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 10px; border: 0; border-radius: 6px; padding: 8px 10px; color: #c8d7e5; background: transparent; text-align: left; cursor: pointer; }
+.command-menu button:hover, .command-menu button:focus-visible { background: #1d3143; outline: 0; }
+.command-menu strong { color: #9de9bd; }
+.command-menu span { overflow: hidden; color: #8196aa; text-overflow: ellipsis; white-space: nowrap; }
+.composer { position: relative; }
+.message-actions button { color: #8fb9d4; }
+.queue-panel, .interaction-panel { display: grid; gap: 8px; margin: 10px 38px 0; border: 1px solid #30465a; border-radius: 10px; padding: 10px 12px; background: #101c29; }
+.queue-head, .interaction-head { display: flex; justify-content: space-between; color: #dbe8f3; }
+.queue-head span, .interaction-head span { color: #8298ad; font-size: 12px; }
+.queue-list { display: grid; gap: 6px; }
+.queue-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid #223446; padding-top: 7px; }
+.queue-item > div:first-child { display: grid; min-width: 0; gap: 2px; }
+.queue-item span { overflow: hidden; color: #c7d6e4; text-overflow: ellipsis; white-space: nowrap; }
+.queue-item small { color: #71879b; }
+.queue-actions, .interaction-actions, .interaction-question div { display: flex; flex-wrap: wrap; gap: 5px; }
+.queue-actions button, .interaction-actions button, .interaction-question button { border: 1px solid #39536a; border-radius: 5px; padding: 4px 7px; color: #b9d3e6; background: #162838; cursor: pointer; }
+.queue-actions button:hover, .interaction-actions button:hover, .interaction-question button:hover { border-color: #70b3d6; background: #1d3a4e; }
+.interaction-card { display: grid; gap: 8px; border-top: 1px solid #223446; padding-top: 9px; }
+.interaction-copy { display: grid; gap: 4px; }
+.interaction-copy strong { color: #f1c38c; }
+.interaction-copy p { margin: 0; color: #d2dfe9; white-space: pre-wrap; }
+.interaction-copy pre { max-height: 90px; margin: 0; overflow: auto; color: #91a9bd; font: 11px/1.4 ui-monospace, monospace; white-space: pre-wrap; }
+.interaction-question { display: grid; gap: 5px; color: #a9bfd1; font-size: 12px; }
+body[data-theme="light"] .command-menu, body[data-theme="light"] .queue-panel, body[data-theme="light"] .interaction-panel { border-color: #ccd9e4; background: #f8fbfd; box-shadow: 0 -12px 30px #8aa0b522; }
+body[data-theme="light"] .command-menu button:hover, body[data-theme="light"] .command-menu button:focus-visible { background: #e7f0f6; }
+body[data-theme="light"] .command-menu span, body[data-theme="light"] .queue-head span, body[data-theme="light"] .interaction-head span, body[data-theme="light"] .queue-item small { color: #6d8295; }
+body[data-theme="light"] .queue-item, body[data-theme="light"] .interaction-card { border-color: #e0e8ef; }
+body[data-theme="light"] .queue-item span, body[data-theme="light"] .interaction-copy p { color: #304d65; }
+body[data-theme="light"] .queue-actions button, body[data-theme="light"] .interaction-actions button, body[data-theme="light"] .interaction-question button { border-color: #b8cbd9; color: #365a73; background: #edf4f8; }
+
+@media (max-width: 700px) {
+  .queue-panel, .interaction-panel { margin-left: 10px; margin-right: 10px; }
+  .queue-item { align-items: flex-start; flex-direction: column; }
+}
+
 .running-panel { display: flex; min-height: 0; flex: 1; flex-direction: column; overflow: auto; padding: 2px 9px 24px 18px; }
 .running-panel-head { display: flex; align-items: end; justify-content: space-between; gap: 18px; border-bottom: 1px solid #243244; padding: 10px 0 18px; }
 .running-panel-head h2 { margin: 5px 0; color: #e6eef7; font-size: 21px; }
