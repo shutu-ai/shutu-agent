@@ -56,6 +56,10 @@ type JobStart struct {
 	Label            string
 	OwnerSession     string // "" = unowned job, visible to any caller
 	OutputLimitBytes int    // >0 truncates the stored terminal output to this cap
+	// ReadOutput, when supplied, returns output produced since the previous
+	// read. This is dsh's consuming stream contract; the final JobOutcome.Output
+	// remains the fallback for jobs that do not expose a stream.
+	ReadOutput func() (string, error)
 
 	// Run is the foreground cancelable body. The registry invokes it once in a
 	// background goroutine after registration and settles the job from its
@@ -81,7 +85,7 @@ type JobOutcome struct {
 //
 // Lifecycle (ADR 决策 ①): Start preflights (spec validation + concurrency cap)
 // then registers and runs the job in a background goroutine; List/Get observe
-// owner-filtered snapshots; Read returns the terminal output idempotently ("" 
+// owner-filtered snapshots; Read returns the terminal output idempotently (""
 // while running); Kill requests cancellation and returns "requested" or
 // "already-finished"; Wait blocks up to timeout and returns the current
 // snapshot; Close cancels and awaits every live job so no goroutine leaks.
@@ -111,6 +115,13 @@ type Registry interface {
 	// Close cancels and awaits every live job so no background goroutine leaks
 	// (lifecycle is reversible, ADR 决策 ①). Start after Close is rejected.
 	Close() error
+}
+
+// DeltaReader is the optional streaming-output extension implemented by job
+// providers that can expose output before settlement. Consumers must fall back
+// to Registry.Read when a provider does not implement it.
+type DeltaReader interface {
+	ReadDelta(ctx context.Context, id, callerSession string) (string, JobSnapshot, error)
 }
 
 // Sentinel errors returned by Registry implementations so callers can

@@ -1,6 +1,7 @@
 // jobs.go — the M5a-2 composition-root orchestration (dispatch-m5a-2 §4). This
 // is where the jobs capability seam is wired into the REPL: registerJobs
-// creates the in-memory Local registry and registers the five job_* tools when
+// creates the in-memory Local registry and registers the dsh job
+// tools when
 // jobs.enabled (D10), and wires the D3 event sink so job/start, job/status and
 // job/done are appended to the active session log. The loop's turn/step
 // structure is untouched (D4): background job goroutines run independently and
@@ -18,8 +19,8 @@ import (
 	"github.com/jabing/shutu-agent/internal/tools"
 )
 
-// registerJobs creates the Local registry and registers the five job_* tools
-// when jobs.enabled, and wires the D3 event sink. When jobs is disabled it
+// registerJobs creates the Local registry and registers the dsh job tools when
+// jobs.enabled, and wires the D3 event sink. When jobs is disabled it
 // creates nothing and registers nothing (D10, mirrors registerKB).
 func (a *app) registerJobs() error {
 	if !config.Enabled(a.cfg.Jobs.Enabled) {
@@ -40,10 +41,9 @@ func (a *app) registerJobs() error {
 	jt := jobs.NewJobTools(a.jobs, func() string { return a.currentID }, onEvent)
 	for _, t := range []tools.Tool{
 		jt.Start(),
-		jt.Status(),
-		jt.Cancel(),
-		jt.Wait(),
-		jt.Read(),
+		jt.DshOutput(),
+		jt.DshKill(),
+		jt.DshList(),
 	} {
 		if err := a.reg.Register(t); err != nil {
 			return fmt.Errorf("pa: register %s: %w", t.Name(), err)

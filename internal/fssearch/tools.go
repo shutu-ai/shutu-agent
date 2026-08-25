@@ -58,6 +58,10 @@ func NewGrepToolForCWD(cwd func() string) GrepTool {
 
 func (GrepTool) Name() string { return GrepToolName }
 
+// ConcurrencySafe marks grep as a read-only filesystem query. dsh may run
+// independent grep calls in parallel and commit their results in model order.
+func (GrepTool) ConcurrencySafe(json.RawMessage) bool { return true }
+
 func (GrepTool) Description() string {
 	return "Search file contents with a regular expression. Returns matching lines with line numbers, grouped by file. " +
 		"Returns the first 250 matches inline; a capped result reports the limit. " +
@@ -250,6 +254,9 @@ func NewGlobToolForCWD(cwd func() string) GlobTool {
 }
 
 func (GlobTool) Name() string { return GlobToolName }
+
+// ConcurrencySafe marks glob as a read-only filesystem query.
+func (GlobTool) ConcurrencySafe(json.RawMessage) bool { return true }
 
 func (GlobTool) Description() string {
 	return "Find files whose paths match a glob pattern. Returns matching file paths — never directories — including hidden files; VCS metadata directories are excluded."

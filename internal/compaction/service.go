@@ -83,9 +83,11 @@ type assistantPayload struct {
 }
 
 type toolResultPayload struct {
-	CallID string `json:"callId"`
-	Name   string `json:"name,omitempty"`
-	Output string `json:"output,omitempty"`
+	CallID  string `json:"callId"`
+	Name    string `json:"name,omitempty"`
+	Output  string `json:"output,omitempty"`
+	Code    string `json:"code,omitempty"`
+	Message any    `json:"message,omitempty"`
 }
 
 type toolErrorPayload struct {
@@ -130,7 +132,7 @@ func pairingBalancedAfter(events []session.Event) []bool {
 					}
 				}
 			}
-		case session.EventToolResult, session.EventToolError:
+		case session.EventToolResult, "tool/error":
 			if id := eventCallID(ev); id != "" {
 				if open[id] {
 					delete(open, id)
@@ -276,11 +278,22 @@ func shadowedHistory(events []session.Event, start, end int64) []llm.Message {
 			out = append(out, llm.Message{Role: llm.RoleAssistant, Content: content, ToolCalls: d.ToolCalls})
 		case session.EventToolResult:
 			var d toolResultPayload
-			if json.Unmarshal(ev.Data, &d) != nil {
+			if err := json.Unmarshal(ev.Data, &d); err != nil {
+				var legacy toolErrorPayload
+				if json.Unmarshal(ev.Data, &legacy) == nil && legacy.CallID != "" {
+					out = append(out, llm.Message{Role: llm.RoleTool, ToolCallID: legacy.CallID, Content: []llm.ContentBlock{llm.Text("Error: " + legacy.Error)}})
+				}
 				continue
 			}
+			if d.Output == "" && d.Message == nil {
+				var legacy toolErrorPayload
+				if json.Unmarshal(ev.Data, &legacy) == nil && legacy.Error != "" {
+					out = append(out, llm.Message{Role: llm.RoleTool, ToolCallID: legacy.CallID, Content: []llm.ContentBlock{llm.Text("Error: " + legacy.Error)}})
+					continue
+				}
+			}
 			out = append(out, llm.Message{Role: llm.RoleTool, ToolCallID: d.CallID, Content: []llm.ContentBlock{llm.Text(d.Output)}})
-		case session.EventToolError:
+		case "tool/error":
 			var d toolErrorPayload
 			if json.Unmarshal(ev.Data, &d) != nil {
 				continue

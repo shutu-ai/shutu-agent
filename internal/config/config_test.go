@@ -193,7 +193,7 @@ func TestLoadRejectsInvalidDuration(t *testing.T) {
 	}
 }
 
-func TestLoadAcceptsEmptyRunCommandTimeoutMeansGlobal(t *testing.T) {
+func TestLoadDefaultsEmptyRunCommandTimeoutToDshBash(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte("tools:\n  run_command:\n    enabled: true\n    timeout: \"\"\n"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
@@ -202,8 +202,8 @@ func TestLoadAcceptsEmptyRunCommandTimeoutMeansGlobal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Tools.RunCommand.Timeout.Duration != 0 {
-		t.Errorf("run_command.timeout = %v, want 0 (use global)", cfg.Tools.RunCommand.Timeout)
+	if cfg.Tools.RunCommand.Timeout.Duration != DefaultRunCommandTimeout {
+		t.Errorf("run_command.timeout = %v, want %v", cfg.Tools.RunCommand.Timeout, DefaultRunCommandTimeout)
 	}
 	if cfg.Tools.Timeout.Duration != DefaultToolTimeout {
 		t.Errorf("global timeout = %v, want %v", cfg.Tools.Timeout, DefaultToolTimeout)

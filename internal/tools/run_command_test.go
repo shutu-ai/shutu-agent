@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"runtime"
 	"strings"
 	"testing"
@@ -41,6 +42,91 @@ func TestScrubEnvRemovesCredentialShapedEntries(t *testing.T) {
 	}
 }
 
+func TestShellEnvReplacesInheritedManagedDshValues(t *testing.T) {
+	t.Setenv("DSH_SESSION_ID", "stale-session")
+	t.Setenv("DSH_HOME", "stale-home")
+
+	env := shellEnv(func() map[string]string {
+		return map[string]string{
+			"DSH_HOME":       "managed-home",
+			"DSH_SESSION_ID": "fresh-session",
+			"DSH_SHELL":      "1",
+		}
+	})
+	values := map[string]string{}
+	for _, kv := range env {
+		name, value, ok := strings.Cut(kv, "=")
+		if ok {
+			values[name] = value
+		}
+	}
+	if values["DSH_SESSION_ID"] != "fresh-session" || values["DSH_HOME"] != "managed-home" {
+		t.Fatalf("managed environment = %v, want fresh DSH values", values)
+	}
+	if got := values["DSH_SHELL"]; got != "1" {
+		t.Fatalf("DSH_SHELL = %q, want 1", got)
+	}
+	if strings.Contains(strings.Join(env, "\n"), "stale-") {
+		t.Fatalf("stale managed environment leaked: %v", env)
+	}
+}
+
+func TestBashEnvAppliesStableOutputOverrides(t *testing.T) {
+	t.Setenv("NO_COLOR", "0")
+	t.Setenv("TERM", "xterm")
+	t.Setenv("PAGER", "less")
+
+	values := map[string]string{}
+	for _, kv := range bashEnv(nil) {
+		name, value, ok := strings.Cut(kv, "=")
+		if ok {
+			values[name] = value
+		}
+	}
+	for name, want := range map[string]string{
+		"NO_COLOR":  "1",
+		"TERM":      "dumb",
+		"PAGER":     "cat",
+		"GIT_PAGER": "cat",
+	} {
+		if values[name] != want {
+			t.Fatalf("%s = %q, want %q", name, values[name], want)
+		}
+	}
+}
+
+func TestCapturePathsConsumesStreamsIndependently(t *testing.T) {
+	dir := t.TempDir()
+	stdout := dir + string(os.PathSeparator) + "stdout"
+	stderr := dir + string(os.PathSeparator) + "stderr"
+	if err := os.WriteFile(stdout, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stderr, []byte("warning\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var capture capturePaths
+	capture.Set(stdout, stderr)
+	got, err := capture.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "[stderr]\nwarning\n" {
+		t.Fatalf("first delta = %q", got)
+	}
+	if err := os.WriteFile(stdout, []byte("output\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err = capture.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "output\n" {
+		t.Fatalf("second delta = %q, want stdout only", got)
+	}
+}
+
 // TestRunCommandNotRegisteredByDefault verifies run_command is not available
 // out of the box: it is neither registered nor whitelisted, so Execute rejects
 // it as unknown (dispatch-m3: 默认关闭).
@@ -68,7 +154,7 @@ func TestRunCommandRegisteredAndExecutes(t *testing.T) {
 			Enabled: true,
 		},
 	})
-	res, err := r.Execute(context.Background(), "bash", json.RawMessage(`{"command":"echo hi"}`))
+	res, err := r.Execute(context.Background(), "bash", json.RawMessage(`{"command":"echo hi","description":"print hi"}`))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -89,11 +175,11 @@ func TestRunCommandNonZeroExit(t *testing.T) {
 			Enabled: true,
 		},
 	})
-	res, err := r.Execute(context.Background(), "bash", json.RawMessage(`{"command":"exit 3"}`))
+	res, err := r.Execute(context.Background(), "bash", json.RawMessage(`{"command":"exit 3","description":"exit with code three"}`))
 	if err != nil {
 		t.Fatalf("non-zero exit must not be a hard error: %v", err)
 	}
-	if !strings.HasPrefix(res.Output, "[exit code: 3]") {
+	if !strings.Contains(res.Output, "[exit code: 3]") {
 		t.Fatalf("output = %q, want exit-code marker", res.Output)
 	}
 }
@@ -117,7 +203,7 @@ func TestRunCommandScrubbedEnv(t *testing.T) {
 			Enabled: true,
 		},
 	})
-	res, err := r.Execute(context.Background(), "bash", json.RawMessage(`{"command":"`+echo+`"}`))
+	res, err := r.Execute(context.Background(), "bash", json.RawMessage(`{"command":"`+echo+`","description":"read scrubbed variable"}`))
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -141,12 +227,12 @@ func TestRunCommandTimeout(t *testing.T) {
 		},
 	})
 	start := time.Now()
-	_, err := r.Execute(context.Background(), "bash", json.RawMessage(`{"command":"`+sleepCommand(10)+`"}`))
-	if err == nil {
-		t.Fatal("expected timeout error")
+	res, err := r.Execute(context.Background(), "bash", json.RawMessage(`{"command":"`+sleepCommand(10)+`","description":"sleep briefly"}`))
+	if err != nil {
+		t.Fatalf("timeout must be a normal result: %v", err)
 	}
-	if !strings.Contains(err.Error(), "timed out") {
-		t.Fatalf("error = %v, want timeout mention", err)
+	if !strings.Contains(res.Output, "timed out") {
+		t.Fatalf("output = %q, want timeout marker", res.Output)
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("timeout took %v, want prompt kill", elapsed)
@@ -167,7 +253,7 @@ func TestRunCommandCancelled(t *testing.T) {
 		},
 	})
 	ctx, cancel := context.WithCancel(context.Background())
-	args := json.RawMessage(`{"command":"` + sleepCommand(30) + `"}`)
+	args := json.RawMessage(`{"command":"` + sleepCommand(30) + `","description":"wait for cancellation"}`)
 
 	var err error
 	done := make(chan struct{})

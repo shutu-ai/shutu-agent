@@ -55,7 +55,7 @@ func safeSegment(s string) string {
 // full text is spilled to disk, the model sees a bounded head plus a notice
 // carrying the omitted byte count and the locator. The head is truncated on a
 // UTF-8 rune boundary and the replacement never exceeds the limit.
-func truncateResult(out, locator string, limit int) Result {
+func truncateResult(out, locator string, limit int) ToolResult {
 	const prefix = "\n\n[output truncated: "
 	const suffix = " bytes omitted; full output at "
 	// Reserve a worst-case notice (omitted digits bounded by len(out)) so the
@@ -68,7 +68,7 @@ func truncateResult(out, locator string, limit int) Result {
 	head := truncateUTF8(out, budget)
 	omitted := len(out) - len(head)
 	notice := prefix + strconv.Itoa(omitted) + suffix + locator + "]"
-	return Result{
+	return ToolResult{
 		Output:     head + notice,
 		SpillPath:  locator,
 		SpillBytes: len(out),

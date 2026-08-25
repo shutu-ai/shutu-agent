@@ -48,7 +48,7 @@ func termPolicy() tools.Policy {
 
 // execTerm executes the composed pwsh tool through the registry's serial gate
 // — the same path the model uses.
-func execTerm(t *testing.T, app *app, args map[string]any) (tools.Result, error) {
+func execTerm(t *testing.T, app *app, args map[string]any) (tools.ToolResult, error) {
 	t.Helper()
 	b, err := json.Marshal(args)
 	if err != nil {

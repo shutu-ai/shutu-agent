@@ -56,8 +56,10 @@ type jobRecord struct {
 	cancelJob context.CancelFunc
 	done      chan struct{} // closed once the job settles
 
-	reported bool // terminal state has been reported to some consumer (read/kill/wait)
-	waiters  int  // live waits, for settlement-time reported marking
+	reported   bool // terminal state has been reported to some consumer (read/kill/wait)
+	waiters    int  // live waits, for settlement-time reported marking
+	readMu     sync.Mutex
+	readOutput func() (string, error)
 }
 
 // NewLocal returns a Local provider. MaxConcurrentJobsPerOwner <= 0 selects the
@@ -128,6 +130,7 @@ func (l *Local) Start(ctx context.Context, spec JobStart) (string, error) {
 		ctx:         jobCtx,
 		cancelJob:   cancelJob,
 		done:        make(chan struct{}),
+		readOutput:  spec.ReadOutput,
 	}
 	l.jobs[id] = rec
 	l.mu.Unlock()
@@ -231,6 +234,57 @@ func (l *Local) Read(ctx context.Context, id, callerSession string) (string, Job
 		rec.reported = true
 	}
 	return text, snapshotOf(rec), nil
+}
+
+// ReadDelta returns output since the previous read for this caller. Producers
+// with ReadOutput own the consuming cursor, matching dsh's job registry; jobs
+// without a stream expose their final output after settlement.
+func (l *Local) ReadDelta(ctx context.Context, id, callerSession string) (string, JobSnapshot, error) {
+	if err := ctx.Err(); err != nil {
+		return "", JobSnapshot{}, err
+	}
+	l.mu.Lock()
+	rec, err := l.lookupLocked(id, callerSession)
+	if err != nil {
+		l.mu.Unlock()
+		return "", JobSnapshot{}, err
+	}
+	l.mu.Unlock()
+	rec.readMu.Lock()
+	defer rec.readMu.Unlock()
+	l.mu.Lock()
+	snap := snapshotOf(rec)
+	reader := rec.readOutput
+	limit := rec.outputLimit
+	finalOutput := rec.output
+	l.mu.Unlock()
+
+	output := finalOutput
+	if reader != nil {
+		live, readErr := reader()
+		if readErr != nil {
+			return "", snap, readErr
+		}
+		output = live
+	}
+	if limit > 0 {
+		output = capOutput(output, limit)
+	}
+	// The producer may have settled while ReadOutput was running. Refresh the
+	// snapshot after the callback so job_output reports the state observed by
+	// the same read, matching dsh's registry behavior.
+	l.mu.Lock()
+	if current, ok := l.jobs[id]; ok && canAccess(current, callerSession) {
+		snap = snapshotOf(current)
+		if reader == nil && isTerminal(current.status) {
+			output = current.output
+			if limit > 0 {
+				output = capOutput(output, limit)
+			}
+		}
+	}
+	l.mu.Unlock()
+	return output, snap, nil
 }
 
 // Kill requests cancellation of a live job: it invokes the producer's Cancel

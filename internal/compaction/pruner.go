@@ -39,6 +39,20 @@ func PruneToolResults(sess SessionLike, maxBytes int) (PruneResult, error) {
 		if json.Unmarshal(ev.Data, &d) != nil {
 			continue
 		}
+		// EventToolError is a source-compatibility alias for tool/result. Its
+		// legacy compact payload has no dsh message envelope and must not be
+		// mistaken for a model-visible tool result during pruning.
+		if d.Code != "" && d.Message == nil {
+			continue
+		}
+		// A literal legacy "tool/error" row may share the compatibility event
+		// type alias but still carry the old string-valued error field.
+		var legacy struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(ev.Data, &legacy) == nil && legacy.Error != "" {
+			continue
+		}
 		if len(d.Output) <= maxBytes {
 			continue
 		}

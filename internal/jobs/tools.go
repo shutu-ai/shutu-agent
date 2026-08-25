@@ -1,6 +1,6 @@
 // tools.go — the M5a-2 Consumer half of the jobs seam (design.md §8 Consumer /
-// D2/D9, dispatch-m5a-2 §2): job_start, job_status, job_cancel, job_wait and
-// job_read are registered into the tools.Registry by the composition root
+// D2/D9, dispatch-m5a-2 §2): dsh's job_output, job_kill and job_list
+// projections are registered into the tools.Registry by the composition root
 // (cmd/pa) when jobs.enabled, and auto-whitelisted by config.applyDefaults the
 // same way the kb_* tools are. They implement the tools.Tool method set
 // structurally (Go structural typing), so this package never imports the tools
@@ -12,7 +12,7 @@
 //
 // D3 event logging lives here (dispatch-m5a-2 §4 decision — the tool-layer
 // option): job_start emits job/start on successful registration, and the
-// observing tools (job_status / job_cancel / job_wait / job_read) emit
+// observing tools (job_output / job_kill / job_list) emit
 // job/status on a newly-observed non-terminal status and job/done on a
 // newly-observed terminal one, exactly once per (id, status) through a shared
 // transition tracker. Every append happens inside a tool Execute — the serial
@@ -83,6 +83,11 @@ func (t *JobTools) Wait() JobWaitTool { return JobWaitTool{t: t} }
 // Read returns the job_read tool.
 func (t *JobTools) Read() JobReadTool { return JobReadTool{t: t} }
 
+// DshOutput, DshKill and DshList expose dsh's canonical job tools.
+func (t *JobTools) DshOutput() DshJobOutputTool { return DshJobOutputTool{t: t} }
+func (t *JobTools) DshKill() DshJobKillTool     { return DshJobKillTool{t: t} }
+func (t *JobTools) DshList() DshJobListTool     { return DshJobListTool{t: t} }
+
 // callerSession returns the active session id (the tool authorization
 // boundary); "" when no owner provider is installed (unowned access).
 func (t *JobTools) callerSession() string {
@@ -152,7 +157,7 @@ func (JobStartTool) Name() string { return ToolStartName }
 
 func (JobStartTool) Description() string {
 	return "run a command line as a background job and return its job id; " +
-		"observe it with job_status/job_read, cancel with job_cancel, await with job_wait"
+		"observe it with job_output, list with job_list, and stop with job_kill"
 }
 
 func (JobStartTool) Schema() map[string]any {
@@ -226,7 +231,7 @@ func (t JobStartTool) Execute(ctx context.Context, args json.RawMessage) (string
 	if snap, err := t.t.reg.Get(ctx, id, owner); err == nil {
 		t.t.reportTransition(snap)
 	}
-	return fmt.Sprintf("started job %s (kind=%s, label=%q); observe with job_status or job_read, await with job_wait", id, kind, label), nil
+	return fmt.Sprintf("started job %s (kind=%s, label=%q); observe with job_output, list with job_list, stop with job_kill", id, kind, label), nil
 }
 
 // JobStatusTool returns the current status snapshot of one job as text.
@@ -422,6 +427,140 @@ func (t JobReadTool) Execute(ctx context.Context, args json.RawMessage) (string,
 		return formatSnapshot(snap) + "\n  output: (empty)", nil
 	}
 	return formatSnapshot(snap) + "\n  output:\n" + out, nil
+}
+
+// DshJobOutputTool is the dsh-compatible replacement for job_read. It uses
+// job_id and can optionally wait before returning the accumulated output.
+type DshJobOutputTool struct{ t *JobTools }
+
+func (DshJobOutputTool) Name() string { return "job_output" }
+func (DshJobOutputTool) Description() string {
+	return "read a background job's output; set wait=true when blocked on completion"
+}
+func (DshJobOutputTool) Schema() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{
+		"job_id":     map[string]any{"type": "string", "minLength": 1},
+		"wait":       map[string]any{"type": "boolean"},
+		"timeout_ms": map[string]any{"type": "integer", "minimum": 1},
+	}, "required": []string{"job_id"}, "additionalProperties": false}
+}
+func (t DshJobOutputTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	var a struct {
+		JobID     string `json:"job_id"`
+		Wait      bool   `json:"wait"`
+		TimeoutMS *int   `json:"timeout_ms"`
+	}
+	if err := json.Unmarshal(args, &a); err != nil {
+		return "", fmt.Errorf("job_output: %w", err)
+	}
+	if a.Wait {
+		timeout := 30 * time.Second
+		if a.TimeoutMS != nil {
+			if *a.TimeoutMS <= 0 {
+				return "", fmt.Errorf("job_output: timeout_ms must be positive")
+			}
+			timeout = time.Duration(*a.TimeoutMS) * time.Millisecond
+		}
+		if timeout > 10*time.Minute {
+			timeout = 10 * time.Minute
+		}
+		if _, err := t.t.reg.Wait(ctx, a.JobID, t.t.callerSession(), timeout); err != nil {
+			return "", fmt.Errorf("job_output: %w", err)
+		}
+	}
+	var out string
+	var snap JobSnapshot
+	var err error
+	if deltaReader, ok := t.t.reg.(DeltaReader); ok {
+		out, snap, err = deltaReader.ReadDelta(ctx, a.JobID, t.t.callerSession())
+	} else {
+		out, snap, err = t.t.reg.Read(ctx, a.JobID, t.t.callerSession())
+	}
+	if err != nil {
+		return "", fmt.Errorf("job_output: %w", err)
+	}
+	t.t.reportTransition(snap)
+	status := dshStatusLine(snap)
+	if out == "" {
+		out = "(no new output)"
+	}
+	separator := "\n"
+	if strings.HasSuffix(out, "\n") {
+		separator = ""
+	}
+	return out + separator + status, nil
+}
+
+// DshJobKill is the dsh-compatible replacement for job_cancel.
+type DshJobKillTool struct{ t *JobTools }
+
+func (DshJobKillTool) Name() string        { return "job_kill" }
+func (DshJobKillTool) Description() string { return "stop a background job that is no longer needed" }
+func (DshJobKillTool) Schema() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{
+		"job_id": map[string]any{"type": "string", "minLength": 1},
+		"reason": map[string]any{"type": "string"},
+	}, "required": []string{"job_id"}, "additionalProperties": false}
+}
+func (t DshJobKillTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	var a struct {
+		JobID  string `json:"job_id"`
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(args, &a); err != nil {
+		return "", fmt.Errorf("job_kill: %w", err)
+	}
+	if a.Reason == "" {
+		a.Reason = "killed via job_kill"
+	}
+	res, err := t.t.reg.Kill(ctx, a.JobID, t.t.callerSession(), a.Reason)
+	if err != nil {
+		return "", fmt.Errorf("job_kill: %w", err)
+	}
+	snap, getErr := t.t.reg.Get(ctx, a.JobID, t.t.callerSession())
+	if getErr == nil {
+		t.t.reportTransition(snap)
+	}
+	if res == "already-finished" {
+		return fmt.Sprintf("job %s had already finished %s", a.JobID, dshStatusLine(snap)), nil
+	}
+	return fmt.Sprintf("requested cancellation of job %s", a.JobID), nil
+}
+
+func dshStatusLine(snap JobSnapshot) string {
+	if snap.Detail == "" {
+		return fmt.Sprintf("[status: %s]", snap.Status)
+	}
+	return fmt.Sprintf("[status: %s, %s]", snap.Status, snap.Detail)
+}
+
+// DshJobListTool is the dsh job_list projection.
+type DshJobListTool struct{ t *JobTools }
+
+func (DshJobListTool) Name() string        { return "job_list" }
+func (DshJobListTool) Description() string { return "list background jobs visible in this session" }
+func (DshJobListTool) Schema() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}
+}
+func (t DshJobListTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	snaps, err := t.t.reg.List(ctx, t.t.callerSession())
+	if err != nil {
+		return "", fmt.Errorf("job_list: %w", err)
+	}
+	if len(snaps) == 0 {
+		return "(no background jobs)", nil
+	}
+	var b strings.Builder
+	for i, snap := range snaps {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		fmt.Fprintf(&b, "%s [%s] %s", snap.ID, snap.Kind, snap.Status)
+		if snap.Label != "" {
+			fmt.Fprintf(&b, " — %s", snap.Label)
+		}
+	}
+	return b.String(), nil
 }
 
 // formatSnapshot renders a job snapshot as model-facing text.

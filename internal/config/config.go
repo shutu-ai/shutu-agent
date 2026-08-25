@@ -26,6 +26,9 @@ const (
 	// is 30s; tool output over 64KB is truncated and spilled.
 	DefaultToolTimeout = 30 * time.Second
 	DefaultOutputLimit = 64 * 1024
+	// DefaultRunCommandTimeout is dsh bash's fresh-process default. It is a
+	// per-tool override, so other tools retain the 30s global policy.
+	DefaultRunCommandTimeout = 120 * time.Second
 
 	// M4a kb defaults (dispatch-m4a §3): the knowledge base is off by default
 	// (D10); a bounded Search/Recall returns 5 hits by default. The database
@@ -851,11 +854,12 @@ type ToolsConfig struct {
 }
 
 // RunCommandConfig is the run_command tool policy. The tool is registered and
-// usable only when Enabled is true (default off); its timeout may override the
-// global tools.timeout; Workdir fixes the working directory of every command.
+// usable only when Enabled is true (default off); its timeout defaults to the
+// dsh bash value of 120s and overrides the global tools.timeout; Workdir fixes
+// the working directory of every command.
 type RunCommandConfig struct {
 	Enabled bool     `yaml:"enabled"`
-	Timeout Duration `yaml:"timeout"` // 0/absent => use tools.timeout
+	Timeout Duration `yaml:"timeout"` // 0/absent => dsh bash default 120s
 	Workdir string   `yaml:"workdir"` // fixed cwd; empty => the agent's own cwd
 }
 
@@ -939,6 +943,9 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Tools.OutputLimit <= 0 {
 		cfg.Tools.OutputLimit = DefaultOutputLimit
+	}
+	if cfg.Tools.RunCommand.Timeout.Duration <= 0 {
+		cfg.Tools.RunCommand.Timeout.Duration = DefaultRunCommandTimeout
 	}
 	// Enabling run_command makes it whitelisted too, so the single
 	// tools.run_command.enabled switch is what turns the execution tool on
@@ -1478,11 +1485,14 @@ func ApplyModePreset(cfg *Config) {
 // single, tested fact shared by applyDefaults and the composition root.
 var kbToolNames = []string{"kb_search", "kb_read", "kb_add"}
 
-// jobsToolNames are the background-job consumer tools (dispatch-m5a-2 §2).
-// They are registered and whitelisted only when jobs is enabled; keeping the
-// names here makes the "jobs.enabled ⇒ 工具自动白名单" rule a single, tested fact
-// shared by applyDefaults and the composition root.
-var jobsToolNames = []string{"job_start", "job_status", "job_cancel", "job_wait", "job_read"}
+// jobsToolNames are the background-job consumer tools (dispatch-m5a-2 §2),
+// including dsh's canonical output/kill/list projections. They are registered
+// and whitelisted only when jobs is enabled; keeping the names here makes the
+// "jobs.enabled ⇒ 工具自动白名单" rule a single, tested fact shared by
+// applyDefaults and the composition root.
+var jobsToolNames = []string{
+	"job_start", "job_output", "job_kill", "job_list",
+}
 
 // subagentToolNames are the subagent consumer tools (dispatch-m5b-2 §2). They
 // are registered and whitelisted only when subagent is enabled; keeping the

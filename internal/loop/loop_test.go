@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -260,6 +261,79 @@ func TestRunToolCallExecutesAndLogs(t *testing.T) {
 	}
 	if !foundTool {
 		t.Fatalf("step 2 messages lack tool result: %+v", last)
+	}
+}
+
+type parallelState struct {
+	current int32
+	max     int32
+}
+
+type parallelTool struct {
+	name  string
+	state *parallelState
+}
+
+func (p parallelTool) Name() string        { return p.name }
+func (p parallelTool) Description() string { return "test-only parallel read" }
+func (p parallelTool) Schema() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}
+}
+func (p parallelTool) ConcurrencySafe(json.RawMessage) bool { return true }
+func (p parallelTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	current := atomic.AddInt32(&p.state.current, 1)
+	for {
+		max := atomic.LoadInt32(&p.state.max)
+		if current <= max || atomic.CompareAndSwapInt32(&p.state.max, max, current) {
+			break
+		}
+	}
+	defer atomic.AddInt32(&p.state.current, -1)
+	select {
+	case <-time.After(75 * time.Millisecond):
+		return p.name, nil
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+
+// TestRunParallelToolCalls verifies the dsh rolling pool: safe sibling calls
+// overlap, while durable call/result rows remain in model order.
+func TestRunParallelToolCalls(t *testing.T) {
+	model := &scriptedLLM{steps: [][]llm.StreamEvent{
+		{{Kind: llm.StreamFinish, FinishReason: "tool_calls", ToolCalls: []llm.ToolCall{
+			{ID: "parallel_a", Name: "parallel_a", Arguments: "{}"},
+			{ID: "parallel_b", Name: "parallel_b", Arguments: "{}"},
+		}}},
+		{{Kind: llm.StreamFinish, FinishReason: "stop"}},
+	}}
+	reg := tools.New()
+	state := &parallelState{}
+	for _, name := range []string{"parallel_a", "parallel_b"} {
+		if err := reg.Register(parallelTool{name: name, state: state}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reg.SetPolicy(tools.Policy{Enabled: []string{"parallel_a", "parallel_b"}, Timeout: time.Second, OutputLimit: tools.DefaultOutputLimit})
+	log := session.New()
+	loop := New(Config{
+		LLM: model, Log: log, Tools: reg, Prompt: prompt.New("You are helpful."),
+		Model: "deepseek-chat", MaxParallelToolCalls: 2,
+	})
+	if err := loop.Run(context.Background(), "run both reads"); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := atomic.LoadInt32(&state.max); got < 2 {
+		t.Fatalf("maximum concurrent calls = %d, want 2", got)
+	}
+	var ordered []string
+	for _, ev := range log.Events() {
+		if ev.Type == session.EventToolCall || ev.Type == session.EventToolResult {
+			ordered = append(ordered, string(ev.Data))
+		}
+	}
+	if len(ordered) != 4 || !strings.Contains(ordered[0], "parallel_a") || !strings.Contains(ordered[1], "parallel_b") || !strings.Contains(ordered[2], "parallel_a") || !strings.Contains(ordered[3], "parallel_b") {
+		t.Fatalf("tool event order = %v, want call a, call b, result a, result b", ordered)
 	}
 }
 

@@ -22,11 +22,11 @@ func makeJobsApp(enabled bool) *app {
 	}
 }
 
-// jobsPolicy whitelists the five job tools so registry Execute can run them
+// jobsPolicy whitelists the canonical dsh job tools so registry Execute can run them
 // (in production config.applyDefaults + PolicyFromConfig do this).
 func jobsPolicy() tools.Policy {
 	return tools.Policy{
-		Enabled:     []string{"job_start", "job_status", "job_cancel", "job_wait", "job_read"},
+		Enabled:     []string{"job_start", "job_output", "job_kill", "job_list"},
 		Timeout:     0, // no per-tool deadline in tests
 		OutputLimit: 0,
 	}
@@ -60,7 +60,7 @@ func TestRegisterJobsDisabledRegistersNothing(t *testing.T) {
 }
 
 // TestRegisterJobsEnabledRegistersAndValidates verifies the enabled path: the
-// registry is created, all five job_* tools are registered, D7 schema
+// registry is created, all canonical job_* tools are registered, D7 schema
 // validation rejects bad arguments at the Execute gate, valid calls flow
 // through, and the job/start event lands in the session log (D3 wiring).
 func TestRegisterJobsEnabledRegistersAndValidates(t *testing.T) {
@@ -78,9 +78,17 @@ func TestRegisterJobsEnabledRegistersAndValidates(t *testing.T) {
 	for _, s := range specs {
 		names = append(names, s.Name)
 	}
-	for _, want := range []string{"job_start", "job_status", "job_cancel", "job_wait", "job_read"} {
+	for _, want := range []string{"job_start", "job_output", "job_kill", "job_list"} {
 		if !containsStr(names, want) {
 			t.Fatalf("registered tools %v lack %q", names, want)
+		}
+	}
+	for _, removed := range []string{"job_status", "job_cancel", "job_wait", "job_read"} {
+		if containsStr(names, removed) {
+			t.Fatalf("removed legacy tool %q is still advertised", removed)
+		}
+		if _, err := app.reg.Execute(context.Background(), removed, json.RawMessage(`{}`)); err == nil {
+			t.Fatalf("removed legacy tool %q is still executable", removed)
 		}
 	}
 
@@ -89,14 +97,13 @@ func TestRegisterJobsEnabledRegistersAndValidates(t *testing.T) {
 		name string
 		args string
 	}{
-		{"job_status", `{}`},                           // missing required id
-		{"job_status", `{"id":123}`},                   // id must be a string
-		{"job_start", `{}`},                            // missing required command
-		{"job_start", `{"command":""}`},                // empty command
-		{"job_cancel", `{}`},                           // missing required id
-		{"job_wait", `{"id":"x","timeout_seconds":0}`}, // timeout must be >= 1
-		{"job_read", `{"id":false}`},                   // wrong id type
-		{"job_status", `{"id":"x","extra":1}`},         // additional properties rejected
+		{"job_output", `{}`},                            // missing required job_id
+		{"job_output", `{"job_id":123}`},                // job_id must be a string
+		{"job_start", `{}`},                             // missing required command
+		{"job_start", `{"command":""}`},                 // empty command
+		{"job_kill", `{}`},                              // missing required job_id
+		{"job_output", `{"job_id":"x","timeout_ms":0}`}, // timeout must be >= 1
+		{"job_list", `{"extra":1}`},                     // additional properties rejected
 	} {
 		if _, err := app.reg.Execute(context.Background(), tc.name, json.RawMessage(tc.args)); err == nil {
 			t.Errorf("%s with args %s must be rejected (D7)", tc.name, tc.args)
@@ -111,8 +118,8 @@ func TestRegisterJobsEnabledRegistersAndValidates(t *testing.T) {
 	if !strings.Contains(res.Output, "started job ") {
 		t.Fatalf("job_start output = %q, want started job ...", res.Output)
 	}
-	if _, err := app.reg.Execute(context.Background(), "job_status", json.RawMessage(`{"id":"bash-1"}`)); err != nil {
-		t.Fatalf("job_status via registry: %v", err)
+	if _, err := app.reg.Execute(context.Background(), "job_output", json.RawMessage(`{"job_id":"bash-1","wait":true}`)); err != nil {
+		t.Fatalf("job_output via registry: %v", err)
 	}
 	// The job/start event was appended to the session log (D3).
 	foundStart := false

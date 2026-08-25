@@ -16,6 +16,9 @@ const (
 	DefaultTimeout = 30 * time.Second
 	// DefaultOutputLimit is the max model-facing tool-result size in bytes.
 	DefaultOutputLimit = 64 * 1024
+	// DefaultRunCommandTimeout is dsh bash's fresh-process default. It is
+	// separate from the 30s deadline used by ordinary tools.
+	DefaultRunCommandTimeout = 120 * time.Second
 	// DefaultSpillDir is where spilled output lands when Policy.SpillDir is
 	// empty; the REPL overrides it to <data_dir>/spill.
 	DefaultSpillDir = "data/spill"
@@ -79,6 +82,7 @@ func DefaultPolicy() Policy {
 		Timeout:     DefaultTimeout,
 		OutputLimit: DefaultOutputLimit,
 		SpillDir:    DefaultSpillDir,
+		RunCommand:  RunCommandPolicy{Timeout: DefaultRunCommandTimeout},
 	}
 }
 
@@ -98,6 +102,9 @@ func PolicyFromConfig(cfg config.ToolsConfig, dataDir string) Policy {
 		Enabled: cfg.RunCommand.Enabled,
 		Timeout: cfg.RunCommand.Timeout.Duration,
 		Workdir: cfg.RunCommand.Workdir,
+	}
+	if p.RunCommand.Timeout <= 0 {
+		p.RunCommand.Timeout = DefaultRunCommandTimeout
 	}
 	if dataDir != "" {
 		p.SpillDir = filepath.Join(dataDir, "spill")

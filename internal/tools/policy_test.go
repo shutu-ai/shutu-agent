@@ -11,6 +11,16 @@ import (
 	"github.com/jabing/shutu-agent/internal/config"
 )
 
+func TestDefaultPolicyUsesDshRunCommandTimeout(t *testing.T) {
+	p := DefaultPolicy()
+	if p.Timeout != DefaultTimeout {
+		t.Fatalf("ordinary tool timeout = %s, want %s", p.Timeout, DefaultTimeout)
+	}
+	if p.RunCommand.Timeout != DefaultRunCommandTimeout {
+		t.Fatalf("run_command timeout = %s, want %s", p.RunCommand.Timeout, DefaultRunCommandTimeout)
+	}
+}
+
 // blockUntilCtxDone is a tool whose Execute waits on the context; the Execute
 // pipeline's deadline or a caller cancellation is what unblocks it. It stands
 // in for a slow command (dispatch-m3: sleep 工具被掐断).
@@ -104,7 +114,7 @@ func TestExecuteNoDeadlineWhenPolicyZero(t *testing.T) {
 	r.Register(&waiterTool{done: done})
 	r.SetPolicy(Policy{Enabled: []string{"waiter"}})
 
-	resCh := make(chan Result, 1)
+	resCh := make(chan ToolResult, 1)
 	errCh := make(chan error, 1)
 	go func() {
 		res, err := r.Execute(context.Background(), "waiter", json.RawMessage(`{}`))

@@ -249,7 +249,7 @@ func (a *app) schedulePreStep(ctx context.Context, _ string) []llm.Message {
 // scheduleFireRun is the Run body of a fired schedule's background job
 // (dispatch-m6a-2 §4). M6a-2 v1 has no executor for arbitrary payload
 // instruction text, so the job settles immediately and records the payload as
-// its output — job_read surfaces exactly what fired. Cancellation is observed
+// its output — job_output surfaces exactly what fired. Cancellation is observed
 // through the job context (jobs registry cancel/close semantics); the job
 // goroutine never touches the session log (D5).
 func scheduleFireRun(payload string) func(ctx context.Context) (jobs.JobOutcome, error) {

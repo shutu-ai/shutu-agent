@@ -1039,7 +1039,7 @@ func extraFields(ev session.Event) (reasoning, toolName, toolOutput string) {
 		if json.Unmarshal(ev.Data, &d) == nil {
 			reasoning = d.Text
 		}
-	case "tool/start":
+	case "tool/call", "tool/start":
 		// One dispatched tool call (dsh running row): name rides tool_name,
 		// args ride tool_args; no summary text.
 		var d struct {
@@ -1265,7 +1265,7 @@ func (s *Server) writeFeedbackError(w http.ResponseWriter, err error) {
 // tool/error event; empty otherwise. It unmarshals only the leaf callId key.
 func callIDOf(ev session.Event) string {
 	switch ev.Type {
-	case "tool/start", "tool/result", "tool/error":
+	case "tool/call", "tool/start", "tool/result", "tool/error":
 		var d struct {
 			CallID string `json:"callId"`
 		}
@@ -2676,7 +2676,7 @@ func summarize(ev session.Event) string {
 		if json.Unmarshal(ev.Data, &d) == nil {
 			return "tool " + d.Name + " → " + boundRunes(d.Output, maxSummary)
 		}
-	case "tool/start":
+	case "tool/call", "tool/start":
 		var d struct {
 			CallID string
 			Name   string

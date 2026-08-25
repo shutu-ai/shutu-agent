@@ -671,7 +671,7 @@ function renderToolRow(ev) {
   const inner = msgInner();
   const name = ev.tool_name || "";
   const variant = toolVariant(name);
-  const isStart = ev.type === "tool/start";
+  const isStart = ev.type === "tool/call" || ev.type === "tool/start";
   const isErr = ev.type === "tool/error";
   const state = isStart ? "running" : (isErr ? "error" : "ok");
   const callID = ev.call_id || "";
@@ -3551,6 +3551,7 @@ function renderEvent(ev, replay) {
     case "compaction/start":
       addCompactionEvent(ev);
       break;
+    case "tool/call":
     case "tool/start":
     case "tool/result":
     case "tool/error":

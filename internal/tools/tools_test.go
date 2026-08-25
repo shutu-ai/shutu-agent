@@ -17,6 +17,32 @@ type fakeTool struct {
 	executed bool
 }
 
+type structuredFakeTool struct{}
+
+func (structuredFakeTool) Name() string        { return "structured" }
+func (structuredFakeTool) Description() string { return "structured fake tool" }
+func (structuredFakeTool) Schema() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{}}
+}
+func (structuredFakeTool) ExecuteResult(context.Context, json.RawMessage) (ToolResult, error) {
+	return ToolResult{Output: "structured", IsError: true}, nil
+}
+
+func TestExecuteUsesStructuredToolResult(t *testing.T) {
+	r := New()
+	if err := r.Register(structuredFakeTool{}); err != nil {
+		t.Fatalf("register structured tool: %v", err)
+	}
+	r.SetPolicy(Policy{Enabled: []string{"structured"}})
+	res, err := r.Execute(context.Background(), "structured", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("execute structured tool: %v", err)
+	}
+	if res.Output != "structured" || !res.IsError {
+		t.Fatalf("structured result = %+v", res)
+	}
+}
+
 func (f *fakeTool) Name() string        { return f.name }
 func (f *fakeTool) Description() string { return "fake tool" }
 func (f *fakeTool) Schema() map[string]any {

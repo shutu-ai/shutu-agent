@@ -49,14 +49,14 @@ func schemaJSON(t *testing.T, tool PwshTool) string {
 // first.
 func TestFormatPwshOutput(t *testing.T) {
 	cases := []struct {
-		name          string
-		stdout        string
-		stderr        string
-		exitCode      int
-		signal        string
-		timedOut      bool
-		timeoutMS     int64
-		want          string
+		name      string
+		stdout    string
+		stderr    string
+		exitCode  int
+		signal    string
+		timedOut  bool
+		timeoutMS int64
+		want      string
 	}{
 		{name: "clean", stdout: "hi\n", want: "hi\n"},
 		{name: "stderr-section", stdout: "out\n", stderr: "err\n", want: "out\n[stderr]\nerr\n"},
@@ -366,8 +366,8 @@ func TestPwshCancelled(t *testing.T) {
 }
 
 // TestPwshBackgroundJob verifies run_in_background registers a jobs.Registry
-// job (kind pwsh): the acknowledgement carries the job id, job_wait observes
-// completion, job_read returns the bounded output, and job_cancel kills a
+// job (kind pwsh): the acknowledgement carries the job id, job_output observes
+// completion, and job_kill kills a
 // live job.
 func TestPwshBackgroundJob(t *testing.T) {
 	requirePwsh(t)

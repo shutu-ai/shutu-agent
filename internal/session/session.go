@@ -27,11 +27,18 @@ const (
 	EventAssistantChunk     = "assistant/chunk"
 	EventAssistantReasoning = "assistant/reasoning" // M8: one streamed reasoning delta
 	EventAssistantMessage   = "assistant/message"
-	EventToolStart          = "tool/start" // tool call dispatched (dsh running row)
-	EventToolResult         = "tool/result"
-	EventToolError          = "tool/error"
-	EventFeedbackRecord     = "feedback/record"    // dsh /feedback; log-only
-	EventWebCommandResult   = "web/command-result" // Web-only command acknowledgement
+	// EventToolCall is the dsh-compatible durable call event. EventToolStart is
+	// kept as a source-compatibility alias for callers written against the old
+	// shutu vocabulary; new events are still emitted as tool/call.
+	EventToolCall   = "tool/call"
+	EventToolStart  = EventToolCall
+	EventToolResult = "tool/result"
+	// EventToolError aliases tool/result for source compatibility. The literal
+	// "tool/error" remains readable below for pre-alignment logs, but is never
+	// emitted by the current loop.
+	EventToolError        = EventToolResult
+	EventFeedbackRecord   = "feedback/record"    // dsh /feedback; log-only
+	EventWebCommandResult = "web/command-result" // Web-only command acknowledgement
 
 	// M4 knowledge-base events (design.md §3): kb/recall lands with the M4a
 	// kernel so the D3 logging mechanism exists before any orchestration;
@@ -343,6 +350,19 @@ func (l *Log) Events() []Event {
 // locator.
 func (l *Log) NextSeq() uint64 { return l.seq + 1 }
 
+// NextTurn returns the 1-based dsh turn number for the next live turn.
+// shutu historically did not persist the number on turn/start, so it is
+// reconstructed from the append-only lifecycle anchors.
+func (l *Log) NextTurn() int {
+	turn := 1
+	for _, ev := range l.events {
+		if ev.Type == EventTurnStart {
+			turn++
+		}
+	}
+	return turn
+}
+
 // DeriveHistory folds the log into model-visible messages (design.md §3:
 // history is a pure derivation of the log). assistant/chunk rows are streaming
 // fidelity records and are folded away in favor of the authoritative
@@ -439,19 +459,43 @@ func derive(events []Event) []llm.Message {
 			}, seq: ev.Seq})
 		case EventToolResult:
 			var d toolResultData
-			if json.Unmarshal(ev.Data, &d) != nil {
+			if err := json.Unmarshal(ev.Data, &d); err != nil {
+				// EventToolError is a compatibility alias for tool/result, so
+				// old callers may have placed the legacy string-error payload
+				// under the new event type. Preserve its history semantics.
+				var legacy toolErrorData
+				if json.Unmarshal(ev.Data, &legacy) == nil && legacy.CallID != "" {
+					out = append(out, tagged{msg: llm.Message{
+						Role:       llm.RoleTool,
+						ToolCallID: legacy.CallID,
+						Content:    []llm.ContentBlock{llm.Text("Error: " + legacy.Error)},
+					}, seq: ev.Seq})
+				}
 				continue
 			}
 			content := d.Content
+			if len(content) == 0 && d.Message != nil {
+				for _, block := range d.Message.Content {
+					if block.Type == "text" {
+						content = append(content, llm.Text(block.Text))
+					}
+				}
+			}
 			if len(content) == 0 {
 				content = []llm.ContentBlock{llm.Text(d.Output)}
 			}
+			callID := d.CallID
+			if callID == "" && d.Message != nil {
+				callID = d.Message.Source.CallID
+			}
 			out = append(out, tagged{msg: llm.Message{
 				Role:       llm.RoleTool,
-				ToolCallID: d.CallID,
+				ToolCallID: callID,
 				Content:    content,
 			}, seq: ev.Seq})
-		case EventToolError:
+		case "tool/error":
+			// Pre-alignment logs used a separate tool/error envelope. Keep it
+			// readable, but never emit this type for new executions.
 			var d toolErrorData
 			if json.Unmarshal(ev.Data, &d) != nil {
 				continue
@@ -593,12 +637,49 @@ type assistantMessageData struct {
 }
 
 type toolResultData struct {
-	CallID  string             `json:"callId"`
-	Name    string             `json:"name"`
-	Output  string             `json:"output"`
-	Spill   *SpillRef          `json:"spill,omitempty"` // set when the output was truncated and spilled
+	// The first fields are the dsh wire shape. The legacy fields below remain
+	// intentionally duplicated so old shutu web/replay readers can consume a
+	// newly written event while they are being migrated.
+	Turn    int                    `json:"turn,omitempty"`
+	Step    int                    `json:"step,omitempty"`
+	Message *toolResultMessageData `json:"message,omitempty"`
+	Error   *toolResultErrorData   `json:"error,omitempty"`
+	Meta    any                    `json:"meta,omitempty"`
+
+	CallID  string             `json:"callId,omitempty"`
+	Name    string             `json:"name,omitempty"`
+	Output  string             `json:"output,omitempty"`
+	Spill   *SpillRef          `json:"spill,omitempty"`
 	Code    string             `json:"code,omitempty"`
 	Content []llm.ContentBlock `json:"content,omitempty"`
+}
+
+type toolCallData struct {
+	Turn      int    `json:"turn"`
+	Step      int    `json:"step"`
+	CallID    string `json:"callId"`
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+type toolResultMessageData struct {
+	Source  toolResultSourceData  `json:"source"`
+	Content []toolResultBlockData `json:"content"`
+}
+
+type toolResultSourceData struct {
+	CallID string `json:"callId"`
+}
+
+type toolResultBlockData struct {
+	Type    string `json:"type"`
+	Text    string `json:"text,omitempty"`
+	IsError bool   `json:"isError,omitempty"`
+}
+
+type toolResultErrorData struct {
+	Name string `json:"name"`
+	Code string `json:"code"`
 }
 
 // toolStartData is the tool/start payload: a tool call dispatched, before its
@@ -712,31 +793,96 @@ func NewInterruptedAssistantMessage(text string, toolCalls []llm.ToolCall, reaso
 // NewToolStart builds the tool/start payload logged the moment a tool call
 // dispatches (dsh: the row appears running before it settles).
 func NewToolStart(callID, name, args string) any {
-	return toolStartData{CallID: callID, Name: name, Args: args}
+	return NewToolCall(0, 0, callID, name, args)
+}
+
+// NewToolCall builds the dsh-compatible durable invocation event.
+func NewToolCall(turn, step int, callID, name, args string) any {
+	return toolCallData{Turn: turn, Step: step, CallID: callID, Name: name, Arguments: args}
 }
 
 // NewToolResult builds one successful tool/result payload. spill is the
 // truncation record (non-nil only when the output was spilled to disk, M3).
 func NewToolResult(callID, name, output string, spill *SpillRef) any {
-	return toolResultData{CallID: callID, Name: name, Output: output, Spill: spill}
+	return newToolResult(0, 0, callID, name, output, nil, false, spill, "")
+}
+
+// NewToolResultAt builds a dsh-compatible successful result at a turn/step.
+func NewToolResultAt(turn, step int, callID, name, output string, spill *SpillRef) any {
+	return newToolResult(turn, step, callID, name, output, nil, false, spill, "")
 }
 
 // NewToolResultWithContent records a tool result carrying provider-neutral
 // content blocks, such as a read_image attachment reference.
 func NewToolResultWithContent(callID, name, output string, content []llm.ContentBlock) any {
-	return toolResultData{CallID: callID, Name: name, Output: output, Content: content}
+	return newToolResult(0, 0, callID, name, output, content, false, nil, "")
+}
+
+// NewToolResultWithContentAt is the turn/step-aware rich result constructor.
+func NewToolResultWithContentAt(turn, step int, callID, name, output string, content []llm.ContentBlock) any {
+	return newToolResult(turn, step, callID, name, output, content, false, nil, "")
+}
+
+// NewToolErrorResultAt records a structured ToolResult whose content is
+// model-visible but marked as an error, matching dsh's isError result bit.
+func NewToolErrorResultAt(turn, step int, callID, name, output string, spill *SpillRef) any {
+	return newToolResult(turn, step, callID, name, output, nil, true, spill, "TOOL_RESULT_ERROR")
+}
+
+// NewToolErrorResultWithContentAt is the rich-content form of
+// NewToolErrorResultAt.
+func NewToolErrorResultWithContentAt(turn, step int, callID, name, output string, content []llm.ContentBlock) any {
+	return newToolResult(turn, step, callID, name, output, content, true, nil, "TOOL_RESULT_ERROR")
 }
 
 // NewAbortedToolResult records a tool call that was present in the assistant
 // response but could not be dispatched because the turn was cancelled.
 func NewAbortedToolResult(callID, name string) any {
-	const code = "ABORTED_BEFORE_DISPATCH"
-	return toolResultData{CallID: callID, Name: name, Output: code, Code: code}
+	return NewAbortedToolResultAt(0, 0, callID, name)
+}
+
+// NewAbortedToolResultAt records the dsh synthetic error for an undispatched
+// call. The caller must also append the corresponding tool/call event.
+func NewAbortedToolResultAt(turn, step int, callID, name string) any {
+	const code = "TOOL_ABORTED_BEFORE_DISPATCH"
+	return newToolResult(turn, step, callID, name, "Error: tool call aborted before dispatch", nil, true, nil, code)
 }
 
 // NewToolError builds one failed tool/error payload.
 func NewToolError(callID, name, err string) any {
+	// Legacy constructor: callers that explicitly append the literal
+	// "tool/error" event remain able to create the old compact payload. New
+	// execution code uses NewToolErrorAt and writes the dsh result envelope.
 	return toolErrorData{CallID: callID, Name: name, Error: err}
+}
+
+// NewToolErrorAt records an execution failure in dsh's result envelope.
+func NewToolErrorAt(turn, step int, callID, name, err string) any {
+	return newToolResult(turn, step, callID, name, "Error: "+err, nil, true, nil, "TOOL_EXECUTION_ERROR")
+}
+
+func newToolResult(turn, step int, callID, name, output string, content []llm.ContentBlock, isError bool, spill *SpillRef, code string) toolResultData {
+	if len(content) == 0 {
+		content = []llm.ContentBlock{llm.Text(output)}
+	}
+	blocks := make([]toolResultBlockData, 0, len(content))
+	for _, block := range content {
+		if block.Kind == llm.BlockText || block.Text != "" {
+			blocks = append(blocks, toolResultBlockData{Type: "text", Text: block.Text, IsError: isError})
+		}
+	}
+	if len(blocks) == 0 {
+		blocks = append(blocks, toolResultBlockData{Type: "text", Text: output, IsError: isError})
+	}
+	result := toolResultData{
+		Turn: turn, Step: step, CallID: callID, Name: name, Output: output,
+		Spill: spill, Code: code, Content: content,
+		Message: &toolResultMessageData{Source: toolResultSourceData{CallID: callID}, Content: blocks},
+	}
+	if isError {
+		result.Error = &toolResultErrorData{Name: "ToolError", Code: code}
+	}
+	return result
 }
 
 // RecallHit is one knowledge-entry projection carried by a kb/recall event:

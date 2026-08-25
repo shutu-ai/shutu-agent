@@ -13,13 +13,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"sync"
 
 	"github.com/santhosh-tekuri/jsonschema/v5"
 
 	"github.com/jabing/shutu-agent/internal/llm"
 )
 
-// Tool is one capability the agent can invoke.
+// Tool is the model-facing description of one capability. Execution is kept
+// behind one of the structured executors below so the registry never exposes
+// a raw string as its tool-result contract.
 type Tool interface {
 	Name() string
 	// Description is a short human-readable summary of what the tool does. It
@@ -27,7 +30,26 @@ type Tool interface {
 	// model-facing request schema.
 	Description() string
 	Schema() map[string]any // JSON Schema of the arguments; also sent to the model
+}
+
+// TextExecutor is the small adapter used by existing text-producing tools.
+// The registry immediately wraps its output in ToolResult.
+type TextExecutor interface {
 	Execute(ctx context.Context, args json.RawMessage) (string, error)
+}
+
+// StructuredExecutor is the dsh-aligned execution contract. Implementations
+// can return multiple content blocks and an explicit model-visible error
+// result without encoding either fact into a string.
+type StructuredExecutor interface {
+	ExecuteResult(ctx context.Context, args json.RawMessage) (ToolResult, error)
+}
+
+// ConcurrencySafe is the opt-in dsh execution classifier. Tools must explicitly
+// implement it and return true before sibling calls may overlap. Omission is
+// exclusive, matching dsh's fail-closed concurrency contract.
+type ConcurrencySafe interface {
+	ConcurrencySafe(args json.RawMessage) bool
 }
 
 // ContentTool is an optional rich-result extension for tools such as
@@ -36,15 +58,16 @@ type ContentTool interface {
 	ExecuteContent(ctx context.Context, args json.RawMessage) ([]llm.ContentBlock, string, error)
 }
 
-// Result is the outcome of one tool execution after the Execute pipeline has
-// applied the timeout and output cap. Output is the model-facing text (the
-// truncated head plus the locator notice when spilled); SpillPath is the
-// absolute spill-file path when the full output was too large.
-type Result struct {
+// ToolResult is the structured outcome of one tool execution after the
+// Execute pipeline has applied the timeout and output cap. Output is the
+// model-facing text (the truncated head plus the locator notice when spilled);
+// Content carries rich blocks, and IsError mirrors dsh's ToolResult error bit.
+type ToolResult struct {
 	Output     string
 	SpillPath  string // non-empty => Output was truncated and the full text spilled
 	SpillBytes int    // full output size in bytes (when spilled)
 	Content    []llm.ContentBlock
+	IsError    bool
 }
 
 // Owner binds the registry's spill naming to the active session. It is set by
@@ -59,10 +82,11 @@ type Owner struct {
 
 // Registry owns the registered tools and their compiled schemas.
 type Registry struct {
-	tools   map[string]Tool
-	schemas map[string]*jsonschema.Schema
-	policy  Policy
-	owner   Owner
+	tools     map[string]Tool
+	executors map[string]any
+	schemas   map[string]*jsonschema.Schema
+	policy    Policy
+	owner     Owner
 	// gate, when installed (M6d-2), is the optional pre-execution hook the
 	// sensitive-tool approval runs through. The registry owns the hook so the
 	// gate stays inside the Execute pipeline (policy lives here, never in the
@@ -72,15 +96,32 @@ type Registry struct {
 	// fallbackSeq is used only when Owner.NextSeq is nil (a spill with no
 	// bound session); it keeps spill filenames unique.
 	fallbackSeq uint64
+	spillMu     sync.Mutex
+}
+
+// IsConcurrencySafe reports whether a registered call may join a parallel
+// group. The schema gate remains authoritative; this method only reads the
+// optional classifier after the loop has received a model call.
+func (r *Registry) IsConcurrencySafe(name string, args json.RawMessage) bool {
+	t, ok := r.tools[name]
+	if !ok {
+		return false
+	}
+	classifier, ok := t.(ConcurrencySafe)
+	if !ok {
+		return false
+	}
+	return classifier.ConcurrencySafe(args)
 }
 
 // New returns a registry with the safe-by-default policy (M3): read-only
 // whitelist, 30s deadline, 64KB output cap.
 func New() *Registry {
 	return &Registry{
-		tools:   map[string]Tool{},
-		schemas: map[string]*jsonschema.Schema{},
-		policy:  DefaultPolicy(),
+		tools:     map[string]Tool{},
+		executors: map[string]any{},
+		schemas:   map[string]*jsonschema.Schema{},
+		policy:    DefaultPolicy(),
 	}
 }
 
@@ -91,6 +132,7 @@ func New() *Registry {
 func (r *Registry) Clone() *Registry {
 	clone := &Registry{
 		tools:       make(map[string]Tool, len(r.tools)),
+		executors:   make(map[string]any, len(r.executors)),
 		schemas:     make(map[string]*jsonschema.Schema, len(r.schemas)),
 		policy:      r.policy,
 		owner:       r.owner,
@@ -100,6 +142,9 @@ func (r *Registry) Clone() *Registry {
 	clone.policy.Enabled = append([]string(nil), r.policy.Enabled...)
 	for name, tool := range r.tools {
 		clone.tools[name] = tool
+	}
+	for name, executor := range r.executors {
+		clone.executors[name] = executor
 	}
 	for name, schema := range r.schemas {
 		clone.schemas[name] = schema
@@ -144,6 +189,11 @@ func (r *Registry) Allow(names ...string) {
 // Register adds a tool. A duplicate name is rejected. The argument schema is
 // compiled once at registration so Execute has no per-call compile cost.
 func (r *Registry) Register(t Tool) error {
+	if _, ok := t.(StructuredExecutor); !ok {
+		if _, ok := t.(TextExecutor); !ok {
+			return fmt.Errorf("tools: %q has no structured or text executor", t.Name())
+		}
+	}
 	if _, ok := r.tools[t.Name()]; ok {
 		return fmt.Errorf("tools: tool %q already registered", t.Name())
 	}
@@ -161,6 +211,7 @@ func (r *Registry) Register(t Tool) error {
 		return fmt.Errorf("tools: compile schema for %q: %w", t.Name(), err)
 	}
 	r.tools[t.Name()] = t
+	r.executors[t.Name()] = t
 	r.schemas[t.Name()] = sch
 	return nil
 }
@@ -196,20 +247,20 @@ const codeRunToolName = "run_code"
 // the compiled JSON Schema (D7), runs the tool under a per-tool deadline, and
 // applies the output cap (truncate + spill). All policy lives here, never in
 // the loop.
-func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessage) (Result, error) {
+func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessage) (ToolResult, error) {
 	t, ok := r.tools[name]
 	if !ok {
-		return Result{}, fmt.Errorf("tools: unknown tool %q", name)
+		return ToolResult{}, fmt.Errorf("tools: unknown tool %q", name)
 	}
 	if !r.policy.Allows(name) {
-		return Result{}, fmt.Errorf("tools: tool %q is not enabled (see tools.enabled)", name)
+		return ToolResult{}, fmt.Errorf("tools: tool %q is not enabled (see tools.enabled)", name)
 	}
 	var v any
 	if err := json.Unmarshal(args, &v); err != nil {
-		return Result{}, fmt.Errorf("tools: %s: invalid arguments JSON: %w", name, err)
+		return ToolResult{}, fmt.Errorf("tools: %s: invalid arguments JSON: %w", name, err)
 	}
 	if err := r.schemas[name].Validate(v); err != nil {
-		return Result{}, fmt.Errorf("tools: %s: invalid arguments: %w", name, err)
+		return ToolResult{}, fmt.Errorf("tools: %s: invalid arguments: %w", name, err)
 	}
 
 	// M6d-2 sensitive-tool gate: runs after whitelist + D7 validation but
@@ -219,13 +270,16 @@ func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessag
 	// is the gate's verdict and is returned verbatim (the tool never runs).
 	if r.gate != nil {
 		if err := r.gate(ctx, name, args); err != nil {
-			return Result{}, err
+			return ToolResult{}, err
 		}
 	}
 
 	timeout := r.policy.Timeout
-	if name == runCommandName && r.policy.RunCommand.Timeout > 0 {
+	if name == runCommandName {
 		timeout = r.policy.RunCommand.Timeout
+		if timeout <= 0 {
+			timeout = DefaultRunCommandTimeout
+		}
 	}
 	if name == codeRunToolName && r.policy.CodeRun.Timeout > 0 {
 		timeout = r.policy.CodeRun.Timeout
@@ -237,37 +291,46 @@ func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessag
 		defer cancel()
 	}
 
-	var content []llm.ContentBlock
-	var out string
+	var result ToolResult
 	var err error
-	if rich, ok := t.(ContentTool); ok {
-		content, out, err = rich.ExecuteContent(execCtx, args)
+	executor := r.executors[name]
+	if structured, ok := executor.(StructuredExecutor); ok {
+		result, err = structured.ExecuteResult(execCtx, args)
+	} else if rich, ok := t.(ContentTool); ok {
+		result.Content, result.Output, err = rich.ExecuteContent(execCtx, args)
 	} else {
-		out, err = t.Execute(execCtx, args)
+		text, ok := executor.(TextExecutor)
+		if !ok {
+			return ToolResult{}, fmt.Errorf("tools: %s: executor is not structured", name)
+		}
+		result.Output, err = text.Execute(execCtx, args)
 	}
 	if err != nil {
 		if execCtx.Err() == context.DeadlineExceeded {
-			return Result{}, fmt.Errorf("tools: %s: timed out after %s: %w", name, timeout, err)
+			return ToolResult{}, fmt.Errorf("tools: %s: timed out after %s: %w", name, timeout, err)
 		}
-		return Result{}, err
+		return ToolResult{}, err
 	}
-	result := r.applyOutputCap(name, out)
-	result.Content = content
-	return result, nil
+	bounded := r.applyOutputCap(name, result.Output)
+	bounded.Content = result.Content
+	bounded.IsError = result.IsError
+	return bounded, nil
 }
 
 // applyOutputCap truncates oversized results and spills the full text. A spill
 // failure is best-effort: it must never turn a successful tool call into an
 // error, so the inline result is kept unchanged (mirrors dsh-spill-policy).
-func (r *Registry) applyOutputCap(name, out string) Result {
+func (r *Registry) applyOutputCap(name, out string) ToolResult {
+	r.spillMu.Lock()
+	defer r.spillMu.Unlock()
 	limit := r.policy.OutputLimit
 	if limit <= 0 || len(out) <= limit {
-		return Result{Output: out}
+		return ToolResult{Output: out}
 	}
 	store := &SpillStore{dir: r.policy.spillDir()}
 	locator, err := store.Save(r.owner.SessionID, r.nextSeq(), out)
 	if err != nil {
-		return Result{Output: out}
+		return ToolResult{Output: out}
 	}
 	return truncateResult(out, locator, limit)
 }

@@ -15,6 +15,10 @@ type GetTime struct{}
 
 func (GetTime) Name() string { return "get_time" }
 
+// ConcurrencySafe marks this read-only, argument-free tool as safe to run
+// alongside another independent call in the same dsh-style tool batch.
+func (GetTime) ConcurrencySafe(json.RawMessage) bool { return true }
+
 func (GetTime) Description() string { return "return the current time in RFC 3339 format" }
 
 func (GetTime) Schema() map[string]any {
@@ -59,6 +63,11 @@ func NewReadFileForRoot(root func() string) ReadFile {
 }
 
 func (ReadFile) Name() string { return "read" }
+
+// ConcurrencySafe marks filesystem reads as safe to overlap. The tool does
+// not mutate registry/session state; callers that need observation semantics
+// use the separate fs package instead.
+func (ReadFile) ConcurrencySafe(json.RawMessage) bool { return true }
 
 func (ReadFile) Description() string { return "read a text file from the local filesystem (read-only)" }
 

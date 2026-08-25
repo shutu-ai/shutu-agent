@@ -273,7 +273,7 @@ func TestSchedulePreStepFiresEventAndEnqueuesJob(t *testing.T) {
 	if firedJob == nil {
 		t.Fatalf("no schedule fire job enqueued for owner %s: %+v", a.currentID, snaps)
 	}
-	// The fired job settles asynchronously; await it (bounded) so job_read
+	// The fired job settles asynchronously; await it (bounded) so job_output
 	// sees the terminal output (the payload) — the same way a model would.
 	if _, err := a.jobs.Wait(context.Background(), firedJob.ID, a.currentID, 2*time.Second); err != nil {
 		t.Fatalf("jobs.Wait: %v", err)

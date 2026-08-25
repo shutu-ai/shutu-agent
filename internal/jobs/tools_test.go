@@ -6,11 +6,12 @@ import (
 	"errors"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
-// Compile-time assertions: the five job_* tools implement the tool method set
+// Compile-time assertions: the legacy and dsh job tools implement the tool method set
 // the composition root boxes into a tools.Registry.
 var (
 	_ = (*JobStartTool)(nil)
@@ -18,6 +19,9 @@ var (
 	_ = (*JobCancelTool)(nil)
 	_ = (*JobWaitTool)(nil)
 	_ = (*JobReadTool)(nil)
+	_ = (*DshJobOutputTool)(nil)
+	_ = (*DshJobKillTool)(nil)
+	_ = (*DshJobListTool)(nil)
 )
 
 // eventLog is a minimal onEvent recorder for tool tests.
@@ -86,6 +90,89 @@ func TestJobStartExecutesRealCommand(t *testing.T) {
 	if c["job/start"] != 1 || c["job/done"] != 1 {
 		t.Fatalf("event counts = %v, want exactly one job/start and one job/done", c)
 	}
+}
+
+// TestDshJobProjectionUsesCanonicalArguments verifies the dsh-facing job
+// surface reads the same registry state with job_id and returns the status
+// marker shape consumed by the shell tools.
+func TestDshJobProjectionUsesCanonicalArguments(t *testing.T) {
+	l := NewLocal(LocalOpts{})
+	defer l.Close()
+	jt := NewJobTools(l, func() string { return "sess-dsh" }, nil)
+
+	gate := make(chan struct{})
+	id := mustStart(t, l, "bash", "sess-dsh", gate)
+
+	out, err := jt.DshOutput().Execute(context.Background(), json.RawMessage(`{"job_id":"bash-1"}`))
+	if err != nil {
+		t.Fatalf("job_output (running): %v", err)
+	}
+	if !strings.Contains(out, "[status: running") {
+		t.Fatalf("job_output (running) = %q, want running status", out)
+	}
+	list, err := jt.DshList().Execute(context.Background(), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("job_list: %v", err)
+	}
+	if !strings.Contains(list, id) {
+		t.Fatalf("job_list = %q, want %s", list, id)
+	}
+
+	close(gate)
+	out, err = jt.DshOutput().Execute(context.Background(), json.RawMessage(`{"job_id":"bash-1","wait":true,"timeout_ms":5000}`))
+	if err != nil {
+		t.Fatalf("job_output (settled): %v", err)
+	}
+	if !strings.Contains(out, "[status: completed") {
+		t.Fatalf("job_output (settled) = %q, want completed status", out)
+	}
+}
+
+func TestDshJobOutputReturnsLiveDeltas(t *testing.T) {
+	l := NewLocal(LocalOpts{})
+	defer l.Close()
+	jt := NewJobTools(l, func() string { return "sess-dsh" }, nil)
+
+	gate := make(chan struct{})
+	var liveMu sync.Mutex
+	chunks := []string{"", "line one\n", " second", ""}
+	id, err := l.Start(context.Background(), JobStart{
+		Kind:         "stream",
+		Label:        "streaming output",
+		OwnerSession: "sess-dsh",
+		ReadOutput: func() (string, error) {
+			liveMu.Lock()
+			defer liveMu.Unlock()
+			chunk := chunks[0]
+			chunks = chunks[1:]
+			return chunk, nil
+		},
+		Run: func(context.Context) (JobOutcome, error) {
+			<-gate
+			return JobOutcome{Status: StatusCompleted, Output: "final marker"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("start streaming job: %v", err)
+	}
+
+	read := func(want string) {
+		t.Helper()
+		out, err := jt.DshOutput().Execute(context.Background(), json.RawMessage(`{"job_id":"`+id+`"}`))
+		if err != nil {
+			t.Fatalf("job_output: %v", err)
+		}
+		if !strings.Contains(out, want) {
+			t.Fatalf("job_output = %q, want %q", out, want)
+		}
+	}
+	read("(no new output)")
+	read("line one\n[status: running]")
+	read(" second")
+
+	close(gate)
+	waitForTerminal(t, l, id, "sess-dsh", 5*time.Second)
+	read("(no new output)")
 }
 
 // TestJobStartDefaults verifies job_start's argument defaults: kind "bash",

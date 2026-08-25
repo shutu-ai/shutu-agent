@@ -167,7 +167,29 @@ func main() {
 		}
 	}
 	if cfg.Tools.RunCommand.Enabled {
-		if err := reg.Register(tools.NewRunCommandForWorkdir(sessionRoot)); err != nil {
+		runCommand := tools.NewRunCommandForWorkdirAndJobs(
+			sessionRoot,
+			func() jobs.Registry {
+				if runtimeApp == nil {
+					return nil
+				}
+				return runtimeApp.jobs
+			},
+			func() string {
+				if runtimeApp == nil {
+					return ""
+				}
+				return runtimeApp.currentID
+			},
+			config.Enabled(cfg.Jobs.Enabled),
+		)
+		runCommand.DshEnvFunc = tools.NewManagedDshEnv(cfg.DataDir, func() string {
+			if runtimeApp == nil {
+				return ""
+			}
+			return runtimeApp.currentID
+		})
+		if err := reg.Register(runCommand); err != nil {
 			fmt.Fprintln(os.Stderr, "pa:", err)
 			os.Exit(1)
 		}

@@ -42,6 +42,9 @@ func (a *app) registerTerminal() error {
 		},
 		Jobs:  a.jobs, // nil when jobs disabled → no run_in_background
 		Owner: func() string { return a.currentID },
+		DshEnvFunc: tools.NewManagedDshEnv(a.cfg.DataDir, func() string {
+			return a.currentID
+		}),
 	})
 	if err := a.reg.Register(pwsh); err != nil {
 		return fmt.Errorf("pa: register %s: %w", pwsh.Name(), err)

@@ -14,7 +14,8 @@
 // reported as [exit code: N] markers on a NORMAL result (never an error), a
 // timeout kills the process tree and reports [timed out after Nms], empty
 // output renders as (no output), and run_in_background registers a
-// jobs.Registry job (kind pwsh) observed with the job_* tools.
+// jobs.Registry job (kind pwsh) observed with job_output/job_kill (and the
+// legacy job_* aliases).
 package tools
 
 import (
@@ -60,8 +61,8 @@ const pwshEncodingPreamble = "[Console]::OutputEncoding = [System.Text.UTF8Encod
 
 // pwshEnvOverrides are the model-friendly environment overrides (dsh
 // ENV_OVERRIDES): disable colors and pagers that would garble tool output.
-// An override already present in the parent environment is kept (dsh
-// ordering: the parent's value wins over the override).
+// Managed values are applied after the inherited environment, so stale parent
+// values cannot override the tool contract.
 var pwshEnvOverrides = []string{"NO_COLOR=1", "PAGER=cat", "GIT_PAGER=cat"}
 
 // PwshOpts configures the pwsh tool (the composition root supplies them).
@@ -78,6 +79,8 @@ type PwshOpts struct {
 	// Owner returns the current session id, the authorization boundary for
 	// background jobs. nil means jobs are unowned.
 	Owner func() string
+	// DshEnvFunc supplies managed DSH_* facts per invocation.
+	DshEnvFunc ManagedEnvFunc
 }
 
 // PwshTool runs one PowerShell command in a fresh process per call.
@@ -86,6 +89,7 @@ type PwshTool struct {
 	workdirFunc func() string
 	jobs        jobs.Registry
 	owner       func() string
+	dshEnv      ManagedEnvFunc
 	background  bool // run_in_background advertised and accepted
 }
 
@@ -97,6 +101,7 @@ func NewPwsh(opts PwshOpts) PwshTool {
 		workdirFunc: opts.WorkdirFunc,
 		jobs:        opts.Jobs,
 		owner:       opts.Owner,
+		dshEnv:      opts.DshEnvFunc,
 		background:  registryPresent(opts.Jobs),
 	}
 }
@@ -131,7 +136,7 @@ func (PwshTool) Description() string {
 		"treat it as an interruption, not a command failure. " +
 		"Long output is truncated to its tail; the full output is saved to a file whose path is reported when available. " +
 		"Set `run_in_background: true` for long-running commands: the call returns a job id immediately; " +
-		"observe with `job_status` or `job_read`, await with `job_wait`, stop with `job_cancel`."
+		"observe with `job_output`, list with `job_list`, and stop with `job_kill`."
 }
 
 func (t PwshTool) Schema() map[string]any {
@@ -159,7 +164,7 @@ func (t PwshTool) Schema() map[string]any {
 	if t.background {
 		properties["run_in_background"] = map[string]any{
 			"type":        "boolean",
-			"description": "Run in the background and return a job id immediately (observe with job_status or job_read, await with job_wait, stop with job_cancel). No timeout applies.",
+			"description": "Run in the background and return a job id immediately (observe with job_output, list with job_list, stop with job_kill). No timeout applies.",
 		}
 	}
 	return map[string]any{
@@ -256,36 +261,18 @@ func effectiveTimeout(requested *int64) time.Duration {
 
 // pwshCommand assembles the fresh-process invocation: the command string is
 // ONE argv element after the UTF-8 preamble, so no quoting layer exists.
-func pwshCommand(pwsh, command, workdir string) *exec.Cmd {
+func pwshCommand(pwsh, command, workdir string, managed ManagedEnvFunc) *exec.Cmd {
 	cmd := exec.Command(pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", pwshEncodingPreamble+command)
 	cmd.Dir = workdir
-	cmd.Env = pwshEnv()
+	cmd.Env = pwshEnv(managed)
 	prepareProcessGroup(cmd)
 	return cmd
 }
 
 // pwshEnv returns the scrubbed parent environment plus the model-friendly
-// overrides; a parent value for an override name is kept (dsh env ordering:
-// ENV_OVERRIDES first, the caller's env wins).
-func pwshEnv() []string {
-	env := scrubEnv(os.Environ())
-	for _, ov := range pwshEnvOverrides {
-		name, _, _ := strings.Cut(ov, "=")
-		if !hasEnvName(env, name) {
-			env = append(env, ov)
-		}
-	}
-	return env
-}
-
-func hasEnvName(env []string, name string) bool {
-	for _, kv := range env {
-		n, _, ok := strings.Cut(kv, "=")
-		if ok && n == name {
-			return true
-		}
-	}
-	return false
+// overrides.
+func pwshEnv(managed ManagedEnvFunc) []string {
+	return overrideEnv(shellEnv(managed), pwshEnvOverrides)
 }
 
 // runForeground runs one command in a fresh process and renders the result.
@@ -310,7 +297,7 @@ func (t PwshTool) runForeground(ctx context.Context, command, workdir string, ti
 		timeout = time.Millisecond
 	}
 
-	cmd := pwshCommand(pwsh, command, workdir)
+	cmd := pwshCommand(pwsh, command, workdir, t.dshEnv)
 	outFile, errFile, cleanup, err := pwshOutputFiles()
 	if err != nil {
 		return "", fmt.Errorf("pwsh: %w", err)
@@ -391,13 +378,15 @@ func (t PwshTool) startBackground(ctx context.Context, command, workdir string) 
 	}
 	var mu sync.Mutex
 	var live *exec.Cmd
+	var capture capturePaths
 	id, err := t.jobs.Start(ctx, jobs.JobStart{
 		Kind:             jobs.Kind(pwshToolName),
 		Label:            command,
 		OwnerSession:     t.ownerSession(),
 		OutputLimitBytes: pwshJobOutputLimit,
+		ReadOutput:       capture.Read,
 		Run: func(jctx context.Context) (jobs.JobOutcome, error) {
-			return runPwshJob(jctx, pwsh, command, workdir, &mu, &live)
+			return runPwshJob(jctx, pwsh, command, workdir, &mu, &live, &capture, t.dshEnv)
 		},
 		Cancel: func(reason string) error {
 			mu.Lock()
@@ -412,7 +401,7 @@ func (t PwshTool) startBackground(ctx context.Context, command, workdir string) 
 	if err != nil {
 		return "", fmt.Errorf("pwsh: %w", err)
 	}
-	return fmt.Sprintf("started background job %s; observe with job_status or job_read, await with job_wait, stop with job_cancel", id), nil
+	return fmt.Sprintf("started background job %s; observe with job_output, list with job_list, stop with job_kill", id), nil
 }
 
 // ownerSession returns the current session id (the job authorization
@@ -425,12 +414,14 @@ func (t PwshTool) ownerSession() string {
 }
 
 // runPwshJob is the background job body: it runs the fresh-process command
-// under the registry-owned context (cancelled by job_cancel / Close) and
+// under the registry-owned context (cancelled by job_kill / Close) and
 // settles the job from the outcome — killed when the job context was
 // cancelled, otherwise completed with the exit code as detail (a nonzero
 // command exit is reported, not failed; dsh processOutcome).
-func runPwshJob(ctx context.Context, pwsh, command, workdir string, mu *sync.Mutex, live **exec.Cmd) (jobs.JobOutcome, error) {
-	cmd := pwshCommand(pwsh, command, workdir)
+func runPwshJob(ctx context.Context, pwsh, command, workdir string, mu *sync.Mutex, live **exec.Cmd, capture *capturePaths, managed ManagedEnvFunc) (outcome jobs.JobOutcome, runErr error) {
+	streamOutput := ""
+	defer func() { capture.Finish(streamOutput) }()
+	cmd := pwshCommand(pwsh, command, workdir, managed)
 	mu.Lock()
 	*live = cmd
 	mu.Unlock()
@@ -444,6 +435,7 @@ func runPwshJob(ctx context.Context, pwsh, command, workdir string, mu *sync.Mut
 	if err != nil {
 		return jobs.JobOutcome{}, fmt.Errorf("pwsh: %w", err)
 	}
+	capture.Set(outFile.Name(), errFile.Name())
 	defer cleanup()
 	cmd.Stdout = outFile
 	cmd.Stderr = errFile
@@ -462,6 +454,7 @@ func runPwshJob(ctx context.Context, pwsh, command, workdir string, mu *sync.Mut
 	if readErr != nil {
 		return jobs.JobOutcome{}, fmt.Errorf("pwsh: read stderr: %w", readErr)
 	}
+	streamOutput = formatShellStreams(string(stdout), string(stderr))
 	body := formatPwshOutput(string(stdout), string(stderr), 0, "", false, 0)
 	if ctx.Err() != nil {
 		return jobs.JobOutcome{Status: jobs.StatusKilled, Detail: "killed", Output: body}, nil
@@ -514,13 +507,7 @@ func outPathOf(f *os.File) string { return f.Name() }
 // (no output). The timed-out marker comes first because the exit marker
 // anchors the tail.
 func formatPwshOutput(stdout, stderr string, exitCode int, signal string, timedOut bool, timeoutMS int64) string {
-	body := stdout
-	if stderr != "" {
-		if body != "" && !strings.HasSuffix(body, "\n") {
-			body += "\n"
-		}
-		body += "[stderr]\n" + stderr
-	}
+	body := formatShellStreams(stdout, stderr)
 	if body == "" {
 		body = "(no output)"
 	}
