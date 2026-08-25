@@ -1,5 +1,5 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent } from 'react'
-import type { AttachmentView, CommandView, ConfigView, DirectoryListing, EventDetails, EventView, FeedbackView, ImageView, InteractionView, JobView, ProviderView, QueueItem, RunningSnapshot, SessionSearchHit, SessionSummary, SettingsView, SubagentView, WorkspaceView } from './api'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent } from 'react'
+import type { AttachmentView, CommandView, ConfigView, DirectoryListing, EventDetails, EventView, FeedbackView, ImageView, InteractionView, JobView, MCPServerView, ProviderModelView, ProviderView, QueueItem, RunningSnapshot, SessionSearchHit, SessionSummary, SettingsView, SubagentView, WorkspaceView } from './api'
 import { projectDshConversation, type DshConversationNode, type DshConversationSnapshot } from './dsh-conversation'
 import { projectDshTrajectory, type DshTimelineMode } from './dsh-trajectory'
 import { WebStore } from './store'
@@ -288,7 +288,7 @@ function SessionBrowser({
   </>
 }
 
-type SettingsSection = 'general' | 'model' | 'capabilities' | 'tools'
+type SettingsSection = 'general' | 'model' | 'capabilities' | 'tools' | 'runtime'
 type ThemePreference = 'dark' | 'light' | 'system'
 
 const CAPABILITY_LABELS: Record<string, string> = {
@@ -352,6 +352,82 @@ function SettingsControls({ store, config, settings, onSaved }: { store: WebStor
   </section>
 }
 
+function ProviderManager({ store, providers, onSaved }: { store: WebStore; providers: readonly ProviderView[]; onSaved: () => void }) {
+  const [selectedId, setSelectedId] = useState(providers[0]?.id ?? '')
+  const selected = providers.find(item => item.id === selectedId)
+  const [form, setForm] = useState({ id: selected?.id ?? '', name: selected?.name ?? '', base_url: selected?.base_url ?? '', model: selected?.model ?? selected?.candidates?.[0] ?? '', api_key: '', protocol: selected?.protocol ?? 'openai-completions', custom: selected?.custom ?? false })
+  const [discovered, setDiscovered] = useState<ProviderModelView[]>([])
+  const [busy, setBusy] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+
+  useEffect(() => {
+    const next = providers.find(item => item.id === selectedId) ?? providers[0]
+    if (next === undefined) return
+    setForm({ id: next.id, name: next.name ?? '', base_url: next.base_url ?? '', model: next.model ?? next.candidates?.[0] ?? '', api_key: '', protocol: next.protocol ?? 'openai-completions', custom: next.custom ?? false })
+    setDiscovered([])
+  }, [providers, selectedId])
+
+  const save = async (): Promise<void> => {
+    if (form.id.trim() === '') return
+    setBusy('save'); setNotice(null)
+    try { await store.saveProvider({ ...form, id: form.id.trim(), name: form.name.trim(), base_url: form.base_url.trim(), model: form.model.trim(), api_key: form.api_key, protocol: form.protocol.trim() }); setNotice('Provider 已保存并即时应用'); onSaved() }
+    catch (error) { setNotice(error instanceof Error ? error.message : String(error)) }
+    finally { setBusy(null) }
+  }
+
+  const remove = async (): Promise<void> => {
+    if (!form.custom || form.id.trim() === '') return
+    setBusy('delete'); setNotice(null)
+    try { await store.deleteProvider(form.id); setNotice('Provider 已删除'); onSaved() }
+    catch (error) { setNotice(error instanceof Error ? error.message : String(error)) }
+    finally { setBusy(null) }
+  }
+
+  const discover = async (): Promise<void> => {
+    if (form.id.trim() === '') return
+    setBusy('discover'); setNotice(null)
+    try { setDiscovered(await store.discoverProvider({ provider: form.id, base_url: form.base_url, protocol: form.protocol, api_key: form.api_key })); setNotice('已读取模型目录') }
+    catch (error) { setNotice(error instanceof Error ? error.message : String(error)) }
+    finally { setBusy(null) }
+  }
+
+  return <section className="runtime-manager"><div className="runtime-manager-head"><div><h2>Provider 管理</h2><p>保存 API Key、端点和模型目录；敏感字段不会回显。</p></div>{notice && <span className="settings-control-notice" role="status">{notice}</span>}</div>
+    <div className="provider-layout"><div className="provider-list">{providers.length === 0 ? <span className="muted">暂无 Provider</span> : providers.map(item => <button type="button" className={item.id === selectedId ? 'selected' : ''} key={item.id} onClick={() => setSelectedId(item.id)}><strong>{item.name || item.id}</strong><small>{item.id} · {item.configured ? '已配置' : '未配置'}</small></button>)}</div>
+      <div className="provider-editor"><div className="provider-editor-grid"><label>ID<input value={form.id} disabled={!form.custom} onChange={event => setForm(previous => ({ ...previous, id: event.target.value }))} /></label><label>名称<input value={form.name} onChange={event => setForm(previous => ({ ...previous, name: event.target.value }))} /></label><label>Base URL<input value={form.base_url} onChange={event => setForm(previous => ({ ...previous, base_url: event.target.value }))} placeholder="https://…" /></label><label>Model<input value={form.model} onChange={event => setForm(previous => ({ ...previous, model: event.target.value }))} /></label><label>Protocol<select value={form.protocol} onChange={event => setForm(previous => ({ ...previous, protocol: event.target.value }))}><option value="openai-completions">OpenAI Completions</option><option value="anthropic-messages">Anthropic Messages</option><option value="google-generative-ai">Google Generative AI</option><option value="openai-responses">OpenAI Responses</option></select></label><label>API Key<input type="password" value={form.api_key} onChange={event => setForm(previous => ({ ...previous, api_key: event.target.value }))} placeholder="留空则不修改" /></label></div><div className="runtime-actions"><button type="button" disabled={busy !== null} onClick={() => void save()}>{busy === 'save' ? '保存中…' : '保存 Provider'}</button><button type="button" disabled={busy !== null} onClick={() => void discover()}>{busy === 'discover' ? '读取中…' : '发现模型'}</button>{form.custom && <button type="button" disabled={busy !== null} onClick={() => void remove()}>删除</button>}</div>{discovered.length > 0 && <div className="discovered-models"><span>发现的模型</span>{discovered.map(item => <button type="button" key={item.id} onClick={() => setForm(previous => ({ ...previous, model: item.id }))}>{item.id}</button>)}</div>}</div>
+    </div>
+  </section>
+}
+
+function McpManager({ store, servers, onSaved }: { store: WebStore; servers: readonly MCPServerView[]; onSaved: () => void }) {
+  const [items, setItems] = useState<MCPServerView[]>([...servers])
+  const [editing, setEditing] = useState('')
+  const [form, setForm] = useState({ name: '', cmd: '', args: '' })
+  const [busy, setBusy] = useState(false)
+  const [notice, setNotice] = useState<string | null>(null)
+  useEffect(() => setItems([...servers]), [servers])
+  const reset = () => { setEditing(''); setForm({ name: '', cmd: '', args: '' }) }
+  const save = async (): Promise<void> => {
+    if (form.name.trim() === '' || form.cmd.trim() === '') return
+    setBusy(true); setNotice(null)
+    try { const next = await store.manageMcp(editing === '' ? 'add' : 'update', { original_name: editing || undefined, name: form.name.trim(), cmd: form.cmd.trim(), args: form.args.trim() ? form.args.trim().split(/\s+/) : [] }); setItems(next); setNotice('MCP 配置已保存，重启后启动'); reset(); onSaved() }
+    catch (error) { setNotice(error instanceof Error ? error.message : String(error)) }
+    finally { setBusy(false) }
+  }
+  const remove = async (name: string): Promise<void> => {
+    setBusy(true); setNotice(null)
+    try { setItems(await store.manageMcp('delete', { original_name: name })); setNotice('MCP 服务已删除'); onSaved() }
+    catch (error) { setNotice(error instanceof Error ? error.message : String(error)) }
+    finally { setBusy(false) }
+  }
+  const refresh = async (): Promise<void> => {
+    setBusy(true); setNotice(null)
+    try { setItems(await store.refreshMcp()); setNotice('连接状态已刷新') }
+    catch (error) { setNotice(error instanceof Error ? error.message : String(error)) }
+    finally { setBusy(false) }
+  }
+  return <section className="runtime-manager"><div className="runtime-manager-head"><div><h2>MCP 管理</h2><p>维护 stdio MCP 服务并刷新连接诊断。</p></div><div className="runtime-actions"><button type="button" disabled={busy} onClick={() => void refresh()}>刷新连接</button>{notice && <span className="settings-control-notice" role="status">{notice}</span>}</div></div><div className="mcp-list">{items.length === 0 ? <span className="muted">暂无 MCP 服务</span> : items.map(item => <div className="mcp-row" key={item.name}><div><strong>{item.name}</strong><small>{item.cmd} {(item.args ?? []).join(' ')}</small></div><span className={`mcp-state ${item.connected ? 'on' : ''}`}>{item.connected ? '已连接' : '未连接'}</span><button type="button" disabled={busy} onClick={() => { setEditing(item.name ?? ''); setForm({ name: item.name ?? '', cmd: item.cmd ?? '', args: (item.args ?? []).join(' ') }) }}>编辑</button><button type="button" disabled={busy} onClick={() => void remove(item.name ?? '')}>删除</button></div>)}</div><div className="mcp-editor"><label>名称<input value={form.name} onChange={event => setForm(previous => ({ ...previous, name: event.target.value }))} /></label><label>命令<input value={form.cmd} onChange={event => setForm(previous => ({ ...previous, cmd: event.target.value }))} /></label><label>参数<input value={form.args} onChange={event => setForm(previous => ({ ...previous, args: event.target.value }))} placeholder="按空格分隔" /></label><div className="runtime-actions"><button type="button" disabled={busy} onClick={() => void save()}>{editing ? '保存修改' : '新增 MCP'}</button>{editing && <button type="button" disabled={busy} onClick={reset}>取消</button>}</div></div></section>
+}
+
 function SettingsPage({ store, theme, onThemeChange, onBack }: {
   store: WebStore
   theme: ThemePreference
@@ -394,6 +470,7 @@ function SettingsPage({ store, theme, onThemeChange, onBack }: {
     { id: 'model', label: '模型', hint: '当前会话模型' },
     { id: 'capabilities', label: '能力开关', hint: '功能启用状态' },
     { id: 'tools', label: '工具', hint: `${toolCount} 个已注册工具` },
+    { id: 'runtime', label: '运行时清单', hint: 'Provider 与 MCP' },
   ]
 
   return <div className="settings-page">
@@ -413,6 +490,7 @@ function SettingsPage({ store, theme, onThemeChange, onBack }: {
           {!loading && !error && config !== null && section === 'model' && <div className="settings-section"><h2>模型</h2><p className="settings-description">当前连接使用的模型配置。</p><article className="model-card"><div className="model-card-head"><div className="model-avatar">D</div><div><strong>DeepSeek</strong><span>{configText(config, 'llm_provider')}</span></div><span className="readonly-badge">只读</span></div><div className="model-fields"><div><span>模型 ID</span><code>{configText(config, 'model')}</code></div><div><span>API 地址</span><code>{configText(config, 'base_url', '使用默认地址')}</code></div><div><span>会话模式</span><code>{configText(config, 'mode')}</code></div></div></article><div className="settings-note">模型切换与凭据管理由服务端配置负责，当前页面不直接修改提供方。</div></div>}
           {!loading && !error && config !== null && section === 'capabilities' && <div className="settings-section"><h2>能力开关</h2><p className="settings-description">根据服务端配置自动发现的功能开关。</p><div className="capability-list">{capabilities.map(([key, value]) => <div className="capability-row" key={key}><div><strong>{CAPABILITY_LABELS[key] ?? key.replace(/_enabled$/, '')}</strong><span>{key}</span></div><span className={`capability-status ${value ? 'on' : 'off'}`}>{value ? '已启用' : '已关闭'}</span></div>)}</div></div>}
           {!loading && !error && config !== null && section === 'tools' && <div className="settings-section"><h2>工具</h2><p className="settings-description">当前注册并可供 Agent 使用的工具。</p><div className="tool-summary"><strong>{toolCount}</strong><span>个工具已启用</span></div><div className="tool-list">{tools.length > 0 ? tools.map(tool => <span className="tool-chip" key={tool}>{tool}</span>) : <span className="muted">服务端未返回工具清单。</span>}</div><div className="settings-note">工具的实际可用性还会受到对应能力开关和当前会话权限影响。</div></div>}
+          {!loading && !error && config !== null && section === 'runtime' && <div className="settings-section"><ProviderManager store={store} providers={config.providers ?? []} onSaved={() => setReload(value => value + 1)} /><McpManager store={store} servers={config.mcp_servers ?? []} onSaved={() => setReload(value => value + 1)} /></div>}
         </section>
       </div>
     </main>
@@ -878,6 +956,35 @@ function InteractionPanel({ store, sessionId, onError }: { store: WebStore; sess
   return <section className="interaction-panel" aria-label="Approval requests"><div className="interaction-head"><strong>Approval required</strong><span>{items.length} pending</span></div>{items.map(item => <article className="interaction-card" key={item.id}><div className="interaction-copy"><strong>{item.tool_name || 'Agent request'}</strong><p>{item.prompt}</p>{item.args && <pre>{item.args}</pre>}</div>{item.questions?.map(question => <div className="interaction-question" key={question.id ?? question.question}><span>{question.question}</span><div>{question.options?.map(option => <button type="button" key={option.label} disabled={busy !== null} onClick={() => void resolve(item, 'approved', option.label)}>{option.label}</button>)}</div></div>)}<div className="interaction-actions"><button type="button" disabled={busy !== null} onClick={() => void resolve(item, 'approved')}>Approve</button><button type="button" disabled={busy !== null} onClick={() => void resolve(item, 'rejected')}>Reject</button><button type="button" disabled={busy !== null} onClick={() => void resolve(item, 'canceled')}>Cancel</button></div></article>)}</section>
 }
 
+function SessionControls({ store, sessionId, onError }: { store: WebStore; sessionId: string | null; onError: (error: unknown) => void }) {
+  const [config, setConfig] = useState<ConfigView | null>(null)
+  const [values, setValues] = useState({ provider: '', model: '', reasoning_effort: '', permission: '' })
+  const [busy, setBusy] = useState(false)
+  useEffect(() => {
+    if (sessionId === null) { setConfig(null); return }
+    const abort = new AbortController()
+    void Promise.all([store.getConfig(abort.signal), store.getSessionConfig(sessionId, abort.signal)]).then(([globalConfig, sessionConfig]) => {
+      if (abort.signal.aborted) return
+      setConfig(globalConfig)
+      setValues({ provider: sessionConfig.provider ?? globalConfig.llm_provider ?? '', model: sessionConfig.model ?? globalConfig.model ?? '', reasoning_effort: sessionConfig.reasoning_effort ?? globalConfig.reasoning_effort ?? '', permission: sessionConfig.permission ?? '' })
+    }).catch(error => { if (!abort.signal.aborted) onError(error) })
+    return () => abort.abort()
+  }, [onError, sessionId, store])
+  const providers = config?.providers ?? []
+  const provider = providers.find(item => item.id === values.provider)
+  const models = provider?.models?.map(item => item.id) ?? provider?.candidates ?? []
+  const update = async (next: Partial<typeof values>): Promise<void> => {
+    if (sessionId === null) return
+    const merged = { ...values, ...next }
+    setValues(merged); setBusy(true)
+    try { await store.updateSessionConfig(sessionId, merged) }
+    catch (error) { onError(error) }
+    finally { setBusy(false) }
+  }
+  if (sessionId === null || config === null) return null
+  return <div className="session-controls" aria-label="Current session controls"><label><span>Model</span><select value={values.model} disabled={busy} onChange={event => void update({ model: event.target.value })}>{models.length > 0 ? models.map(item => <option key={item} value={item}>{item}</option>) : <option value={values.model}>{values.model || 'default'}</option>}</select></label><label><span>Reasoning</span><select value={values.reasoning_effort} disabled={busy} onChange={event => void update({ reasoning_effort: event.target.value })}><option value="">Default</option><option value="off">Off</option><option value="low">Low</option><option value="high">High</option><option value="max">Max</option></select></label><label><span>Permission</span><select value={values.permission} disabled={busy} onChange={event => void update({ permission: event.target.value })}><option value="">Default</option><option value="readonly">Read only</option><option value="standard">Standard</option><option value="full">Full</option></select></label></div>
+}
+
 function isConversationEvent(event: EventView): boolean {
   return event.type.startsWith('user/') || event.type.startsWith('assistant/') ||
     event.type.startsWith('tool/') || event.type.startsWith('interact/') ||
@@ -906,6 +1013,7 @@ export function App({ store }: { store: WebStore }) {
       return stored === 'light' || stored === 'system' ? stored : 'dark'
     } catch { return 'dark' }
   })
+  const reportError = useCallback((error: unknown): void => { setSendError(error instanceof Error ? error.message : String(error)) }, [])
   const selected = state.sessions.find(session => session.id === state.selectedId)
   const filtered = useMemo(() => {
     const query = search.trim().toLocaleLowerCase()
@@ -1144,10 +1252,11 @@ export function App({ store }: { store: WebStore }) {
         <div className="topbar-actions"><button type="button" className="files-toggle" onClick={() => setFilesOpen(value => !value)} disabled={state.selectedId === null} aria-pressed={filesOpen}>Files</button><label className="search-box"><span>⌕</span><input aria-label="Search trajectory" placeholder="Search events" value={search} onChange={event => setSearch(event.target.value)} />{search && <button type="button" onClick={() => setSearch('')} aria-label="Clear search">×</button>}</label></div>
       </header>
       <nav className="tabs" role="tablist"><button role="tab" aria-selected={tab === 'chat'} className={tab === 'chat' ? 'tab selected' : 'tab'} onClick={() => setTab('chat')}>Conversation</button><button role="tab" aria-selected={tab === 'trajectory'} className={tab === 'trajectory' ? 'tab selected' : 'tab'} onClick={() => setTab('trajectory')}>Trajectory <span>{state.events.length}</span></button><button role="tab" aria-selected={tab === 'running'} className={tab === 'running' ? 'tab selected' : 'tab'} onClick={() => setTab('running')}>运行中</button></nav>
+      <SessionControls store={store} sessionId={state.selectedId} onError={reportError} />
       {search.trim() !== '' && <div className="search-status" role="status" aria-live="polite">{filtered.length} matching loaded events{state.hasOlder ? ' · scroll to load older history' : ''}</div>}
       {(state.error || sendError) && <div className="error-banner"><span>{state.error || sendError}</span><button onClick={() => { setSendError(null); void store.start() }}>Retry</button></div>}
-      <InteractionPanel store={store} sessionId={state.selectedId} onError={error => setSendError(error instanceof Error ? error.message : String(error))} />
-      <QueuePanel store={store} sessionId={state.selectedId} active={state.sending} onError={error => setSendError(error instanceof Error ? error.message : String(error))} />
+      <InteractionPanel store={store} sessionId={state.selectedId} onError={reportError} />
+      <QueuePanel store={store} sessionId={state.selectedId} active={state.sending} onError={reportError} />
       <section className="content-panel">
         {filesOpen && state.selectedId !== null ? <FilesPanel store={store} sessionId={state.selectedId} onClose={() => setFilesOpen(false)} onReference={path => { setDraft(previous => `${previous}${previous.trim() === '' ? '' : ' '}@${path}`); setFilesOpen(false) }} /> : state.authRequired ? <form className="auth-card" onSubmit={event => { event.preventDefault(); void authenticate() }}><strong>Authentication required</strong><span>Enter the bearer token configured for the Shutu web server.</span><input aria-label="Bearer token" type="password" autoComplete="current-password" value={token} onChange={event => setToken(event.target.value)} placeholder="Bearer token" /><button type="submit" disabled={token.trim() === ''}>Connect</button></form> : state.loading ? <div className="empty"><div className="spinner" />Loading session…</div> : tab === 'running' ? <RunningPanel store={store} sessionId={state.selectedId} /> : state.selectedId === null ? <div className="empty"><strong>Start a new conversation</strong><span>Select a session or send a message from the agent.</span></div> : filtered.length === 0 ? <div className="empty"><strong>{search ? 'No matching events' : 'No events yet'}</strong><span>{search ? 'Try a different search term.' : 'Events will appear here as the session runs.'}</span></div> : tab === 'trajectory' ? <><DshTimeline events={filtered} onSelectSeq={setFocusedSeq} /><VirtualEvents events={filtered} store={store} sessionId={state.selectedId} feedbackBySeq={feedbackBySeq} onFeedback={submitFeedback} focusSeq={focusedSeq} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} /></> : <DshConversation events={filtered} sessionId={state.selectedId} store={store} feedbackBySeq={feedbackBySeq} onFeedback={submitFeedback} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} />}
       </section>
