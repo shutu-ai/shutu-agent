@@ -79,6 +79,35 @@ describe('ShutuApi', () => {
     expect(requestHeaders?.get('Accept')).toBe('application/json')
   })
 
+  it('maps workspace, directory, remote search and file APIs', async () => {
+    const requests: { path: string; method: string; body?: string }[] = []
+    const api = new ShutuApi('https://shutu.test', 'secret', async (input, init) => {
+      const url = new URL(String(input))
+      requests.push({ path: `${url.pathname}${url.search}`, method: init?.method ?? 'GET', body: typeof init?.body === 'string' ? init.body : undefined })
+      if (url.pathname === '/api/workspaces' && (init?.method ?? 'GET') === 'GET') return new Response(JSON.stringify({ workspaces: [{ id: 'w1', title: 'Project', session_ids: ['s1'], created_at: 1 }], ungrouped_ids: [] }), { status: 200 })
+      if (url.pathname === '/api/workspaces/directories') return new Response(JSON.stringify({ path: 'C:/project', home: 'C:/Users/test', crumbs: [], entries: [{ name: 'src', path: 'C:/project/src' }] }), { status: 200 })
+      if (url.pathname === '/api/search') return new Response(JSON.stringify({ hits: [{ id: 's1', snippet: 'match', updated_at: '2026-08-25T00:00:00Z' }] }), { status: 200 })
+      if (url.pathname.endsWith('/files')) return new Response(JSON.stringify({ root: 'C:/project', path: '', entries: [{ name: 'README.md', path: 'README.md', dir: false, size: 4 }] }), { status: 200 })
+      if (url.pathname.endsWith('/file')) return new Response(JSON.stringify({ path: 'README.md', content: 'docs', start_line: 1, end_line: 1, total_lines: 1 }), { status: 200 })
+      return new Response(JSON.stringify({ ok: true, id: 'w1', title: 'Project', path: 'C:/project' }), { status: 200 })
+    })
+
+    await expect(api.listWorkspaces()).resolves.toMatchObject({ workspaces: [{ id: 'w1' }] })
+    await expect(api.createWorkspace('Project', 'C:/project')).resolves.toMatchObject({ id: 'w1' })
+    await expect(api.listWorkspaceDirectories('C:/project')).resolves.toMatchObject({ path: 'C:/project' })
+    await expect(api.searchSessions('match')).resolves.toHaveLength(1)
+    await expect(api.listFiles('s/1', '', 'readme')).resolves.toMatchObject({ entries: [{ path: 'README.md' }] })
+    await expect(api.previewFile('s/1', 'README.md', 1, 3)).resolves.toMatchObject({ content: 'docs' })
+    expect(requests).toEqual([
+      { path: '/api/workspaces', method: 'GET' },
+      { path: '/api/workspaces', method: 'POST', body: '{"title":"Project","path":"C:/project"}' },
+      { path: '/api/workspaces/directories?path=C%3A%2Fproject', method: 'GET' },
+      { path: '/api/search?q=match', method: 'GET' },
+      { path: '/api/sessions/s%2F1/files?q=readme', method: 'GET' },
+      { path: '/api/sessions/s%2F1/file?path=README.md&start=1&end=3', method: 'GET' },
+    ])
+  })
+
   it('resumes SSE with Last-Event-ID and parses event frames', async () => {
     let requestHeaders: Headers | undefined
     const first = { seq: 8, type: 'tool/start', version: 1, time: '2026-08-25T00:00:00Z', summary: 'start' }

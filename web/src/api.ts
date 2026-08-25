@@ -16,6 +16,63 @@ export interface SessionSummary {
   status?: SessionStatus
 }
 
+export interface WorkspaceView {
+  id: string
+  title: string
+  path?: string
+  session_ids: string[]
+  created_at: number
+}
+
+export interface WorkspaceList {
+  workspaces: WorkspaceView[]
+  ungrouped_ids: string[]
+}
+
+export interface DirectoryEntry {
+  name: string
+  path: string
+  hidden?: boolean
+}
+
+export interface DirectoryListing {
+  path: string
+  home: string
+  crumbs: DirectoryEntry[]
+  entries: DirectoryEntry[]
+  read_error?: string
+  truncated?: boolean
+}
+
+export interface SessionFileView {
+  name: string
+  path: string
+  dir: boolean
+  size?: number
+  mod_time?: string
+}
+
+export interface SessionFilesView {
+  root: string
+  path: string
+  entries: SessionFileView[]
+}
+
+export interface FilePreview {
+  path: string
+  content: string
+  start_line: number
+  end_line: number
+  total_lines: number
+}
+
+export interface SessionSearchHit {
+  id: string
+  title?: string
+  updated_at: string
+  snippet: string
+}
+
 export interface EventDetails {
   [key: string]: unknown
 }
@@ -121,8 +178,20 @@ export interface WebApi {
   deleteFeedback(sessionId: string, seq: number, signal?: AbortSignal): Promise<void>
   uploadAttachment(sessionId: string, file: File, signal?: AbortSignal): Promise<AttachmentView>
   loadAttachment(sessionId: string, attachmentId: string, signal?: AbortSignal): Promise<Blob>
+  listWorkspaces(signal?: AbortSignal): Promise<WorkspaceList>
+  createWorkspace(title: string, path?: string, signal?: AbortSignal): Promise<{ id: string; title: string; path: string }>
+  pickWorkspaceDirectory(signal?: AbortSignal): Promise<{ path: string }>
+  listWorkspaceDirectories(path?: string, signal?: AbortSignal): Promise<DirectoryListing>
+  createWorkspaceDirectory(path: string, name: string, signal?: AbortSignal): Promise<{ path: string }>
+  renameWorkspace(workspaceId: string, title: string, signal?: AbortSignal): Promise<void>
+  deleteWorkspace(workspaceId: string, signal?: AbortSignal): Promise<void>
+  reorderWorkspaces(ids: string[], signal?: AbortSignal): Promise<void>
+  reorderSessions(workspaceId: string, sessionIds: string[], signal?: AbortSignal): Promise<void>
+  searchSessions(query: string, signal?: AbortSignal): Promise<SessionSearchHit[]>
+  listFiles(sessionId: string, path?: string, query?: string, signal?: AbortSignal): Promise<SessionFilesView>
+  previewFile(sessionId: string, path: string, start?: number, end?: number, signal?: AbortSignal): Promise<FilePreview>
   listSessions(signal?: AbortSignal): Promise<SessionSummary[]>
-  createSession(signal?: AbortSignal): Promise<{ id: string }>
+  createSession(workspaceId?: string, signal?: AbortSignal): Promise<{ id: string; workspace_id?: string }>
   resumeSession(sessionId: string, signal?: AbortSignal): Promise<void>
   renameSession(sessionId: string, title: string, signal?: AbortSignal): Promise<{ title: string }>
   archiveSession(sessionId: string, signal?: AbortSignal): Promise<void>
@@ -200,6 +269,73 @@ export class ShutuApi implements WebApi {
     return this.json<FeedbackView[]>(`/api/sessions/${encodeURIComponent(sessionId)}/feedback`, { signal })
   }
 
+  listWorkspaces(signal?: AbortSignal): Promise<WorkspaceList> {
+    return this.json<WorkspaceList>('/api/workspaces', { signal })
+  }
+
+  async createWorkspace(title: string, path = '', signal?: AbortSignal): Promise<{ id: string; title: string; path: string }> {
+    return this.json<{ id: string; title: string; path: string }>('/api/workspaces', {
+      method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title, path }),
+    })
+  }
+
+  pickWorkspaceDirectory(signal?: AbortSignal): Promise<{ path: string }> {
+    return this.json<{ path: string }>('/api/workspaces/pick-directory', { method: 'POST', signal })
+  }
+
+  listWorkspaceDirectories(path = '', signal?: AbortSignal): Promise<DirectoryListing> {
+    const query = path === '' ? '' : `?${new URLSearchParams({ path })}`
+    return this.json<DirectoryListing>(`/api/workspaces/directories${query}`, { signal })
+  }
+
+  async createWorkspaceDirectory(path: string, name: string, signal?: AbortSignal): Promise<{ path: string }> {
+    return this.json<{ path: string }>('/api/workspaces/directories', {
+      method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, name }),
+    })
+  }
+
+  async renameWorkspace(workspaceId: string, title: string, signal?: AbortSignal): Promise<void> {
+    await this.json<{ ok: true }>(`/api/workspaces/${encodeURIComponent(workspaceId)}`, {
+      method: 'PATCH', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title }),
+    })
+  }
+
+  async deleteWorkspace(workspaceId: string, signal?: AbortSignal): Promise<void> {
+    await this.json<{ ok: true }>(`/api/workspaces/${encodeURIComponent(workspaceId)}`, { method: 'DELETE', signal })
+  }
+
+  async reorderWorkspaces(ids: string[], signal?: AbortSignal): Promise<void> {
+    await this.json<{ ok: true }>('/api/workspaces/order', {
+      method: 'PATCH', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }),
+    })
+  }
+
+  async reorderSessions(workspaceId: string, sessionIds: string[], signal?: AbortSignal): Promise<void> {
+    await this.json<{ ok: true }>('/api/sessions/order', {
+      method: 'PATCH', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workspace_id: workspaceId, session_ids: sessionIds }),
+    })
+  }
+
+  searchSessions(query: string, signal?: AbortSignal): Promise<SessionSearchHit[]> {
+    const params = new URLSearchParams({ q: query })
+    return this.json<{ hits: SessionSearchHit[] }>(`/api/search?${params}`, { signal }).then(result => result.hits ?? [])
+  }
+
+  listFiles(sessionId: string, path = '', query = '', signal?: AbortSignal): Promise<SessionFilesView> {
+    const params = new URLSearchParams()
+    if (path !== '') params.set('path', path)
+    if (query !== '') params.set('q', query)
+    const suffix = params.size > 0 ? `?${params}` : ''
+    return this.json<SessionFilesView>(`/api/sessions/${encodeURIComponent(sessionId)}/files${suffix}`, { signal })
+  }
+
+  previewFile(sessionId: string, path: string, start?: number, end?: number, signal?: AbortSignal): Promise<FilePreview> {
+    const params = new URLSearchParams({ path })
+    if (start !== undefined) params.set('start', String(start))
+    if (end !== undefined) params.set('end', String(end))
+    return this.json<FilePreview>(`/api/sessions/${encodeURIComponent(sessionId)}/file?${params}`, { signal })
+  }
+
   putFeedback(sessionId: string, seq: number, rating: 'positive' | 'negative', note = '', signal?: AbortSignal): Promise<FeedbackView> {
     return this.json<FeedbackView>(`/api/sessions/${encodeURIComponent(sessionId)}/feedback/${seq}`, {
       method: 'PUT', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rating, note }),
@@ -220,8 +356,10 @@ export class ShutuApi implements WebApi {
     return this.blob(`/api/sessions/${encodeURIComponent(sessionId)}/attachments/${encodeURIComponent(attachmentId)}`, { signal })
   }
 
-  async createSession(signal?: AbortSignal): Promise<{ id: string }> {
-    return this.json<{ id: string }>('/api/sessions', { method: 'POST', signal, body: '{}' })
+  async createSession(workspaceId = '', signal?: AbortSignal): Promise<{ id: string; workspace_id?: string }> {
+    return this.json<{ id: string; workspace_id?: string }>('/api/sessions', {
+      method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(workspaceId === '' ? {} : { workspace_id: workspaceId }),
+    })
   }
 
   async resumeSession(sessionId: string, signal?: AbortSignal): Promise<void> {

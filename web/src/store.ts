@@ -1,8 +1,9 @@
-import type { AttachmentView, ConfigView, EventView, FeedbackView, RunningSnapshot, SessionSummary, WebApi } from './api'
+import type { AttachmentView, ConfigView, EventView, FeedbackView, FilePreview, RunningSnapshot, SessionFilesView, SessionSearchHit, SessionSummary, WebApi, WorkspaceList } from './api'
 import { ShutuApiError } from './api'
 
 export interface WebState {
   sessions: readonly SessionSummary[]
+  workspaces: WorkspaceList
   selectedId: string | null
   events: readonly EventView[]
   hasOlder: boolean
@@ -45,7 +46,7 @@ function saveSessionId(id: string | null): void {
 }
 
 const EMPTY: WebState = {
-  sessions: [], selectedId: null, events: [], hasOlder: false,
+  sessions: [], workspaces: { workspaces: [], ungrouped_ids: [] }, selectedId: null, events: [], hasOlder: false,
   loading: false, loadingOlder: false, sending: false, connected: false, error: null, authRequired: false,
 }
 
@@ -74,8 +75,9 @@ export class WebStore {
   async start(): Promise<void> {
     this.patch({ loading: true })
     try {
-      const sessions = sortSessions(await this.api.listSessions())
-      this.patch({ sessions, error: null, authRequired: false })
+      const [rawSessions, workspaces] = await Promise.all([this.api.listSessions(), this.api.listWorkspaces()])
+      const sessions = sortSessions(rawSessions)
+      this.patch({ sessions, workspaces, error: null, authRequired: false })
       const saved = savedSessionId()
       const current = sessions.find(session => session.id === saved) ?? sessions[0]
       if (current !== undefined) await this.open(current.id)
@@ -94,13 +96,14 @@ export class WebStore {
   }
 
   async refreshSessions(): Promise<readonly SessionSummary[]> {
-    const sessions = sortSessions(await this.api.listSessions())
-    this.patch({ sessions })
+    const [rawSessions, workspaces] = await Promise.all([this.api.listSessions(), this.api.listWorkspaces()])
+    const sessions = sortSessions(rawSessions)
+    this.patch({ sessions, workspaces })
     return sessions
   }
 
-  async createSession(): Promise<void> {
-    const result = await this.api.createSession()
+  async createSession(workspaceId = ''): Promise<void> {
+    const result = await this.api.createSession(workspaceId)
     await this.refreshSessions()
     await this.open(result.id)
   }
@@ -215,6 +218,59 @@ export class WebStore {
 
   loadAttachment(sessionId: string, attachmentId: string, signal?: AbortSignal): Promise<Blob> {
     return this.api.loadAttachment(sessionId, attachmentId, signal)
+  }
+
+  getWorkspaces(signal?: AbortSignal): Promise<WorkspaceList> {
+    return this.api.listWorkspaces(signal)
+  }
+
+  async createWorkspace(title: string, path = ''): Promise<void> {
+    await this.api.createWorkspace(title, path)
+    await this.refreshSessions()
+  }
+
+  async renameWorkspace(workspaceId: string, title: string): Promise<void> {
+    await this.api.renameWorkspace(workspaceId, title)
+    await this.refreshSessions()
+  }
+
+  async deleteWorkspace(workspaceId: string): Promise<void> {
+    await this.api.deleteWorkspace(workspaceId)
+    await this.refreshSessions()
+  }
+
+  pickWorkspaceDirectory(signal?: AbortSignal): Promise<{ path: string }> {
+    return this.api.pickWorkspaceDirectory(signal)
+  }
+
+  listWorkspaceDirectories(path = '', signal?: AbortSignal) {
+    return this.api.listWorkspaceDirectories(path, signal)
+  }
+
+  createWorkspaceDirectory(path: string, name: string): Promise<{ path: string }> {
+    return this.api.createWorkspaceDirectory(path, name)
+  }
+
+  async reorderWorkspaces(ids: string[]): Promise<void> {
+    await this.api.reorderWorkspaces(ids)
+    await this.refreshSessions()
+  }
+
+  async reorderSessions(workspaceId: string, sessionIds: string[]): Promise<void> {
+    await this.api.reorderSessions(workspaceId, sessionIds)
+    await this.refreshSessions()
+  }
+
+  searchSessions(query: string, signal?: AbortSignal): Promise<SessionSearchHit[]> {
+    return this.api.searchSessions(query, signal)
+  }
+
+  listFiles(sessionId: string, path = '', query = '', signal?: AbortSignal): Promise<SessionFilesView> {
+    return this.api.listFiles(sessionId, path, query, signal)
+  }
+
+  previewFile(sessionId: string, path: string, start?: number, end?: number, signal?: AbortSignal): Promise<FilePreview> {
+    return this.api.previewFile(sessionId, path, start, end, signal)
   }
 
   async loadRunning(sessionId: string, signal?: AbortSignal): Promise<RunningSnapshot> {

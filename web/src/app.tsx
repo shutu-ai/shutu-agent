@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
-import type { AttachmentView, ConfigView, EventDetails, EventView, FeedbackView, ImageView, JobView, RunningSnapshot, SessionSummary, SubagentView } from './api'
+import type { AttachmentView, ConfigView, DirectoryListing, EventDetails, EventView, FeedbackView, ImageView, JobView, RunningSnapshot, SessionSearchHit, SessionSummary, SubagentView, WorkspaceView } from './api'
 import { projectDshConversation, type DshConversationNode, type DshConversationSnapshot } from './dsh-conversation'
 import { projectDshTrajectory, type DshTimelineMode } from './dsh-trajectory'
 import { WebStore } from './store'
@@ -52,14 +52,88 @@ type SidebarDialog =
   | { kind: 'rename'; session: SessionSummary }
   | { kind: 'archive' | 'delete'; session: SessionSummary }
 
+type WorkspaceDialog =
+  | { kind: 'create' }
+  | { kind: 'rename' | 'delete'; workspace: WorkspaceView }
+
+function WorkspaceDialog({ store, dialog, onClose, onError }: {
+  store: WebStore
+  dialog: WorkspaceDialog
+  onClose: () => void
+  onError: (error: unknown) => void
+}) {
+  const initial = dialog.kind === 'create' ? undefined : dialog.workspace
+  const [title, setTitle] = useState(initial?.title ?? '')
+  const [path, setPath] = useState(initial?.path ?? '')
+  const [browser, setBrowser] = useState<DirectoryListing | null>(null)
+  const [browserLoading, setBrowserLoading] = useState(false)
+  const [folderName, setFolderName] = useState('')
+  const [working, setWorking] = useState(false)
+
+  const loadDirectory = async (nextPath = ''): Promise<void> => {
+    setBrowserLoading(true)
+    try { setBrowser(await store.listWorkspaceDirectories(nextPath)) }
+    catch (error) { onError(error) }
+    finally { setBrowserLoading(false) }
+  }
+
+  const chooseNativeDirectory = async (): Promise<void> => {
+    try {
+      const result = await store.pickWorkspaceDirectory()
+      if (result.path !== '') setPath(result.path)
+    } catch (error) { onError(error) }
+  }
+
+  const createFolder = async (): Promise<void> => {
+    if (browser === null || folderName.trim() === '') return
+    setWorking(true)
+    try {
+      const result = await store.createWorkspaceDirectory(browser.path, folderName.trim())
+      setFolderName('')
+      await loadDirectory(result.path)
+    } catch (error) { onError(error) }
+    finally { setWorking(false) }
+  }
+
+  const submit = async (): Promise<void> => {
+    setWorking(true)
+    try {
+      if (dialog.kind === 'create') await store.createWorkspace(title.trim(), path.trim())
+      else if (dialog.kind === 'rename') await store.renameWorkspace(dialog.workspace.id, title.trim())
+      else await store.deleteWorkspace(dialog.workspace.id)
+      onClose()
+    } catch (error) { onError(error) }
+    finally { setWorking(false) }
+  }
+
+  const isDelete = dialog.kind === 'delete'
+  return <div className="sidebar-dialog-backdrop" role="presentation" onMouseDown={() => !working && onClose()}>
+    <form className="sidebar-dialog workspace-dialog" role="dialog" aria-modal="true" aria-labelledby="workspace-dialog-title" onSubmit={event => { event.preventDefault(); void submit() }} onMouseDown={event => event.stopPropagation()}>
+      <h2 id="workspace-dialog-title">{dialog.kind === 'create' ? 'New workspace' : dialog.kind === 'rename' ? 'Rename workspace' : 'Delete workspace?'}</h2>
+      {isDelete ? <p>{`Delete ${dialog.workspace.title}? Sessions will return to the ungrouped list.`}</p> : <>
+        <label>Workspace name<input autoFocus value={title} onChange={event => setTitle(event.target.value)} maxLength={60} aria-label="Workspace name" /></label>
+        {dialog.kind === 'create' && <label>Directory<input value={path} onChange={event => setPath(event.target.value)} placeholder="Optional absolute path" aria-label="Workspace directory" /><span className="workspace-dialog-actions"><button type="button" onClick={() => void chooseNativeDirectory()} disabled={working}>Choose directory</button><button type="button" onClick={() => { setBrowser(value => value === null ? { path: '', home: '', crumbs: [], entries: [] } : null); if (browser === null) void loadDirectory() }} disabled={working}>Browse</button></span></label>}
+        {dialog.kind === 'create' && browser !== null && <div className="directory-browser" aria-label="Directory browser">
+          <div className="directory-crumbs">{browser.crumbs.map(crumb => <button type="button" key={crumb.path} onClick={() => void loadDirectory(crumb.path)}>{crumb.name}</button>)}</div>
+          {browserLoading ? <span className="muted">Loading directories…</span> : browser.read_error ? <span className="muted">{browser.read_error}</span> : <div className="directory-list">{browser.entries.filter(entry => !entry.hidden).map(entry => <button type="button" key={entry.path} onClick={() => void loadDirectory(entry.path)}>📁 {entry.name}</button>)}</div>}
+          <div className="directory-new-folder"><input value={folderName} onChange={event => setFolderName(event.target.value)} placeholder="New folder name" aria-label="New folder name" /><button type="button" onClick={() => void createFolder()} disabled={working || folderName.trim() === ''}>Create</button></div>
+        </div>}
+      </>}
+      <div className="dialog-actions"><button type="button" onClick={onClose} disabled={working}>Cancel</button><button type="submit" className={isDelete ? 'danger-button' : ''} disabled={working || (!isDelete && title.trim() === '')}>{isDelete ? 'Delete' : 'Save'}</button></div>
+    </form>
+  </div>
+}
+
 function SessionBrowser({
   sessions,
+  workspaces,
   selectedId,
   store,
   onError,
   onSettings,
 }: {
   sessions: readonly SessionSummary[]
+  workspaces: { workspaces: WorkspaceView[]; ungrouped_ids: string[] }
   selectedId: string | null
   store: WebStore
   onError: (error: unknown) => void
@@ -76,6 +150,11 @@ function SessionBrowser({
   const [dialog, setDialog] = useState<SidebarDialog | null>(null)
   const [draftTitle, setDraftTitle] = useState('')
   const [working, setWorking] = useState(false)
+  const [workspaceDialog, setWorkspaceDialog] = useState<WorkspaceDialog | null>(null)
+  const [workspaceMenuId, setWorkspaceMenuId] = useState<string | null>(null)
+  const [remoteHits, setRemoteHits] = useState<SessionSearchHit[]>([])
+  const [remoteLoading, setRemoteLoading] = useState(false)
+  const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Record<string, boolean>>({})
   const filtered = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase()
     if (!needle) return sessions
@@ -83,6 +162,21 @@ function SessionBrowser({
   }, [query, sessions])
   const visible = expanded || query.trim() !== '' ? filtered : filtered.slice(0, 5)
   const overflow = Math.max(0, filtered.length - 5)
+
+  useEffect(() => {
+    const needle = query.trim()
+    if (needle === '') { setRemoteHits([]); return }
+    const abort = new AbortController()
+    setRemoteLoading(true)
+    void store.searchSessions(needle, abort.signal).then(hits => {
+      if (!abort.signal.aborted) setRemoteHits(hits)
+    }).catch(() => {
+      if (!abort.signal.aborted) setRemoteHits([])
+    }).finally(() => {
+      if (!abort.signal.aborted) setRemoteLoading(false)
+    })
+    return () => abort.abort()
+  }, [query, store])
 
   useEffect(() => {
     if (typeof localStorage === 'undefined') return
@@ -94,6 +188,43 @@ function SessionBrowser({
     try { await operation(); setDialog(null); setMenuId(null) }
     catch (error) { onError(error) }
     finally { setWorking(false) }
+  }
+
+  const sessionById = useMemo(() => new Map(sessions.map(session => [session.id, session])), [sessions])
+  const visibleIds = useMemo(() => new Set(visible.map(session => session.id)), [visible])
+  const renderSession = (session: SessionSummary) => {
+    const status = sessionStatus(session)
+    const menuOpen = menuId === session.id
+    return <div className={`session-row ${session.id === selectedId ? 'active' : ''}`} key={session.id} role="treeitem" aria-selected={session.id === selectedId}>
+      <button className="session" type="button" onClick={() => { setMenuId(null); void store.open(session.id) }}>
+        <span className={`session-state ${status.tone}`} aria-label={status.label} title={status.label} />
+        <span className="session-copy"><span className="session-title">{sessionTitle(session)}</span><small>{relativeTime(session.updated_at)} · {session.event_count} events</small></span>
+      </button>
+      <button className="session-actions" type="button" onClick={event => { event.stopPropagation(); setMenuId(menuOpen ? null : session.id) }} aria-label={`Actions for ${sessionTitle(session)}`} aria-expanded={menuOpen}>⋯</button>
+      {menuOpen && <div className="session-menu" role="menu">
+        <button type="button" role="menuitem" onClick={() => { setDraftTitle(session.title || ''); setDialog({ kind: 'rename', session }); setMenuId(null) }}>Rename</button>
+        <button type="button" role="menuitem" onClick={() => { setDialog({ kind: 'archive', session }); setMenuId(null) }}>Archive</button>
+        <button type="button" role="menuitem" className="danger-action" onClick={() => { setDialog({ kind: 'delete', session }); setMenuId(null) }}>Delete</button>
+      </div>}
+    </div>
+  }
+
+  const renderWorkspace = (workspace: WorkspaceView) => {
+    const ids = workspace.session_ids.filter(id => visibleIds.has(id))
+    const isCollapsed = collapsedWorkspaces[workspace.id] === true
+    const menuOpen = workspaceMenuId === workspace.id
+    return <section className="workspace-group" key={workspace.id}>
+      <div className="workspace-group-head">
+        <button type="button" className="workspace-toggle" onClick={() => setCollapsedWorkspaces(previous => ({ ...previous, [workspace.id]: !isCollapsed }))} aria-expanded={!isCollapsed}>
+          <span className="workspace-chevron">{isCollapsed ? '›' : '⌄'}</span><span className="workspace-title">{workspace.title}</span><small>{ids.length}</small>
+        </button>
+        <button type="button" className="workspace-new-session" onClick={() => void run(() => store.createSession(workspace.id))} aria-label={`New session in ${workspace.title}`}>＋</button>
+        <button type="button" className="workspace-actions" onClick={() => setWorkspaceMenuId(menuOpen ? null : workspace.id)} aria-label={`Actions for ${workspace.title}`} aria-expanded={menuOpen}>⋯</button>
+        {menuOpen && <div className="workspace-menu" role="menu"><button type="button" role="menuitem" onClick={() => { setWorkspaceMenuId(null); setWorkspaceDialog({ kind: 'rename', workspace }) }}>Rename</button><button type="button" role="menuitem" className="danger-action" onClick={() => { setWorkspaceMenuId(null); setWorkspaceDialog({ kind: 'delete', workspace }) }}>Delete</button></div>}
+      </div>
+      {!isCollapsed && ids.map(id => { const session = sessionById.get(id); return session ? renderSession(session) : null })}
+      {!isCollapsed && ids.length === 0 && <div className="workspace-empty">No sessions</div>}
+    </section>
   }
 
   return <>
@@ -109,26 +240,18 @@ function SessionBrowser({
       </button>
       <div className="sidebar-section-head">
         <span>Sessions</span><span className="session-count">{filtered.length}</span>
+        <button type="button" className="sidebar-icon-button" onClick={() => setWorkspaceDialog({ kind: 'create' })} aria-label="New workspace" title="New workspace">＋</button>
         <button type="button" className="sidebar-icon-button" onClick={() => setSearchOpen(value => !value)} aria-label="Search sessions" title="Search sessions">⌕</button>
       </div>
       {searchOpen && <div className="session-search-wrap"><input autoFocus value={query} onChange={event => setQuery(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') { setQuery(''); setSearchOpen(false) } }} placeholder="Search sessions…" aria-label="Search sessions" /><button type="button" onClick={() => { setQuery(''); setSearchOpen(false) }} aria-label="Clear session search">×</button></div>}
       <div className="session-list" role="tree" aria-label="Sessions">
-        {visible.map(session => {
-          const status = sessionStatus(session)
-          const menuOpen = menuId === session.id
-          return <div className={`session-row ${session.id === selectedId ? 'active' : ''}`} key={session.id} role="treeitem" aria-selected={session.id === selectedId}>
-            <button className="session" type="button" onClick={() => { setMenuId(null); void store.open(session.id) }}>
-              <span className={`session-state ${status.tone}`} aria-label={status.label} title={status.label} />
-              <span className="session-copy"><span className="session-title">{sessionTitle(session)}</span><small>{relativeTime(session.updated_at)} · {session.event_count} events</small></span>
-            </button>
-            <button className="session-actions" type="button" onClick={event => { event.stopPropagation(); setMenuId(menuOpen ? null : session.id) }} aria-label={`Actions for ${sessionTitle(session)}`} aria-expanded={menuOpen}>⋯</button>
-            {menuOpen && <div className="session-menu" role="menu">
-              <button type="button" role="menuitem" onClick={() => { setDraftTitle(session.title || ''); setDialog({ kind: 'rename', session }); setMenuId(null) }}>Rename</button>
-              <button type="button" role="menuitem" onClick={() => { setDialog({ kind: 'archive', session }); setMenuId(null) }}>Archive</button>
-              <button type="button" role="menuitem" className="danger-action" onClick={() => { setDialog({ kind: 'delete', session }); setMenuId(null) }}>Delete</button>
-            </div>}
-          </div>
-        })}
+        {query.trim() !== '' && remoteHits.length > 0 && <div className="remote-search-results" role="group" aria-label="Search results"><span className="workspace-label">Matching session history</span>{remoteHits.map(hit => <button type="button" className="remote-search-hit" key={hit.id} onClick={() => { setQuery(''); void store.open(hit.id) }}><strong>{hit.title || hit.id}</strong><span>{hit.snippet}</span></button>)}</div>}
+        {remoteLoading && query.trim() !== '' && <div className="workspace-empty">Searching history…</div>}
+        {workspaces.workspaces.map(renderWorkspace)}
+        <section className="workspace-group ungrouped-group">
+          <div className="workspace-group-head"><span className="workspace-label">Ungrouped</span><small>{workspaces.ungrouped_ids.filter(id => visibleIds.has(id)).length}</small></div>
+          {workspaces.ungrouped_ids.filter(id => visibleIds.has(id)).map(id => { const session = sessionById.get(id); return session ? renderSession(session) : null })}
+        </section>
         {overflow > 0 && !expanded && query.trim() === '' && <button className="session-overflow" type="button" onClick={() => setExpanded(true)}>Show {overflow} more sessions</button>}
         {expanded && query.trim() === '' && overflow > 0 && <button className="session-overflow" type="button" onClick={() => setExpanded(false)}>Show fewer sessions</button>}
         {visible.length === 0 && <div className="sidebar-empty">{query ? 'No matching sessions' : 'No sessions yet'}</div>}
@@ -137,6 +260,7 @@ function SessionBrowser({
     </aside>
     {dialog?.kind === 'rename' && <div className="sidebar-dialog-backdrop" role="presentation" onMouseDown={() => !working && setDialog(null)}><form className="sidebar-dialog" role="dialog" aria-modal="true" aria-labelledby="rename-session-title" onSubmit={event => { event.preventDefault(); void run(() => store.renameSession(dialog.session.id, draftTitle.trim())) }} onMouseDown={event => event.stopPropagation()}><h2 id="rename-session-title">Rename session</h2><input autoFocus value={draftTitle} onChange={event => setDraftTitle(event.target.value)} maxLength={120} aria-label="Session name" /><div className="dialog-actions"><button type="button" onClick={() => setDialog(null)} disabled={working}>Cancel</button><button type="submit" disabled={working || draftTitle.trim() === ''}>Save</button></div></form></div>}
     {(dialog?.kind === 'archive' || dialog?.kind === 'delete') && <div className="sidebar-dialog-backdrop" role="presentation" onMouseDown={() => !working && setDialog(null)}><div className="sidebar-dialog" role="dialog" aria-modal="true" aria-labelledby="session-action-title" onMouseDown={event => event.stopPropagation()}><h2 id="session-action-title">{dialog.kind === 'archive' ? 'Archive session?' : 'Delete session?'}</h2><p>{dialog.kind === 'archive' ? 'The session will leave the active list and remain in storage.' : 'This permanently removes the session and its events.'}</p><div className="dialog-actions"><button type="button" onClick={() => setDialog(null)} disabled={working}>Cancel</button><button type="button" className={dialog.kind === 'delete' ? 'danger-button' : ''} disabled={working} onClick={() => void run(() => dialog.kind === 'archive' ? store.archiveSession(dialog.session.id) : store.deleteSession(dialog.session.id))}>{dialog.kind === 'archive' ? 'Archive' : 'Delete'}</button></div></div></div>}
+    {workspaceDialog !== null && <WorkspaceDialog store={store} dialog={workspaceDialog} onClose={() => setWorkspaceDialog(null)} onError={onError} />}
   </>
 }
 
@@ -230,6 +354,58 @@ function detailEntries(details: EventDetails | undefined): [string, string][] {
   return Object.entries(details)
     .filter(([, value]) => value !== undefined && value !== null && value !== '')
     .map(([key, value]) => [key, detailText(value)])
+}
+
+function parentFilePath(path: string): string {
+  const parts = path.split('/').filter(Boolean)
+  parts.pop()
+  return parts.join('/')
+}
+
+function FilesPanel({ store, sessionId, onClose, onReference }: {
+  store: WebStore
+  sessionId: string
+  onClose: () => void
+  onReference: (path: string) => void
+}) {
+  const [path, setPath] = useState('')
+  const [query, setQuery] = useState('')
+  const [listing, setListing] = useState<Awaited<ReturnType<WebStore['listFiles']>> | null>(null)
+  const [preview, setPreview] = useState<Awaited<ReturnType<WebStore['previewFile']>> | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    const abort = new AbortController()
+    setLoading(true)
+    setError(null)
+    void store.listFiles(sessionId, path, query, abort.signal).then(value => {
+      if (!abort.signal.aborted) setListing(value)
+    }).catch(reason => {
+      if (!abort.signal.aborted) setError(reason instanceof Error ? reason.message : String(reason))
+    }).finally(() => {
+      if (!abort.signal.aborted) setLoading(false)
+    })
+    return () => abort.abort()
+  }, [path, query, sessionId, store])
+
+  const openFile = async (filePath: string): Promise<void> => {
+    setPreview(null)
+    setError(null)
+    try { setPreview(await store.previewFile(sessionId, filePath)) }
+    catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
+  }
+
+  return <section className="files-panel" aria-label="Workspace files">
+    <div className="files-panel-head"><div><span className="eyebrow">WORKSPACE FILES</span><h2>Files</h2><p>{listing?.root || 'Session workspace'}</p></div><button type="button" className="settings-close" onClick={onClose} aria-label="Close files">×</button></div>
+    <div className="files-toolbar"><button type="button" onClick={() => { setPath(parentFilePath(path)); setPreview(null) }} disabled={path === ''}>↑ Up</button><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Search files…" aria-label="Search workspace files" />{path !== '' && <code>{path}</code>}</div>
+    {loading && <div className="files-state"><div className="spinner" />Loading files…</div>}
+    {!loading && error && <div className="files-state files-error"><strong>Unable to load files</strong><span>{error}</span></div>}
+    {!loading && !error && listing !== null && <div className="files-layout">
+      <div className="files-list" role="list" aria-label="Workspace file list">{listing.entries.length === 0 ? <div className="files-state">No files found.</div> : listing.entries.map(entry => <div className="file-row" role="listitem" key={entry.path}><button type="button" className="file-open" onClick={() => entry.dir ? (setPath(entry.path), setPreview(null)) : void openFile(entry.path)}><span>{entry.dir ? '📁' : '📄'}</span><strong>{entry.name}</strong><small>{entry.dir ? 'Folder' : entry.size === undefined ? '' : `${Math.ceil(entry.size / 1024)} KB`}</small></button>{!entry.dir && <button type="button" className="file-reference" onClick={() => onReference(entry.path)}>引用</button>}</div>)}</div>
+      {preview !== null && <article className="file-preview"><div className="file-preview-head"><strong>{preview.path}</strong><span>Lines {preview.start_line}–{preview.end_line} / {preview.total_lines}</span><button type="button" onClick={() => onReference(preview.path)}>引用文件</button></div><pre>{preview.content}</pre></article>}
+    </div>}
+  </section>
 }
 
 function EventImages({ store, sessionId, images }: { store: WebStore; sessionId: string; images: readonly ImageView[] }) {
@@ -560,6 +736,7 @@ export function App({ store }: { store: WebStore }) {
   const [search, setSearch] = useState('')
   const [sendError, setSendError] = useState<string | null>(null)
   const [focusedSeq, setFocusedSeq] = useState<number | null>(null)
+  const [filesOpen, setFilesOpen] = useState(false)
   const [token, setToken] = useState(() => store.getToken())
   const [settingsOpen, setSettingsOpen] = useState(() => typeof window !== 'undefined' && window.location.hash === '#/settings')
   const [feedbackBySeq, setFeedbackBySeq] = useState<Record<number, FeedbackView>>({})
@@ -600,6 +777,8 @@ export function App({ store }: { store: WebStore }) {
     })
     return () => abort.abort()
   }, [state.selectedId, store])
+
+  useEffect(() => { setFilesOpen(false) }, [state.selectedId])
 
   useEffect(() => {
     const syncRoute = () => setSettingsOpen(window.location.hash === '#/settings')
@@ -706,17 +885,17 @@ export function App({ store }: { store: WebStore }) {
   if (settingsOpen) return <SettingsPage store={store} theme={theme} onThemeChange={setTheme} onBack={() => setSettingsRoute(false)} />
 
   return <div className="shell">
-    <SessionBrowser sessions={state.sessions} selectedId={state.selectedId} store={store} onError={error => setSendError(error instanceof Error ? error.message : String(error))} onSettings={() => setSettingsRoute(true)} />
+    <SessionBrowser sessions={state.sessions} workspaces={state.workspaces} selectedId={state.selectedId} store={store} onError={error => setSendError(error instanceof Error ? error.message : String(error))} onSettings={() => setSettingsRoute(true)} />
     <main className="main-panel">
       <header className="topbar">
         <div><h1>{selected?.title || (state.selectedId ? state.selectedId : 'Conversation')}</h1><div className="status-line"><span className={state.connected ? 'status-dot online' : 'status-dot'} />{state.connected ? 'Live' : 'Reconnecting'}</div></div>
-        <label className="search-box"><span>⌕</span><input aria-label="Search trajectory" placeholder="Search events" value={search} onChange={event => setSearch(event.target.value)} />{search && <button type="button" onClick={() => setSearch('')} aria-label="Clear search">×</button>}</label>
+        <div className="topbar-actions"><button type="button" className="files-toggle" onClick={() => setFilesOpen(value => !value)} disabled={state.selectedId === null} aria-pressed={filesOpen}>Files</button><label className="search-box"><span>⌕</span><input aria-label="Search trajectory" placeholder="Search events" value={search} onChange={event => setSearch(event.target.value)} />{search && <button type="button" onClick={() => setSearch('')} aria-label="Clear search">×</button>}</label></div>
       </header>
       <nav className="tabs" role="tablist"><button role="tab" aria-selected={tab === 'chat'} className={tab === 'chat' ? 'tab selected' : 'tab'} onClick={() => setTab('chat')}>Conversation</button><button role="tab" aria-selected={tab === 'trajectory'} className={tab === 'trajectory' ? 'tab selected' : 'tab'} onClick={() => setTab('trajectory')}>Trajectory <span>{state.events.length}</span></button><button role="tab" aria-selected={tab === 'running'} className={tab === 'running' ? 'tab selected' : 'tab'} onClick={() => setTab('running')}>运行中</button></nav>
       {search.trim() !== '' && <div className="search-status" role="status" aria-live="polite">{filtered.length} matching loaded events{state.hasOlder ? ' · scroll to load older history' : ''}</div>}
       {(state.error || sendError) && <div className="error-banner"><span>{state.error || sendError}</span><button onClick={() => { setSendError(null); void store.start() }}>Retry</button></div>}
       <section className="content-panel">
-        {state.authRequired ? <form className="auth-card" onSubmit={event => { event.preventDefault(); void authenticate() }}><strong>Authentication required</strong><span>Enter the bearer token configured for the Shutu web server.</span><input aria-label="Bearer token" type="password" autoComplete="current-password" value={token} onChange={event => setToken(event.target.value)} placeholder="Bearer token" /><button type="submit" disabled={token.trim() === ''}>Connect</button></form> : state.loading ? <div className="empty"><div className="spinner" />Loading session…</div> : tab === 'running' ? <RunningPanel store={store} sessionId={state.selectedId} /> : state.selectedId === null ? <div className="empty"><strong>Start a new conversation</strong><span>Select a session or send a message from the agent.</span></div> : filtered.length === 0 ? <div className="empty"><strong>{search ? 'No matching events' : 'No events yet'}</strong><span>{search ? 'Try a different search term.' : 'Events will appear here as the session runs.'}</span></div> : tab === 'trajectory' ? <><DshTimeline events={filtered} onSelectSeq={setFocusedSeq} /><VirtualEvents events={filtered} store={store} sessionId={state.selectedId} feedbackBySeq={feedbackBySeq} onFeedback={submitFeedback} focusSeq={focusedSeq} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} /></> : <DshConversation events={filtered} sessionId={state.selectedId} store={store} feedbackBySeq={feedbackBySeq} onFeedback={submitFeedback} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} />}
+        {filesOpen && state.selectedId !== null ? <FilesPanel store={store} sessionId={state.selectedId} onClose={() => setFilesOpen(false)} onReference={path => { setDraft(previous => `${previous}${previous.trim() === '' ? '' : ' '}@${path}`); setFilesOpen(false) }} /> : state.authRequired ? <form className="auth-card" onSubmit={event => { event.preventDefault(); void authenticate() }}><strong>Authentication required</strong><span>Enter the bearer token configured for the Shutu web server.</span><input aria-label="Bearer token" type="password" autoComplete="current-password" value={token} onChange={event => setToken(event.target.value)} placeholder="Bearer token" /><button type="submit" disabled={token.trim() === ''}>Connect</button></form> : state.loading ? <div className="empty"><div className="spinner" />Loading session…</div> : tab === 'running' ? <RunningPanel store={store} sessionId={state.selectedId} /> : state.selectedId === null ? <div className="empty"><strong>Start a new conversation</strong><span>Select a session or send a message from the agent.</span></div> : filtered.length === 0 ? <div className="empty"><strong>{search ? 'No matching events' : 'No events yet'}</strong><span>{search ? 'Try a different search term.' : 'Events will appear here as the session runs.'}</span></div> : tab === 'trajectory' ? <><DshTimeline events={filtered} onSelectSeq={setFocusedSeq} /><VirtualEvents events={filtered} store={store} sessionId={state.selectedId} feedbackBySeq={feedbackBySeq} onFeedback={submitFeedback} focusSeq={focusedSeq} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} /></> : <DshConversation events={filtered} sessionId={state.selectedId} store={store} feedbackBySeq={feedbackBySeq} onFeedback={submitFeedback} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} />}
       </section>
       <form className="composer" onSubmit={event => { event.preventDefault(); if (state.sending) void stopRun(); else void submit() }}>{pendingImages.length > 0 && <div className="attachment-preview-list">{pendingImages.map(item => <div className="attachment-preview" key={item.ref.id}><img src={item.previewUrl} alt="待发送图片" /><button type="button" onClick={() => removePendingImage(item.ref.id)} aria-label="移除附件">×</button></div>)}</div>}<div className="composer-row"><label className="attach-button" aria-label="添加图片"><input type="file" accept="image/*" multiple disabled={state.selectedId === null || state.sending || uploading} onChange={event => { void attachFiles(event.currentTarget.files); event.currentTarget.value = '' }} />📎</label><textarea value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); if (!state.sending) void submit() } }} placeholder={uploading ? '正在上传图片…' : state.sending ? 'Agent is running…' : 'Send a message…'} rows={2} /><button type="submit" disabled={state.selectedId === null || uploading || (!state.sending && draft.trim() === '' && pendingImages.length === 0)}>{state.sending ? 'Stop' : 'Send'} <span>{state.sending ? '■' : '↵'}</span></button></div></form>
     </main>
