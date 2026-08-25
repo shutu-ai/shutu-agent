@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
@@ -21,7 +21,28 @@ if (tool === undefined || !existsSync(tool)) {
   ].join('\n'))
 }
 
-const result = spawnSync(process.execPath, [tool, ...process.argv.slice(3)], {
+function resolveTypeScriptProject() {
+  if (name !== 'typescript') return undefined
+  const sourcePath = resolve(webRoot, 'tsconfig.json')
+  const generatedPath = resolve(webRoot, '.tsconfig.shutu.generated.json')
+  const source = JSON.parse(readFileSync(sourcePath, 'utf8'))
+  const replaceRoot = (value) => {
+    if (typeof value === 'string') return value.replaceAll('../../deepseek-harness', dshRoot.replaceAll('\\', '/'))
+    if (Array.isArray(value)) return value.map(replaceRoot)
+    if (value !== null && typeof value === 'object') {
+      return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, replaceRoot(child)]))
+    }
+    return value
+  }
+  writeFileSync(generatedPath, `${JSON.stringify(replaceRoot(source), null, 2)}\n`)
+  return generatedPath
+}
+
+const project = resolveTypeScriptProject()
+const args = project === undefined
+  ? process.argv.slice(3)
+  : ['--project', project, ...process.argv.slice(3)]
+const result = spawnSync(process.execPath, [tool, ...args], {
   cwd: webRoot,
   env: process.env,
   stdio: 'inherit',

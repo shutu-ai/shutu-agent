@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import type { EventDetails, EventView } from './api'
+import { projectDshConversation, type DshConversationNode, type DshConversationSnapshot } from './dsh-conversation'
 import { projectDshTrajectory, type DshTimelineMode } from './dsh-trajectory'
 import { WebStore } from './store'
 import './styles.css'
@@ -80,6 +81,54 @@ function DshTimeline({ events }: { events: readonly EventView[] }) {
     </div>
     <div className="timeline-legend"><span><i className="lane-dot lane-0" />Model</span><span><i className="lane-dot lane-1" />Assistant</span><span><i className="lane-dot lane-2" />Tools</span>{selected !== null && <span className="timeline-selected">Record #{selected}</span>}</div>
   </section>
+}
+
+function conversationNodeLabel(node: DshConversationNode): string {
+  switch (node.kind) {
+    case 'user': return 'User message'
+    case 'assistant': return 'Assistant message'
+    case 'tool-running': return 'Tool running'
+    case 'tool-result': return node.isError ? 'Tool error' : 'Tool result'
+    case 'context': return `Context · ${node.source}`
+    case 'compaction': return 'Compaction'
+    case 'unknown': return node.type
+  }
+}
+
+function DshConversation({ events, sessionId, onReachTop, loadingOlder }: {
+  events: readonly EventView[]
+  sessionId: string
+  onReachTop: () => void
+  loadingOlder: boolean
+}) {
+  const snapshot = useMemo(() => projectDshConversation(events, sessionId), [events, sessionId])
+  const eventBySeq = useMemo(() => new Map(events.map(event => [event.seq, event])), [events])
+  return <div className="dsh-conversation-scroll" onScroll={event => {
+    if (event.currentTarget.scrollTop < 100) onReachTop()
+  }}>
+    <DshConversationHeader snapshot={snapshot} />
+    {loadingOlder && <div className="history-loading">Loading earlier events…</div>}
+    <div className="dsh-conversation-list">
+      {snapshot.nodes.map(node => {
+        const raw = eventBySeq.get(node.seq)
+        if (raw === undefined) return null
+        return <section className={`conversation-node ${node.kind}`} key={`${node.kind}:${node.seq}`}>
+          <div className="conversation-node-head"><span>{conversationNodeLabel(node)}</span><span>#{node.seq}</span></div>
+          <EventCard event={raw} />
+        </section>
+      })}
+    </div>
+  </div>
+}
+
+function DshConversationHeader({ snapshot }: { snapshot: DshConversationSnapshot }) {
+  const activeTools = snapshot.runningCalls.length
+  return <div className="dsh-conversation-header" aria-label="DSH conversation snapshot">
+    <strong>Conversation</strong>
+    <span>{snapshot.nodes.length} nodes</span>
+    <span>{snapshot.chat.timeline.turnOrder.length} turns</span>
+    {activeTools > 0 && <span className="conversation-running">{activeTools} tool{activeTools === 1 ? '' : 's'} running</span>}
+  </div>
 }
 
 function VirtualEvents({ events, onReachTop, loadingOlder }: {
@@ -186,7 +235,7 @@ export function App({ store }: { store: WebStore }) {
       <nav className="tabs" role="tablist"><button role="tab" aria-selected={tab === 'chat'} className={tab === 'chat' ? 'tab selected' : 'tab'} onClick={() => setTab('chat')}>Conversation</button><button role="tab" aria-selected={tab === 'trajectory'} className={tab === 'trajectory' ? 'tab selected' : 'tab'} onClick={() => setTab('trajectory')}>Trajectory <span>{state.events.length}</span></button></nav>
       {(state.error || sendError) && <div className="error-banner"><span>{state.error || sendError}</span><button onClick={() => { setSendError(null); void store.start() }}>Retry</button></div>}
       <section className="content-panel">
-        {state.authRequired ? <form className="auth-card" onSubmit={event => { event.preventDefault(); void authenticate() }}><strong>Authentication required</strong><span>Enter the bearer token configured for the Shutu web server.</span><input aria-label="Bearer token" type="password" autoComplete="current-password" value={token} onChange={event => setToken(event.target.value)} placeholder="Bearer token" /><button type="submit" disabled={token.trim() === ''}>Connect</button></form> : state.loading ? <div className="empty"><div className="spinner" />Loading session…</div> : state.selectedId === null ? <div className="empty"><strong>Start a new conversation</strong><span>Select a session or send a message from the agent.</span></div> : filtered.length === 0 ? <div className="empty"><strong>{search ? 'No matching events' : 'No events yet'}</strong><span>{search ? 'Try a different search term.' : 'Events will appear here as the session runs.'}</span></div> : <>{tab === 'trajectory' && <DshTimeline events={filtered} />}<VirtualEvents events={filtered} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} /></>}
+        {state.authRequired ? <form className="auth-card" onSubmit={event => { event.preventDefault(); void authenticate() }}><strong>Authentication required</strong><span>Enter the bearer token configured for the Shutu web server.</span><input aria-label="Bearer token" type="password" autoComplete="current-password" value={token} onChange={event => setToken(event.target.value)} placeholder="Bearer token" /><button type="submit" disabled={token.trim() === ''}>Connect</button></form> : state.loading ? <div className="empty"><div className="spinner" />Loading session…</div> : state.selectedId === null ? <div className="empty"><strong>Start a new conversation</strong><span>Select a session or send a message from the agent.</span></div> : filtered.length === 0 ? <div className="empty"><strong>{search ? 'No matching events' : 'No events yet'}</strong><span>{search ? 'Try a different search term.' : 'Events will appear here as the session runs.'}</span></div> : tab === 'trajectory' ? <><DshTimeline events={filtered} /><VirtualEvents events={filtered} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} /></> : <DshConversation events={filtered} sessionId={state.selectedId} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} />}
       </section>
       <form className="composer" onSubmit={event => { event.preventDefault(); if (state.sending) void stopRun(); else void submit() }}><textarea value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); if (!state.sending) void submit() } }} placeholder={state.sending ? 'Agent is running…' : 'Send a message…'} rows={2} /><button type="submit" disabled={state.selectedId === null || (!state.sending && draft.trim() === '')}>{state.sending ? 'Stop' : 'Send'} <span>{state.sending ? '■' : '↵'}</span></button></form>
     </main>
