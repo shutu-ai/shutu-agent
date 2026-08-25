@@ -109,4 +109,29 @@ pre { margin: 3px 0 0; overflow: auto; color: #b9c8da; font: 11px/1.45 ui-monosp
 .composer button { align-self: end; border: 0; border-radius: 8px; padding: 8px 14px; color: #09131c; background: #9de9bd; font-weight: 700; }
 .composer button:disabled { cursor: not-allowed; opacity: .45; }
 .composer button span { margin-left: 4px; opacity: .7; }
-@media (max-width: 800px) { body { min-width: 0; } .sidebar { width: 210px; flex-basis: 210px; } .topbar, .content-panel { padding-left: 20px; padding-right: 20px; } .composer { margin-left: 20px; margin-right: 20px; } .search-box { min-width: 160px; } }
+@media (max-width: 800px) {
+  body { min-width: 0; overflow-x: hidden; }
+  .shell { min-width: 0; }
+  .sidebar { width: 150px; flex-basis: 150px; padding: 18px 8px; }
+  .brand { gap: 6px; padding: 0 5px 22px; font-size: 15px; }
+  .brand-mark { width: 25px; height: 25px; }
+  .brand-sub { display: none; }
+  .sidebar-title { padding-left: 5px; padding-right: 5px; }
+  .session { padding: 10px 8px; }
+  .main-panel { width: calc(100vw - 150px); }
+  .topbar { align-items: stretch; flex-direction: column; gap: 9px; padding: 18px 14px 13px; }
+  h1 { max-width: 100%; font-size: 17px; }
+  .search-box { min-width: 0; width: 100%; }
+  .tabs { gap: 18px; overflow-x: auto; padding: 0 14px; white-space: nowrap; }
+  .content-panel { padding: 12px 8px 6px; }
+  .dsh-conversation-scroll, .event-scroll { padding-left: 4px; padding-right: 4px; }
+  .dsh-conversation-header { flex-wrap: wrap; gap: 7px 10px; }
+  .conversation-running { margin-left: 0; }
+  .search-status { padding-left: 14px; padding-right: 14px; }
+  .error-banner { margin-left: 14px; margin-right: 14px; }
+  .composer { margin: 8px 10px 16px; }
+}
+@media (max-width: 600px) {
+  .sidebar { display: none; }
+  .main-panel { width: 100vw; }
+}
