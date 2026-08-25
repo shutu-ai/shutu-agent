@@ -32,20 +32,42 @@ import (
 type ApprovalStatus string
 
 const (
-	StatusPending  ApprovalStatus = "pending"  // created, waiting for the user
-	StatusApproved ApprovalStatus = "approved" // the user said yes
-	StatusRejected ApprovalStatus = "rejected" // the user said no
-	StatusExpired  ApprovalStatus = "expired"  // abandoned (reserved for later expiry)
+	StatusPending  ApprovalStatus = "pending"   // created, waiting for the user
+	StatusApproved ApprovalStatus = "approved"  // the user said yes
+	StatusRejected ApprovalStatus = "rejected"  // the user said no
+	StatusExpired  ApprovalStatus = "expired"   // abandoned (reserved for later expiry)
+	StatusCanceled ApprovalStatus = "cancelled" // the question UI was dismissed
 )
+
+// QuestionOption is one selectable answer offered by a structured user
+// question. It mirrors DSH's wire-safe question option without coupling the
+// interaction seam to a UI package.
+type QuestionOption struct {
+	Label       string `json:"label"`
+	Description string `json:"description,omitempty"`
+}
+
+// Question is one structured question carried by an interaction request.
+// Empty Questions keeps the legacy approval-only request shape intact.
+type Question struct {
+	ID          string           `json:"id"`
+	Question    string           `json:"question"`
+	Detail      string           `json:"detail,omitempty"`
+	Header      string           `json:"header,omitempty"`
+	Options     []QuestionOption `json:"options,omitempty"`
+	MultiSelect bool             `json:"multi_select,omitempty"`
+}
 
 // Request is one pending-or-resolved human-approval item. Callers receive fresh
 // value copies, never live provider state.
 type Request struct {
-	ID         string          // provider-issued id ("req-N" under the memory provider)
-	Prompt     string          // user-facing explanation of the sensitive action
-	ToolName   string          // tool whose execution triggered the approval
-	Args       string          // tool args JSON at trigger time (bounded, ≤ maxArgsLen runes)
-	Status     ApprovalStatus  // pending by default
+	ID         string         // provider-issued id ("req-N" under the memory provider)
+	Prompt     string         // user-facing explanation of the sensitive action
+	ToolName   string         // tool whose execution triggered the approval
+	Args       string         // tool args JSON at trigger time (bounded, ≤ maxArgsLen runes)
+	Questions  []Question     `json:"questions,omitempty"`
+	Answer     string         `json:"answer,omitempty"` // structured answer JSON, set after resolution
+	Status     ApprovalStatus // pending by default
 	CreatedAt  time.Time
 	ResolvedAt *time.Time // set once the request leaves pending; nil otherwise
 }
@@ -93,6 +115,35 @@ type Engine interface {
 	// Close releases the backend and marks the engine closed. It is idempotent;
 	// every other operation after Close is rejected with ErrEngineClosed.
 	Close() error
+}
+
+// StructuredRequester is an optional extension implemented by the in-memory
+// engine. Keeping it outside Engine preserves compatibility with existing
+// approval consumers and test doubles while allowing interact_ask to carry DSH
+// style question batches when the concrete engine supports them.
+type StructuredRequester interface {
+	RequestWithQuestions(ctx context.Context, prompt, toolName, args string, questions []Question) (Request, error)
+}
+
+// AnswerResolver is an optional extension used by the Web transport to retain
+// the structured answer while preserving the normal approved/rejected status.
+type AnswerResolver interface {
+	ResolveWithAnswer(ctx context.Context, id string, status ApprovalStatus, answer string) (Request, error)
+}
+
+// Canceler is the optional user-question cancellation extension. Cancellation
+// is separate from rejection so a blocked ask_user_question can distinguish a
+// dismissed UI from a deliberate negative answer.
+type Canceler interface {
+	Cancel(ctx context.Context, id string) (Request, error)
+}
+
+// RequestRestorer is an optional startup hook for providers that can restore
+// approval snapshots from a durable session log. It intentionally stays
+// outside Engine so existing consumers and test doubles remain source-
+// compatible.
+type RequestRestorer interface {
+	Restore(ctx context.Context, requests []Request) error
 }
 
 // closer is the optional extension a Provider implements to release its

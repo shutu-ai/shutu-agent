@@ -23,7 +23,9 @@ package interact
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	agenttools "github.com/jabing/shutu-agent/internal/tools"
 	"strings"
 
 	"github.com/jabing/shutu-agent/internal/session"
@@ -31,8 +33,9 @@ import (
 
 // Tool names (whitelisted when interact.enabled; see config.interactToolNames).
 const (
-	ToolAskName    = "interact_ask"
-	ToolStatusName = "interact_status"
+	ToolAskName             = "interact_ask"
+	ToolAskUserQuestionName = "ask_user_question"
+	ToolStatusName          = "interact_status"
 )
 
 // InteractTools bundles the shared state of the two interact_* tools: the
@@ -51,6 +54,11 @@ func NewInteractTools(e Engine, onEvent func(typ string, data any)) *InteractToo
 
 // Ask returns the interact_ask tool.
 func (t *InteractTools) Ask() InteractAskTool { return InteractAskTool{t: t} }
+
+// AskUserQuestion returns the blocking DSH-compatible question tool.
+func (t *InteractTools) AskUserQuestion() AskUserQuestionTool {
+	return AskUserQuestionTool{t: t}
+}
 
 // Status returns the interact_status tool.
 func (t *InteractTools) Status() InteractStatusTool { return InteractStatusTool{t: t} }
@@ -97,31 +105,156 @@ func (InteractAskTool) Schema() map[string]any {
 				"minLength":   1,
 				"description": "the user-facing question or the sensitive action to approve",
 			},
+			"questions": map[string]any{
+				"type":        "array",
+				"description": "optional structured questions; each answer is returned with selected option labels",
+				"items": map[string]any{
+					"type":                 "object",
+					"properties":           map[string]any{"id": map[string]any{"type": "string"}, "question": map[string]any{"type": "string"}, "detail": map[string]any{"type": "string"}, "header": map[string]any{"type": "string"}, "multi_select": map[string]any{"type": "boolean"}, "options": map[string]any{"type": "array", "items": map[string]any{"type": "object", "properties": map[string]any{"label": map[string]any{"type": "string"}, "description": map[string]any{"type": "string"}}, "required": []string{"label"}, "additionalProperties": false}}},
+					"required":             []string{"id", "question"},
+					"additionalProperties": false,
+				},
+			},
 		},
 		"required":             []string{"prompt"},
 		"additionalProperties": false,
 	}
 }
 
-func (t InteractAskTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t InteractAskTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
-		Prompt string `json:"prompt"`
+		Prompt    string     `json:"prompt"`
+		Questions []Question `json:"questions"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("interact_ask: %w", err)
 	}
 	if strings.TrimSpace(a.Prompt) == "" {
 		return "", fmt.Errorf("interact_ask: prompt is required")
 	}
-	req, err := t.t.e.Request(ctx, a.Prompt, ToolAskName, boundArgs(string(args)))
+	if err := validateQuestions(a.Questions); err != nil {
+		return "", fmt.Errorf("interact_ask: %w", err)
+	}
+	rawArgs, _ := json.Marshal(args)
+	var req Request
+	var err error
+	if len(a.Questions) > 0 {
+		structured, ok := t.t.e.(StructuredRequester)
+		if !ok {
+			return "", fmt.Errorf("structured questions are unavailable")
+		}
+		req, err = structured.RequestWithQuestions(ctx, a.Prompt, ToolAskName, boundArgs(string(rawArgs)), a.Questions)
+	} else {
+		req, err = t.t.e.Request(ctx, a.Prompt, ToolAskName, boundArgs(string(rawArgs)))
+	}
 	if err != nil {
 		return "", fmt.Errorf("interact_ask: %w", err)
 	}
 	// interact/request is a log-only fact (D3); the created request's id and
 	// triggering tool are logged, and the returned text is what the loop logs
 	// as tool/result.
-	t.t.emit(session.EventInteractRequest, session.NewInteractRequest(req.ID, req.ToolName))
+	t.t.emit(session.EventInteractRequest, session.NewInteractRequestDetail(req.ID, req.ToolName, req.Prompt, req.Args, req.Questions))
 	return fmt.Sprintf("created approval request %s (status=%s); the user will answer on their terminal", req.ID, req.Status), nil
+}
+
+// AskUserQuestionTool raises a structured question batch and waits until the
+// Web/host resolves it. Unlike legacy interact_ask, this tool does not return
+// before the human answer is available.
+type AskUserQuestionTool struct{ t *InteractTools }
+
+func (AskUserQuestionTool) Name() string { return ToolAskUserQuestionName }
+func (AskUserQuestionTool) Description() string {
+	return "ask the user one or more structured questions and wait for the answer"
+}
+func (AskUserQuestionTool) Schema() map[string]any {
+	return map[string]any{
+		"type": "object", "properties": map[string]any{
+			"questions": map[string]any{
+				"type": "array", "minItems": 1,
+				"items": map[string]any{
+					"type": "object", "properties": map[string]any{
+						"id": map[string]any{"type": "string"}, "question": map[string]any{"type": "string"},
+						"detail": map[string]any{"type": "string"}, "header": map[string]any{"type": "string"},
+						"multi_select": map[string]any{"type": "boolean"}, "options": map[string]any{
+							"type": "array", "items": map[string]any{"type": "object", "properties": map[string]any{
+								"label": map[string]any{"type": "string"}, "description": map[string]any{"type": "string"},
+							}, "required": []string{"label"}, "additionalProperties": false},
+						},
+					}, "required": []string{"id", "question"}, "additionalProperties": false,
+				},
+			},
+		}, "required": []string{"questions"}, "additionalProperties": false,
+	}
+}
+
+func (t AskUserQuestionTool) Execute(ctx context.Context, args any) (string, error) {
+	var input struct {
+		Questions []Question `json:"questions"`
+	}
+	if err := agenttools.DecodeArgs(args, &input); err != nil {
+		return "", fmt.Errorf("ask_user_question: %w", err)
+	}
+	if len(input.Questions) == 0 {
+		return "", fmt.Errorf("ask_user_question: at least one question is required")
+	}
+	if err := validateQuestions(input.Questions); err != nil {
+		return "", fmt.Errorf("ask_user_question: %w", err)
+	}
+	structured, ok := t.t.e.(StructuredRequester)
+	if !ok {
+		return "", fmt.Errorf("ask_user_question: structured questions are unavailable")
+	}
+	rawArgs, _ := json.Marshal(args)
+	req, err := structured.RequestWithQuestions(ctx, "Please answer the following questions.", ToolAskUserQuestionName, boundArgs(string(rawArgs)), input.Questions)
+	if err != nil {
+		return "", fmt.Errorf("ask_user_question: %w", err)
+	}
+	t.t.emit(session.EventInteractRequest, session.NewInteractRequestDetail(req.ID, req.ToolName, req.Prompt, req.Args, req.Questions))
+	resolved, err := t.t.e.Await(ctx, req.ID)
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			if canceler, ok := t.t.e.(Canceler); ok {
+				if _, cancelErr := canceler.Cancel(context.Background(), req.ID); cancelErr == nil {
+					t.t.emit(session.EventInteractCancel, session.NewInteractCancel(req.ID))
+				}
+			}
+		}
+		return "", fmt.Errorf("ask_user_question: %w", err)
+	}
+	if resolved.Status == StatusCanceled {
+		return "", fmt.Errorf("ask_user_question: user cancelled the questions")
+	}
+	if resolved.Status != StatusApproved {
+		return "", fmt.Errorf("ask_user_question: user rejected the questions")
+	}
+	if resolved.Answer == "" {
+		return `{"answers":[]}`, nil
+	}
+	return resolved.Answer, nil
+}
+
+func validateQuestions(questions []Question) error {
+	seen := make(map[string]struct{}, len(questions))
+	for _, q := range questions {
+		if strings.TrimSpace(q.ID) == "" || strings.TrimSpace(q.Question) == "" {
+			return fmt.Errorf("each question requires id and question")
+		}
+		if _, ok := seen[q.ID]; ok {
+			return fmt.Errorf("duplicate question id %q", q.ID)
+		}
+		seen[q.ID] = struct{}{}
+		optionSeen := make(map[string]struct{}, len(q.Options))
+		for _, option := range q.Options {
+			if strings.TrimSpace(option.Label) == "" {
+				return fmt.Errorf("question %q has an empty option label", q.ID)
+			}
+			if _, ok := optionSeen[option.Label]; ok {
+				return fmt.Errorf("question %q has duplicate option %q", q.ID, option.Label)
+			}
+			optionSeen[option.Label] = struct{}{}
+		}
+	}
+	return nil
 }
 
 // InteractStatusTool looks up the current approval status of one request.
@@ -150,11 +283,11 @@ func (InteractStatusTool) Schema() map[string]any {
 	}
 }
 
-func (t InteractStatusTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t InteractStatusTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		ID string `json:"id"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("interact_status: %w", err)
 	}
 	if a.ID == "" {

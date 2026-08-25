@@ -126,7 +126,9 @@ func TestInteractionsAPI(t *testing.T) {
 	srv, _ := newTestServer(t, "tok")
 	eng := interact.NewEngine(nil)
 	t.Cleanup(func() { _ = eng.Close() })
-	request, err := eng.Request(context.Background(), "Allow the sensitive tool?", "write_file", `{"path":"/tmp/demo"}`)
+	request, err := eng.RequestWithQuestions(context.Background(), "Choose a release track", "interact_ask", `{"path":"/tmp/demo"}`, []interact.Question{{
+		ID: "track", Question: "Which track?", Options: []interact.QuestionOption{{Label: "stable"}, {Label: "canary"}},
+	}})
 	if err != nil {
 		t.Fatalf("Request: %v", err)
 	}
@@ -137,9 +139,17 @@ func TestInteractionsAPI(t *testing.T) {
 			}
 			return eng.List(ctx)
 		},
-		func(ctx context.Context, sessionID, id string, status interact.ApprovalStatus) error {
+		func(ctx context.Context, sessionID, id string, status interact.ApprovalStatus, answer string) error {
 			if sessionID == "other-session" {
 				return interact.ErrUnknownRequest
+			}
+			if answer != "" {
+				resolver, ok := any(eng).(interact.AnswerResolver)
+				if !ok {
+					return interact.ErrUnknownRequest
+				}
+				_, err := resolver.ResolveWithAnswer(ctx, id, status, answer)
+				return err
 			}
 			_, err := eng.Resolve(ctx, id, status)
 			return err
@@ -166,17 +176,21 @@ func TestInteractionsAPI(t *testing.T) {
 	if listed.Interactions[0]["args"] != `{"path":"/tmp/demo"}` {
 		t.Fatalf("listed args = %v, want bounded JSON args", listed.Interactions[0]["args"])
 	}
+	if questions, ok := listed.Interactions[0]["questions"].([]any); !ok || len(questions) != 1 {
+		t.Fatalf("listed questions = %v, want one structured question", listed.Interactions[0]["questions"])
+	}
 
 	rec = doReqBody(t, srv.Handler(), "POST", "/api/interactions/"+request.ID+"/resolve?session_id=other-session", "tok", `{"status":"approved"}`)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("wrong-session resolve = %d, want 409", rec.Code)
 	}
-	rec = doReqBody(t, srv.Handler(), "POST", "/api/interactions/"+request.ID+"/resolve?session_id=owner-session", "tok", `{"status":"approved"}`)
+	answer := `{"answers":[{"id":"track","selected":["stable"]}]}`
+	rec = doReqBody(t, srv.Handler(), "POST", "/api/interactions/"+request.ID+"/resolve?session_id=owner-session", "tok", `{"status":"approved","answer":`+strconv.Quote(answer)+`}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("POST interaction resolve = %d: %s", rec.Code, rec.Body.String())
 	}
 	resolved, err := eng.List(context.Background())
-	if err != nil || len(resolved) != 1 || resolved[0].Status != interact.StatusApproved {
+	if err != nil || len(resolved) != 1 || resolved[0].Status != interact.StatusApproved || resolved[0].Answer != answer {
 		t.Fatalf("resolved interactions = %+v, err=%v", resolved, err)
 	}
 
@@ -529,6 +543,94 @@ func TestMessageHandlerInvoked(t *testing.T) {
 	srv2, _ := newTestServer(t, "tok")
 	if rec := doReqBody(t, srv2.Handler(), "POST", "/api/sessions/s-1/message", "tok", `{"text":"hi"}`); rec.Code != http.StatusNotImplemented {
 		t.Fatalf("message with nil handler → %d, want 501", rec.Code)
+	}
+}
+
+func TestSessionQueueAPI(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+	created := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	items := []QueueItem{}
+	var updated string
+	srv.SetQueueManager(
+		func(ctx context.Context, sessionID string) ([]QueueItem, error) {
+			if sessionID != "s-1" {
+				t.Fatalf("list session = %q, want s-1", sessionID)
+			}
+			return items, nil
+		},
+		func(ctx context.Context, sessionID, text string) (QueueItem, error) {
+			item := QueueItem{ID: "q-1", Text: text, CreatedAt: created, Placement: "queued"}
+			items = append(items, item)
+			return item, nil
+		},
+		func(ctx context.Context, sessionID, itemID, action string) error {
+			updated = sessionID + "/" + itemID + "/" + action
+			return nil
+		},
+	)
+
+	if rec := doReq(t, srv.Handler(), "GET", "/api/sessions/s-1/queue", ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("queue without token = %d, want 401", rec.Code)
+	}
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/sessions/s-1/queue", "tok", `{"text":"queued"}`)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("enqueue = %d, want 202", rec.Code)
+	}
+	var item QueueItem
+	if err := json.Unmarshal(rec.Body.Bytes(), &item); err != nil {
+		t.Fatal(err)
+	}
+	if item.ID != "q-1" || item.Text != "queued" || item.Placement != "queued" {
+		t.Fatalf("enqueue response = %+v", item)
+	}
+	rec = doReq(t, srv.Handler(), "GET", "/api/sessions/s-1/queue", "tok")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"id":"q-1"`) {
+		t.Fatalf("list = %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doReqBody(t, srv.Handler(), "PATCH", "/api/sessions/s-1/queue/q-1", "tok", `{"action":"steer"}`)
+	if rec.Code != http.StatusOK || updated != "s-1/q-1/steer" {
+		t.Fatalf("update = %d %s, callback=%q", rec.Code, rec.Body.String(), updated)
+	}
+	if rec := doReqBody(t, srv.Handler(), "POST", "/api/sessions/s-1/queue", "tok", `{"text":"  "}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("empty enqueue = %d, want 400", rec.Code)
+	}
+	srv2, _ := newTestServer(t, "tok")
+	if rec := doReq(t, srv2.Handler(), "GET", "/api/sessions/s-1/queue", "tok"); rec.Code != http.StatusNotImplemented {
+		t.Fatalf("unwired queue = %d, want 501", rec.Code)
+	}
+}
+
+func TestSessionFilesAPI(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte("package main\n\nfunc main() {\n\tprintln(\"ok\")\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	seedSession(t, st, "s-files", nil)
+	if headers, ok := any(st).(store.SessionHeaderStore); ok {
+		if err := headers.SetSessionCWD(context.Background(), "s-files", root); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		t.Fatal("SQLite store lacks SessionHeaderStore")
+	}
+	rec := doReq(t, srv.Handler(), "GET", "/api/sessions/s-files/files?q=main", "tok")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"path":"main.go"`) {
+		t.Fatalf("file search = %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doReq(t, srv.Handler(), "GET", "/api/sessions/s-files/file?path=main.go&start=3&end=4", "tok")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("file preview = %d %s", rec.Code, rec.Body.String())
+	}
+	var view map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &view); err != nil {
+		t.Fatal(err)
+	}
+	if view["start_line"] != float64(3) || !strings.Contains(view["content"].(string), "println") {
+		t.Fatalf("file preview body = %v", view)
+	}
+	if rec := doReq(t, srv.Handler(), "GET", "/api/sessions/s-files/file?path=../secret", "tok"); rec.Code != http.StatusBadRequest {
+		t.Fatalf("escaping file path = %d, want 400", rec.Code)
 	}
 }
 

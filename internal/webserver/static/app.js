@@ -9,6 +9,7 @@
 const KEY_TOKEN = "pa_token";
 const KEY_THEME = "pa_theme";
 const KEY_CURRENT = "pa_current";
+const KEY_QUEUE = "pa_queued_messages";
 const KEY_RECENT_WS = "pa_recent_workspace"; // dsh recentWorkspaceId: where 新会话 lands
 
 // ---- layout constants (ui-layout columns.ts) -----------------------------
@@ -107,10 +108,69 @@ let pendingInteractions = [];
 let interactionPollTimer = null;
 let queuedMessages = [];
 let queueFlushBusy = false;
+let queuedBySession = new Map();
+let queuedSessionID = currentID;
 let sessionReferences = [];
 let sessionOutputs = [];
 let referenceMenuOpen = false;
 let referenceHighlight = 0;
+let referenceRemoteKey = "";
+
+try {
+  const storedQueues = JSON.parse(sessionStorage.getItem(KEY_QUEUE) || "{}");
+  for (const [id, items] of Object.entries(storedQueues)) {
+    if (Array.isArray(items)) queuedBySession.set(id, items.filter((item) => item && typeof item.text === "string").slice(-20));
+  }
+} catch (_) { /* unavailable storage is non-fatal */ }
+function persistQueues() {
+  try {
+    const value = Object.fromEntries([...queuedBySession.entries()].map(([id, items]) => [id, items.slice(-20)]));
+    sessionStorage.setItem(KEY_QUEUE, JSON.stringify(value));
+  } catch (_) { /* private mode/storage limits are non-fatal */ }
+}
+function persistCurrentQueue() {
+  if (currentID) queuedBySession.set(currentID, queuedMessages.slice(-20));
+  persistQueues();
+}
+
+// The server queue is authoritative when the running portal exposes the dsh
+// queue API. Local sessionStorage remains a compatibility/offline fallback for
+// older binaries and transient network failures.
+async function loadServerQueue(id = currentID) {
+  if (!id) return false;
+  try {
+    const res = await api(`/api/sessions/${encodeURIComponent(id)}/queue`);
+    if (!res.ok) return false;
+    const items = await res.json();
+    if (currentID !== id) return false;
+    queuedMessages = Array.isArray(items)
+      ? items.filter((item) => item && typeof item.text === "string").map((item) => ({
+        id: item.id || "", text: item.text, createdAt: item.created_at || "",
+      }))
+      : [];
+    persistCurrentQueue();
+    renderQueue();
+    return true;
+  } catch (e) {
+    if (e.message !== "unauthorized") console.debug("queue sync unavailable", e);
+    return false;
+  }
+}
+
+async function updateServerQueue(item, action) {
+  if (!item || !item.id || !currentID) return false;
+  try {
+    const res = await api(`/api/sessions/${encodeURIComponent(currentID)}/queue/${encodeURIComponent(item.id)}`, {
+      method: "PATCH", body: JSON.stringify({ action }),
+    });
+    if (!res.ok) return false;
+    await loadServerQueue(currentID);
+    return true;
+  } catch (e) {
+    if (e.message !== "unauthorized") console.debug("queue update unavailable", e);
+    return false;
+  }
+}
 
 // The web command catalog is loaded from the backend config.commands response.
 // The server remains authoritative and still handles unknown commands. The
@@ -3373,9 +3433,26 @@ function renderApprovalRoot() {
       <div class="approval-copy"><div class="approval-prompt">${esc(item.prompt || `允许 ${item.tool_name || "工具"} 执行？`)}</div><div class="approval-meta">${esc(item.tool_name || "敏感操作")} · ${esc(item.id)}</div>${item.args ? `<details><summary>查看参数</summary><pre>${esc(item.args)}</pre></details>` : ""}</div>
       <div class="approval-actions"><button type="button" data-approval="rejected" class="approval-deny">拒绝</button><button type="button" data-approval="approved" class="approval-allow">允许</button></div>
     </div>`).join("")}`;
+  // Structured DSH questions reuse the approval transport but render their
+  // selectable answer fields in the same card. Legacy approvals remain
+  // unchanged because their questions list is empty.
+  approvalRoot.innerHTML = `<div class="approval-heading"><span class="approval-pulse"></span><strong>需要你的确认</strong><span class="approval-count">${pending.length}</span></div>${pending.map((item) => `
+    <div class="approval-card" data-interaction-id="${esc(item.id)}">
+      <div class="approval-copy"><div class="approval-prompt">${esc(item.prompt || `允许 ${item.tool_name || "工具"} 执行？`)}</div><div class="approval-meta">${esc(item.tool_name || "敏感操作")} · ${esc(item.id)}</div>${item.args ? `<details><summary>查看参数</summary><pre>${esc(item.args)}</pre></details>` : ""}${(item.questions || []).map((q) => `<fieldset class="approval-question"><legend>${esc(q.header || q.question || q.id)}</legend>${q.detail ? `<div class="approval-question-detail">${esc(q.detail)}</div>` : ""}${(q.options || []).map((option) => `<label class="approval-option"><input type="${q.multi_select ? "checkbox" : "radio"}" name="question-${esc(item.id)}-${esc(q.id)}" data-question-id="${esc(q.id)}" data-option="${esc(option.label)}"><span>${esc(option.label)}</span>${option.description ? `<small>${esc(option.description)}</small>` : ""}</label>`).join("")}<textarea class="approval-question-custom" data-question-id="${esc(q.id)}" placeholder="其他（可选）"></textarea></fieldset>`).join("")}</div>
+      <div class="approval-actions"><button type="button" data-approval="rejected" class="approval-deny">拒绝</button><button type="button" data-approval="approved" class="approval-allow">${(item.questions || []).length ? "提交答案" : "允许"}</button></div>
+    </div>`).join("")}`;
   approvalRoot.classList.remove("hidden");
   approvalRoot.querySelectorAll("[data-approval]").forEach((button) => {
     button.addEventListener("click", () => resolveInteraction(button.closest("[data-interaction-id]").dataset.interactionId, button.dataset.approval));
+  });
+  approvalRoot.querySelectorAll(".approval-card").forEach((card) => {
+    if (!card.querySelector(".approval-question")) return;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "approval-cancel";
+    button.textContent = "取消问题";
+    button.addEventListener("click", () => resolveInteraction(card.dataset.interactionId, "cancelled"));
+    card.querySelector(".approval-actions")?.prepend(button);
   });
 }
 
@@ -3398,8 +3475,18 @@ async function resolveInteraction(id, status) {
   card?.classList.add("busy");
   try {
     const suffix = currentID ? `?session_id=${encodeURIComponent(currentID)}` : "";
+    const answers = [];
+    card?.querySelectorAll("[data-question-id]").forEach((input) => {
+      const id = input.dataset.questionId;
+      let answer = answers.find((entry) => entry.id === id);
+      if (!answer) { answer = { id, selected: [] }; answers.push(answer); }
+      if (input.dataset.option && input.checked) answer.selected.push(input.dataset.option);
+      if (input.classList.contains("approval-question-custom") && input.value.trim()) answer.custom = input.value.trim();
+    });
+    const body = { status };
+    if (answers.length) body.answer = JSON.stringify({ answers });
     const res = await api(`/api/interactions/${encodeURIComponent(id)}/resolve${suffix}`, {
-      method: "POST", body: JSON.stringify({ status }),
+      method: "POST", body: JSON.stringify(body),
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
@@ -3441,6 +3528,23 @@ function syncSessionArtifacts(evs) {
   renderReferenceMenu();
   renderDeliverables();
 }
+async function loadSessionFiles(id, query = "") {
+  if (!id) return;
+  const key = `${id}:${query}`;
+  if (referenceRemoteKey === key) return;
+  referenceRemoteKey = key;
+  try {
+    const suffix = query ? `?q=${encodeURIComponent(query)}` : "";
+    const res = await api(`/api/sessions/${encodeURIComponent(id)}/files${suffix}`);
+    if (!res.ok || currentID !== id) return;
+    const body = await res.json();
+    const found = Array.isArray(body.entries) ? body.entries.filter((item) => item && !item.dir && item.path).map((item) => item.path) : [];
+    sessionReferences = [...new Set([...sessionReferences, ...found])].slice(-120);
+    renderReferenceMenu();
+  } catch (e) {
+    if (e.message !== "unauthorized") console.debug("workspace files unavailable", e);
+  }
+}
 function noteSessionArtifact(ev) {
   const path = artifactPath(ev);
   if (!path || !String(ev.type || "").startsWith("fs/")) return;
@@ -3476,6 +3580,7 @@ function renderReferenceMenu() {
     referenceMenu.classList.add("hidden");
     return;
   }
+  void loadSessionFiles(currentID, hit.query);
   const items = sessionReferences.filter((path) => path.toLowerCase().includes(hit.query)).slice(0, 8);
   referenceHighlight = Math.min(referenceHighlight, Math.max(0, items.length - 1));
   referenceMenu.innerHTML = items.length
@@ -3515,7 +3620,48 @@ function renderDeliverables() {
   }
   deliverablesRoot.innerHTML = `<span class="deliverables-heading">产出文件</span>${sessionOutputs.map((path) => `<button type="button" class="deliverable-item" title="引用 ${esc(path)}" data-output="${esc(path)}">${esc(path)}</button>`).join("")}`;
   deliverablesRoot.classList.remove("hidden");
-  deliverablesRoot.querySelectorAll("[data-output]").forEach((button) => button.addEventListener("click", () => insertFileReference(button.dataset.output)));
+  deliverablesRoot.querySelectorAll("[data-output]").forEach((button) => {
+    button.addEventListener("click", () => insertFileReference(button.dataset.output));
+    button.addEventListener("dblclick", () => void previewSessionFile(button.dataset.output));
+    const download = document.createElement("button");
+    download.type = "button";
+    download.className = "deliverable-download";
+    download.textContent = "↓";
+    download.title = "Download file";
+    download.addEventListener("click", (event) => { event.stopPropagation(); void downloadSessionFile(button.dataset.output); });
+    button.after(download);
+  });
+}
+
+async function previewSessionFile(path) {
+  if (!currentID || !path) return;
+  try {
+    const res = await api(`/api/sessions/${encodeURIComponent(currentID)}/file?path=${encodeURIComponent(path)}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const body = await res.json();
+    selectedTool = { seq: `file:${path}`, name: `File preview · ${path}`, args: "", output: body.content || "", error: false };
+    detailsPanel?.classList.remove("hidden");
+    renderDetails();
+  } catch (e) {
+    if (e.message !== "unauthorized") toast(`File preview failed: ${e.message}`);
+  }
+}
+
+async function downloadSessionFile(path) {
+  if (!currentID || !path) return;
+  try {
+    const res = await api(`/api/sessions/${encodeURIComponent(currentID)}/file?path=${encodeURIComponent(path)}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const body = await res.json();
+    const blob = new Blob([body.content || ""], { type: "text/plain;charset=utf-8" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = path.split(/[\\/]/).pop() || "download.txt";
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  } catch (e) {
+    if (e.message !== "unauthorized") toast(`File download failed: ${e.message}`);
+  }
 }
 // Composer pref loading: the mode comes from the config view (loadConfigLabels);
 // the permission preset is a persisted setting (fallback localStorage).
@@ -3625,6 +3771,11 @@ function syncSessionTitle() {
 }
 
 function openSession(id) {
+  if (queuedSessionID && queuedSessionID !== id) {
+    queuedBySession.set(queuedSessionID, queuedMessages.slice(-20));
+    persistQueues();
+  }
+  queuedSessionID = id;
   if (sseAbort) { sseAbort.abort(); sseAbort = null; }
   if (sseReconnect) { clearTimeout(sseReconnect); sseReconnect = null; }
   streamState = null;
@@ -3638,10 +3789,11 @@ function openSession(id) {
   messagesEl.querySelector(".messages-inner")?.remove();
   syncSessionTitle();
   toolMeta = {};
-  queuedMessages = [];
+  queuedMessages = (queuedBySession.get(id) || []).slice();
   queueFlushBusy = false;
   sessionReferences = [];
   sessionOutputs = [];
+  referenceRemoteKey = "";
   closeReferenceMenu();
   renderQueue();
   renderDeliverables();
@@ -3661,7 +3813,7 @@ function openSession(id) {
   }
   loadSessionConfig(id);
   loadSessionState(id);
-  return loadFeedback(id).then(() => Promise.all([loadEvents(id), connectStream(id)]));
+  return loadFeedback(id).then(() => Promise.all([loadEvents(id), connectStream(id), loadServerQueue(id), loadSessionFiles(id)]));
 }
 
 async function loadEvents(id) {
@@ -3959,12 +4111,41 @@ function renderQueue() {
   queueRoot.classList.remove("hidden");
   queueRoot.querySelectorAll("[data-queue-move]").forEach((button) => button.addEventListener("click", () => {
     const index = Number(button.dataset.queueMove);
-    if (index > 0 && queuedMessages[index]) queuedMessages.unshift(queuedMessages.splice(index, 1)[0]);
-    renderQueue();
+    const item = queuedMessages[index];
+    void (async () => {
+      if (await updateServerQueue(item, "move_first")) return;
+      if (index > 0 && queuedMessages[index]) queuedMessages.unshift(queuedMessages.splice(index, 1)[0]);
+      persistCurrentQueue();
+      renderQueue();
+    })();
   }));
+  queueRoot.querySelectorAll(".queue-row").forEach((row) => {
+    const index = Number(row.dataset.queueIndex);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = "绔嬪嵆鎻掕瘽";
+    button.title = "Stop current turn and handle this message first";
+    button.addEventListener("click", () => {
+      const item = queuedMessages[index];
+      void (async () => {
+        if (await updateServerQueue(item, "steer")) return;
+        if (index > 0 && queuedMessages[index]) queuedMessages.unshift(queuedMessages.splice(index, 1)[0]);
+        persistCurrentQueue();
+        renderQueue();
+        if (turnRunning) await stopTurn();
+      })();
+    });
+    row.insertBefore(button, row.querySelector("[data-queue-remove]"));
+  });
   queueRoot.querySelectorAll("[data-queue-remove]").forEach((button) => button.addEventListener("click", () => {
-    queuedMessages.splice(Number(button.dataset.queueRemove), 1);
-    renderQueue();
+    const index = Number(button.dataset.queueRemove);
+    const item = queuedMessages[index];
+    void (async () => {
+      if (await updateServerQueue(item, "delete")) return;
+      queuedMessages.splice(index, 1);
+      persistCurrentQueue();
+      renderQueue();
+    })();
   }));
 }
 async function flushQueuedMessages() {
@@ -3973,6 +4154,11 @@ async function flushQueuedMessages() {
   try {
     while (queuedMessages.length && currentID && !turnRunning) {
       const next = queuedMessages.shift();
+      if (next.id) {
+        await loadServerQueue(currentID);
+        return;
+      }
+      persistCurrentQueue();
       renderQueue();
       composerText.value = next.text;
       syncGrow();
@@ -4037,8 +4223,26 @@ async function sendMessage() {
   const text = composerText.value.trim();
   if ((!text && drafts.length === 0) || !currentID) return;
   if (turnRunning) {
+    if (!drafts.length) {
+      try {
+        const res = await api(`/api/sessions/${encodeURIComponent(currentID)}/queue`, {
+          method: "POST", body: JSON.stringify({ text }),
+        });
+        if (res.ok) {
+          composerText.value = "";
+          syncGrow();
+          closeSlashMenu();
+          closeReferenceMenu();
+          await loadServerQueue(currentID);
+          return;
+        }
+      } catch (e) {
+        if (e.message === "unauthorized") throw e;
+      }
+    }
     if (drafts.length) { toast("当前回合运行中暂不支持图片排队，请稍后发送"); return; }
     queuedMessages.push({ text });
+    persistCurrentQueue();
     composerText.value = "";
     syncGrow();
     closeSlashMenu();
@@ -4126,8 +4330,9 @@ async function sendMessage() {
     });
     loadSessionState(currentID);
     refreshContextMeter();
+    const serverQueueReady = await loadServerQueue(currentID);
     renderQueue();
-    if (!turnRunning && queuedMessages.length) void flushQueuedMessages();
+    if (!serverQueueReady && !turnRunning && queuedMessages.length) void flushQueuedMessages();
   }
 }
 
@@ -4332,6 +4537,7 @@ const SETTINGS_SECTIONS = [
   { id: "general", label: "通用设置", icon: PA_ICONS.settings },
   { id: "model", label: "模型", icon: PA_ICONS.data },
   { id: "caps", label: "能力开关", icon: PA_ICONS.personalization },
+  { id: "plugins", label: "运行时清单", icon: PA_ICONS.personalization },
   { id: "skills", label: "技能", icon: PA_ICONS.skills },
 ];
 const CAPABILITY_NAMES = {
@@ -5115,6 +5321,24 @@ function renderCaps(c) {
   }
 }
 
+function renderPlugins(c) {
+  const enabled = Object.keys(c).filter((key) => key.endsWith("_enabled") && c[key] === true);
+  const commands = Array.isArray(c.commands) ? c.commands : [];
+  const skills = commands.filter((item) => item && item.kind === "skill");
+  const providers = Array.isArray(c.providers) ? c.providers : [];
+  const mcpServers = Array.isArray(c.mcp_servers) ? c.mcp_servers : [];
+  const rows = [
+    ["能力模块", `${enabled.length} 个已启用`, `${Object.keys(c).filter((key) => key.endsWith("_enabled")).length} 个已发现`],
+    ["命令入口", `${commands.length} 个`, "来自后端命令目录"],
+    ["技能入口", `${skills.length} 个`, "可从输入框 / 菜单调用"],
+    ["模型提供方", `${providers.length} 个`, "来自当前运行时目录"],
+    ["MCP 服务", `${mcpServers.length} 个`, `${mcpServers.filter((item) => item && item.connected).length} 个已连接`],
+  ];
+  const capRows = Object.keys(c).filter((key) => key.endsWith("_enabled") && typeof c[key] === "boolean").sort();
+  const sec = settingsSectionEl();
+  sec.innerHTML = `<h2>运行时清单</h2><p class="intro">对齐 DSH 插件清单：展示当前 Web 进程发现到的能力、命令、技能、模型提供方和 MCP 服务状态。</p><div class="plugin-summary">${rows.map(([title, value, detail]) => `<div class="plugin-summary-card"><span>${esc(title)}</span><strong>${esc(value)}</strong><small>${esc(detail)}</small></div>`).join("")}</div><h3 class="plugin-list-title">能力状态</h3><div class="plugin-list">${capRows.map((key) => { const short = key.replace(/_enabled$/, ""); return `<div class="plugin-row"><span>${esc(CAPABILITY_NAMES[short] || short)}</span><code>${esc(key)}</code><span class="cap-badge ${c[key] ? "on" : ""}">${c[key] ? "已启用" : "未启用"}</span></div>`; }).join("")}</div><h3 class="plugin-list-title">MCP 服务</h3><div class="plugin-list">${mcpServers.length ? mcpServers.map((item) => `<div class="plugin-row"><span>${esc(item.name || "MCP")}</span><code>${esc(item.cmd || "")}</code><span>${Number(item.tool_count || 0)} 个工具</span><span class="cap-badge ${item.connected ? "on" : ""}">${item.connected ? "已连接" : "未连接"}</span></div>`).join("") : `<div class="plugin-empty">当前未配置 MCP 服务</div>`}</div>`;
+}
+
 // ---- 技能 settings page (dsh-skill-mcp-panel 对齐; user 2026-09) -----------
 // Boots via GET /api/config/skills (list + groups + scopes in one round trip),
 // then drives every action through POST /api/config/skills { action }.
@@ -5527,6 +5751,7 @@ function renderSettingsSec() {
   if (settingsSec === "general") renderGeneral(c);
   else if (settingsSec === "model") renderModel(c);
   else if (settingsSec === "caps") renderCaps(c);
+  else if (settingsSec === "plugins") renderPlugins(c);
   else if (settingsSec === "skills") renderSkills(c);
 }
 

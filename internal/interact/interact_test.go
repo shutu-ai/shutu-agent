@@ -180,6 +180,32 @@ func TestEngineList(t *testing.T) {
 	}
 }
 
+func TestEngineRestorePreservesIDsAndLifecycle(t *testing.T) {
+	eng := NewEngine(NewMemProvider())
+	created := time.Date(2026, 8, 25, 10, 0, 0, 0, time.UTC)
+	resolved := created.Add(time.Minute)
+	if err := eng.Restore(context.Background(), []Request{
+		{ID: "req-7", Prompt: "restart approval", ToolName: "bash", Status: StatusPending, CreatedAt: created},
+		{ID: "req-8", Prompt: "done approval", ToolName: "bash", Status: StatusApproved, CreatedAt: created, ResolvedAt: &resolved},
+	}); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	items, err := eng.List(context.Background())
+	if err != nil || len(items) != 2 {
+		t.Fatalf("List after Restore = %+v, err=%v", items, err)
+	}
+	if _, err := eng.Resolve(context.Background(), "req-7", StatusRejected); err != nil {
+		t.Fatalf("Resolve restored request: %v", err)
+	}
+	createdAfter, err := eng.Request(context.Background(), "new", "bash", "{}")
+	if err != nil {
+		t.Fatalf("Request after Restore: %v", err)
+	}
+	if createdAfter.ID != "req-9" {
+		t.Fatalf("new id after Restore = %q, want req-9", createdAfter.ID)
+	}
+}
+
 // --- Await ------------------------------------------------------------------
 
 func TestEngineAwaitResolved(t *testing.T) {

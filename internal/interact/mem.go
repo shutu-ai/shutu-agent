@@ -70,6 +70,32 @@ func (m *memProvider) Create(ctx context.Context, r Request) (Request, error) {
 	return cloneRequest(r), nil
 }
 
+// Restore installs durable request snapshots without allocating new ids.
+// Existing ids are preserved so a browser that was open across a restart can
+// still resolve the same request; the next generated id advances past the
+// restored req-N range.
+func (m *memProvider) Restore(ctx context.Context, requests []Request) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return ErrProviderClosed
+	}
+	for _, r := range requests {
+		if r.ID == "" {
+			return fmt.Errorf("interact: restored request id is empty")
+		}
+		m.requests[r.ID] = cloneRequest(r)
+		var n int
+		if _, err := fmt.Sscanf(r.ID, "req-%d", &n); err == nil && n > m.nextID {
+			m.nextID = n
+		}
+	}
+	return nil
+}
+
 // Resolve marks the request with id as resolved with status. An unknown id and
 // a request that is no longer pending are rejected; the stored record's
 // ResolvedAt is stamped at resolution time.
@@ -108,6 +134,12 @@ func (m *memProvider) Close() error {
 // cloneRequest copies a Request so the returned value never aliases the
 // record's ResolvedAt pointer.
 func cloneRequest(r Request) Request {
+	if r.Questions != nil {
+		r.Questions = append([]Question(nil), r.Questions...)
+		for i := range r.Questions {
+			r.Questions[i].Options = append([]QuestionOption(nil), r.Questions[i].Options...)
+		}
+	}
 	if r.ResolvedAt != nil {
 		t := *r.ResolvedAt
 		r.ResolvedAt = &t

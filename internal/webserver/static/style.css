@@ -825,6 +825,13 @@ mark {
 .approval-prompt { color: var(--dsw-alias-label-primary); white-space: pre-wrap; word-break: break-word; }
 .approval-meta { margin-top: 4px; color: var(--dsw-alias-label-tertiary); font-size: 12px; line-height: 18px; }
 .approval-args { margin: 6px 0 0; padding: 8px; max-height: 120px; overflow: auto; border-radius: 6px; background: var(--dsw-alias-markdown-code-block); color: var(--dsw-alias-label-secondary); font: 12px/18px var(--dsw-font-code); white-space: pre-wrap; word-break: break-word; }
+.approval-question { margin: 10px 0 0; padding: 8px; border: 1px solid var(--dsw-alias-border-l1); border-radius: var(--dsw-radius-m); }
+.approval-question legend { padding: 0 4px; color: var(--dsw-alias-label-primary); font-size: 12px; font-weight: 600; }
+.approval-question-detail { margin: 0 0 6px; color: var(--dsw-alias-label-tertiary); font-size: 11px; line-height: 16px; white-space: pre-wrap; }
+.approval-option { display: grid; grid-template-columns: 16px minmax(0, auto); gap: 6px; align-items: start; padding: 5px 4px; border-radius: 5px; color: var(--dsw-alias-label-secondary); font-size: 12px; cursor: pointer; }
+.approval-option:hover { background: var(--dsw-alias-interactive-bg-hover); }
+.approval-option small { grid-column: 2; color: var(--dsw-alias-label-caption); font-size: 11px; line-height: 15px; }
+.approval-question-custom { width: 100%; min-height: 28px; margin-top: 5px; padding: 5px 7px; resize: vertical; border: 1px solid var(--dsw-alias-border-l1); border-radius: 5px; background: transparent; color: var(--dsw-alias-label-primary); font: 12px/18px var(--dsw-font-base); box-sizing: border-box; }
 .approval-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
 .approval-actions button, .goal-bar-actions button { min-height: 28px; padding: 3px 12px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 14px; background: transparent; color: var(--dsw-alias-label-secondary); font-size: 12px; }
 .approval-actions button:hover, .goal-bar-actions button:hover { background: var(--dsw-alias-interactive-bg-hover); color: var(--dsw-alias-label-primary); }
@@ -1797,6 +1804,14 @@ body[data-ds-dark-theme="false"] .nav-cell.active { background: #EBEEF2; }
   border: 1px solid var(--dsw-alias-border-l2); color: var(--dsw-alias-label-caption);
 }
 .cap-badge.on { color: var(--dsw-alias-state-success-primary); }
+.plugin-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
+.plugin-summary-card { display: flex; flex-direction: column; gap: 3px; padding: 12px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 10px; background: var(--dsw-alias-bg-layer-1); }
+.plugin-summary-card span, .plugin-summary-card small { color: var(--dsw-alias-label-tertiary); font-size: 12px; }
+.plugin-summary-card strong { color: var(--dsw-alias-label-primary); font-size: 15px; font-weight: 600; }
+.plugin-list-title { margin: 10px 0 0; color: var(--dsw-alias-label-primary); font-size: 13px; font-weight: 600; }
+.plugin-list { display: flex; flex-direction: column; border-top: 1px solid var(--dsw-alias-border-l1); }
+.plugin-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(100px, auto) auto; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--dsw-alias-border-l1); color: var(--dsw-alias-label-secondary); font-size: 12px; }
+.plugin-row code { color: var(--dsw-alias-label-caption); font: 11px/16px var(--dsw-font-code); }
 /* Model settings page (M11: dsh ModelsSection) — provider row-cards, credential
    dots, per-provider editor cards. Ported from dsh client-ui-settings-models'
    ModelsSection stylesheet; every value maps onto the shutdown design tokens. */
@@ -2132,6 +2147,9 @@ body[data-ds-dark-theme="false"] .nav-cell.active { background: #EBEEF2; }
   .goal-bar-main { align-items: flex-start; }
   .goal-bar-actions { flex-direction: column; }
   .goal-bar-actions button { padding-left: 8px; padding-right: 8px; }
+  .plugin-summary { grid-template-columns: 1fr; }
+  .plugin-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .plugin-row code { display: none; }
   .hero-inner { padding: 0 12px; }
   .hero-title { font-size: 22px; }
   .hero-headline { grid-template-columns: 28px auto auto; column-gap: 7px; }

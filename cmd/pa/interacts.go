@@ -61,6 +61,11 @@ func (a *app) registerInteracts() error {
 	prov := interact.NewMemProvider()
 	eng := interact.NewEngine(prov)
 	a.interacts = eng
+	if a.store != nil {
+		if err := a.restoreInteractions(context.Background(), eng); err != nil {
+			return fmt.Errorf("pa: restore interactions: %w", err)
+		}
+	}
 	// D3 event sink: interact/* events are appended to the active session log.
 	// The callback only ever runs inside an interact_* tool Execute or the
 	// sensitive-tool gate — the serial main-loop path (D5). a.log is read at
@@ -90,6 +95,7 @@ func (a *app) registerInteracts() error {
 	st := interact.NewInteractTools(eng, onEvent)
 	for _, t := range []tools.Tool{
 		st.Ask(),
+		st.AskUserQuestion(),
 		st.Status(),
 	} {
 		if err := a.reg.Register(t); err != nil {
@@ -108,6 +114,104 @@ func (a *app) registerInteracts() error {
 			return tools.PreToolDecision{Kind: "allow"}, nil
 		})
 	}
+	return nil
+}
+
+// restoreInteractions rebuilds the process-local approval table and its
+// session ownership index from durable interact/request + interact/resolve
+// facts. Old request events without detail remain visible with a safe fallback
+// prompt, while newer events restore the full approval card.
+func (a *app) restoreInteractions(ctx context.Context, restorer interface {
+	Restore(context.Context, []interact.Request) error
+}) error {
+	metas, err := a.store.ListSessions(ctx)
+	if err != nil {
+		return err
+	}
+	type requestFact struct {
+		ID        string              `json:"id"`
+		ToolName  string              `json:"toolName"`
+		Prompt    string              `json:"prompt"`
+		Args      string              `json:"args"`
+		Questions []interact.Question `json:"questions"`
+	}
+	type resolveFact struct {
+		ID       string `json:"id"`
+		Approved bool   `json:"approved"`
+	}
+	requests := make(map[string]interact.Request)
+	owners := make(map[string]string)
+	for _, meta := range metas {
+		events, err := a.store.LoadSession(ctx, meta.ID)
+		if err != nil {
+			return err
+		}
+		for _, ev := range events {
+			switch ev.Type {
+			case session.EventInteractRequest:
+				var fact requestFact
+				if err := json.Unmarshal(ev.Data, &fact); err != nil || fact.ID == "" {
+					continue
+				}
+				prompt := fact.Prompt
+				if prompt == "" {
+					prompt = fmt.Sprintf("Approval required for %s", fact.ToolName)
+				}
+				requests[fact.ID] = interact.Request{
+					ID: fact.ID, Prompt: prompt, ToolName: fact.ToolName, Args: fact.Args,
+					Questions: fact.Questions, Status: interact.StatusPending, CreatedAt: ev.At,
+				}
+				owners[fact.ID] = meta.ID
+			case session.EventInteractResolve:
+				var fact resolveFact
+				if err := json.Unmarshal(ev.Data, &fact); err != nil || fact.ID == "" {
+					continue
+				}
+				r, ok := requests[fact.ID]
+				if !ok {
+					continue
+				}
+				if fact.Approved {
+					r.Status = interact.StatusApproved
+				} else {
+					r.Status = interact.StatusRejected
+				}
+				resolvedAt := ev.At
+				r.ResolvedAt = &resolvedAt
+				requests[fact.ID] = r
+			case session.EventInteractCancel:
+				var fact struct {
+					ID string `json:"id"`
+				}
+				if err := json.Unmarshal(ev.Data, &fact); err != nil || fact.ID == "" {
+					continue
+				}
+				r, ok := requests[fact.ID]
+				if !ok {
+					continue
+				}
+				r.Status = interact.StatusCanceled
+				resolvedAt := ev.At
+				r.ResolvedAt = &resolvedAt
+				requests[fact.ID] = r
+			}
+		}
+	}
+	restored := make([]interact.Request, 0, len(requests))
+	for _, request := range requests {
+		restored = append(restored, request)
+	}
+	if err := restorer.Restore(ctx, restored); err != nil {
+		return err
+	}
+	a.interactionMu.Lock()
+	if a.interactionSessions == nil {
+		a.interactionSessions = make(map[string]string)
+	}
+	for id, owner := range owners {
+		a.interactionSessions[id] = owner
+	}
+	a.interactionMu.Unlock()
 	return nil
 }
 
@@ -144,7 +248,7 @@ func (a *app) sensitiveGate(eng interact.Engine, onEvent func(string, any)) func
 		if err != nil {
 			return fmt.Errorf("interact: %s approval request failed: %w", name, err)
 		}
-		onEvent(session.EventInteractRequest, session.NewInteractRequest(req.ID, name))
+		onEvent(session.EventInteractRequest, session.NewInteractRequestDetail(req.ID, name, req.Prompt, req.Args, req.Questions))
 		approved := false
 		if isWebApprovalContext(ctx) {
 			// The browser resolves the same engine through /api/interactions;

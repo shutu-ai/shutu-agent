@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jabing/shutu-agent/internal/session"
 )
@@ -83,6 +84,14 @@ func TestInteractToolsSchemaShape(t *testing.T) {
 	if !reflect.DeepEqual(statusReq, []string{"id"}) {
 		t.Fatalf("interact_status required = %v, want [id]", statusReq)
 	}
+	question := its.AskUserQuestion().Schema()
+	if question["type"] != "object" || question["additionalProperties"] != false {
+		t.Fatalf("ask_user_question schema = %v", question)
+	}
+	questionReq, _ := question["required"].([]string)
+	if !reflect.DeepEqual(questionReq, []string{"questions"}) {
+		t.Fatalf("ask_user_question required = %v", questionReq)
+	}
 }
 
 // --- interact_ask -------------------------------------------------------------
@@ -124,6 +133,93 @@ func TestInteractAskCreatesRequestAndEmitsEvent(t *testing.T) {
 	}
 	if len(all) != 1 || all[0].Status != StatusPending || all[0].Prompt != "ok to run the report?" {
 		t.Fatalf("engine table = %+v, want one pending request with the prompt", all)
+	}
+}
+
+func TestInteractAskStructuredQuestionsRoundTrip(t *testing.T) {
+	e := NewEngine(nil)
+	defer e.Close()
+	its := NewInteractTools(e, nil)
+	input := `{"prompt":"Choose the release track","questions":[{"id":"track","question":"Which track?","detail":"Pick one","options":[{"label":"stable","description":"Production"},{"label":"canary"}]}]}`
+	if _, err := its.Ask().Execute(context.Background(), json.RawMessage(input)); err != nil {
+		t.Fatalf("structured interact_ask: %v", err)
+	}
+	items, err := e.List(context.Background())
+	if err != nil || len(items) != 1 || len(items[0].Questions) != 1 {
+		t.Fatalf("structured request = %+v, err=%v", items, err)
+	}
+	if items[0].Questions[0].Options[0].Label != "stable" {
+		t.Fatalf("structured options = %+v", items[0].Questions[0].Options)
+	}
+	resolver, ok := any(e).(AnswerResolver)
+	if !ok {
+		t.Fatal("engine does not expose structured answer resolver")
+	}
+	answer := `{"answers":[{"id":"track","selected":["stable"]}]}`
+	if _, err := resolver.ResolveWithAnswer(context.Background(), items[0].ID, StatusApproved, `{"answers":[{"id":"track","selected":["unknown"]}]}`); err == nil {
+		t.Fatal("invalid structured option must be rejected")
+	}
+	if _, err := resolver.ResolveWithAnswer(context.Background(), items[0].ID, StatusApproved, answer); err != nil {
+		t.Fatalf("ResolveWithAnswer: %v", err)
+	}
+	resolved, err := e.Await(context.Background(), items[0].ID)
+	if err != nil || resolved.Answer != answer {
+		t.Fatalf("resolved answer = %q, err=%v", resolved.Answer, err)
+	}
+}
+
+func TestAskUserQuestionBlocksAndCanBeCancelled(t *testing.T) {
+	e := NewEngine(nil)
+	defer e.Close()
+	var recs []eventRecord
+	its := NewInteractTools(e, collectEvents(&recs))
+	result := make(chan error, 1)
+	go func() {
+		_, err := its.AskUserQuestion().Execute(context.Background(), json.RawMessage(`{"questions":[{"id":"mode","question":"Mode?","options":[{"label":"safe"}]}]}`))
+		result <- err
+	}()
+	var req Request
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
+		items, _ := e.List(context.Background())
+		if len(items) == 1 {
+			req = items[0]
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if req.ID == "" {
+		t.Fatal("ask_user_question did not create a request")
+	}
+	if _, err := e.ResolveWithAnswer(context.Background(), req.ID, StatusApproved, `{"answers":[{"id":"mode","selected":["safe"]}]}`); err != nil {
+		t.Fatalf("resolve question: %v", err)
+	}
+	if err := <-result; err != nil {
+		t.Fatalf("ask_user_question result: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result = make(chan error, 1)
+	go func() {
+		_, err := its.AskUserQuestion().Execute(ctx, json.RawMessage(`{"questions":[{"id":"cancel","question":"Cancel me"}]}`))
+		result <- err
+	}()
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
+		items, _ := e.List(context.Background())
+		if len(items) == 2 && items[1].Status == StatusPending {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	if err := <-result; err == nil {
+		t.Fatal("cancelled ask_user_question must return an error")
+	}
+	items, _ := e.List(context.Background())
+	if len(items) != 2 || items[1].Status != StatusCanceled {
+		t.Fatalf("cancelled request = %+v", items)
+	}
+	if countEventType(recs, session.EventInteractCancel) != 1 {
+		t.Fatalf("cancel event count = %d, want 1", countEventType(recs, session.EventInteractCancel))
 	}
 }
 

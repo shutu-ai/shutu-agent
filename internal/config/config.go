@@ -67,7 +67,7 @@ const (
 
 	// M5d-2 skill defaults (dispatch-m5d-2 §2): the injected catalog is
 	// bounded to 500 chars when skill.catalog_max_chars is absent or
-	// non-positive, and skill_load returns at most 8000 chars of a skill body
+	// non-positive, and skill returns at most 8000 chars of a skill body
 	// when skill.body_max_chars is absent or non-positive (dispatch-m5d 约束:
 	// 正文有长度上限防超长注入).
 	DefaultSkillCatalogMaxChars = 500
@@ -513,11 +513,11 @@ type CompactionConfig struct {
 // SkillConfig is the skill policy (dispatch-m5d-2 §2 / ADR
 // 2026-08-18-m5-agent-core.md 决策 ④). Skills are off by default (D10): when
 // disabled the composition root neither creates a provider/registry nor
-// registers or whitelists the skill_load tool, and no catalog injector is
+// registers or whitelists the skill tool, and no catalog injector is
 // registered.
 type SkillConfig struct {
 	// Enabled gates the whole capability: when false, no skill provider/
-	// registry is created and skill_load is neither registered nor whitelisted,
+	// registry is created and skill is neither registered nor whitelisted,
 	// and no skill catalog pre-step injector is wired (D10).
 	Enabled *bool `yaml:"enabled"`
 	// Dirs are additional custom skill directories (source "custom", rank 300)
@@ -526,7 +526,7 @@ type SkillConfig struct {
 	// CatalogMaxChars bounds the injected skill catalog (sorted name +
 	// description) in chars; <= 0 means the default 500.
 	CatalogMaxChars int `yaml:"catalog_max_chars"`
-	// BodyMaxChars bounds the skill body skill_load returns to the model in
+	// BodyMaxChars bounds the skill body skill returns to the model in
 	// chars (Unicode-safe truncation, 防超长注入); <= 0 means the default 8000.
 	BodyMaxChars int `yaml:"body_max_chars"`
 }
@@ -1041,9 +1041,9 @@ func applyDefaults(cfg *Config) {
 	if cfg.Compaction.RetainTurns <= 0 {
 		cfg.Compaction.RetainTurns = DefaultCompactionRetainTurns
 	}
-	// M5d-2 skill defaults: off by default (D10); the catalog is bounded to
+	// M5d-2 skill defaults: the sample config enables this capability; the catalog is bounded to
 	// 500 chars and the returned skill body to 8000 chars. Enabling skill
-	// whitelists its single consumer tool skill_load, so the one
+	// whitelists its single consumer tool skill, so the one
 	// skill.enabled switch turns the whole capability (provider + registry +
 	// tool + catalog injector) on (mirrors kb/jobs/subagent). Non-positive
 	// bounds are clamped to the defaults (校验非负: a negative configured value
@@ -1348,7 +1348,7 @@ func applyDefaults(cfg *Config) {
 			}
 		}
 	}
-	// GAP-2 ralph defaults: off by default (D10). Enabling ralph whitelists its
+	// GAP-2 ralph defaults: the sample config enables it. Enabling ralph whitelists its
 	// single consumer tool ralph, so the one ralph.enabled switch turns the
 	// whole capability (engine + tool + event logging) on (mirrors kb/jobs/
 	// subagent/skill/schedule/plan/spill/interact/code/mcp/fs/web/terminal/eval/
@@ -1363,7 +1363,7 @@ func applyDefaults(cfg *Config) {
 	if cfg.Ralph.MaxRounds <= 0 || cfg.Ralph.MaxRounds > DefaultRalphMaxRounds {
 		cfg.Ralph.MaxRounds = DefaultRalphMaxRounds
 	}
-	// GAP-3 workflow defaults: off by default (D10); the ready-task concurrency
+	// GAP-3 workflow defaults: the sample config enables it; the ready-task concurrency
 	// cap is 4. Enabling workflow whitelists its single consumer tool
 	// workflow_run, so the one workflow.enabled switch turns the whole
 	// capability (engine + tool + event logging) on (mirrors kb/jobs/subagent/
@@ -1514,11 +1514,11 @@ var subagentToolNames = []string{
 	"subagent_resume",
 }
 
-// skillToolNames are the skill consumer tools (dispatch-m5d-2 §2). skill_load
+// skillToolNames are the skill consumer tools (dispatch-m5d-2 §2). skill
 // is registered and whitelisted only when skill is enabled; keeping the name
 // here makes the "skill.enabled ⇒ 工具自动白名单" rule a single, tested fact
 // shared by applyDefaults and the composition root.
-var skillToolNames = []string{"skill_load"}
+var skillToolNames = []string{"skill"}
 
 // scheduleToolNames are the schedule consumer tools (dispatch-m6a-2 §3). They
 // are registered and whitelisted only when schedule is enabled; keeping the
@@ -1542,7 +1542,7 @@ var spillToolNames = []string{"spill_write", "spill_recall", "spill_list", "spil
 // They are registered and whitelisted only when interact is enabled; keeping
 // the names here makes the "interact.enabled ⇒ 工具自动白名单" rule a single,
 // tested fact shared by applyDefaults and the composition root.
-var interactToolNames = []string{"interact_ask", "interact_status"}
+var interactToolNames = []string{"interact_ask", "ask_user_question", "interact_status"}
 
 // codeToolNames are the code-sandbox consumer tools (dispatch-m6e-2 §2).
 // run_code is registered and whitelisted only when code is enabled; keeping the

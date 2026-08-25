@@ -683,6 +683,13 @@ type app struct {
 	// cancellable context here, and the stop handler calls the stored cancel.
 	cancelMu   sync.Mutex
 	turnCancel context.CancelFunc
+	// webQueueMu protects the process-local dsh-style queue. Queue contents are
+	// intentionally ephemeral like the current Web turn; durable conversation
+	// history remains in the session store.
+	webQueueMu      sync.Mutex
+	webQueue        map[string][]webQueueMessage
+	webQueueRunning map[string]bool
+	webQueueSeq     uint64
 	// runningSession is the session id whose turn is currently in flight, or ""
 	// when idle. It is published by runTurn under turnMu and read atomically by
 	// the sidebar status provider, so the webserver always sees a consistent

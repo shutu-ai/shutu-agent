@@ -218,6 +218,7 @@ const (
 	// the interact package.
 	EventInteractRequest = "interact/request"
 	EventInteractResolve = "interact/resolve"
+	EventInteractCancel  = "interact/cancel"
 	EventInteractDeny    = "interact/deny"
 	EventInteractStatus  = "interact/status"
 
@@ -640,11 +641,12 @@ type toolResultData struct {
 	// The first fields are the dsh wire shape. The legacy fields below remain
 	// intentionally duplicated so old shutu web/replay readers can consume a
 	// newly written event while they are being migrated.
-	Turn    int                    `json:"turn,omitempty"`
-	Step    int                    `json:"step,omitempty"`
-	Message *toolResultMessageData `json:"message,omitempty"`
-	Error   *toolResultErrorData   `json:"error,omitempty"`
-	Meta    any                    `json:"meta,omitempty"`
+	Turn            int                    `json:"turn,omitempty"`
+	Step            int                    `json:"step,omitempty"`
+	Message         *toolResultMessageData `json:"message,omitempty"`
+	Error           *toolResultErrorData   `json:"error,omitempty"`
+	Meta            any                    `json:"meta,omitempty"`
+	SourceEventSeqs []uint64               `json:"sourceEventSeqs,omitempty"`
 
 	CallID  string             `json:"callId,omitempty"`
 	Name    string             `json:"name,omitempty"`
@@ -812,6 +814,12 @@ func NewToolResultAt(turn, step int, callID, name, output string, spill *SpillRe
 	return newToolResult(turn, step, callID, name, output, nil, false, spill, "")
 }
 
+// NewToolResultAtWithSource attaches the tool/call event sequence that caused
+// this result, matching dsh's durable sourceEventSeqs linkage.
+func NewToolResultAtWithSource(turn, step int, callID, name, output string, spill *SpillRef, sourceSeq uint64) any {
+	return addToolResultSource(NewToolResultAt(turn, step, callID, name, output, spill), sourceSeq)
+}
+
 // NewToolResultWithContent records a tool result carrying provider-neutral
 // content blocks, such as a read_image attachment reference.
 func NewToolResultWithContent(callID, name, output string, content []llm.ContentBlock) any {
@@ -823,16 +831,49 @@ func NewToolResultWithContentAt(turn, step int, callID, name, output string, con
 	return newToolResult(turn, step, callID, name, output, content, false, nil, "")
 }
 
+// NewToolResultWithContentAtSource is the source-linked rich-result form.
+func NewToolResultWithContentAtSource(turn, step int, callID, name, output string, content []llm.ContentBlock, sourceSeq uint64) any {
+	return addToolResultSource(NewToolResultWithContentAt(turn, step, callID, name, output, content), sourceSeq)
+}
+
 // NewToolErrorResultAt records a structured ToolResult whose content is
 // model-visible but marked as an error, matching dsh's isError result bit.
 func NewToolErrorResultAt(turn, step int, callID, name, output string, spill *SpillRef) any {
-	return newToolResult(turn, step, callID, name, output, nil, true, spill, "TOOL_RESULT_ERROR")
+	return NewToolErrorResultAtCode(turn, step, callID, name, output, spill, "TOOL_RESULT_ERROR")
+}
+
+// NewToolErrorResultAtCode records a model-visible tool failure while keeping
+// the dsh error name/code on the durable result envelope.
+func NewToolErrorResultAtCode(turn, step int, callID, name, output string, spill *SpillRef, code string) any {
+	result := newToolResult(turn, step, callID, name, output, nil, true, spill, code)
+	result.Error = &toolResultErrorData{Name: toolErrorName(code), Code: code}
+	return result
+}
+
+// NewToolErrorResultAtCodeWithSource is the source-linked form of
+// NewToolErrorResultAtCode.
+func NewToolErrorResultAtCodeWithSource(turn, step int, callID, name, output string, spill *SpillRef, code string, sourceSeq uint64) any {
+	return addToolResultSource(NewToolErrorResultAtCode(turn, step, callID, name, output, spill, code), sourceSeq)
 }
 
 // NewToolErrorResultWithContentAt is the rich-content form of
 // NewToolErrorResultAt.
 func NewToolErrorResultWithContentAt(turn, step int, callID, name, output string, content []llm.ContentBlock) any {
-	return newToolResult(turn, step, callID, name, output, content, true, nil, "TOOL_RESULT_ERROR")
+	return NewToolErrorResultWithContentAtCode(turn, step, callID, name, output, content, "TOOL_RESULT_ERROR")
+}
+
+// NewToolErrorResultWithContentAtCode is the rich-content form of
+// NewToolErrorResultAtCode.
+func NewToolErrorResultWithContentAtCode(turn, step int, callID, name, output string, content []llm.ContentBlock, code string) any {
+	result := newToolResult(turn, step, callID, name, output, content, true, nil, code)
+	result.Error = &toolResultErrorData{Name: toolErrorName(code), Code: code}
+	return result
+}
+
+// NewToolErrorResultWithContentAtCodeWithSource is the rich, source-linked
+// form of NewToolErrorResultWithContentAtCode.
+func NewToolErrorResultWithContentAtCodeWithSource(turn, step int, callID, name, output string, content []llm.ContentBlock, code string, sourceSeq uint64) any {
+	return addToolResultSource(NewToolErrorResultWithContentAtCode(turn, step, callID, name, output, content, code), sourceSeq)
 }
 
 // NewAbortedToolResult records a tool call that was present in the assistant
@@ -844,8 +885,14 @@ func NewAbortedToolResult(callID, name string) any {
 // NewAbortedToolResultAt records the dsh synthetic error for an undispatched
 // call. The caller must also append the corresponding tool/call event.
 func NewAbortedToolResultAt(turn, step int, callID, name string) any {
-	const code = "TOOL_ABORTED_BEFORE_DISPATCH"
+	const code = "ABORTED_BEFORE_DISPATCH"
 	return newToolResult(turn, step, callID, name, "Error: tool call aborted before dispatch", nil, true, nil, code)
+}
+
+// NewAbortedToolResultAtWithSource is the source-linked synthetic result for
+// an undispatched call.
+func NewAbortedToolResultAtWithSource(turn, step int, callID, name string, sourceSeq uint64) any {
+	return addToolResultSource(NewAbortedToolResultAt(turn, step, callID, name), sourceSeq)
 }
 
 // NewToolError builds one failed tool/error payload.
@@ -858,7 +905,47 @@ func NewToolError(callID, name, err string) any {
 
 // NewToolErrorAt records an execution failure in dsh's result envelope.
 func NewToolErrorAt(turn, step int, callID, name, err string) any {
-	return newToolResult(turn, step, callID, name, "Error: "+err, nil, true, nil, "TOOL_EXECUTION_ERROR")
+	return NewToolErrorAtCode(turn, step, callID, name, err, "TOOL_EXECUTION_ERROR")
+}
+
+// NewToolErrorAtCode records a dsh-compatible structured failure while
+// preserving the stable error code selected by the execution pipeline.
+func NewToolErrorAtCode(turn, step int, callID, name, err, code string) any {
+	result := newToolResult(turn, step, callID, name, "Error: "+err, nil, true, nil, code)
+	result.Error = &toolResultErrorData{Name: toolErrorName(code), Code: code}
+	return result
+}
+
+// NewToolErrorAtCodeWithSource is the source-linked form of NewToolErrorAtCode.
+func NewToolErrorAtCodeWithSource(turn, step int, callID, name, err, code string, sourceSeq uint64) any {
+	return addToolResultSource(NewToolErrorAtCode(turn, step, callID, name, err, code), sourceSeq)
+}
+
+func addToolResultSource(payload any, sourceSeq uint64) any {
+	if sourceSeq == 0 {
+		return payload
+	}
+	result, ok := payload.(toolResultData)
+	if !ok {
+		return payload
+	}
+	result.SourceEventSeqs = []uint64{sourceSeq}
+	return result
+}
+
+func toolErrorName(code string) string {
+	switch code {
+	case "UNKNOWN_TOOL":
+		return "ToolNotFoundError"
+	case "INVALID_ARGS":
+		return "ToolArgsError"
+	case "TOOL_TIMEOUT":
+		return "ToolTimeoutError"
+	case "ABORTED", "ABORTED_BEFORE_DISPATCH":
+		return "AbortError"
+	default:
+		return "ToolError"
+	}
 }
 
 func newToolResult(turn, step int, callID, name, output string, content []llm.ContentBlock, isError bool, spill *SpillRef, code string) toolResultData {
@@ -1522,8 +1609,11 @@ func NewSpillDelete(id string) any {
 // request id and the tool whose execution triggered the approval. DeriveHistory
 // treats it as opaque data.
 type interactRequestData struct {
-	ID       string `json:"id"`
-	ToolName string `json:"toolName"`
+	ID        string `json:"id"`
+	ToolName  string `json:"toolName"`
+	Prompt    string `json:"prompt,omitempty"`
+	Args      string `json:"args,omitempty"`
+	Questions any    `json:"questions,omitempty"`
 }
 
 // interactResolveData is the interact/resolve payload: the request id and the
@@ -1556,11 +1646,22 @@ func NewInteractRequest(id, toolName string) any {
 	return interactRequestData{ID: id, ToolName: toolName}
 }
 
+// NewInteractRequestDetail records the bounded request projection needed to
+// restore a Web approval card after restart. The legacy constructor remains
+// intentionally small for old callers and old event fixtures.
+func NewInteractRequestDetail(id, toolName, prompt, args string, questions any) any {
+	return interactRequestData{ID: id, ToolName: toolName, Prompt: prompt, Args: args, Questions: questions}
+}
+
 // NewInteractResolve builds the interact/resolve payload recorded when a user
 // decision is recorded for the request with id (dispatch-m6d-2 §1 / D3).
 func NewInteractResolve(id string, approved bool) any {
 	return interactResolveData{ID: id, Approved: approved}
 }
+
+// NewInteractCancel records a user-question dismissal separately from an
+// explicit rejection so restart replay can preserve the outcome.
+func NewInteractCancel(id string) any { return map[string]string{"id": id} }
 
 // NewInteractDeny builds the interact/deny payload recorded when the
 // sensitive-tool gate blocks a tool's execution after a rejection

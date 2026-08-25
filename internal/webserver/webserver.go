@@ -70,9 +70,12 @@ type Server struct {
 	// M10 W1 interactive wiring (ADR D-WEB2-A/B/C): the optional handlers the
 	// composition root injects after New. All three are nil until a Setter is
 	// called; a nil handler makes its API answer 501.
-	msgFn  func(ctx context.Context, sessionID, text string, images []llm.ImageRef) error
-	sessFn func(ctx context.Context, action, id string) (string, error)
-	evSrc  func(sessionID string, sink func(session.Event)) func()
+	msgFn          func(ctx context.Context, sessionID, text string, images []llm.ImageRef) error
+	sessFn         func(ctx context.Context, action, id string) (string, error)
+	evSrc          func(sessionID string, sink func(session.Event)) func()
+	queueListFn    func(ctx context.Context, sessionID string) ([]QueueItem, error)
+	queueEnqueueFn func(ctx context.Context, sessionID, text string) (QueueItem, error)
+	queueUpdateFn  func(ctx context.Context, sessionID, itemID, action string) error
 
 	// statusFn is the dsh-session-status alignment: it computes the live state
 	// (warning/ongoing/done/idle + labels + running-subagent count) for one
@@ -145,7 +148,7 @@ type Server struct {
 	// engine remains owned by cmd/pa; this server only transports request views
 	// and a resolve command.
 	interactionFn        func(ctx context.Context, sessionID string) ([]interact.Request, error)
-	resolveInteractionFn func(ctx context.Context, sessionID, id string, status interact.ApprovalStatus) error
+	resolveInteractionFn func(ctx context.Context, sessionID, id string, status interact.ApprovalStatus, answer string) error
 }
 
 // ProviderEdit is the M11 provider-management payload shared by POST and DELETE
@@ -174,6 +177,16 @@ type ProviderModel struct {
 	Name          string `json:"name,omitempty"`
 	ContextWindow int    `json:"context_window,omitempty"`
 	MaxTokens     int    `json:"max_tokens,omitempty"`
+}
+
+// QueueItem is one user message waiting behind the active turn. Placement is
+// kept explicit so the wire shape can grow to match dsh's queued/steered
+// states without changing the frontend contract.
+type QueueItem struct {
+	ID        string    `json:"id"`
+	Text      string    `json:"text"`
+	CreatedAt time.Time `json:"created_at"`
+	Placement string    `json:"placement"`
 }
 
 // ProviderDiscover is the POST /api/config/provider/discover payload: the
@@ -232,7 +245,7 @@ func (s *Server) SetSkillManager(fn func(ctx context.Context, action string, req
 // SetInteractionManager wires the live approval surface used by DSH Web.
 func (s *Server) SetInteractionManager(
 	list func(ctx context.Context, sessionID string) ([]interact.Request, error),
-	resolve func(ctx context.Context, sessionID, id string, status interact.ApprovalStatus) error,
+	resolve func(ctx context.Context, sessionID, id string, status interact.ApprovalStatus, answer string) error,
 ) {
 	s.interactionFn = list
 	s.resolveInteractionFn = resolve
@@ -326,6 +339,10 @@ func New(st store.Store, token, addr string) (*Server, error) {
 	mux.Handle("PATCH /api/sessions/flat-order", s.requireAuth(http.HandlerFunc(s.handleSessionsFlatOrder)))
 	// P6.3 remote search across session bodies (dsh searchAcrossSessions).
 	mux.Handle("GET /api/search", s.requireAuth(http.HandlerFunc(s.handleSearch)))
+	// dsh file reference compatibility: browse/search the addressed session's
+	// workspace and preview bounded text with line ranges.
+	mux.Handle("GET /api/sessions/{id}/files", s.requireAuth(http.HandlerFunc(s.handleSessionFiles)))
+	mux.Handle("GET /api/sessions/{id}/file", s.requireAuth(http.HandlerFunc(s.handleSessionFile)))
 	// P6 workspace grouping (dsh grouped sidebar view): list, create, rename,
 	// delete, order. The sessions list carries workspace_id so the sidebar groups.
 	mux.Handle("GET /api/workspaces", s.requireAuth(http.HandlerFunc(s.handleWorkspaces)))
@@ -337,6 +354,11 @@ func New(st store.Store, token, addr string) (*Server, error) {
 	mux.Handle("DELETE /api/workspaces/{id}", s.requireAuth(http.HandlerFunc(s.handleWorkspaceDelete)))
 	mux.Handle("PATCH /api/workspaces/order", s.requireAuth(http.HandlerFunc(s.handleWorkspacesOrder)))
 	mux.Handle("POST /api/sessions/{id}/message", s.requireAuth(http.HandlerFunc(s.handleMessage)))
+	// dsh queue/steer compatibility: queued messages are session-scoped and
+	// managed by the composition root, while this server only transports them.
+	mux.Handle("GET /api/sessions/{id}/queue", s.requireAuth(http.HandlerFunc(s.handleQueueList)))
+	mux.Handle("POST /api/sessions/{id}/queue", s.requireAuth(http.HandlerFunc(s.handleQueueEnqueue)))
+	mux.Handle("PATCH /api/sessions/{id}/queue/{itemID}", s.requireAuth(http.HandlerFunc(s.handleQueueUpdate)))
 	// M10 P2 (ADR D-WEB2-I): sidebar session management — rename (PATCH) and
 	// delete (DELETE). PATCH body is {"title": "..."}; an empty title clears the
 	// override back to first-user-message inference.
@@ -408,6 +430,18 @@ func (s *Server) Close() error {
 // (cmd/pa) at registration time; nil (the default) makes the API answer 501.
 func (s *Server) SetMessageHandler(fn func(ctx context.Context, sessionID, text string, images []llm.ImageRef) error) {
 	s.msgFn = fn
+}
+
+// SetQueueManager wires the dsh-style per-session queue. The composition root
+// owns execution and cancellation; nil callbacks leave the queue API at 501.
+func (s *Server) SetQueueManager(
+	list func(ctx context.Context, sessionID string) ([]QueueItem, error),
+	enqueue func(ctx context.Context, sessionID, text string) (QueueItem, error),
+	update func(ctx context.Context, sessionID, itemID, action string) error,
+) {
+	s.queueListFn = list
+	s.queueEnqueueFn = enqueue
+	s.queueUpdateFn = update
 }
 
 // SetSessionManager wires the session new/resume API (POST /api/sessions and
@@ -1773,6 +1807,174 @@ type searchHitView struct {
 	Snippet   string    `json:"snippet"`
 }
 
+type sessionFileView struct {
+	Name    string    `json:"name"`
+	Path    string    `json:"path"`
+	Dir     bool      `json:"dir"`
+	Size    int64     `json:"size,omitempty"`
+	ModTime time.Time `json:"mod_time,omitempty"`
+}
+
+func (s *Server) sessionWorkdir(ctx context.Context, sessionID string) (string, error) {
+	meta, err := s.store.GetSessionMeta(ctx, sessionID)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(meta.CWD) != "" {
+		abs, err := filepath.Abs(meta.CWD)
+		if err != nil {
+			return "", err
+		}
+		info, err := os.Stat(abs)
+		if err != nil || !info.IsDir() {
+			return "", fmt.Errorf("session workdir is unavailable")
+		}
+		return filepath.Clean(abs), nil
+	}
+	return s.workspaceWorkdir(ctx, meta.WorkspaceID)
+}
+
+func safeSessionPath(root, relative string) (string, string, error) {
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return "", "", err
+	}
+	relative = filepath.Clean(strings.TrimSpace(relative))
+	if relative == "." || relative == "" {
+		return root, "", nil
+	}
+	if filepath.IsAbs(relative) {
+		return "", "", errors.New("absolute file paths are not allowed")
+	}
+	target := filepath.Clean(filepath.Join(root, relative))
+	rel, err := filepath.Rel(root, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", "", errors.New("file path escapes workspace")
+	}
+	return target, filepath.ToSlash(rel), nil
+}
+
+func (s *Server) handleSessionFiles(w http.ResponseWriter, r *http.Request) {
+	root, err := s.sessionWorkdir(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	relDir := r.URL.Query().Get("path")
+	target, rel, err := safeSessionPath(root, relDir)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	entries := make([]sessionFileView, 0, 64)
+	if query != "" {
+		needle := strings.ToLower(query)
+		walkErr := filepath.WalkDir(root, func(pathName string, d os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return nil
+			}
+			if len(entries) >= 200 || d.IsDir() {
+				return nil
+			}
+			relPath, relErr := filepath.Rel(root, pathName)
+			if relErr != nil || !strings.Contains(strings.ToLower(filepath.ToSlash(relPath)), needle) {
+				return nil
+			}
+			info, infoErr := d.Info()
+			if infoErr != nil {
+				return nil
+			}
+			entries = append(entries, sessionFileView{Name: filepath.Base(pathName), Path: filepath.ToSlash(relPath), Size: info.Size(), ModTime: info.ModTime()})
+			return nil
+		})
+		if walkErr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": walkErr.Error()})
+			return
+		}
+	} else {
+		children, readErr := os.ReadDir(target)
+		if readErr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": readErr.Error()})
+			return
+		}
+		for _, child := range children {
+			if strings.HasPrefix(child.Name(), ".") {
+				continue
+			}
+			info, infoErr := child.Info()
+			if infoErr != nil {
+				continue
+			}
+			childRel := filepath.ToSlash(filepath.Join(rel, child.Name()))
+			entries = append(entries, sessionFileView{Name: child.Name(), Path: childRel, Dir: child.IsDir(), Size: info.Size(), ModTime: info.ModTime()})
+		}
+		sort.Slice(entries, func(i, j int) bool {
+			if entries[i].Dir != entries[j].Dir {
+				return entries[i].Dir
+			}
+			return entries[i].Name < entries[j].Name
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"root": root, "path": rel, "entries": entries})
+}
+
+func (s *Server) handleSessionFile(w http.ResponseWriter, r *http.Request) {
+	root, err := s.sessionWorkdir(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	target, rel, err := safeSessionPath(root, r.URL.Query().Get("path"))
+	if err != nil || rel == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "a relative file path is required"})
+		return
+	}
+	info, err := os.Stat(target)
+	if err != nil || info.IsDir() {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "file not found"})
+		return
+	}
+	if info.Size() > 512<<10 {
+		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"error": "file preview is limited to 512 KiB"})
+		return
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	lines := strings.Split(string(data), "\n")
+	start := 1
+	end := len(lines)
+	if raw := r.URL.Query().Get("start"); raw != "" {
+		if parsed, parseErr := strconv.Atoi(raw); parseErr == nil && parsed > 0 {
+			start = parsed
+		}
+	}
+	if raw := r.URL.Query().Get("end"); raw != "" {
+		if parsed, parseErr := strconv.Atoi(raw); parseErr == nil && parsed >= start {
+			end = parsed
+		}
+	}
+	if start > len(lines) {
+		start = len(lines)
+	}
+	if end > len(lines) {
+		end = len(lines)
+	}
+	if start < 1 {
+		start = 1
+	}
+	if end < start {
+		end = start
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"path": rel, "content": strings.Join(lines[start-1:end], "\n"),
+		"start_line": start, "end_line": end, "total_lines": len(lines),
+	})
+}
+
 // handleSearch implements GET /api/search?q=... (P6.3): sessions whose event
 // bodies contain the query, each with the first matching snippet.
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
@@ -2208,6 +2410,77 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.msgFn(r.Context(), id, body.Text, images); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleQueueList implements GET /api/sessions/{id}/queue. The queue is
+// process-owned by cmd/pa, so an unwired generic server answers 501.
+func (s *Server) handleQueueList(w http.ResponseWriter, r *http.Request) {
+	if s.queueListFn == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "queue manager not wired"})
+		return
+	}
+	items, err := s.queueListFn(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	if items == nil {
+		items = []QueueItem{}
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+// handleQueueEnqueue implements POST /api/sessions/{id}/queue. The active
+// turn keeps running; the composition root drains this item after completion.
+func (s *Server) handleQueueEnqueue(w http.ResponseWriter, r *http.Request) {
+	if s.queueEnqueueFn == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "queue manager not wired"})
+		return
+	}
+	var body struct {
+		Text string `json:"text"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON body"})
+		return
+	}
+	if strings.TrimSpace(body.Text) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "text is required"})
+		return
+	}
+	item, err := s.queueEnqueueFn(r.Context(), r.PathValue("id"), body.Text)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusAccepted, item)
+}
+
+// handleQueueUpdate implements PATCH /api/sessions/{id}/queue/{itemID}.
+// Supported actions mirror the useful dsh controls: move_first, delete and
+// steer (cancel the active turn, then promote the item).
+func (s *Server) handleQueueUpdate(w http.ResponseWriter, r *http.Request) {
+	if s.queueUpdateFn == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "queue manager not wired"})
+		return
+	}
+	var body struct {
+		Action string `json:"action"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON body"})
+		return
+	}
+	action := strings.TrimSpace(body.Action)
+	if action != "move_first" && action != "delete" && action != "steer" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "action must be move_first, delete, or steer"})
+		return
+	}
+	if err := s.queueUpdateFn(r.Context(), r.PathValue("id"), r.PathValue("itemID"), action); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -2684,6 +2957,9 @@ func (s *Server) handleInteractions(w http.ResponseWriter, r *http.Request) {
 			"id": item.ID, "prompt": item.Prompt, "tool_name": item.ToolName,
 			"args": item.Args, "status": string(item.Status), "created_at": item.CreatedAt,
 		}
+		if len(item.Questions) > 0 {
+			view["questions"] = item.Questions
+		}
 		if item.ResolvedAt != nil {
 			view["resolved_at"] = item.ResolvedAt
 		}
@@ -2700,17 +2976,18 @@ func (s *Server) handleInteractionResolve(w http.ResponseWriter, r *http.Request
 	}
 	var body struct {
 		Status string `json:"status"`
+		Answer string `json:"answer,omitempty"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON body"})
 		return
 	}
 	status := interact.ApprovalStatus(body.Status)
-	if status != interact.StatusApproved && status != interact.StatusRejected {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "status must be approved or rejected"})
+	if status != interact.StatusApproved && status != interact.StatusRejected && status != interact.StatusCanceled {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "status must be approved, rejected, or cancelled"})
 		return
 	}
-	if err := s.resolveInteractionFn(r.Context(), r.URL.Query().Get("session_id"), r.PathValue("id"), status); err != nil {
+	if err := s.resolveInteractionFn(r.Context(), r.URL.Query().Get("session_id"), r.PathValue("id"), status, body.Answer); err != nil {
 		if errors.Is(err, interact.ErrUnknownRequest) || errors.Is(err, interact.ErrAlreadyResolved) {
 			writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error()})
 			return
@@ -2735,6 +3012,7 @@ func eventDetails(ev session.Event) map[string]any {
 		session.EventGoalRoundEnd:       {"goalId", "round", "status", "error"},
 		session.EventInteractRequest:    {"id", "toolName"},
 		session.EventInteractResolve:    {"id", "approved"},
+		session.EventInteractCancel:     {"id"},
 		session.EventInteractDeny:       {"id"},
 		session.EventInteractStatus:     {"id", "status"},
 		session.EventWorkflowRun:        {"total", "completed", "failed"},

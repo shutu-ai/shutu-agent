@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/jabing/shutu-agent/internal/compaction"
 	"github.com/jabing/shutu-agent/internal/config"
@@ -44,6 +45,13 @@ const eventHubBuffer = 256
 type eventHub struct {
 	mu   sync.Mutex
 	subs map[string]map[chan session.Event]struct{}
+}
+
+type webQueueMessage struct {
+	ID        string
+	SessionID string
+	Text      string
+	CreatedAt time.Time
 }
 
 // NewEventHub returns an empty event hub.
@@ -123,6 +131,7 @@ func (a *app) registerWebServer() error {
 	srv.SetMessageHandler(func(ctx context.Context, sessionID, text string, images []llm.ImageRef) error {
 		return a.webMessage(ctx, sessionID, text, images)
 	})
+	srv.SetQueueManager(a.webQueueList, a.webQueueEnqueue, a.webQueueUpdate)
 	srv.SetSessionManager(func(ctx context.Context, action, id string) (string, error) {
 		return a.webSessionManager(ctx, action, id)
 	})
@@ -215,17 +224,26 @@ func (a *app) registerWebServer() error {
 				}
 				return filtered, nil
 			},
-			func(ctx context.Context, sessionID, id string, status interact.ApprovalStatus) error {
+			func(ctx context.Context, sessionID, id string, status interact.ApprovalStatus, answer string) error {
 				if !a.interactionBelongsTo(id, sessionID) {
 					return interact.ErrUnknownRequest
 				}
-				_, err := a.interacts.Resolve(ctx, id, status)
+				var err error
+				if answerResolver, ok := a.interacts.(interact.AnswerResolver); ok {
+					_, err = answerResolver.ResolveWithAnswer(ctx, id, status, answer)
+				} else {
+					_, err = a.interacts.Resolve(ctx, id, status)
+				}
 				if err != nil {
 					return err
 				}
 				if a.log != nil {
-					approved := status == interact.StatusApproved
-					_, _ = a.log.Append(session.EventInteractResolve, session.NewInteractResolve(id, approved))
+					if status == interact.StatusCanceled {
+						_, _ = a.log.Append(session.EventInteractCancel, session.NewInteractCancel(id))
+					} else {
+						approved := status == interact.StatusApproved
+						_, _ = a.log.Append(session.EventInteractResolve, session.NewInteractResolve(id, approved))
+					}
 				}
 				return nil
 			},
@@ -306,6 +324,114 @@ func projectionProviderPlans(ctx context.Context, engine plan.Engine) ([]plan.Pl
 	return []plan.Plan{}, nil
 }
 
+func (a *app) webQueueList(ctx context.Context, sessionID string) ([]webserver.QueueItem, error) {
+	a.webQueueMu.Lock()
+	defer a.webQueueMu.Unlock()
+	queued := a.webQueue[sessionID]
+	items := make([]webserver.QueueItem, 0, len(queued))
+	for _, item := range queued {
+		items = append(items, webserver.QueueItem{
+			ID: item.ID, Text: item.Text, CreatedAt: item.CreatedAt, Placement: "queued",
+		})
+	}
+	return items, nil
+}
+
+func (a *app) webQueueEnqueue(ctx context.Context, sessionID, text string) (webserver.QueueItem, error) {
+	text = strings.TrimSpace(text)
+	if sessionID == "" {
+		return webserver.QueueItem{}, errors.New("session id is required")
+	}
+	if text == "" {
+		return webserver.QueueItem{}, errors.New("text is required")
+	}
+	a.webQueueMu.Lock()
+	if a.webQueue == nil {
+		a.webQueue = make(map[string][]webQueueMessage)
+	}
+	if a.webQueueRunning == nil {
+		a.webQueueRunning = make(map[string]bool)
+	}
+	a.webQueueSeq++
+	item := webQueueMessage{
+		ID: fmt.Sprintf("webq-%d", a.webQueueSeq), SessionID: sessionID,
+		Text: text, CreatedAt: time.Now().UTC(),
+	}
+	a.webQueue[sessionID] = append(a.webQueue[sessionID], item)
+	a.webQueueMu.Unlock()
+
+	// If no turn is active, start the queue immediately. During an active turn
+	// webMessage's defer drains it as soon as the current turn settles.
+	a.drainWebQueue(sessionID)
+	return webserver.QueueItem{ID: item.ID, Text: item.Text, CreatedAt: item.CreatedAt, Placement: "queued"}, nil
+}
+
+func (a *app) webQueueUpdate(ctx context.Context, sessionID, itemID, action string) error {
+	if action != "move_first" && action != "delete" && action != "steer" {
+		return fmt.Errorf("unsupported queue action %q", action)
+	}
+	a.webQueueMu.Lock()
+	queued := a.webQueue[sessionID]
+	idx := -1
+	for i := range queued {
+		if queued[i].ID == itemID {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		a.webQueueMu.Unlock()
+		return errors.New("queue item not found")
+	}
+	item := queued[idx]
+	queued = append(queued[:idx], queued[idx+1:]...)
+	if action == "move_first" || action == "steer" {
+		queued = append([]webQueueMessage{item}, queued...)
+	}
+	a.webQueue[sessionID] = queued
+	a.webQueueMu.Unlock()
+
+	if action == "steer" && a.webTurnRunning(sessionID) {
+		if err := a.stopTurn(sessionID); err != nil {
+			return err
+		}
+	}
+	a.drainWebQueue(sessionID)
+	return nil
+}
+
+func (a *app) webTurnRunning(sessionID string) bool {
+	v := a.runningSession.Load()
+	running, _ := v.(string)
+	return running != "" && (sessionID == "" || running == sessionID)
+}
+
+func (a *app) drainWebQueue(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	a.webQueueMu.Lock()
+	if a.webQueueRunning == nil {
+		a.webQueueRunning = make(map[string]bool)
+	}
+	if a.webQueueRunning[sessionID] || a.webTurnRunning(sessionID) || len(a.webQueue[sessionID]) == 0 {
+		a.webQueueMu.Unlock()
+		return
+	}
+	item := a.webQueue[sessionID][0]
+	a.webQueue[sessionID] = a.webQueue[sessionID][1:]
+	a.webQueueRunning[sessionID] = true
+	a.webQueueMu.Unlock()
+
+	go func() {
+		_ = a.webMessage(context.Background(), sessionID, item.Text, nil)
+		a.webQueueMu.Lock()
+		a.webQueueRunning[sessionID] = false
+		a.webQueueMu.Unlock()
+		a.drainWebQueue(sessionID)
+	}()
+}
+
 // webMessage handles one web chat message for a session (ADR D-WEB2-A): when
 // the target session differs from the current one it is resumed first (attachSink
 // already rebinds to the new session), then the turn runs under the global serial
@@ -317,6 +443,7 @@ func (a *app) webMessage(ctx context.Context, sessionID, text string, images []l
 	if strings.TrimSpace(text) == "" && len(images) == 0 {
 		return errors.New("empty message text")
 	}
+	defer a.drainWebQueue(sessionID)
 	// Sensitive-tool approvals raised during a Web turn are resolved by the
 	// browser approval card, not by the REPL stdin prompt.
 	ctx = withWebApprovalContext(ctx)
@@ -1065,6 +1192,7 @@ func (a *app) webConfig() map[string]any {
 		"reasoning_effort": a.cfg.ReasoningEffort,
 		"mode":             a.cfg.Mode,
 		"providers":        a.webProviders(), // P5.1 live model pickers
+		"mcp_servers":      a.webMCPServers(),
 
 		// Capability gates (dsh 对齐: 默认全开, nil*bool→on; 显式 enabled:false 关).
 		"terminal_enabled":   config.Enabled(a.cfg.Terminal.Enabled),
@@ -1089,6 +1217,27 @@ func (a *app) webConfig() map[string]any {
 
 		"web_server_addr": a.cfg.WebServer.Addr,
 	}
+}
+
+func (a *app) webMCPServers() []map[string]any {
+	servers := make([]map[string]any, 0, len(a.cfg.Mcp.Servers))
+	for i, server := range a.cfg.Mcp.Servers {
+		prefix := "mcp__" + server.Name + "__"
+		toolCount := 0
+		if a.reg != nil {
+			for _, spec := range a.reg.Specs() {
+				if strings.HasPrefix(spec.Name, prefix) {
+					toolCount++
+				}
+			}
+		}
+		servers = append(servers, map[string]any{
+			"name": server.Name, "cmd": server.Cmd, "args": server.Args,
+			"enabled": config.Enabled(a.cfg.Mcp.Enabled), "connected": i < len(a.mcp),
+			"tool_count": toolCount,
+		})
+	}
+	return servers
 }
 
 // modelReasoning describes one model's selectable thinking efforts (dsh
