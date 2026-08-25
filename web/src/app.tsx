@@ -166,7 +166,8 @@ function VirtualEvents({ events, onReachTop, loadingOlder }: {
 
 function isConversationEvent(event: EventView): boolean {
   return event.type.startsWith('user/') || event.type.startsWith('assistant/') ||
-    event.type.startsWith('tool/') || event.type.startsWith('interact/')
+    event.type.startsWith('tool/') || event.type.startsWith('interact/') ||
+    event.type.startsWith('turn/') || event.type.startsWith('step/')
 }
 
 export function App({ store }: { store: WebStore }) {
