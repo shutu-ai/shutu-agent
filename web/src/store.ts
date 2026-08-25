@@ -1,4 +1,4 @@
-import type { EventView, SessionSummary, ShutuApi } from './api'
+import type { EventView, SessionSummary, WebApi } from './api'
 
 export interface WebState {
   sessions: readonly SessionSummary[]
@@ -24,7 +24,7 @@ export class WebStore {
   private streamAbort: AbortController | null = null
   private generation = 0
 
-  constructor(private readonly api: ShutuApi) {}
+  constructor(private readonly api: WebApi) {}
 
   getSnapshot = (): WebState => this.state
 

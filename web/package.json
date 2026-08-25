@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "build": "node ../../deepseek-harness/apps/web/node_modules/vite/bin/vite.js build",
-    "typecheck": "node ../../deepseek-harness/apps/web/node_modules/typescript/bin/tsc --noEmit"
+    "typecheck": "node ../../deepseek-harness/apps/web/node_modules/typescript/bin/tsc --noEmit",
+    "test": "node ../../deepseek-harness/apps/web/node_modules/vitest/vitest.mjs run"
   },
   "dependencies": {
     "@deepseek-ai/cordis": "file:../../deepseek-harness/vendor/cordis",

@@ -21,7 +21,8 @@
     "paths": {
       "react": ["../../deepseek-harness/apps/web/node_modules/@types/react/index.d.ts"],
       "react/jsx-runtime": ["../../deepseek-harness/apps/web/node_modules/@types/react/jsx-runtime.d.ts"],
-      "react-dom/client": ["../../deepseek-harness/apps/web/node_modules/@types/react-dom/client.d.ts"]
+      "react-dom/client": ["../../deepseek-harness/apps/web/node_modules/@types/react-dom/client.d.ts"],
+      "vitest": ["../../deepseek-harness/apps/web/node_modules/vitest"]
     }
   },
   "include": ["src"]

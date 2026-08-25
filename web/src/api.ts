@@ -51,7 +51,15 @@ export interface EventPageCursor {
 
 export type EventListener = (event: EventView) => void
 
-export class ShutuApi {
+export interface WebApi {
+  listSessions(signal?: AbortSignal): Promise<SessionSummary[]>
+  loadEvents(sessionId: string, cursor?: EventPageCursor, signal?: AbortSignal): Promise<EventPage>
+  sendMessage(sessionId: string, text: string, signal?: AbortSignal): Promise<void>
+  stop(sessionId: string, signal?: AbortSignal): Promise<void>
+  stream(sessionId: string, lastSeq: number, signal: AbortSignal, onEvent: EventListener): Promise<void>
+}
+
+export class ShutuApi implements WebApi {
   constructor(
     private readonly baseUrl = '',
     private readonly token = '',
