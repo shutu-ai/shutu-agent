@@ -136,6 +136,7 @@ type Server struct {
 	// for POST /api/config/provider/discover. It asks an endpoint which models
 	// it serves (获取可用模型). nil (the default) makes the API answer 501.
 	setDiscoverFn func(ctx context.Context, request ProviderDiscover) ([]ProviderModel, error)
+	mcpRefreshFn  func(ctx context.Context) ([]map[string]any, error)
 
 	// 技能设置页 (dsh-skill-mcp-panel 对齐): the skill-management dispatcher for
 	// /api/config/skills. It lists every skill with scope/rel/disabled state,
@@ -240,6 +241,12 @@ type SkillRequest struct {
 // default) keeps every /api/config/skills route at 501.
 func (s *Server) SetSkillManager(fn func(ctx context.Context, action string, req SkillRequest) (map[string]any, error)) {
 	s.skillsFn = fn
+}
+
+// SetMCPManager wires the live MCP diagnostics/refresh action used by the
+// runtime inventory page. It does not mutate configuration or secrets.
+func (s *Server) SetMCPManager(fn func(ctx context.Context) ([]map[string]any, error)) {
+	s.mcpRefreshFn = fn
 }
 
 // SetInteractionManager wires the live approval surface used by DSH Web.
@@ -388,6 +395,7 @@ func New(st store.Store, token, addr string) (*Server, error) {
 	mux.Handle("GET /api/sessions/{id}/events/stream", s.requireAuth(http.HandlerFunc(s.handleEventStream)))
 	// M10 W2 (ADR D-WEB2-D): the read-only sanitized config view.
 	mux.Handle("GET /api/config", s.requireAuth(http.HandlerFunc(s.handleConfig)))
+	mux.Handle("POST /api/config/mcp/refresh", s.requireAuth(http.HandlerFunc(s.handleMCPRefresh)))
 	// M10 W4 (ADR D-WEB2-H): the read-only subagent and background-job panels.
 	mux.Handle("GET /api/subagents", s.requireAuth(http.HandlerFunc(s.handleSubagents)))
 	mux.Handle("GET /api/jobs", s.requireAuth(http.HandlerFunc(s.handleJobs)))
@@ -666,6 +674,19 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, s.cfgFn())
+}
+
+func (s *Server) handleMCPRefresh(w http.ResponseWriter, r *http.Request) {
+	if s.mcpRefreshFn == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "mcp manager not wired"})
+		return
+	}
+	servers, err := s.mcpRefreshFn(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"servers": servers})
 }
 
 // handleSettingsGet implements GET /api/settings (the General-settings rows:

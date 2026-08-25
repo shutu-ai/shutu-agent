@@ -206,6 +206,7 @@ func (a *app) registerWebServer() error {
 	// manager is created lazily (independent of skill.enabled) so the page
 	// always lists the skill files it manages.
 	srv.SetSkillManager(a.webSkills)
+	srv.SetMCPManager(a.webRefreshMCP)
 	// DSH Web approval surface: resolve the same live interact engine that the
 	// sensitive-tool gate is waiting on. The engine is optional by capability;
 	// an unconfigured interact seam answers 501 from the generic server.
@@ -1238,6 +1239,33 @@ func (a *app) webMCPServers() []map[string]any {
 		})
 	}
 	return servers
+}
+
+func (a *app) webRefreshMCP(ctx context.Context) ([]map[string]any, error) {
+	servers := make([]map[string]any, 0, len(a.cfg.Mcp.Servers))
+	for i, server := range a.cfg.Mcp.Servers {
+		row := map[string]any{"name": server.Name, "cmd": server.Cmd, "args": server.Args, "enabled": config.Enabled(a.cfg.Mcp.Enabled), "connected": false, "tool_count": 0}
+		if i >= len(a.mcp) {
+			row["error"] = "client is not connected"
+			servers = append(servers, row)
+			continue
+		}
+		client := a.mcp[i]
+		if err := client.Start(ctx); err != nil {
+			row["error"] = err.Error()
+			servers = append(servers, row)
+			continue
+		}
+		advertised, err := client.ListTools(ctx)
+		if err != nil {
+			row["error"] = err.Error()
+		} else {
+			row["connected"] = true
+			row["tool_count"] = len(advertised)
+		}
+		servers = append(servers, row)
+	}
+	return servers, nil
 }
 
 // modelReasoning describes one model's selectable thinking efforts (dsh

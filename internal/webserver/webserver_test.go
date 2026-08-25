@@ -1015,6 +1015,24 @@ func TestConfigAPI(t *testing.T) {
 	}
 }
 
+func TestMCPRefreshAPI(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+	srv.SetMCPManager(func(ctx context.Context) ([]map[string]any, error) {
+		return []map[string]any{{"name": "demo", "connected": true, "tool_count": 2}}, nil
+	})
+	if rec := doReq(t, srv.Handler(), "POST", "/api/config/mcp/refresh", ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("mcp refresh without token = %d, want 401", rec.Code)
+	}
+	rec := doReq(t, srv.Handler(), "POST", "/api/config/mcp/refresh", "tok")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"tool_count":2`) {
+		t.Fatalf("mcp refresh = %d %s", rec.Code, rec.Body.String())
+	}
+	srv2, _ := newTestServer(t, "tok")
+	if rec := doReq(t, srv2.Handler(), "POST", "/api/config/mcp/refresh", "tok"); rec.Code != http.StatusNotImplemented {
+		t.Fatalf("unwired mcp refresh = %d, want 501", rec.Code)
+	}
+}
+
 func mustData(t *testing.T, v any) json.RawMessage {
 	t.Helper()
 	b, err := json.Marshal(v)

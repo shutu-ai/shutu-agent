@@ -5336,7 +5336,35 @@ function renderPlugins(c) {
   ];
   const capRows = Object.keys(c).filter((key) => key.endsWith("_enabled") && typeof c[key] === "boolean").sort();
   const sec = settingsSectionEl();
+  setTimeout(() => {
+    const title = sec.querySelector("h2");
+    if (!title || title.querySelector(".mcp-refresh")) return;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "mcp-refresh sec-btn";
+    button.textContent = "刷新 MCP";
+    button.addEventListener("click", () => void refreshMCPInventory(button));
+    title.appendChild(button);
+  }, 0);
   sec.innerHTML = `<h2>运行时清单</h2><p class="intro">对齐 DSH 插件清单：展示当前 Web 进程发现到的能力、命令、技能、模型提供方和 MCP 服务状态。</p><div class="plugin-summary">${rows.map(([title, value, detail]) => `<div class="plugin-summary-card"><span>${esc(title)}</span><strong>${esc(value)}</strong><small>${esc(detail)}</small></div>`).join("")}</div><h3 class="plugin-list-title">能力状态</h3><div class="plugin-list">${capRows.map((key) => { const short = key.replace(/_enabled$/, ""); return `<div class="plugin-row"><span>${esc(CAPABILITY_NAMES[short] || short)}</span><code>${esc(key)}</code><span class="cap-badge ${c[key] ? "on" : ""}">${c[key] ? "已启用" : "未启用"}</span></div>`; }).join("")}</div><h3 class="plugin-list-title">MCP 服务</h3><div class="plugin-list">${mcpServers.length ? mcpServers.map((item) => `<div class="plugin-row"><span>${esc(item.name || "MCP")}</span><code>${esc(item.cmd || "")}</code><span>${Number(item.tool_count || 0)} 个工具</span><span class="cap-badge ${item.connected ? "on" : ""}">${item.connected ? "已连接" : "未连接"}</span></div>`).join("") : `<div class="plugin-empty">当前未配置 MCP 服务</div>`}</div>`;
+}
+
+async function refreshMCPInventory(button) {
+  if (button) { button.disabled = true; button.textContent = "刷新中…"; }
+  try {
+    const res = await api("/api/config/mcp/refresh", { method: "POST" });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || `HTTP ${res.status}`);
+    }
+    const body = await res.json();
+    settingsConfig = Object.assign({}, settingsConfig, { mcp_servers: body.servers || [] });
+    renderPlugins(settingsConfig);
+  } catch (e) {
+    if (e.message !== "unauthorized") toast(`MCP 刷新失败：${e.message}`);
+  } finally {
+    if (button) { button.disabled = false; button.textContent = "刷新 MCP"; }
+  }
 }
 
 // ---- 技能 settings page (dsh-skill-mcp-panel 对齐; user 2026-09) -----------
