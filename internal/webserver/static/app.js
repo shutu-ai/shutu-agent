@@ -3251,8 +3251,15 @@ async function loadSessionState(id) {
     const plans = Array.isArray(state.plans) ? state.plans : [];
     const steps = plans.flatMap((plan) => Array.isArray(plan.steps) ? plan.steps : []);
     const done = steps.filter((step) => step.status === "done" || step.status === "completed").length;
-    const activeGoal = goals.find((goal) => !["complete", "completed", "cancelled", "blocked"].includes(goal.status));
+    const activeGoal = goals.find((goal) => !["complete", "completed", "cancelled"].includes(goal.status));
     const parts = [];
+    if (activeGoal) {
+      const phase = activeGoal.status === "in-progress" || activeGoal.status === "pending" ? "active" : (activeGoal.status || "active");
+      const rounds = Number.isSafeInteger(activeGoal.roundsStarted) && Number.isSafeInteger(activeGoal.maxRounds)
+        ? ` · ${activeGoal.roundsStarted}/${activeGoal.maxRounds} rounds` : "";
+      parts.push(`Goal [${esc(phase)}]${rounds}`);
+      if (activeGoal.blockedReason) parts.push(`Blocked: ${esc(activeGoal.blockedReason)}`);
+    }
     if (state.plan_mode) parts.push("计划模式");
     if (activeGoal) parts.push(`目标：${esc(activeGoal.objective || activeGoal.title || "进行中")}`);
     if (steps.length) parts.push(`任务 ${done}/${steps.length}`);

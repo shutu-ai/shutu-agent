@@ -35,18 +35,23 @@ type planUpdateEvent struct {
 }
 
 type planSnapshot struct {
-	Objective string    `json:"objective"`
-	GoalID    string    `json:"goalId"`
-	PlanID    string    `json:"planId"`
-	Status    Status    `json:"status"`
-	CreatedAt time.Time `json:"createdAt"`
-	Steps     []Todo    `json:"steps"`
+	Objective     string    `json:"objective"`
+	GoalID        string    `json:"goalId"`
+	PlanID        string    `json:"planId"`
+	Status        Status    `json:"status"`
+	Revision      int       `json:"revision"`
+	MaxRounds     int       `json:"maxRounds"`
+	RoundsStarted int       `json:"roundsStarted"`
+	BlockedReason string    `json:"blockedReason"`
+	CreatedAt     time.Time `json:"createdAt"`
+	Steps         []Todo    `json:"steps"`
 }
 
 type planStatusEvent struct {
 	Scope  string `json:"scope"`
 	ID     string `json:"id"`
 	Status Status `json:"status"`
+	Reason string `json:"reason"`
 }
 
 type planDeleteEvent struct {
@@ -86,9 +91,19 @@ func restoreEvents(events []session.Event) (map[string]Goal, map[string]Plan, er
 				if !validStatus(status) {
 					status = StatusPending
 				}
+				revision := snap.Revision
+				if revision < 1 {
+					revision = 1
+				}
+				maxRounds := snap.MaxRounds
+				if maxRounds <= 0 {
+					maxRounds = DefaultMaxGoalRounds
+				}
 				goals[data.ID] = Goal{
 					ID: data.ID, Title: data.Title, Objective: snap.Objective,
-					Status: status, Plans: []string{}, CreatedAt: created,
+					Status: status, Plans: []string{}, Revision: revision,
+					MaxRounds: maxRounds, RoundsStarted: snap.RoundsStarted,
+					BlockedReason: snap.BlockedReason, CreatedAt: created,
 				}
 				lastGoalID = data.ID
 			case string(ScopePlan):
@@ -155,6 +170,12 @@ func restoreEvents(events []session.Event) (map[string]Goal, map[string]Plan, er
 			case string(ScopeGoal):
 				if g, ok := goals[data.ID]; ok {
 					g.Status = data.Status
+					g.Revision = nextRestoreRevision(g.Revision)
+					if data.Status == StatusBlocked {
+						g.BlockedReason = data.Reason
+					} else {
+						g.BlockedReason = ""
+					}
 					applyRestoreCompletedAt(&g.CompletedAt, data.Status, ev.At)
 					goals[data.ID] = g
 				}
@@ -186,7 +207,20 @@ func restoreEvents(events []session.Event) (map[string]Goal, map[string]Plan, er
 						g.Title = data.Title
 					}
 					g.Objective = data.Objective
+					g.Revision = nextRestoreRevision(g.Revision)
 					goals[data.ID] = g
+				}
+			}
+
+		case session.EventGoalRoundStart:
+			var data struct {
+				GoalID string `json:"goalId"`
+				Round  int    `json:"round"`
+			}
+			if json.Unmarshal(ev.Data, &data) == nil {
+				if g, ok := goals[data.GoalID]; ok && data.Round > g.RoundsStarted {
+					g.RoundsStarted = data.Round
+					goals[data.GoalID] = g
 				}
 			}
 
@@ -220,6 +254,13 @@ func restoreEvents(events []session.Event) (map[string]Goal, map[string]Plan, er
 		}
 	}
 	return goals, plans, nil
+}
+
+func nextRestoreRevision(current int) int {
+	if current < 1 {
+		return 1
+	}
+	return current + 1
 }
 
 func decodeSnapshot(detail map[string]any) (planSnapshot, error) {

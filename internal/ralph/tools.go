@@ -58,7 +58,7 @@ func (RalphTool) Schema() map[string]any {
 			"max_rounds": map[string]any{
 				"type":        "integer",
 				"minimum":     1,
-				"description": "loop cap (default 3)",
+				"description": "loop cap (default 256; deployment maximum 256)",
 			},
 		},
 		"required":             []string{"objective"},

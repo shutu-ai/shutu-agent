@@ -31,7 +31,7 @@ func TestDriverContinuesSameSessionUntilGoalDone(t *testing.T) {
 	if len(seen) != 1 || !strings.Contains(seen[0], `"Ship the feature"`) || !strings.Contains(seen[0], "Round: 1/3") {
 		t.Fatalf("prompt=%q", seen)
 	}
-	if len(log.Events()) != 2 || log.Events()[0].Type != session.EventGoalRoundStart || log.Events()[1].Type != session.EventGoalRoundEnd {
+	if len(log.Events()) != 3 || log.Events()[0].Type != session.EventPlanStatus || log.Events()[1].Type != session.EventGoalRoundStart || log.Events()[2].Type != session.EventGoalRoundEnd {
 		t.Fatalf("goal events=%+v", log.Events())
 	}
 }
@@ -47,7 +47,7 @@ func TestDriverRoundLimitBlocksAndObserverIsFailOpen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.StopReason != "round-limit" || res.Rounds != 2 || res.Status != plan.StatusBlocked {
+	if res.StopReason != "round-limit" || res.Rounds != 2 || res.Status != plan.StatusInProgress {
 		t.Fatalf("result=%+v", res)
 	}
 }

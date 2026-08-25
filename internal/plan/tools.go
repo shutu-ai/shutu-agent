@@ -163,6 +163,11 @@ func (PlanGoalTool) Schema() map[string]any {
 				"type":        "string",
 				"description": "one-paragraph goal description (optional)",
 			},
+			"max_rounds": map[string]any{
+				"type":        "integer",
+				"minimum":     1,
+				"description": "maximum same-session continuation rounds (default 256)",
+			},
 		},
 		"required":             []string{"title"},
 		"additionalProperties": false,
@@ -173,6 +178,7 @@ func (t PlanGoalTool) Execute(ctx context.Context, args json.RawMessage) (string
 	var a struct {
 		Title     string `json:"title"`
 		Objective string `json:"objective"`
+		MaxRounds int    `json:"max_rounds"`
 	}
 	if err := json.Unmarshal(args, &a); err != nil {
 		return "", fmt.Errorf("plan_goal: %w", err)
@@ -180,7 +186,15 @@ func (t PlanGoalTool) Execute(ctx context.Context, args json.RawMessage) (string
 	if strings.TrimSpace(a.Title) == "" {
 		return "", fmt.Errorf("plan_goal: empty title")
 	}
-	g, err := t.t.e.CreateGoal(ctx, a.Title, a.Objective)
+	var g Goal
+	var err error
+	if creator, ok := t.t.e.(interface {
+		CreateGoalWithMaxRounds(context.Context, string, string, int) (Goal, error)
+	}); ok {
+		g, err = creator.CreateGoalWithMaxRounds(ctx, a.Title, a.Objective, a.MaxRounds)
+	} else {
+		g, err = t.t.e.CreateGoal(ctx, a.Title, a.Objective)
+	}
 	if err != nil {
 		return "", fmt.Errorf("plan_goal: %w", err)
 	}
@@ -188,9 +202,12 @@ func (t PlanGoalTool) Execute(ctx context.Context, args json.RawMessage) (string
 	// with the goal scope, and the returned text is what the loop logs as
 	// tool/result.
 	t.t.emit(session.EventPlanCreate, session.NewPlanCreate(string(ScopeGoal), g.ID, g.Title, nil, map[string]any{
-		"objective": g.Objective,
-		"status":    g.Status,
-		"createdAt": g.CreatedAt,
+		"objective":     g.Objective,
+		"status":        g.Status,
+		"revision":      g.Revision,
+		"maxRounds":     g.MaxRounds,
+		"roundsStarted": g.RoundsStarted,
+		"createdAt":     g.CreatedAt,
 	}))
 	return fmt.Sprintf("created goal %s: %s", g.ID, g.Title), nil
 }
@@ -345,6 +362,10 @@ func (PlanStatusTool) Schema() map[string]any {
 				"minLength":   1,
 				"description": "the id of the goal/plan/todo to update",
 			},
+			"revision": map[string]any{
+				"type": "integer", "minimum": 1,
+				"description": "expected current goal revision (optional CAS fence)",
+			},
 			"status": map[string]any{
 				"type": "string",
 				"enum": []string{
@@ -352,6 +373,10 @@ func (PlanStatusTool) Schema() map[string]any {
 					string(StatusDone), string(StatusCancelled),
 				},
 				"description": "new status: pending, in-progress, paused, blocked, done or cancelled",
+			},
+			"reason": map[string]any{
+				"type":        "string",
+				"description": "optional human-readable blocker reason when status is blocked",
 			},
 		},
 		"required":             []string{"scope", "id", "status"},
@@ -361,9 +386,11 @@ func (PlanStatusTool) Schema() map[string]any {
 
 func (t PlanStatusTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var a struct {
-		Scope  string `json:"scope"`
-		ID     string `json:"id"`
-		Status string `json:"status"`
+		Scope    string `json:"scope"`
+		ID       string `json:"id"`
+		Status   string `json:"status"`
+		Reason   string `json:"reason"`
+		Revision int    `json:"revision"`
 	}
 	if err := json.Unmarshal(args, &a); err != nil {
 		return "", fmt.Errorf("plan_status: %w", err)
@@ -375,10 +402,31 @@ func (t PlanStatusTool) Execute(ctx context.Context, args json.RawMessage) (stri
 	if !validStatus(st) {
 		return "", fmt.Errorf("plan_status: invalid status %q (expected pending, in-progress, paused, blocked, done or cancelled)", a.Status)
 	}
-	if err := t.t.e.SetStatus(ctx, a.Scope, a.ID, st); err != nil {
-		return "", fmt.Errorf("plan_status: %w", err)
+	var statusErr error
+	if a.Scope == string(ScopeGoal) && a.Revision > 0 {
+		if setter, ok := t.t.e.(interface {
+			SetGoalStatusIfRevision(context.Context, string, int, Status) error
+		}); ok {
+			statusErr = setter.SetGoalStatusIfRevision(ctx, a.ID, a.Revision, st)
+		} else {
+			statusErr = t.t.e.SetStatus(ctx, a.Scope, a.ID, st)
+		}
+	} else {
+		statusErr = t.t.e.SetStatus(ctx, a.Scope, a.ID, st)
 	}
-	t.t.emit(session.EventPlanStatus, session.NewPlanStatus(a.Scope, a.ID, string(st)))
+	if statusErr != nil {
+		return "", fmt.Errorf("plan_status: %w", statusErr)
+	}
+	if a.Scope == string(ScopeGoal) && st == StatusBlocked && a.Reason != "" {
+		if setter, ok := t.t.e.(interface {
+			SetGoalBlockedReason(context.Context, string, string) error
+		}); ok {
+			if err := setter.SetGoalBlockedReason(ctx, a.ID, strings.TrimSpace(a.Reason)); err != nil {
+				return "", fmt.Errorf("plan_status: %w", err)
+			}
+		}
+	}
+	t.t.emit(session.EventPlanStatus, session.NewPlanStatus(a.Scope, a.ID, string(st), strings.TrimSpace(a.Reason)))
 	return fmt.Sprintf("set %s %s status to %s", a.Scope, a.ID, st), nil
 }
 

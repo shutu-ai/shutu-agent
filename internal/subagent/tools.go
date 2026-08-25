@@ -397,6 +397,7 @@ func (SubagentResumeTool) Schema() map[string]any {
 		"properties": map[string]any{
 			"id":          map[string]any{"type": "string", "minLength": 1},
 			"message":     map[string]any{"type": "string", "minLength": 1},
+			"provider":    map[string]any{"type": "string", "description": "original provider when resuming after a process restart"},
 			"continuable": map[string]any{"type": "boolean"},
 		},
 		"required":             []string{"id", "message"},
@@ -407,17 +408,26 @@ func (t SubagentResumeTool) Execute(ctx context.Context, args json.RawMessage) (
 	var a struct {
 		ID          string `json:"id"`
 		Message     string `json:"message"`
+		Provider    string `json:"provider"`
 		Continuable bool   `json:"continuable"`
 	}
 	if err := json.Unmarshal(args, &a); err != nil {
 		return "", fmt.Errorf("%s: %w", ToolResumeName, err)
 	}
-	run, err := t.t.rt.Resume(ctx, defaultProviderName, a.ID, a.Message, a.Continuable)
+	provider := strings.TrimSpace(a.Provider)
+	if provider == "" {
+		if info, _, ok := t.t.lookup(a.ID); ok && info.provider != "" {
+			provider = info.provider
+		} else {
+			provider = defaultProviderName
+		}
+	}
+	run, err := t.t.rt.Resume(ctx, provider, a.ID, a.Message, a.Continuable)
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", ToolResumeName, err)
 	}
-	t.t.register(run.ID, &childInfo{run: run, provider: defaultProviderName, label: "resumed"})
-	return fmt.Sprintf("resumed subagent %s", run.ID), nil
+	t.t.register(run.ID, &childInfo{run: run, provider: provider, label: "resumed"})
+	return fmt.Sprintf("resumed subagent %s (provider=%s)", run.ID, provider), nil
 }
 
 // SubagentStatusTool returns one subagent's summary: running while live, or

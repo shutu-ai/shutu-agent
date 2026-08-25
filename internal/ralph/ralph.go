@@ -14,7 +14,10 @@ import (
 )
 
 // DefaultMaxRounds is the loop cap when max_rounds is absent (D-GAP-3).
-const DefaultMaxRounds = 3
+const DefaultMaxRounds = 256
+
+// MaxRoundsLimit is the deployment safety ceiling used by the dsh tool.
+const MaxRoundsLimit = 256
 
 // Round protocol markers (D-GAP-3): a worker's final reply starting with
 // "DONE: " means the objective is met; "BLOCKED: " means an impassable
@@ -58,16 +61,27 @@ type RoundReport struct {
 
 // Engine runs the loop.
 type Engine struct {
-	spawn Spawn
+	spawn     Spawn
+	maxRounds int
 }
 
 // NewEngine returns an engine bound to a spawn capability. A nil spawn is
 // rejected at use time (NewEngine errors).
 func NewEngine(spawn Spawn) (*Engine, error) {
+	return NewEngineWithLimit(spawn, MaxRoundsLimit)
+}
+
+// NewEngineWithLimit binds a deployment-owned round ceiling. Model-provided
+// max_rounds values above it are rejected instead of silently weakening the
+// host policy.
+func NewEngineWithLimit(spawn Spawn, limit int) (*Engine, error) {
 	if spawn == nil {
 		return nil, fmt.Errorf("ralph: engine requires a spawn capability")
 	}
-	return &Engine{spawn: spawn}, nil
+	if limit <= 0 {
+		limit = MaxRoundsLimit
+	}
+	return &Engine{spawn: spawn, maxRounds: limit}, nil
 }
 
 // Run executes the fresh-agent loop up to maxRounds (<=0 → DefaultMaxRounds).
@@ -76,6 +90,9 @@ func NewEngine(spawn Spawn) (*Engine, error) {
 func (e *Engine) Run(ctx context.Context, objective string, maxRounds int) (Report, error) {
 	if maxRounds <= 0 {
 		maxRounds = DefaultMaxRounds
+	}
+	if e.maxRounds > 0 && maxRounds > e.maxRounds {
+		return Report{}, fmt.Errorf("ralph: max_rounds %d exceeds deployment limit %d", maxRounds, e.maxRounds)
 	}
 	rep := Report{Objective: objective, MaxRounds: maxRounds}
 	prevBrief := ""

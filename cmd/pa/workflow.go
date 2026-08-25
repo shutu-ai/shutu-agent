@@ -49,7 +49,6 @@ func (a *app) registerWorkflow() error {
 	if err != nil {
 		return err
 	}
-	parentID := a.currentID
 	startAgent := func(ctx context.Context, req workflow.AgentRequest) (workflow.AgentResult, error) {
 		provider := req.Provider
 		if provider == "" {
@@ -59,11 +58,13 @@ func (a *app) registerWorkflow() error {
 			provider = "spawn"
 		}
 		run, err := a.subagents.Start(ctx, provider, subagent.StartRequest{
-			Label:           req.Label,
-			Prompt:          req.Prompt,
-			Model:           req.Model,
-			OutputSchema:    req.Schema,
-			ParentSessionID: parentID,
+			Label:        req.Label,
+			Prompt:       req.Prompt,
+			Model:        req.Model,
+			OutputSchema: req.Schema,
+			// Read the parent at spawn time. A workflow can outlive a /new or
+			// /resume command, and dsh attributes each child to the live owner.
+			ParentSessionID: a.currentID,
 		})
 		if err != nil {
 			return workflow.AgentResult{}, err
@@ -72,7 +73,7 @@ func (a *app) registerWorkflow() error {
 		if err != nil {
 			return workflow.AgentResult{}, err
 		}
-		return workflow.AgentResult{ID: run.ID, Output: res.Output, StopReason: res.StopReason}, nil
+		return workflow.AgentResult{ID: run.ID, Output: res.Output, StopReason: res.StopReason, Structured: res.Structured}, nil
 	}
 	scriptRunner := nodeworkflow.New(nodeworkflow.Config{
 		MaxConcurrent:   a.cfg.Workflow.MaxConcurrent,

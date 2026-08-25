@@ -1239,6 +1239,7 @@ type planStatusData struct {
 	Scope  string `json:"scope"`
 	ID     string `json:"id"`
 	Status string `json:"status"`
+	Reason string `json:"reason,omitempty"`
 }
 
 // planListData is the plan/list payload: the number of goals in the returned
@@ -1301,8 +1302,12 @@ func NewPlanDelete(scope, id string) any {
 
 // NewPlanStatus builds the plan/status payload recorded when plan_status sets
 // a record's status (dispatch-m6b-2 §1 / D3).
-func NewPlanStatus(scope, id string, st string) any {
-	return planStatusData{Scope: scope, ID: id, Status: st}
+func NewPlanStatus(scope, id string, st string, reason ...string) any {
+	data := planStatusData{Scope: scope, ID: id, Status: st}
+	if len(reason) > 0 {
+		data.Reason = reason[0]
+	}
+	return data
 }
 
 // NewPlanList builds the plan/list payload recorded when plan_list returns the

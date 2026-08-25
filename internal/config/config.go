@@ -159,6 +159,7 @@ const (
 	DefaultWorkflowMaxTotalAgents  = 1000
 	DefaultWorkflowMaxItemsPerCall = 4096
 	DefaultWorkflowSyncTimeoutMS   = 5000
+	DefaultRalphMaxRounds          = 256
 
 	// Mode presets (ADR 2026-08-20-mode-presets.md D-MODE-1): the top-level
 	// mode selects the agent's capability preset — minimal (极简: 固定 persona
@@ -341,6 +342,9 @@ type EvalConfig struct {
 // Runtime). minimal 模式同样关闭 (D-MODE-2).
 type RalphConfig struct {
 	Enabled *bool `yaml:"enabled"` // default false (D10)
+	// MaxRounds is the deployment ceiling for one fresh-agent loop. <= 0 uses
+	// dsh's default 256.
+	MaxRounds int `yaml:"max_rounds"`
 }
 
 // WorkflowConfig is the dsh-compatible workflow policy. The capability is
@@ -1338,6 +1342,9 @@ func applyDefaults(cfg *Config) {
 				cfg.Tools.Enabled = append(cfg.Tools.Enabled, name)
 			}
 		}
+	}
+	if cfg.Ralph.MaxRounds <= 0 || cfg.Ralph.MaxRounds > DefaultRalphMaxRounds {
+		cfg.Ralph.MaxRounds = DefaultRalphMaxRounds
 	}
 	// GAP-3 workflow defaults: off by default (D10); the ready-task concurrency
 	// cap is 4. Enabling workflow whitelists its single consumer tool

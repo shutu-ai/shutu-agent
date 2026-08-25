@@ -50,6 +50,20 @@ func NewEngine(prov Provider) *engine {
 // CreateGoal validates the title and creates a pending goal with a fresh
 // engine-issued id, returning it.
 func (e *engine) CreateGoal(ctx context.Context, title, objective string) (Goal, error) {
+	return e.createGoal(ctx, title, objective, DefaultMaxGoalRounds)
+}
+
+// CreateGoalWithMaxRounds creates a goal with a caller-selected positive
+// continuation budget. It is an optional extension used by the dsh-shaped
+// plan_goal tool; the Engine interface keeps the legacy constructor stable.
+func (e *engine) CreateGoalWithMaxRounds(ctx context.Context, title, objective string, maxRounds int) (Goal, error) {
+	if maxRounds <= 0 {
+		maxRounds = DefaultMaxGoalRounds
+	}
+	return e.createGoal(ctx, title, objective, maxRounds)
+}
+
+func (e *engine) createGoal(ctx context.Context, title, objective string, maxRounds int) (Goal, error) {
 	if err := ctx.Err(); err != nil {
 		return Goal{}, err
 	}
@@ -68,6 +82,8 @@ func (e *engine) CreateGoal(ctx context.Context, title, objective string) (Goal,
 		Objective: objective,
 		Status:    StatusPending,
 		Plans:     []string{},
+		Revision:  1,
+		MaxRounds: maxRounds,
 		CreatedAt: time.Now(),
 	}
 	e.mu.Unlock()
@@ -96,6 +112,7 @@ func (e *engine) UpdateGoal(ctx context.Context, id, title, objective string) (G
 	}
 	g.Title = title
 	g.Objective = objective
+	g.Revision = nextRevision(g.Revision)
 	if err := e.prov.PutGoal(ctx, g); err != nil {
 		return Goal{}, err
 	}
@@ -212,6 +229,10 @@ func (e *engine) SetStatus(ctx context.Context, scope string, id string, st Stat
 			return err
 		}
 		g.Status = st
+		g.Revision = nextRevision(g.Revision)
+		if st != StatusBlocked {
+			g.BlockedReason = ""
+		}
 		applyCompletedAt(&g.CompletedAt, st)
 		return e.prov.PutGoal(ctx, g)
 	case string(ScopePlan):
@@ -226,6 +247,89 @@ func (e *engine) SetStatus(ctx context.Context, scope string, id string, st Stat
 	default:
 		return fmt.Errorf("%w: %q", ErrUnknownScope, scope)
 	}
+}
+
+// SetGoalBlockedReason stores the policy-owned explanation shown with a
+// blocked Goal. It is an optional extension so generic plan consumers keep the
+// existing Engine interface.
+func (e *engine) SetGoalBlockedReason(ctx context.Context, id, reason string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := e.checkOpen(); err != nil {
+		return err
+	}
+	g, err := e.prov.GetGoal(ctx, id)
+	if err != nil {
+		return err
+	}
+	if g.Status != StatusBlocked {
+		return fmt.Errorf("plan: goal %s is not blocked", id)
+	}
+	g.BlockedReason = reason
+	return e.prov.PutGoal(ctx, g)
+}
+
+// SetGoalStatusIfRevision applies a goal mutation only when the caller still
+// holds the current revision, matching dsh's GoalRef compare-and-set fence.
+func (e *engine) SetGoalStatusIfRevision(ctx context.Context, id string, revision int, st Status) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := e.checkOpen(); err != nil {
+		return err
+	}
+	g, err := e.prov.GetGoal(ctx, id)
+	if err != nil {
+		return err
+	}
+	if revision < 1 || g.Revision != revision {
+		return fmt.Errorf("plan: stale goal revision %d (current %d)", revision, g.Revision)
+	}
+	g.Status = st
+	g.Revision = nextRevision(g.Revision)
+	if st != StatusBlocked {
+		g.BlockedReason = ""
+	}
+	applyCompletedAt(&g.CompletedAt, st)
+	return e.prov.PutGoal(ctx, g)
+}
+
+// StartGoalRound admits one and only one next continuation round. Keeping the
+// counter in the projection prevents a restart from silently resetting the
+// dsh-style per-goal budget.
+func (e *engine) StartGoalRound(ctx context.Context, id string) (Goal, error) {
+	if err := ctx.Err(); err != nil {
+		return Goal{}, err
+	}
+	if err := e.checkOpen(); err != nil {
+		return Goal{}, err
+	}
+	g, err := e.prov.GetGoal(ctx, id)
+	if err != nil {
+		return Goal{}, err
+	}
+	if g.MaxRounds <= 0 {
+		g.MaxRounds = DefaultMaxGoalRounds
+	}
+	if g.Status != StatusPending && g.Status != StatusInProgress {
+		return Goal{}, fmt.Errorf("plan: goal %s is not active (%s)", id, g.Status)
+	}
+	if g.RoundsStarted >= g.MaxRounds {
+		return Goal{}, fmt.Errorf("plan: goal %s exhausted %d rounds", id, g.MaxRounds)
+	}
+	g.RoundsStarted++
+	if err := e.prov.PutGoal(ctx, g); err != nil {
+		return Goal{}, err
+	}
+	return g, nil
+}
+
+func nextRevision(current int) int {
+	if current < 1 {
+		return 1
+	}
+	return current + 1
 }
 
 // setTodoStatus locates the todo with id across every plan, updates its status

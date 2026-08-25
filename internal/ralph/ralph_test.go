@@ -148,22 +148,22 @@ func TestRunProgressThenDone(t *testing.T) {
 	}
 }
 
-// TestRunRoundLimit: all-progress rounds exhaust the default cap without a
+// TestRunRoundLimit: all-progress rounds exhaust the explicit cap without a
 // DONE/BLOCKED outcome (a normal, non-error end).
 func TestRunRoundLimit(t *testing.T) {
 	eng := mustEngine(t, &fakeSpawn{outputs: []string{"进展一", "进展二", "进展三"}})
-	rep, err := eng.Run(context.Background(), "目标", 0)
+	rep, err := eng.Run(context.Background(), "目标", 3)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if rep.Done || rep.Blocked {
 		t.Fatalf("rep.Done=%v rep.Blocked=%v, want both false (round-limit)", rep.Done, rep.Blocked)
 	}
-	if rep.Rounds != DefaultMaxRounds {
-		t.Errorf("rep.Rounds = %d, want %d (default cap)", rep.Rounds, DefaultMaxRounds)
+	if rep.Rounds != 3 {
+		t.Errorf("rep.Rounds = %d, want 3 (explicit cap)", rep.Rounds)
 	}
-	if len(rep.RoundBriefs) != DefaultMaxRounds {
-		t.Errorf("len(rep.RoundBriefs) = %d, want %d", len(rep.RoundBriefs), DefaultMaxRounds)
+	if len(rep.RoundBriefs) != 3 {
+		t.Errorf("len(rep.RoundBriefs) = %d, want 3", len(rep.RoundBriefs))
 	}
 }
 

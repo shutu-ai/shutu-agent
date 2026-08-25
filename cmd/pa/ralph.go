@@ -42,7 +42,11 @@ func (a *app) registerRalph() error {
 		}
 		return res.Output, nil
 	}
-	eng, err := ralph.NewEngine(spawn)
+	limit := a.cfg.Ralph.MaxRounds
+	if limit <= 0 {
+		limit = ralph.MaxRoundsLimit
+	}
+	eng, err := ralph.NewEngineWithLimit(spawn, limit)
 	if err != nil {
 		return err
 	}

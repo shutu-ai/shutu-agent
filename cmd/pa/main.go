@@ -629,14 +629,19 @@ type app struct {
 	goalScheduler *schedule.DurableScheduler
 	scheduleRunMu sync.Mutex
 	scheduleWake  chan struct{}
-	plans         plan.Engine     // nil when plan disabled (D10)
-	spills        spill.Engine    // nil when spill disabled (D10)
-	interacts     interact.Engine // nil when interact disabled (D10)
-	code          code.Engine     // nil when code disabled (D10)
-	mcp           []mcp.Client    // nil when mcp disabled (D10); one live bridged client per configured server
-	fs            fs.FileService  // nil when fs disabled (D10)
-	web           *web.Engine     // nil when web disabled (D10)
-	hooks         *hookrunner.Runner
+	plans         plan.Engine // nil when plan disabled (D10)
+	// goalActivation is intentionally process-local. Durable goal state lives
+	// in the session log; opening/resuming a session disarms automatic rounds
+	// until an explicit human resume or a newly created goal arms it.
+	goalActivationMu sync.Mutex
+	goalActivation   map[string]bool
+	spills           spill.Engine    // nil when spill disabled (D10)
+	interacts        interact.Engine // nil when interact disabled (D10)
+	code             code.Engine     // nil when code disabled (D10)
+	mcp              []mcp.Client    // nil when mcp disabled (D10); one live bridged client per configured server
+	fs               fs.FileService  // nil when fs disabled (D10)
+	web              *web.Engine     // nil when web disabled (D10)
+	hooks            *hookrunner.Runner
 
 	// webserver is the M10a unified web portal (ADR 2026-08-20-m10-web-portal.md);
 	// nil when web_server disabled (D10).
@@ -746,6 +751,7 @@ func (a *app) newSession(ctx context.Context) error {
 	}
 	a.currentID = id
 	a.log = session.New()
+	a.setGoalActivation(id, false)
 	if err := a.restorePlans(); err != nil {
 		return err
 	}
@@ -780,6 +786,7 @@ func (a *app) resumeSession(ctx context.Context, id string) error {
 	}
 	a.currentID = id
 	a.log = session.New()
+	a.setGoalActivation(id, false)
 	if err := a.log.Restore(events); err != nil {
 		return err
 	}

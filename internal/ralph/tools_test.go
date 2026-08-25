@@ -59,7 +59,7 @@ func TestRalphToolExecuteFormatsReport(t *testing.T) {
 func TestRalphToolExecuteBlocked(t *testing.T) {
 	eng := mustEngine(t, &fakeSpawn{outputs: []string{"BLOCKED: 缺凭证"}})
 	tool := NewRalphTool(eng, nil)
-	out, err := tool.Execute(context.Background(), json.RawMessage(`{"objective":"x"}`))
+	out, err := tool.Execute(context.Background(), json.RawMessage(`{"objective":"x","max_rounds":3}`))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestRalphToolExecuteRejectsEmptyObjective(t *testing.T) {
 func TestRalphToolExecuteRoundLimit(t *testing.T) {
 	eng := mustEngine(t, &fakeSpawn{outputs: []string{"进展一", "进展二", "进展三"}})
 	tool := NewRalphTool(eng, nil)
-	out, err := tool.Execute(context.Background(), json.RawMessage(`{"objective":"x"}`))
+	out, err := tool.Execute(context.Background(), json.RawMessage(`{"objective":"x","max_rounds":3}`))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}

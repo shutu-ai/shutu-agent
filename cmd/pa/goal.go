@@ -24,9 +24,10 @@ func (a *app) runIdleGoal(ctx context.Context, interactive bool) error {
 		return err
 	}
 	driver := &goalservice.Driver{
-		Plans:     a.plans,
-		Log:       a.log,
-		MaxRounds: goalservice.DefaultMaxRounds,
+		Plans:  a.plans,
+		Log:    a.log,
+		Armed:  func(plan.Goal) bool { return a.goalIsArmed(a.currentID) },
+		Disarm: func(g plan.Goal) { a.setGoalActivation(a.currentID, false) },
 		Runner: func(roundCtx context.Context, prompt string) error {
 			return a.runTurn(roundCtx, prompt, interactive)
 		},
@@ -37,6 +38,33 @@ func (a *app) runIdleGoal(ctx context.Context, interactive bool) error {
 		fmt.Printf("\ngoal %s: %s after %d round(s)\n", result.GoalID, result.StopReason, result.Rounds)
 	}
 	return err
+}
+
+func (a *app) setGoalActivation(sessionID string, armed bool) {
+	if sessionID == "" {
+		return
+	}
+	a.goalActivationMu.Lock()
+	defer a.goalActivationMu.Unlock()
+	if a.goalActivation == nil {
+		a.goalActivation = make(map[string]bool)
+	}
+	a.goalActivation[sessionID] = armed
+}
+
+func (a *app) goalIsArmed(sessionID string) bool {
+	if sessionID == "" {
+		return false
+	}
+	a.goalActivationMu.Lock()
+	defer a.goalActivationMu.Unlock()
+	if a.goalActivation == nil {
+		// Bare app instances used by the CLI/tests predate the activation map;
+		// their explicit goal driver remains backwards compatible.
+		return true
+	}
+	armed, ok := a.goalActivation[sessionID]
+	return !ok || armed
 }
 
 // currentActiveGoal resolves ownership from the append-only session log and
@@ -66,6 +94,9 @@ func (a *app) currentActiveGoal(ctx context.Context) (string, error) {
 		}
 		switch status[data.ID] {
 		case plan.StatusPending, plan.StatusInProgress:
+			if !a.goalIsArmed(a.currentID) {
+				return "", nil
+			}
 			return data.ID, nil
 		}
 	}

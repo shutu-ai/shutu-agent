@@ -10,6 +10,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 
@@ -35,8 +36,17 @@ func (a *app) registerPlans() error {
 	// (/new, /resume) is honored the same way as the job/subagent/schedule
 	// wiring.
 	onEvent := func(typ string, data any) {
-		if _, err := a.log.Append(typ, data); err != nil {
-			fmt.Fprintln(os.Stderr, "pa: "+typ+" event:", err)
+		_, appendErr := a.log.Append(typ, data)
+		if appendErr != nil {
+			fmt.Fprintln(os.Stderr, "pa: "+typ+" event:", appendErr)
+		}
+		if appendErr == nil && typ == "plan/create" {
+			var fact struct {
+				Scope string `json:"scope"`
+			}
+			if raw, err := json.Marshal(data); err == nil && json.Unmarshal(raw, &fact) == nil && fact.Scope == "goal" {
+				a.setGoalActivation(a.currentID, true)
+			}
 		}
 	}
 	pt := plan.NewPlanTools(eng, onEvent)

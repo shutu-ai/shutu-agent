@@ -756,7 +756,15 @@ func renderWebGoal(g plan.Goal) string {
 	case plan.StatusDone, plan.StatusCancelled:
 		status = "complete"
 	}
-	return fmt.Sprintf("Goal\nStatus: %s\nObjective: %s\nID: %s\nPlans: %d\nCommands: /goal edit <objective> | /goal pause | /goal resume | /goal clear", status, g.Objective, g.ID, len(g.Plans))
+	maxRounds := g.MaxRounds
+	if maxRounds <= 0 {
+		maxRounds = plan.DefaultMaxGoalRounds
+	}
+	blocked := ""
+	if g.BlockedReason != "" {
+		blocked = "\nBlocked reason: " + g.BlockedReason
+	}
+	return fmt.Sprintf("Goal\nStatus: %s\nObjective: %s\nID: %s\nRounds: %d/%d\nPlans: %d%s\nCommands: /goal edit <objective> | /goal pause | /goal resume | /goal clear", status, g.Objective, g.ID, g.RoundsStarted, maxRounds, len(g.Plans), blocked)
 }
 
 // webGoalCommand follows dsh's /goal grammar while using the existing plan
@@ -787,6 +795,7 @@ func (a *app) webGoalCommand(ctx context.Context, input string) (string, error) 
 		if _, err := a.log.Append(session.EventPlanDelete, session.NewPlanDelete(string(plan.ScopeGoal), g.ID)); err != nil {
 			return "", err
 		}
+		a.setGoalActivation(a.currentID, false)
 		return "Goal cleared.", nil
 	}
 	if input == "pause" || input == "resume" {
@@ -803,11 +812,24 @@ func (a *app) webGoalCommand(ctx context.Context, input string) (string, error) 
 			st = plan.StatusInProgress
 			message = "Goal resumed."
 		}
-		if err := a.plans.SetStatus(ctx, string(plan.ScopeGoal), g.ID, st); err != nil {
-			return "", err
+		var statusErr error
+		if setter, ok := a.plans.(interface {
+			SetGoalStatusIfRevision(context.Context, string, int, plan.Status) error
+		}); ok {
+			statusErr = setter.SetGoalStatusIfRevision(ctx, g.ID, g.Revision, st)
+		} else {
+			statusErr = a.plans.SetStatus(ctx, string(plan.ScopeGoal), g.ID, st)
+		}
+		if statusErr != nil {
+			return "", statusErr
 		}
 		if _, err := a.log.Append(session.EventPlanStatus, session.NewPlanStatus(string(plan.ScopeGoal), g.ID, string(st))); err != nil {
 			return "", err
+		}
+		if input == "resume" {
+			a.setGoalActivation(a.currentID, true)
+		} else {
+			a.setGoalActivation(a.currentID, false)
 		}
 		return message, nil
 	}
@@ -862,6 +884,7 @@ func (a *app) webPlanGoal(ctx context.Context, args []string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	a.setGoalActivation(a.currentID, true)
 	return res.Output, nil
 }
 

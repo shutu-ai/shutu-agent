@@ -1,7 +1,6 @@
 // Package goal implements the same-session goal round driver seam. It owns
-// only continuation policy; plan state remains in internal/plan and model
-// execution is injected as a runner, so the core loop is not re-entered by
-// this package.
+// continuation policy; durable goal state remains in internal/plan and model
+// execution is injected as a runner.
 package goal
 
 import (
@@ -14,7 +13,8 @@ import (
 	"github.com/jabing/shutu-agent/internal/session"
 )
 
-const DefaultMaxRounds = 8
+// dsh's default deployment cap. A Goal may carry a smaller durable cap.
+const DefaultMaxRounds = 256
 
 var (
 	ErrNoRunner     = errors.New("goal: runner is not configured")
@@ -26,16 +26,15 @@ var (
 // be serialized by its owner; Driver never starts a second round concurrently.
 type Runner func(ctx context.Context, prompt string) error
 
-// Observer supplies current external progress (for example subagent/eval
-// summaries) to the next round prompt. It is fail-open: an observer error is
-// recorded in the prompt as unavailable progress rather than aborting work.
+// Observer supplies current external progress to the next round prompt. It is
+// fail-open: observer errors are rendered as unavailable progress.
 type Observer func(ctx context.Context, goal plan.Goal) (string, error)
 
 type Result struct {
 	GoalID     string
 	Rounds     int
 	Status     plan.Status
-	StopReason string // completed | blocked | round-limit | error | cancelled
+	StopReason string // completed | paused | disarmed | round-limit | error | cancelled
 }
 
 type Driver struct {
@@ -44,24 +43,20 @@ type Driver struct {
 	Runner    Runner
 	Observe   Observer
 	MaxRounds int
+	// Armed is process-local continuation authority. It is never persisted;
+	// nil keeps standalone callers backwards compatible and means armed.
+	Armed func(plan.Goal) bool
+	// Disarm removes automatic continuation authority without changing the
+	// durable objective. dsh uses this after resume/session-start and failures.
+	Disarm func(plan.Goal)
 }
 
 func (d *Driver) Run(ctx context.Context, goalID string) (Result, error) {
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
 	}
-	if d.Plans == nil {
-		return Result{}, fmt.Errorf("%w: plan engine", ErrNoRunner)
-	}
-	if d.Runner == nil {
+	if d.Plans == nil || d.Runner == nil {
 		return Result{}, ErrNoRunner
-	}
-	max := d.MaxRounds
-	if max == 0 {
-		max = DefaultMaxRounds
-	}
-	if max < 0 {
-		return Result{}, ErrInvalidRound
 	}
 	goal, err := findGoal(ctx, d.Plans, goalID)
 	if err != nil {
@@ -70,51 +65,115 @@ func (d *Driver) Run(ctx context.Context, goalID string) (Result, error) {
 	if goal.Status == plan.StatusDone {
 		return Result{GoalID: goal.ID, Status: goal.Status, StopReason: "completed"}, nil
 	}
-	if goal.Status == plan.StatusBlocked || goal.Status == plan.StatusCancelled {
+	if goal.Status == plan.StatusBlocked || goal.Status == plan.StatusCancelled || goal.Status == plan.StatusPaused {
 		return Result{GoalID: goal.ID, Status: goal.Status, StopReason: string(goal.Status)}, nil
 	}
-	if err := d.Plans.SetStatus(ctx, string(plan.ScopeGoal), goal.ID, plan.StatusInProgress); err != nil {
-		return Result{}, err
+	if d.Armed != nil && !d.Armed(goal) {
+		return Result{GoalID: goal.ID, Status: goal.Status, StopReason: "disarmed"}, nil
 	}
-	for round := 1; round <= max; round++ {
+
+	max := d.MaxRounds
+	if max <= 0 {
+		max = goal.MaxRounds
+	}
+	if max <= 0 {
+		max = DefaultMaxRounds
+	}
+	if max < 1 {
+		return Result{}, ErrInvalidRound
+	}
+	if goal.RoundsStarted >= max {
+		d.disarm(goal)
+		return Result{GoalID: goal.ID, Status: goal.Status, StopReason: "round-limit"}, nil
+	}
+	if goal.Status == plan.StatusPending {
+		if err := d.setStatus(ctx, goal.ID, plan.StatusInProgress); err != nil {
+			return Result{}, err
+		}
+	}
+
+	started := 0
+	remaining := max - goal.RoundsStarted
+	for started < remaining {
 		if err := ctx.Err(); err != nil {
-			_ = d.Plans.SetStatus(context.Background(), string(plan.ScopeGoal), goal.ID, plan.StatusBlocked)
-			d.appendEnd(goal.ID, round, "cancelled", err.Error())
-			return Result{GoalID: goal.ID, Rounds: round - 1, Status: plan.StatusBlocked, StopReason: "cancelled"}, err
+			d.disarm(goal)
+			_ = d.setStatus(context.Background(), goal.ID, plan.StatusPaused)
+			d.appendEnd(goal.ID, goal.RoundsStarted, "cancelled", err.Error())
+			return Result{GoalID: goal.ID, Rounds: started, Status: plan.StatusPaused, StopReason: "cancelled"}, err
 		}
 		goal, err = findGoal(ctx, d.Plans, goalID)
 		if err != nil {
 			return Result{}, err
 		}
-		if goal.Status == plan.StatusDone {
-			return Result{GoalID: goal.ID, Rounds: round - 1, Status: goal.Status, StopReason: "completed"}, nil
+		if goal.Status == plan.StatusDone || goal.Status == plan.StatusBlocked || goal.Status == plan.StatusCancelled || goal.Status == plan.StatusPaused {
+			reason := string(goal.Status)
+			if goal.Status == plan.StatusDone {
+				reason = "completed"
+			}
+			return Result{GoalID: goal.ID, Rounds: started, Status: goal.Status, StopReason: reason}, nil
 		}
-		if goal.Status == plan.StatusBlocked || goal.Status == plan.StatusCancelled {
-			return Result{GoalID: goal.ID, Rounds: round - 1, Status: goal.Status, StopReason: string(goal.Status)}, nil
+		if d.Armed != nil && !d.Armed(goal) {
+			return Result{GoalID: goal.ID, Rounds: started, Status: goal.Status, StopReason: "disarmed"}, nil
 		}
-		prompt := renderPrompt(goal, round, max, d.Observe, ctx)
-		d.appendStart(goal.ID, round, prompt)
+
+		admitted := goal.RoundsStarted + 1
+		if counter, ok := d.Plans.(interface {
+			StartGoalRound(context.Context, string) (plan.Goal, error)
+		}); ok {
+			goal, err = counter.StartGoalRound(ctx, goal.ID)
+			if err != nil {
+				return Result{}, err
+			}
+			admitted = goal.RoundsStarted
+		}
+		prompt := renderPrompt(goal, admitted, max, d.Observe, ctx)
+		d.appendStart(goal.ID, admitted, prompt)
+		started++
 		runErr := d.Runner(ctx, prompt)
 		if runErr != nil {
-			_ = d.Plans.SetStatus(context.Background(), string(plan.ScopeGoal), goal.ID, plan.StatusBlocked)
-			d.appendEnd(goal.ID, round, "error", runErr.Error())
-			return Result{GoalID: goal.ID, Rounds: round, Status: plan.StatusBlocked, StopReason: "error"}, runErr
+			d.disarm(goal)
+			if ctx.Err() != nil {
+				_ = d.setStatus(context.Background(), goal.ID, plan.StatusPaused)
+				d.appendEnd(goal.ID, admitted, "cancelled", ctx.Err().Error())
+				return Result{GoalID: goal.ID, Rounds: started, Status: plan.StatusPaused, StopReason: "cancelled"}, ctx.Err()
+			}
+			// Provider and persistence failures are not prompt-level blockers. The
+			// objective stays active and requires an explicit resume.
+			d.appendEnd(goal.ID, admitted, "error", runErr.Error())
+			return Result{GoalID: goal.ID, Rounds: started, Status: plan.StatusInProgress, StopReason: "error"}, runErr
 		}
+
 		goal, err = findGoal(ctx, d.Plans, goalID)
 		if err != nil {
 			return Result{}, err
 		}
-		d.appendEnd(goal.ID, round, string(goal.Status), "")
+		d.appendEnd(goal.ID, admitted, string(goal.Status), "")
 		if goal.Status == plan.StatusDone {
-			return Result{GoalID: goal.ID, Rounds: round, Status: goal.Status, StopReason: "completed"}, nil
+			return Result{GoalID: goal.ID, Rounds: started, Status: goal.Status, StopReason: "completed"}, nil
 		}
-		if goal.Status == plan.StatusBlocked || goal.Status == plan.StatusCancelled {
-			return Result{GoalID: goal.ID, Rounds: round, Status: goal.Status, StopReason: string(goal.Status)}, nil
+		if goal.Status == plan.StatusBlocked || goal.Status == plan.StatusCancelled || goal.Status == plan.StatusPaused {
+			return Result{GoalID: goal.ID, Rounds: started, Status: goal.Status, StopReason: string(goal.Status)}, nil
 		}
 	}
-	_ = d.Plans.SetStatus(context.Background(), string(plan.ScopeGoal), goal.ID, plan.StatusBlocked)
-	d.appendEnd(goal.ID, max, "round-limit", "")
-	return Result{GoalID: goal.ID, Rounds: max, Status: plan.StatusBlocked, StopReason: "round-limit"}, nil
+	d.disarm(goal)
+	d.appendEnd(goal.ID, goal.RoundsStarted, "round-limit", "")
+	return Result{GoalID: goal.ID, Rounds: started, Status: goal.Status, StopReason: "round-limit"}, nil
+}
+
+func (d *Driver) disarm(goal plan.Goal) {
+	if d.Disarm != nil {
+		d.Disarm(goal)
+	}
+}
+
+func (d *Driver) setStatus(ctx context.Context, id string, status plan.Status) error {
+	if err := d.Plans.SetStatus(ctx, string(plan.ScopeGoal), id, status); err != nil {
+		return err
+	}
+	if d.Log != nil {
+		_, _ = d.Log.Append(session.EventPlanStatus, session.NewPlanStatus(string(plan.ScopeGoal), id, string(status)))
+	}
+	return nil
 }
 
 func findGoal(ctx context.Context, e plan.Engine, id string) (plan.Goal, error) {
@@ -150,6 +209,7 @@ func (d *Driver) appendStart(id string, round int, prompt string) {
 		_, _ = d.Log.Append(session.EventGoalRoundStart, session.NewGoalRoundStart(id, round, prompt))
 	}
 }
+
 func (d *Driver) appendEnd(id string, round int, status, errText string) {
 	if d.Log != nil {
 		_, _ = d.Log.Append(session.EventGoalRoundEnd, session.NewGoalRoundEnd(id, round, status, errText))

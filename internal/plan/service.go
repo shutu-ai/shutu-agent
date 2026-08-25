@@ -29,6 +29,11 @@ import (
 // and todos (dsh goal GoalStatus / plan-mode Status / tool-todo TodoStatus).
 type Status string
 
+// DefaultMaxGoalRounds follows dsh's deployment default for same-session goal
+// continuation. A goal may override it at creation time in future API layers;
+// legacy callers receive this value automatically.
+const DefaultMaxGoalRounds = 256
+
 const (
 	StatusPending    Status = "pending"     // created, not started
 	StatusInProgress Status = "in-progress" // actively being worked on
@@ -76,14 +81,25 @@ type Plan struct {
 // Goal is the root of the aggregation tree (dsh goal Goal): a one-paragraph
 // objective that owns an ordered list of plan ids.
 type Goal struct {
-	ID          string // engine-issued id ("goal-N")
-	Title       string
-	Objective   string // one-paragraph goal description
-	Status      Status
-	Plans       []string // plan id list in creation order (DAG under the goal)
-	Owner       string   // owning session id (optional)
-	CreatedAt   time.Time
-	CompletedAt *time.Time // set when Status turns done; cleared on a live status
+	ID        string // engine-issued id ("goal-N")
+	Title     string
+	Objective string // one-paragraph goal description
+	Status    Status
+	Plans     []string // plan id list in creation order (DAG under the goal)
+	Owner     string   // owning session id (optional)
+	// Revision changes on every durable goal mutation. It gives callers a
+	// lightweight compare-and-set fence, matching dsh's GoalRef semantics.
+	Revision int `json:"revision"`
+	// MaxRounds is the durable per-goal continuation budget. Zero is treated as
+	// the deployment default when reading legacy records.
+	MaxRounds int `json:"maxRounds"`
+	// RoundsStarted counts admitted same-session continuation rounds. It is
+	// separate from Revision and is restored from goal/round_start facts.
+	RoundsStarted int `json:"roundsStarted"`
+	// BlockedReason is policy text retained for the Web/model projection.
+	BlockedReason string `json:"blockedReason,omitempty"`
+	CreatedAt     time.Time
+	CompletedAt   *time.Time // set when Status turns done; cleared on a live status
 }
 
 // Provider is one plan backend (design.md §10 D2: Service / Provider / Consumer
@@ -140,6 +156,10 @@ type Engine interface {
 	// rejected; an unknown scope is rejected. A transition to done stamps
 	// CompletedAt (goals and todos); a transition away clears it.
 	SetStatus(ctx context.Context, scope string, id string, st Status) error
+	// StartGoalRound admits exactly the next continuation round and persists its
+	// counter in the projection. The driver records the corresponding durable
+	// goal/round_start fact separately in the session log.
+	StartGoalRound(ctx context.Context, id string) (Goal, error)
 	// List returns every goal — the goal → plans → todos aggregation tree: each
 	// goal carries its ordered Plans ids, each plan its ordered Steps (via
 	// GetPlan). Goals are sorted by id. Standalone plans (GoalID "") are not in
