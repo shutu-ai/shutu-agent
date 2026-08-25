@@ -33,6 +33,7 @@ describe('WebStore', () => {
   it('loads a session and de-duplicates live events by sequence', async () => {
     let emitted = false
     const api: WebApi = {
+      getConfig: async () => ({}),
       listSessions: async () => [session('one')],
       createSession: async () => ({ id: 'new' }),
       resumeSession: async () => undefined,
@@ -66,6 +67,7 @@ describe('WebStore', () => {
     let resolveOlder!: (value: EventPage) => void
     const olderPage = new Promise<EventPage>(resolve => { resolveOlder = resolve })
     const api: WebApi = {
+      getConfig: async () => ({}),
       listSessions: async () => [],
       createSession: async () => ({ id: 'new' }),
       resumeSession: async () => undefined,
@@ -97,6 +99,7 @@ describe('WebStore', () => {
   it('marks bearer authentication as required and retries after a token update', async () => {
     let authorized = false
     const api: WebApi = {
+      getConfig: async () => ({}),
       listSessions: async () => {
         if (!authorized) throw new ShutuApiError('unauthorized', 401)
         return [session('secure')]

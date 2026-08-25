@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
-import type { EventDetails, EventView, SessionSummary } from './api'
+import type { ConfigView, EventDetails, EventView, SessionSummary } from './api'
 import { projectDshConversation, type DshConversationNode, type DshConversationSnapshot } from './dsh-conversation'
 import { projectDshTrajectory, type DshTimelineMode } from './dsh-trajectory'
 import { WebStore } from './store'
@@ -51,18 +51,19 @@ function sessionStatus(session: SessionSummary): { tone: 'running' | 'done' | 'i
 type SidebarDialog =
   | { kind: 'rename'; session: SessionSummary }
   | { kind: 'archive' | 'delete'; session: SessionSummary }
-  | { kind: 'settings' }
 
 function SessionBrowser({
   sessions,
   selectedId,
   store,
   onError,
+  onSettings,
 }: {
   sessions: readonly SessionSummary[]
   selectedId: string | null
   store: WebStore
   onError: (error: unknown) => void
+  onSettings: () => void
 }) {
   const [query, setQuery] = useState('')
   const [searchOpen, setSearchOpen] = useState(false)
@@ -132,12 +133,91 @@ function SessionBrowser({
         {expanded && query.trim() === '' && overflow > 0 && <button className="session-overflow" type="button" onClick={() => setExpanded(false)}>Show fewer sessions</button>}
         {visible.length === 0 && <div className="sidebar-empty">{query ? 'No matching sessions' : 'No sessions yet'}</div>}
       </div>
-      <button className="settings-button" type="button" onClick={() => setDialog({ kind: 'settings' })}><span aria-hidden="true">⚙</span> Settings</button>
+      <button className="settings-button" type="button" onClick={onSettings}><span aria-hidden="true">⚙</span> Settings</button>
     </aside>
     {dialog?.kind === 'rename' && <div className="sidebar-dialog-backdrop" role="presentation" onMouseDown={() => !working && setDialog(null)}><form className="sidebar-dialog" role="dialog" aria-modal="true" aria-labelledby="rename-session-title" onSubmit={event => { event.preventDefault(); void run(() => store.renameSession(dialog.session.id, draftTitle.trim())) }} onMouseDown={event => event.stopPropagation()}><h2 id="rename-session-title">Rename session</h2><input autoFocus value={draftTitle} onChange={event => setDraftTitle(event.target.value)} maxLength={120} aria-label="Session name" /><div className="dialog-actions"><button type="button" onClick={() => setDialog(null)} disabled={working}>Cancel</button><button type="submit" disabled={working || draftTitle.trim() === ''}>Save</button></div></form></div>}
     {(dialog?.kind === 'archive' || dialog?.kind === 'delete') && <div className="sidebar-dialog-backdrop" role="presentation" onMouseDown={() => !working && setDialog(null)}><div className="sidebar-dialog" role="dialog" aria-modal="true" aria-labelledby="session-action-title" onMouseDown={event => event.stopPropagation()}><h2 id="session-action-title">{dialog.kind === 'archive' ? 'Archive session?' : 'Delete session?'}</h2><p>{dialog.kind === 'archive' ? 'The session will leave the active list and remain in storage.' : 'This permanently removes the session and its events.'}</p><div className="dialog-actions"><button type="button" onClick={() => setDialog(null)} disabled={working}>Cancel</button><button type="button" className={dialog.kind === 'delete' ? 'danger-button' : ''} disabled={working} onClick={() => void run(() => dialog.kind === 'archive' ? store.archiveSession(dialog.session.id) : store.deleteSession(dialog.session.id))}>{dialog.kind === 'archive' ? 'Archive' : 'Delete'}</button></div></div></div>}
-    {dialog?.kind === 'settings' && <div className="sidebar-dialog-backdrop" role="presentation" onMouseDown={() => setDialog(null)}><div className="sidebar-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title" onMouseDown={event => event.stopPropagation()}><h2 id="settings-title">Settings</h2><p>Settings panel is reserved for the next work package.</p><div className="dialog-actions"><button type="button" onClick={() => setDialog(null)}>Close</button></div></div></div>}
   </>
+}
+
+type SettingsSection = 'general' | 'model' | 'capabilities' | 'tools'
+type ThemePreference = 'dark' | 'light'
+
+const CAPABILITY_LABELS: Record<string, string> = {
+  code_enabled: '代码执行', compaction_enabled: '上下文压缩', eval_enabled: '评估工具',
+  fs_enabled: '文件系统', fs_search_enabled: '文件搜索', interact_enabled: '交互提问',
+  jobs_enabled: '后台任务', mcp_enabled: 'MCP 工具', multimodal_enabled: '多模态',
+  plan_enabled: '计划模式', ralph_enabled: 'Ralph 工作流', schedule_enabled: '定时任务',
+  skill_enabled: '技能系统', spill_enabled: '上下文溢出存储', subagent_enabled: '子代理',
+  terminal_enabled: '终端', web_enabled: '网页访问', workflow_enabled: '工作流',
+}
+
+function configText(config: ConfigView | null, key: string, fallback = '—'): string {
+  const value = config?.[key]
+  return typeof value === 'string' && value !== '' ? value : fallback
+}
+
+function SettingsPage({ store, theme, onThemeChange, onBack }: {
+  store: WebStore
+  theme: ThemePreference
+  onThemeChange: (theme: ThemePreference) => void
+  onBack: () => void
+}) {
+  const [section, setSection] = useState<SettingsSection>('general')
+  const [config, setConfig] = useState<ConfigView | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [reload, setReload] = useState(0)
+
+  useEffect(() => {
+    const abort = new AbortController()
+    setLoading(true)
+    setError(null)
+    void store.getConfig(abort.signal).then(value => {
+      if (!abort.signal.aborted) setConfig(value)
+    }).catch(reason => {
+      if (!abort.signal.aborted) setError(reason instanceof Error ? reason.message : String(reason))
+    }).finally(() => {
+      if (!abort.signal.aborted) setLoading(false)
+    })
+    return () => abort.abort()
+  }, [reload, store])
+
+  const capabilities = useMemo(() => Object.entries(config ?? {})
+    .filter(([key, value]) => key.endsWith('_enabled') && typeof value === 'boolean')
+    .sort(([left], [right]) => (CAPABILITY_LABELS[left] ?? left).localeCompare(CAPABILITY_LABELS[right] ?? right, 'zh-CN')),
+  [config])
+  const tools = useMemo(() => Array.isArray(config?.tools_enabled)
+    ? config.tools_enabled.filter((tool): tool is string => typeof tool === 'string')
+    : [], [config])
+  const toolCount = typeof config?.tools_enabled_count === 'number' ? config.tools_enabled_count : tools.length
+  const sections: { id: SettingsSection; label: string; hint: string }[] = [
+    { id: 'general', label: '通用设置', hint: '界面与运行模式' },
+    { id: 'model', label: '模型', hint: '当前会话模型' },
+    { id: 'capabilities', label: '能力开关', hint: '功能启用状态' },
+    { id: 'tools', label: '工具', hint: `${toolCount} 个已注册工具` },
+  ]
+
+  return <div className="settings-page">
+    <header className="settings-topbar">
+      <button className="settings-back" type="button" onClick={onBack}>‹ 返回聊天</button>
+      <div className="settings-theme-toggle" role="group" aria-label="主题"><button type="button" className={theme === 'light' ? 'selected' : ''} onClick={() => onThemeChange('light')}>浅色</button><button type="button" className={theme === 'dark' ? 'selected' : ''} onClick={() => onThemeChange('dark')}>深色</button></div>
+    </header>
+    <main className="settings-panel">
+      <div className="settings-heading"><div><span className="eyebrow">DSH WEB</span><h1>设置</h1><p>查看当前运行配置与已启用能力。</p></div><button className="settings-close" type="button" onClick={onBack} aria-label="关闭设置">×</button></div>
+      <div className="settings-layout">
+        <nav className="settings-nav" aria-label="设置分区">{sections.map(item => <button key={item.id} type="button" className={section === item.id ? 'selected' : ''} onClick={() => setSection(item.id)}><strong>{item.label}</strong><span>{item.hint}</span></button>)}</nav>
+        <section className="settings-content" aria-live="polite">
+          {loading && <div className="settings-state"><div className="spinner" />正在加载配置…</div>}
+          {!loading && error && <div className="settings-state settings-error"><strong>配置读取失败</strong><span>{error}</span><button type="button" onClick={() => setReload(value => value + 1)}>重试</button></div>}
+          {!loading && !error && config !== null && section === 'general' && <div className="settings-section"><h2>通用设置</h2><p className="settings-description">这些选项描述当前 Web 工作区的运行方式。</p><div className="setting-group"><h3>外观</h3><div className="appearance-options"><button type="button" className={theme === 'light' ? 'selected' : ''} onClick={() => onThemeChange('light')}><span className="appearance-swatch light-swatch" />浅色</button><button type="button" className={theme === 'dark' ? 'selected' : ''} onClick={() => onThemeChange('dark')}><span className="appearance-swatch dark-swatch" />深色</button></div></div><div className="setting-row"><div><strong>运行模式</strong><span>当前 Agent 的默认权限与行为模式</span></div><code>{configText(config, 'mode')}</code></div><div className="setting-row"><div><strong>Web 地址</strong><span>当前服务监听地址</span></div><code>{configText(config, 'web_server_addr')}</code></div><div className="setting-row"><div><strong>配置文件</strong><span>配置由服务启动时加载，Web 端只读展示</span></div><span className="readonly-badge">只读</span></div><div className="settings-note">修改配置文件或能力开关后，重启 Shutu 服务才能生效。</div></div>}
+          {!loading && !error && config !== null && section === 'model' && <div className="settings-section"><h2>模型</h2><p className="settings-description">当前连接使用的模型配置。</p><article className="model-card"><div className="model-card-head"><div className="model-avatar">D</div><div><strong>DeepSeek</strong><span>{configText(config, 'llm_provider')}</span></div><span className="readonly-badge">只读</span></div><div className="model-fields"><div><span>模型 ID</span><code>{configText(config, 'model')}</code></div><div><span>API 地址</span><code>{configText(config, 'base_url', '使用默认地址')}</code></div><div><span>会话模式</span><code>{configText(config, 'mode')}</code></div></div></article><div className="settings-note">模型切换与凭据管理由服务端配置负责，当前页面不直接修改提供方。</div></div>}
+          {!loading && !error && config !== null && section === 'capabilities' && <div className="settings-section"><h2>能力开关</h2><p className="settings-description">根据服务端配置自动发现的功能开关。</p><div className="capability-list">{capabilities.map(([key, value]) => <div className="capability-row" key={key}><div><strong>{CAPABILITY_LABELS[key] ?? key.replace(/_enabled$/, '')}</strong><span>{key}</span></div><span className={`capability-status ${value ? 'on' : 'off'}`}>{value ? '已启用' : '已关闭'}</span></div>)}</div></div>}
+          {!loading && !error && config !== null && section === 'tools' && <div className="settings-section"><h2>工具</h2><p className="settings-description">当前注册并可供 Agent 使用的工具。</p><div className="tool-summary"><strong>{toolCount}</strong><span>个工具已启用</span></div><div className="tool-list">{tools.length > 0 ? tools.map(tool => <span className="tool-chip" key={tool}>{tool}</span>) : <span className="muted">服务端未返回工具清单。</span>}</div><div className="settings-note">工具的实际可用性还会受到对应能力开关和当前会话权限影响。</div></div>}
+        </section>
+      </div>
+    </main>
+  </div>
 }
 
 function detailText(value: unknown): string {
@@ -360,6 +440,11 @@ export function App({ store }: { store: WebStore }) {
   const [sendError, setSendError] = useState<string | null>(null)
   const [focusedSeq, setFocusedSeq] = useState<number | null>(null)
   const [token, setToken] = useState(() => store.getToken())
+  const [settingsOpen, setSettingsOpen] = useState(() => typeof window !== 'undefined' && window.location.hash === '#/settings')
+  const [theme, setTheme] = useState<ThemePreference>(() => {
+    if (typeof localStorage === 'undefined') return 'dark'
+    try { return localStorage.getItem('shutu.web.theme') === 'light' ? 'light' : 'dark' } catch { return 'dark' }
+  })
   const selected = state.sessions.find(session => session.id === state.selectedId)
   const filtered = useMemo(() => {
     const query = search.trim().toLocaleLowerCase()
@@ -372,6 +457,25 @@ export function App({ store }: { store: WebStore }) {
   }, [search, state.events, tab])
 
   useEffect(() => { void store.start() }, [store])
+
+  useEffect(() => {
+    const syncRoute = () => setSettingsOpen(window.location.hash === '#/settings')
+    window.addEventListener('hashchange', syncRoute)
+    window.addEventListener('popstate', syncRoute)
+    return () => { window.removeEventListener('hashchange', syncRoute); window.removeEventListener('popstate', syncRoute) }
+  }, [])
+
+  useEffect(() => {
+    document.body.dataset.theme = theme
+    document.documentElement.style.colorScheme = theme
+    try { localStorage.setItem('shutu.web.theme', theme) } catch { /* optional preference */ }
+  }, [theme])
+
+  const setSettingsRoute = (open: boolean): void => {
+    setSettingsOpen(open)
+    const hash = open ? '#/settings' : '#/'
+    if (window.location.hash !== hash) window.location.hash = hash
+  }
 
   const submit = async (): Promise<void> => {
     const value = draft.trim()
@@ -400,8 +504,10 @@ export function App({ store }: { store: WebStore }) {
     }
   }
 
+  if (settingsOpen) return <SettingsPage store={store} theme={theme} onThemeChange={setTheme} onBack={() => setSettingsRoute(false)} />
+
   return <div className="shell">
-    <SessionBrowser sessions={state.sessions} selectedId={state.selectedId} store={store} onError={error => setSendError(error instanceof Error ? error.message : String(error))} />
+    <SessionBrowser sessions={state.sessions} selectedId={state.selectedId} store={store} onError={error => setSendError(error instanceof Error ? error.message : String(error))} onSettings={() => setSettingsRoute(true)} />
     <main className="main-panel">
       <header className="topbar">
         <div><h1>{selected?.title || (state.selectedId ? state.selectedId : 'Conversation')}</h1><div className="status-line"><span className={state.connected ? 'status-dot online' : 'status-dot'} />{state.connected ? 'Live' : 'Reconnecting'}</div></div>

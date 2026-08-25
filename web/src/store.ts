@@ -1,4 +1,4 @@
-import type { EventView, SessionSummary, WebApi } from './api'
+import type { ConfigView, EventView, SessionSummary, WebApi } from './api'
 import { ShutuApiError } from './api'
 
 export interface WebState {
@@ -192,6 +192,10 @@ export class WebStore {
   }
 
   getToken(): string { return this.api.getToken?.() ?? '' }
+
+  getConfig(signal?: AbortSignal): Promise<ConfigView> {
+    return this.api.getConfig(signal)
+  }
 
   async authenticate(token: string): Promise<void> {
     this.api.setToken?.(token)

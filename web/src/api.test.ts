@@ -2,6 +2,20 @@ import { describe, expect, it } from 'vitest'
 import { ShutuApi } from './api'
 
 describe('ShutuApi', () => {
+  it('loads the sanitized read-only config endpoint with bearer authentication', async () => {
+    let requestURL = ''
+    let requestHeaders: Headers | undefined
+    const api = new ShutuApi('https://shutu.test', 'secret', async (input, init) => {
+      requestURL = String(input)
+      requestHeaders = new Headers(init?.headers)
+      return new Response(JSON.stringify({ model: 'deepseek-v4-flash', terminal_enabled: true }), { status: 200 })
+    })
+
+    await expect(api.getConfig()).resolves.toMatchObject({ model: 'deepseek-v4-flash', terminal_enabled: true })
+    expect(requestURL).toBe('https://shutu.test/api/config')
+    expect(requestHeaders?.get('Authorization')).toBe('Bearer secret')
+  })
+
   it('builds encoded cursor requests with bearer authentication', async () => {
     let requestURL = ''
     let requestHeaders: Headers | undefined

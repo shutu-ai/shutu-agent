@@ -53,9 +53,24 @@ export interface EventPageCursor {
   limit?: number
 }
 
+export interface ConfigView {
+  model?: string
+  base_url?: string
+  llm_provider?: string
+  reasoning_effort?: string
+  mode?: string
+  web_server_addr?: string
+  tools_enabled?: string[]
+  tools_enabled_count?: number
+  providers?: unknown[]
+  mcp_servers?: unknown[]
+  [key: string]: unknown
+}
+
 export type EventListener = (event: EventView) => void
 
 export interface WebApi {
+  getConfig(signal?: AbortSignal): Promise<ConfigView>
   listSessions(signal?: AbortSignal): Promise<SessionSummary[]>
   createSession(signal?: AbortSignal): Promise<{ id: string }>
   resumeSession(sessionId: string, signal?: AbortSignal): Promise<void>
@@ -107,6 +122,10 @@ export class ShutuApi implements WebApi {
 
   listSessions(signal?: AbortSignal): Promise<SessionSummary[]> {
     return this.json<SessionSummary[]>('/api/sessions', { signal })
+  }
+
+  getConfig(signal?: AbortSignal): Promise<ConfigView> {
+    return this.json<ConfigView>('/api/config', { signal })
   }
 
   async createSession(signal?: AbortSignal): Promise<{ id: string }> {

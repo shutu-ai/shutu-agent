@@ -1196,15 +1196,18 @@ func (a *app) stopTurn(sessionID string) error {
 }
 
 func (a *app) webConfig() map[string]any {
+	tools := a.webToolCatalog()
 	return map[string]any{
-		`commands`:         a.webCommandCatalog(),
-		"model":            llmProviderModel(a.cfg, a.cfg.LLM.Provider),
-		"base_url":         a.cfg.BaseURL,
-		"llm_provider":     a.cfg.LLM.Provider,
-		"reasoning_effort": a.cfg.ReasoningEffort,
-		"mode":             a.cfg.Mode,
-		"providers":        a.webProviders(), // P5.1 live model pickers
-		"mcp_servers":      a.webMCPServers(),
+		`commands`:            a.webCommandCatalog(),
+		"model":               llmProviderModel(a.cfg, a.cfg.LLM.Provider),
+		"base_url":            a.cfg.BaseURL,
+		"llm_provider":        a.cfg.LLM.Provider,
+		"reasoning_effort":    a.cfg.ReasoningEffort,
+		"mode":                a.cfg.Mode,
+		"providers":           a.webProviders(), // P5.1 live model pickers
+		"mcp_servers":         a.webMCPServers(),
+		"tools_enabled":       tools,
+		"tools_enabled_count": len(tools),
 
 		// Capability gates (dsh 对齐: 默认全开, nil*bool→on; 显式 enabled:false 关).
 		"terminal_enabled":   config.Enabled(a.cfg.Terminal.Enabled),
@@ -1228,6 +1231,18 @@ func (a *app) webConfig() map[string]any {
 
 		"web_server_addr": a.cfg.WebServer.Addr,
 	}
+}
+
+func (a *app) webToolCatalog() []string {
+	if a.reg == nil {
+		return []string{}
+	}
+	specs := a.reg.Specs()
+	tools := make([]string, 0, len(specs))
+	for _, spec := range specs {
+		tools = append(tools, spec.Name)
+	}
+	return tools
 }
 
 func (a *app) webMCPServers() []map[string]any {
