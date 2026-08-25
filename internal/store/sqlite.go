@@ -391,6 +391,66 @@ func (s *SQLiteStore) LoadSession(ctx context.Context, sessionID string) ([]sess
 	return events, nil
 }
 
+// LoadSessionPage returns one bounded, contiguous event window. The newest
+// page is returned when both cursors are zero; before walks toward history and
+// after walks toward the live tail. The SQL query reads at most limit+1 rows,
+// which is important for large trajectory sessions.
+func (s *SQLiteStore) LoadSessionPage(ctx context.Context, sessionID string, before, after uint64, limit int) ([]session.Event, bool, error) {
+	if limit < 1 {
+		return nil, false, fmt.Errorf("store: invalid event page limit %d", limit)
+	}
+	if before != 0 && after != 0 {
+		return nil, false, fmt.Errorf("store: before and after cursors are mutually exclusive")
+	}
+	if err := s.ensureSession(ctx, sessionID); err != nil {
+		return nil, false, err
+	}
+
+	query := `SELECT seq, type, version, at, data FROM events WHERE session_id = ? ORDER BY seq DESC LIMIT ?`
+	args := []any{sessionID, limit + 1}
+	if before != 0 {
+		query = `SELECT seq, type, version, at, data FROM events WHERE session_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?`
+		args = []any{sessionID, before, limit + 1}
+	} else if after != 0 {
+		query = `SELECT seq, type, version, at, data FROM events WHERE session_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?`
+		args = []any{sessionID, after, limit + 1}
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, false, fmt.Errorf("store: load event page %q: %w", sessionID, err)
+	}
+	defer rows.Close()
+	events := make([]session.Event, 0, limit+1)
+	for rows.Next() {
+		var ev session.Event
+		var seq, version, at int64
+		var data string
+		if err := rows.Scan(&seq, &ev.Type, &version, &at, &data); err != nil {
+			return nil, false, fmt.Errorf("store: scan event page: %w", err)
+		}
+		ev.Seq = uint64(seq)
+		ev.Version = int(version)
+		ev.At = time.Unix(0, at).UTC()
+		ev.Data = []byte(data)
+		events = append(events, ev)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("store: read event page: %w", err)
+	}
+	hasMore := len(events) > limit
+	if hasMore {
+		events = events[:limit]
+	}
+	if before == 0 && after == 0 || before != 0 {
+		// The newest/history query is DESC for efficient tail reads; normalize
+		// the wire contract to ascending sequence order for the client merger.
+		for left, right := 0, len(events)-1; left < right; left, right = left+1, right-1 {
+			events[left], events[right] = events[right], events[left]
+		}
+	}
+	return events, hasMore, nil
+}
+
 // ListSessions returns every session's metadata, most recently updated first.
 // Archived sessions are included (the webserver filters them out of the active
 // list); Sort is the manual drag order within the group and FlatSort the

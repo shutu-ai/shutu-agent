@@ -496,3 +496,5 @@ web_server:
   enabled: true
   addr: 127.0.0.1:18099
   token: ""
+  # React/Cordis frontend output from: cd web && npm.cmd run build
+  dist_dir: web/dist

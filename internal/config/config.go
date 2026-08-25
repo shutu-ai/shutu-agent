@@ -363,6 +363,9 @@ type WebServerConfig struct {
 	Enabled bool   `yaml:"enabled"` // default false (D10)
 	Addr    string `yaml:"addr"`    // default 127.0.0.1:8080 (local-only personal portal)
 	Token   string `yaml:"token"`   // required when enabled; plaintext only in this config
+	// DistDir points to the React/Cordis SPA output. The composition root passes
+	// it to the web server so frontend releases do not require a Go rebuild.
+	DistDir string `yaml:"dist_dir"`
 }
 
 // MultimodalConfig is the image-attachment policy (dispatch-m8-3 §3 / ADR

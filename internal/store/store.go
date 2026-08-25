@@ -234,3 +234,15 @@ type Store interface {
 	// Close releases the backend's resources.
 	Close() error
 }
+
+// SessionEventPageStore is the optional, cursor-based history surface used by
+// the React/Cordis web client. Keeping it separate from Store preserves source
+// compatibility with small test stores and older integrations while allowing
+// SQLite to avoid loading an entire long-running session into memory.
+//
+// before and after are exclusive sequence cursors. A zero cursor means the
+// newest page (when both are zero) or the oldest page in the requested
+// direction. Implementations return events in ascending sequence order.
+type SessionEventPageStore interface {
+	LoadSessionPage(ctx context.Context, sessionID string, before, after uint64, limit int) (events []session.Event, hasMore bool, err error)
+}

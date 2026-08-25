@@ -60,6 +60,10 @@ type Server struct {
 	tokenHash [32]byte // sha256 of the configured token; the plaintext never survives New
 	authOn    bool     // token != "" → bearer check enforced
 	addr      string
+	// frontendDir is an optional external SPA dist root. It is deliberately a
+	// server setter rather than a constructor argument so existing embedders and
+	// tests remain source-compatible.
+	frontendDir string
 	// defaultWorkdir is the fallback cwd for ungrouped sessions and legacy
 	// title-only workspaces. The composition root sets it from config; an empty
 	// value falls back to the server process cwd.
@@ -306,6 +310,17 @@ func (s *Server) SetProviderDiscover(fn func(ctx context.Context, request Provid
 // SetDefaultWorkdir sets the absolute directory used by ungrouped sessions
 // and by workspaces created without an explicit path.
 func (s *Server) SetDefaultWorkdir(dir string) { s.defaultWorkdir = dir }
+
+// SetFrontendDist selects an external React/Cordis SPA dist directory. An
+// empty value keeps the embedded legacy portal. The directory is read-only
+// from the server side and is never accepted from a request path.
+func (s *Server) SetFrontendDist(dir string) {
+	if strings.TrimSpace(dir) == "" {
+		s.frontendDir = ""
+		return
+	}
+	s.frontendDir = filepath.Clean(dir)
+}
 
 // empty opens the portal to the local machine (dsh-style, no login); a token
 // turns on bearer auth and only its SHA-256 digest is retained. addr defaults
@@ -645,6 +660,10 @@ func (s *Server) handleFavicon(w http.ResponseWriter, r *http.Request) {
 // pattern "GET /" matches every unmatched path, so a strict path check keeps
 // unknown routes a 404 rather than serving the shell.
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
+	if s.frontendDir != "" {
+		s.serveFrontend(w, r)
+		return
+	}
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
 		return
@@ -656,6 +675,35 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(b)
+}
+
+// serveFrontend serves the external SPA with a safe path boundary. Existing
+// API routes win in ServeMux; all other GET paths are either a dist asset or
+// an SPA fallback to index.html. This mirrors DSH's frontend-static behavior.
+func (s *Server) serveFrontend(w http.ResponseWriter, r *http.Request) {
+	root := filepath.Clean(s.frontendDir)
+	index := filepath.Join(root, "index.html")
+	cleanPath := path.Clean("/" + r.URL.Path)
+	rel := strings.TrimPrefix(cleanPath, "/")
+	target := index
+	if rel != "" {
+		target = filepath.Join(root, filepath.FromSlash(rel))
+		if target != root && !strings.HasPrefix(target, root+string(filepath.Separator)) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+	}
+	if info, err := os.Stat(target); err == nil && !info.IsDir() {
+		w.Header().Set("Cache-Control", "no-cache")
+		http.ServeFile(w, r, target)
+		return
+	}
+	if _, err := os.Stat(index); err != nil {
+		http.Error(w, "frontend index missing", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-cache")
+	http.ServeFile(w, r, index)
 }
 
 // handleStatic serves embedded static assets under /static/ (StripPrefix
@@ -998,6 +1046,7 @@ type eventView struct {
 	Command           string         `json:"command,omitempty"` // browser-side web command action
 	Seq               uint64         `json:"seq"`
 	Type              string         `json:"type"`
+	Version           int            `json:"version"`
 	Time              time.Time      `json:"time"`
 	Summary           string         `json:"summary"`
 	ContextMessage    bool           `json:"context_message,omitempty"` // model-only runtime/skill context; never a user bubble
@@ -1016,6 +1065,18 @@ type eventView struct {
 	Images            []imageView    `json:"images,omitempty"`      // P5: 该消息携带的图片引用
 }
 
+// eventPageView is the cursor envelope consumed by the React/Cordis adapter.
+// The legacy unpaged endpoint remains an array so the current portal and older
+// clients keep working during the migration.
+type eventPageView struct {
+	Events        []eventView `json:"events"`
+	HasMore       bool        `json:"has_more"`
+	NextBeforeSeq uint64      `json:"next_before_seq,omitempty"`
+	NextAfterSeq  uint64      `json:"next_after_seq,omitempty"`
+	FirstSeq      uint64      `json:"first_seq,omitempty"`
+	LastSeq       uint64      `json:"last_seq,omitempty"`
+}
+
 // toEventView builds the public view for one event (bounded summary + the W4
 // extra fields + the P5 image refs).
 func toEventView(ev session.Event) eventView {
@@ -1028,7 +1089,7 @@ func toEventView(ev session.Event) eventView {
 		// context-injection row; never expose the injected prompt body.
 		summary = "上下文注入 " + contextSource
 	}
-	v := eventView{Seq: ev.Seq, Type: ev.Type, Time: ev.At, Summary: summary, ContextMessage: contextMessage, ContextSource: contextSource}
+	v := eventView{Seq: ev.Seq, Type: ev.Type, Version: ev.Version, Time: ev.At, Summary: summary, ContextMessage: contextMessage, ContextSource: contextSource}
 	v.CompactionID, v.CompactionSummary, v.CompactionItems, v.CompactionTokens, v.CompactionError, v.CompactionMarker = compactionFields(ev)
 	v.Reasoning, v.ToolName, v.ToolOutput = extraFields(ev)
 	v.Images = extractImages(ev)
@@ -1234,7 +1295,12 @@ func extraFields(ev session.Event) (reasoning, toolName, toolOutput string) {
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	events, err := s.store.LoadSession(r.Context(), id)
+	before, after, limit, paged, err := parseEventPageQuery(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	events, hasMore, err := s.loadEventWindow(r.Context(), id, before, after, limit, paged)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
@@ -1253,7 +1319,95 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, v)
 	}
-	writeJSON(w, http.StatusOK, out)
+	if !paged {
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+	page := eventPageView{Events: out, HasMore: hasMore}
+	if len(out) > 0 {
+		page.FirstSeq = out[0].Seq
+		page.LastSeq = out[len(out)-1].Seq
+		if hasMore {
+			if after != 0 {
+				page.NextAfterSeq = page.LastSeq
+			} else {
+				page.NextBeforeSeq = page.FirstSeq
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, page)
+}
+
+const (
+	defaultEventPageLimit = 100
+	maxEventPageLimit     = 500
+)
+
+func parseEventPageQuery(r *http.Request) (before, after uint64, limit int, paged bool, err error) {
+	query := r.URL.Query()
+	paged = query.Has("before_seq") || query.Has("after_seq") || query.Has("limit")
+	limit = defaultEventPageLimit
+	if raw := strings.TrimSpace(query.Get("limit")); raw != "" {
+		limit, err = strconv.Atoi(raw)
+		if err != nil || limit < 1 || limit > maxEventPageLimit {
+			return 0, 0, 0, false, fmt.Errorf("limit must be between 1 and %d", maxEventPageLimit)
+		}
+	}
+	if raw := strings.TrimSpace(query.Get("before_seq")); raw != "" {
+		before, err = strconv.ParseUint(raw, 10, 64)
+		if err != nil || before == 0 {
+			return 0, 0, 0, false, fmt.Errorf("before_seq must be a positive integer")
+		}
+	}
+	if raw := strings.TrimSpace(query.Get("after_seq")); raw != "" {
+		after, err = strconv.ParseUint(raw, 10, 64)
+		if err != nil || after == 0 {
+			return 0, 0, 0, false, fmt.Errorf("after_seq must be a positive integer")
+		}
+	}
+	if before != 0 && after != 0 {
+		return 0, 0, 0, false, fmt.Errorf("before_seq and after_seq are mutually exclusive")
+	}
+	return before, after, limit, paged, nil
+}
+
+func (s *Server) loadEventWindow(ctx context.Context, id string, before, after uint64, limit int, paged bool) ([]session.Event, bool, error) {
+	if !paged {
+		events, err := s.store.LoadSession(ctx, id)
+		return events, false, err
+	}
+	if pageStore, ok := s.store.(store.SessionEventPageStore); ok {
+		return pageStore.LoadSessionPage(ctx, id, before, after, limit)
+	}
+	// Compatibility fallback for custom stores. The SQLite implementation above
+	// is the production path; this branch keeps existing test doubles usable.
+	events, err := s.store.LoadSession(ctx, id)
+	if err != nil {
+		return nil, false, err
+	}
+	if after != 0 {
+		start := 0
+		for start < len(events) && events[start].Seq <= after {
+			start++
+		}
+		end := start + limit
+		if end > len(events) {
+			end = len(events)
+		}
+		return events[start:end], end < len(events), nil
+	}
+	end := len(events)
+	if before != 0 {
+		end = 0
+		for end < len(events) && events[end].Seq < before {
+			end++
+		}
+	}
+	start := end - limit
+	if start < 0 {
+		start = 0
+	}
+	return events[start:end], start > 0, nil
 }
 
 // handleSessionExport serves a portable ZIP containing the current session's
@@ -2858,7 +3012,12 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "event source not wired"})
 		return
 	}
-	events, err := s.store.LoadSession(r.Context(), id)
+	resumeSeq, err := streamResumeSeq(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	allEvents, err := s.store.LoadSession(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
@@ -2866,6 +3025,14 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
+	}
+	events := allEvents
+	if resumeSeq != 0 {
+		start := 0
+		for start < len(events) && events[start].Seq <= resumeSeq {
+			start++
+		}
+		events = events[start:]
 	}
 	fl, ok := w.(http.Flusher)
 	if !ok {
@@ -2877,9 +3044,8 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, "retry: 3000\n")
-	argsByCall := make(map[string]string)
+	argsByCall := collectToolArgs(allEvents)
 	for _, ev := range events {
-		collectToolArgsInto(argsByCall, ev)
 		writeSSEEvent(w, ev, argsByCall)
 	}
 	fl.Flush()
@@ -2890,6 +3056,18 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 	})
 	defer unsub()
 	<-r.Context().Done()
+}
+
+func streamResumeSeq(r *http.Request) (uint64, error) {
+	raw := strings.TrimSpace(r.Header.Get("Last-Event-ID"))
+	if raw == "" {
+		return 0, nil
+	}
+	seq, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("Last-Event-ID must be a positive integer")
+	}
+	return seq, nil
 }
 
 // handleSessionContext implements GET /api/sessions/{id}/context (dsh
@@ -3109,6 +3287,9 @@ func (s *Server) handleInteractionResolve(w http.ResponseWriter, r *http.Request
 // cards. Raw event payloads never cross this boundary: tool arguments, model
 // context and other opaque data remain private.
 func eventDetails(ev session.Event) map[string]any {
+	if ev.Type == session.EventLLMRequestStart || ev.Type == session.EventLLMRequestEnd || ev.Type == session.EventLLMRetry {
+		return llmRequestDetails(ev)
+	}
 	allowed := map[string][]string{
 		session.EventPlanCreate:         {"scope", "id", "title", "goalId", "status"},
 		session.EventPlanUpdate:         {"scope", "id", "title", "objective"},
@@ -3165,6 +3346,68 @@ func eventDetails(ev session.Event) map[string]any {
 			out[key] = boundRunes(typed, maxSummary)
 		case bool, float64:
 			out[key] = typed
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// llmRequestDetails is an allow-listed projection for the trajectory details
+// drawer. It exposes provider/model/attempt/token usage without forwarding the
+// opaque request payload or credentials.
+func llmRequestDetails(ev session.Event) map[string]any {
+	var raw struct {
+		Provider   string          `json:"provider"`
+		Model      string          `json:"model"`
+		Effort     string          `json:"reasoningEffort"`
+		Status     string          `json:"status"`
+		Error      string          `json:"error"`
+		Attempt    int             `json:"attempt"`
+		MaxRetries int             `json:"maxRetries"`
+		DelayMS    int64           `json:"delayMs"`
+		Attempts   int             `json:"attempts"`
+		Usage      *llm.TokenUsage `json:"usage"`
+	}
+	if json.Unmarshal(ev.Data, &raw) != nil {
+		return nil
+	}
+	out := make(map[string]any, 8)
+	if raw.Provider != "" {
+		out["provider"] = raw.Provider
+	}
+	if raw.Model != "" {
+		out["model"] = raw.Model
+	}
+	if raw.Effort != "" {
+		out["reasoning_effort"] = raw.Effort
+	}
+	if raw.Status != "" {
+		out["status"] = raw.Status
+	}
+	if raw.Error != "" {
+		out["error"] = boundRunes(raw.Error, maxSummary)
+	}
+	if raw.Attempt != 0 {
+		out["attempt"] = raw.Attempt
+	}
+	if raw.MaxRetries != 0 {
+		out["max_retries"] = raw.MaxRetries
+	}
+	if raw.DelayMS != 0 {
+		out["delay_ms"] = raw.DelayMS
+	}
+	if raw.Attempts != 0 {
+		out["attempts"] = raw.Attempts
+	}
+	if raw.Usage != nil && !raw.Usage.Empty() {
+		out["usage"] = map[string]any{
+			"input_tokens":        raw.Usage.InputTokens,
+			"output_tokens":       raw.Usage.OutputTokens,
+			"total_tokens":        raw.Usage.TotalTokens,
+			"reasoning_tokens":    raw.Usage.ReasoningTokens,
+			"cached_input_tokens": raw.Usage.CachedInputTokens,
 		}
 	}
 	if len(out) == 0 {

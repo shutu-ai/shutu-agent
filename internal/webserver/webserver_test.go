@@ -285,6 +285,55 @@ func TestSessionEvents(t *testing.T) {
 	}
 }
 
+func TestSessionEventsCursorPagination(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	now := time.Now()
+	seedSession(t, st, "s-page", []session.Event{
+		{Seq: 1, Type: session.EventUserMessage, At: now, Version: 1, Data: mustData(t, map[string]any{"Text": "one"})},
+		{Seq: 2, Type: session.EventLLMRequestStart, At: now, Version: 1, Data: mustData(t, map[string]any{"provider": "deepseek", "model": "reasoner", "reasoningEffort": "high"})},
+		{Seq: 3, Type: session.EventLLMRequestEnd, At: now, Version: 1, Data: mustData(t, map[string]any{"provider": "deepseek", "model": "reasoner", "status": "completed", "usage": map[string]any{"inputTokens": 12, "outputTokens": 7, "totalTokens": 19}})},
+	})
+
+	rec := doReq(t, srv.Handler(), "GET", "/api/sessions/s-page/events?limit=2", "tok")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("initial page = %d: %s", rec.Code, rec.Body.String())
+	}
+	var page eventPageView
+	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode initial page: %v", err)
+	}
+	if len(page.Events) != 2 || page.Events[0].Seq != 2 || page.Events[1].Seq != 3 || !page.HasMore || page.NextBeforeSeq != 2 {
+		t.Fatalf("initial page = %+v, want seq 2..3 with before cursor 2", page)
+	}
+	if page.Events[1].Details["usage"].(map[string]any)["total_tokens"] != float64(19) {
+		t.Fatalf("request usage details = %+v, want total_tokens=19", page.Events[1].Details)
+	}
+
+	rec = doReq(t, srv.Handler(), "GET", "/api/sessions/s-page/events?before_seq=2&limit=2", "tok")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("history page = %d: %s", rec.Code, rec.Body.String())
+	}
+	page = eventPageView{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode history page: %v", err)
+	}
+	if len(page.Events) != 1 || page.Events[0].Seq != 1 || page.HasMore {
+		t.Fatalf("history page = %+v, want only seq 1", page)
+	}
+
+	rec = doReq(t, srv.Handler(), "GET", "/api/sessions/s-page/events?after_seq=1&limit=1", "tok")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("tail page = %d: %s", rec.Code, rec.Body.String())
+	}
+	page = eventPageView{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode tail page: %v", err)
+	}
+	if len(page.Events) != 1 || page.Events[0].Seq != 2 || !page.HasMore || page.NextAfterSeq != 2 {
+		t.Fatalf("tail page = %+v, want seq 2 with after cursor 2", page)
+	}
+}
+
 func TestMessageFeedbackAPI(t *testing.T) {
 	srv, st := newTestServer(t, "tok")
 	seedSession(t, st, "s-feedback", []session.Event{
@@ -337,6 +386,32 @@ func TestStaticServed(t *testing.T) {
 	}
 	if rec := doReq(t, h, "GET", "/nope", "tok"); rec.Code != http.StatusNotFound {
 		t.Fatalf("GET /nope → %d, want 404", rec.Code)
+	}
+}
+
+func TestExternalFrontendDistServedAsSPA(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+	dist := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dist, "assets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dist, "index.html"), []byte("<div id=\"react-root\">DSH</div>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dist, "assets", "app.js"), []byte("console.log('dsh')"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv.SetFrontendDist(dist)
+
+	if rec := doReq(t, srv.Handler(), "GET", "/", "tok"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "react-root") {
+		t.Fatalf("external index = %d %q, want React root", rec.Code, rec.Body.String())
+	}
+	if rec := doReq(t, srv.Handler(), "GET", "/assets/app.js", "tok"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "dsh") {
+		t.Fatalf("external asset = %d %q, want asset body", rec.Code, rec.Body.String())
+	}
+	// Client-side routes fall back to the same index, matching DSH SPA hosting.
+	if rec := doReq(t, srv.Handler(), "GET", "/session/s-1/trajectory", "tok"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "react-root") {
+		t.Fatalf("SPA route = %d %q, want index fallback", rec.Code, rec.Body.String())
 	}
 }
 
@@ -939,6 +1014,43 @@ func TestEventsStreamSSE(t *testing.T) {
 	srv2, _ := newTestServer(t, "tok")
 	if rec := doReq(t, srv2.Handler(), "GET", "/api/sessions/s-1/events/stream", "tok"); rec.Code != http.StatusNotImplemented {
 		t.Fatalf("stream with nil source → %d, want 501", rec.Code)
+	}
+}
+
+func TestEventsStreamResumesAfterLastEventID(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	seedSession(t, st, "s-resume", []session.Event{
+		{Seq: 1, Type: session.EventUserMessage, At: time.Now(), Version: 1, Data: mustData(t, map[string]any{"Text": "old"})},
+		{Seq: 2, Type: session.EventAssistantMessage, At: time.Now(), Version: 1, Data: mustData(t, map[string]any{"Text": "current"})},
+	})
+	pushed := make(chan struct{})
+	srv.SetEventSource(func(sessionID string, sink func(session.Event)) func() {
+		sink(session.Event{Seq: 3, Type: session.EventAssistantChunk, At: time.Now(), Version: 1, Data: mustData(t, map[string]any{"Text": "live"})})
+		close(pushed)
+		return func() {}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := httptest.NewRequest("GET", "/api/sessions/s-resume/events/stream", nil).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer tok")
+	req.Header.Set("Last-Event-ID", "1")
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() { srv.Handler().ServeHTTP(rec, req); close(done) }()
+	select {
+	case <-pushed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for resumed event source push")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for resumed stream handler")
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, `"seq":1`) || !strings.Contains(body, `"seq":2`) || !strings.Contains(body, `"seq":3`) {
+		t.Fatalf("resumed stream body = %q, want seq 2 and 3 only", body)
 	}
 }
 
