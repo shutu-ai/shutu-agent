@@ -3,21 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "node ../../deepseek-harness/apps/web/node_modules/vite/bin/vite.js build",
-    "typecheck": "node ../../deepseek-harness/apps/web/node_modules/typescript/bin/tsc --noEmit",
-    "test": "node ../../deepseek-harness/apps/web/node_modules/vitest/vitest.mjs run"
-  },
-  "dependencies": {
-    "@deepseek-ai/cordis": "file:../../deepseek-harness/vendor/cordis",
-    "@deepseek-ai/cosmokit": "file:../../deepseek-harness/vendor/cosmokit",
-    "react": "file:../../deepseek-harness/apps/web/node_modules/react",
-    "react-dom": "file:../../deepseek-harness/apps/web/node_modules/react-dom"
-  },
-  "devDependencies": {
-    "@types/react": "file:../../deepseek-harness/apps/web/node_modules/@types/react",
-    "@types/react-dom": "file:../../deepseek-harness/apps/web/node_modules/@types/react-dom",
-    "@vitejs/plugin-react": "file:../../deepseek-harness/apps/web/node_modules/@vitejs/plugin-react",
-    "typescript": "file:../../deepseek-harness/apps/web/node_modules/typescript",
-    "vite": "file:../../deepseek-harness/apps/web/node_modules/vite"
+    "build": "node scripts/run-dsh-tool.mjs vite build",
+    "typecheck": "node scripts/run-dsh-tool.mjs typescript --noEmit",
+    "test": "node scripts/run-dsh-tool.mjs vitest run"
   }
 }

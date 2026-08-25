@@ -11,6 +11,10 @@ npm.cmd run typecheck
 npm.cmd run build
 ```
 
+The scripts resolve the DSH toolchain through `SHUTU_DSH_ROOT`. A sibling
+`deepseek-harness` checkout is used only as the local default; CI or a deploy
+workspace must set the variable explicitly to its read-only DSH source tree.
+
 The Go server serves `web/dist` when `web_server.dist_dir` is set in
 `config.yaml`. The client consumes the cursor envelope from
 `GET /api/sessions/{id}/events?limit=100`, reconnects through SSE with
