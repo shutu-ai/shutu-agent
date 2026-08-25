@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -179,7 +180,7 @@ const (
 // defaultEnabledTools is the native standard-mode whitelist applied when
 // tools.enabled is absent. PTC adds run_code only through its mode projection;
 // minimal replaces the list with its fixed terminal/file seam.
-var defaultEnabledTools = []string{"get_time", "read"}
+var defaultEnabledTools = []string{"read"}
 
 // ReadOnlyTools returns the read-only execution whitelist (D10): the tools
 // that are always safe to expose. The General-settings "permission" preset's
@@ -194,9 +195,9 @@ func MinimalTools() []string { return append([]string(nil), minimalEnabledTools.
 // 对齐: 每次调用全新 pwsh 进程) + 文件编辑 (read/write/list/edit). 工具名须与
 // 各包常量一致 (tools.go/fs.go).
 var minimalEnabledTools = []string{
-	"get_time", "read",
-	"pwsh",
-	"write", "list", "edit",
+	"read",
+	platformShellToolName(), "terminal_open", "terminal_list", "terminal_read", "terminal_send", "terminal_signal", "terminal_close",
+	"write", "edit",
 }
 
 // Bool returns a pointer to b, for assigning an explicit *bool flag where the
@@ -1152,12 +1153,15 @@ func applyDefaults(cfg *Config) {
 	if cfg.Mcp.ACPEnabled == nil {
 		cfg.Mcp.ACPEnabled = Bool(false)
 	}
-	// M6f-3 fs defaults: off by default (D10); root empty means the default
+	// M6f-3 fs defaults: enabled by default to match dsh base; root empty means the default
 	// <project> (the process working directory), resolved by the FileService
 	// constructor — there is nothing to default here. Enabling fs whitelists
 	// its three consumer tools, so the one fs.enabled switch turns the whole
 	// capability (FileService + fs_* tools + event logging) on (mirrors
 	// kb/jobs/subagent/skill/schedule/plan/spill/interact/code/mcp).
+	if cfg.Fs.Enabled == nil {
+		cfg.Fs.Enabled = Bool(true)
+	}
 	if Enabled(cfg.Fs.Enabled) {
 		for _, name := range fsToolNames {
 			if !contains(cfg.Tools.Enabled, name) {
@@ -1287,6 +1291,9 @@ func applyDefaults(cfg *Config) {
 	if cfg.Terminal.MaxConcurrentSessions <= 0 {
 		cfg.Terminal.MaxConcurrentSessions = DefaultTerminalMaxConcurrent
 	}
+	if cfg.Terminal.Enabled == nil {
+		cfg.Terminal.Enabled = Bool(true)
+	}
 	if cfg.Terminal.ACPEnabled == nil {
 		cfg.Terminal.ACPEnabled = Bool(false)
 	}
@@ -1326,11 +1333,14 @@ func applyDefaults(cfg *Config) {
 			}
 		}
 	}
-	// D-GAP-1 fs-search defaults: off by default (D10). Enabling fs_search
+	// D-GAP-1 fs-search defaults: enabled by default to match dsh base. Enabling fs_search
 	// whitelists its two consumer tools grep and glob, so the one fs_search.
 	// enabled switch turns the whole capability (search engine + tools) on
 	// (mirrors kb/jobs/subagent/skill/schedule/plan/spill/interact/code/mcp/
 	// fs/web/terminal/eval).
+	if cfg.FsSearch.Enabled == nil {
+		cfg.FsSearch.Enabled = Bool(true)
+	}
 	if Enabled(cfg.FsSearch.Enabled) {
 		for _, name := range fsSearchToolNames {
 			if !contains(cfg.Tools.Enabled, name) {
@@ -1546,13 +1556,13 @@ var codeToolNames = []string{"run_code"}
 // shared by applyDefaults and the composition root. Bridged server tools
 // (mcp.<server>.<tool>) are dynamic and are whitelisted by the composition root
 // as they are registered.
-var mcpToolNames = []string{"mcp_list", "mcp_call"}
+var mcpToolNames = []string{}
 
 // fsToolNames are the safe-file-operation consumer tools (dispatch-m6f-3 §3).
 // They are registered and whitelisted only when fs is enabled; keeping the
 // names here makes the "fs.enabled ⇒ 工具自动白名单" rule a single, tested fact
 // shared by applyDefaults and the composition root.
-var fsToolNames = []string{"write", "list", "edit"}
+var fsToolNames = []string{"write", "edit"}
 
 // fsSearchToolNames are the file-content-search consumer tools (D-GAP-1, 对齐
 // dsh tool-fs-search). They are registered and whitelisted only when
@@ -1590,7 +1600,16 @@ var webToolNames = []string{"web_search", "web_fetch"}
 // and whitelisted only when terminal is enabled; keeping the names here makes
 // the "terminal.enabled ⇒ 工具自动白名单" rule a single, tested fact shared by
 // applyDefaults and the composition root.
-var terminalToolNames = []string{"pwsh"}
+var terminalToolNames = append([]string{platformShellToolName()},
+	"terminal_open", "terminal_list", "terminal_read", "terminal_send", "terminal_signal", "terminal_close",
+)
+
+func platformShellToolName() string {
+	if runtime.GOOS == "windows" {
+		return "pwsh"
+	}
+	return "bash"
+}
 
 // evalToolNames are the task-evaluation consumer tools (ADR
 // 2026-08-20-eval-seam.md D-EVAL-6). They are registered and whitelisted only

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -92,6 +93,44 @@ func TestRegisterTerminalEnabledRegistersPwsh(t *testing.T) {
 	schema, _ = json.Marshal(toolSchema(app.reg, "pwsh"))
 	if !strings.Contains(string(schema), "run_in_background") {
 		t.Fatalf("schema with jobs must advertise run_in_background: %s", schema)
+	}
+}
+
+func TestPersistentTerminalToolsMatchDshSurface(t *testing.T) {
+	app := makeTermApp(true)
+	if err := app.registerTerminal(); err != nil {
+		t.Fatalf("registerTerminal: %v", err)
+	}
+	app.reg.SetPolicy(tools.Policy{Enabled: []string{"pwsh", "terminal_open", "terminal_list", "terminal_read", "terminal_send", "terminal_signal", "terminal_close"}, Timeout: time.Minute})
+	opened, err := app.reg.Execute(context.Background(), "terminal_open", json.RawMessage(`{"type":"shell","name":"dsh-test"}`))
+	if err != nil {
+		t.Fatalf("terminal_open: %v", err)
+	}
+	value, ok := opened.Value.(map[string]any)
+	if !ok {
+		t.Fatalf("terminal_open value = %T", opened.Value)
+	}
+	id, _ := value["sessionId"].(string)
+	if id == "" {
+		t.Fatalf("terminal_open returned no sessionId: %v", value)
+	}
+	defer app.closeModelTerminalSessions()
+	listed, err := app.reg.Execute(context.Background(), "terminal_list", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("terminal_list: %v", err)
+	}
+	if list, ok := listed.Value.([]any); !ok || len(list) != 1 {
+		t.Fatalf("terminal_list value = %#v", listed.Value)
+	}
+	sent, err := app.reg.Execute(context.Background(), "terminal_send", json.RawMessage(fmt.Sprintf(`{"sessionId":%q,"text":"echo dsh-terminal"}`, id)))
+	if err != nil {
+		t.Fatalf("terminal_send: %v", err)
+	}
+	if !strings.Contains(sent.Output, "dsh-terminal") {
+		t.Fatalf("terminal_send output = %q", sent.Output)
+	}
+	if _, err := app.reg.Execute(context.Background(), "terminal_close", json.RawMessage(fmt.Sprintf(`{"sessionId":%q}`, id))); err != nil {
+		t.Fatalf("terminal_close: %v", err)
 	}
 }
 

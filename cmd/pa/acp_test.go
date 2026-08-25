@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -43,7 +42,8 @@ func (acpDynamicExtensionTool) Description() string { return "test-only dynamic 
 func (acpDynamicExtensionTool) Schema() map[string]any {
 	return map[string]any{"type": "object"}
 }
-func (acpDynamicExtensionTool) Execute(context.Context, json.RawMessage) (string, error) {
+func (acpDynamicExtensionTool) OutputSchema() map[string]any { return map[string]any{"type": "string"} }
+func (acpDynamicExtensionTool) Execute(context.Context, any) (string, error) {
 	return "unexpected", nil
 }
 
@@ -93,11 +93,11 @@ func TestACPFactoryCreatesIndependentCWDAndLogs(t *testing.T) {
 	if one.id == two.id || one.log == two.log || one.registry == two.registry {
 		t.Fatal("ACP sessions must not share identity, log, or registry")
 	}
-	got, err := one.registry.Execute(context.Background(), "read", []byte(`{"path":"marker.txt"}`))
+	got, err := one.registry.Execute(context.Background(), "read", []byte(`{"file_path":"marker.txt"}`))
 	if err != nil || got.Output != "1\tone" {
 		t.Fatalf("first cwd read = %q, err=%v", got.Output, err)
 	}
-	got, err = two.registry.Execute(context.Background(), "read", []byte(`{"path":"marker.txt"}`))
+	got, err = two.registry.Execute(context.Background(), "read", []byte(`{"file_path":"marker.txt"}`))
 	if err != nil || got.Output != "1\ttwo" {
 		t.Fatalf("second cwd read = %q, err=%v", got.Output, err)
 	}
@@ -220,13 +220,9 @@ func TestACPExplicitMCPOwnsClientAndRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := registry.Execute(context.Background(), "mcp.demo.lookup", []byte(`{}`))
+	got, err := registry.Execute(context.Background(), "mcp__demo__lookup", []byte(`{}`))
 	if err != nil || got.Output != "ok" {
 		t.Fatalf("MCP advertised tool = %q, err=%v", got.Output, err)
-	}
-	got, err = registry.Execute(context.Background(), mcp.ToolListName, []byte(`{"server":"demo"}`))
-	if err != nil || got.Output != "- lookup: lookup data" {
-		t.Fatalf("MCP list = %q, err=%v", got.Output, err)
 	}
 	if err := service.Close(); err != nil {
 		t.Fatal(err)
@@ -241,7 +237,7 @@ func TestACPExplicitMCPOwnsClientAndRegistry(t *testing.T) {
 	for _, ev := range log.Events() {
 		types[ev.Type]++
 	}
-	if types[session.EventMcpCall] != 1 || types[session.EventMcpList] != 1 {
+	if types[session.EventMcpCall] != 1 || types[session.EventMcpList] != 0 {
 		t.Fatalf("MCP events = %#v", types)
 	}
 }

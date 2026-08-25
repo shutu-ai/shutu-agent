@@ -159,8 +159,8 @@ func TestApplySessionRuntime(t *testing.T) {
 	// 5. readonly permission narrows the whitelist to the read-only tools.
 	mustSession("s-ro", "", "", "", "", "readonly")
 	_, restore = a.applySessionRuntime("s-ro")
-	if _, err := a.reg.Execute(ctx, "get_time", json.RawMessage("{}")); err != nil {
-		t.Fatalf("readonly tier should allow get_time: %v", err)
+	if _, err := a.reg.Execute(ctx, "get_time", json.RawMessage("{}")); err == nil {
+		t.Fatalf("readonly tier must not expose non-dsh get_time")
 	}
 	restore()
 }
@@ -174,7 +174,8 @@ func (stubCodeRun) Description() string { return "stub code sandbox" }
 func (stubCodeRun) Schema() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{}}
 }
-func (stubCodeRun) Execute(context.Context, json.RawMessage) (string, error) { return "ok", nil }
+func (stubCodeRun) OutputSchema() map[string]any                 { return map[string]any{"type": "string"} }
+func (stubCodeRun) Execute(context.Context, any) (string, error) { return "ok", nil }
 
 // recordLLM captures the model-facing tool schemas of every request, so a test
 // can assert the session's mode projection on the wire.
@@ -287,7 +288,7 @@ func TestSessionModeWireSurface(t *testing.T) {
 	if _, err := a.reg.Execute(ctx, "run_code", json.RawMessage(`{}`)); err != nil {
 		t.Fatalf("PTC session must execute run_code: %v", err)
 	}
-	if _, err := a.reg.Execute(ctx, "read", json.RawMessage(`{"path":"x"}`)); err == nil {
+	if _, err := a.reg.Execute(ctx, "read", json.RawMessage(`{"file_path":"x"}`)); err == nil {
 		t.Fatal("PTC session must not execute native tools directly")
 	}
 	restore()

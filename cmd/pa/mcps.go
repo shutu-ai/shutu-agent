@@ -13,9 +13,8 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
+	agenttools "github.com/jabing/shutu-agent/internal/tools"
 	"strings"
 
 	"github.com/jabing/shutu-agent/internal/config"
@@ -38,18 +37,6 @@ func (a *app) registerMcps() error {
 	// log. The callback only ever runs inside a mcp_* tool Execute — the serial
 	// main-loop path (D5). a.log is read at call time, so a session switch
 	// (/new, /resume) is honored the same way as the other register* wiring.
-	onEvent := func(typ string, data any) {
-		if _, err := a.log.Append(typ, data); err != nil {
-			fmt.Fprintln(os.Stderr, "pa: "+typ+" event:", err)
-		}
-	}
-	mt := mcp.NewMcpTools(f, toMcpServers(a.cfg.Mcp.Servers), onEvent)
-	if err := a.reg.Register(mt.List()); err != nil {
-		return fmt.Errorf("pa: register mcp_list: %w", err)
-	}
-	if err := a.reg.Register(mt.Call()); err != nil {
-		return fmt.Errorf("pa: register mcp_call: %w", err)
-	}
 	ctx := context.Background()
 	for _, srv := range a.cfg.Mcp.Servers {
 		if err := a.bridgeMcpServer(ctx, f, srv); err != nil {
@@ -84,7 +71,7 @@ func (a *app) bridgeMcpServer(ctx context.Context, f mcp.Factory, srv config.Mcp
 	}
 	a.mcp = append(a.mcp, client)
 	for _, tl := range tools {
-		name := "mcp." + srv.Name + "." + tl.Name
+		name := "mcp__" + srv.Name + "__" + tl.Name
 		bt := bridgedMcpTool{
 			client: client,
 			name:   name,
@@ -122,9 +109,9 @@ func (t bridgedMcpTool) Name() string           { return t.name }
 func (t bridgedMcpTool) Description() string    { return t.desc }
 func (t bridgedMcpTool) Schema() map[string]any { return t.schema }
 
-func (t bridgedMcpTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t bridgedMcpTool) Execute(ctx context.Context, args any) (string, error) {
 	var a map[string]any
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("%s: %w", t.name, err)
 	}
 	res, err := t.client.Call(ctx, t.tool, a)

@@ -483,6 +483,7 @@ func main() {
 		os.Exit(1)
 	}
 	defer func() {
+		app.closeModelTerminalSessions()
 		if app.termSess != nil {
 			app.termSess.Close()
 		}
@@ -700,6 +701,11 @@ type app struct {
 	// this session.
 	termSess  *terminal.Session
 	termOwner string
+
+	// modelTerms are the dsh-compatible persistent terminal sessions. They are
+	// separate from termSess, which remains the user-facing /term session.
+	modelTermMu sync.Mutex
+	modelTerms  map[string]*modelTerminalRecord
 
 	// approveInput feeds the sensitive-tool gate's y/n read (nil => os.Stdin).
 	// It exists so the wiring tests can inject canned approval answers; in the

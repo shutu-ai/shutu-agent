@@ -19,12 +19,45 @@ type fakeTool struct {
 
 type structuredFakeTool struct{}
 
+type parsedClassifierTool struct{}
+
+func (parsedClassifierTool) OutputSchema() map[string]any { return map[string]any{"type": "string"} }
+
+func (parsedClassifierTool) Name() string        { return "parsed_classifier" }
+func (parsedClassifierTool) Description() string { return "classifier test tool" }
+func (parsedClassifierTool) Schema() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{}}
+}
+func (parsedClassifierTool) Execute(context.Context, any) (string, error) {
+	return "ok", nil
+}
+func (parsedClassifierTool) ConcurrencySafe(args any) bool {
+	values, ok := args.(map[string]any)
+	return ok && values["parallel"] == true
+}
+
+type panickingClassifierTool struct{}
+
+func (panickingClassifierTool) OutputSchema() map[string]any { return map[string]any{"type": "string"} }
+
+func (panickingClassifierTool) Name() string        { return "panic_classifier" }
+func (panickingClassifierTool) Description() string { return "panic classifier test tool" }
+func (panickingClassifierTool) Schema() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{}}
+}
+func (panickingClassifierTool) Execute(context.Context, any) (string, error) {
+	return "ok", nil
+}
+func (panickingClassifierTool) ConcurrencySafe(any) bool { panic("classifier failed") }
+
 func (structuredFakeTool) Name() string        { return "structured" }
 func (structuredFakeTool) Description() string { return "structured fake tool" }
 func (structuredFakeTool) Schema() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{}}
 }
-func (structuredFakeTool) ExecuteResult(context.Context, json.RawMessage) (ToolResult, error) {
+func (structuredFakeTool) OutputSchema() map[string]any                 { return map[string]any{"type": "string"} }
+func (structuredFakeTool) Execute(context.Context, any) (string, error) { return "unused", nil }
+func (structuredFakeTool) ExecuteResult(context.Context, any) (ToolResult, error) {
 	return ToolResult{Output: "structured", IsError: true}, nil
 }
 
@@ -51,7 +84,8 @@ func (f *fakeTool) Schema() map[string]any {
 	}
 	return map[string]any{"type": "object", "properties": map[string]any{}}
 }
-func (f *fakeTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (f *fakeTool) OutputSchema() map[string]any { return map[string]any{"type": "string"} }
+func (f *fakeTool) Execute(ctx context.Context, args any) (string, error) {
 	f.executed = true
 	return "ok", nil
 }
@@ -117,6 +151,48 @@ func TestExecuteMalformedJSON(t *testing.T) {
 	}
 }
 
+func TestConcurrencyClassifierReceivesParsedArguments(t *testing.T) {
+	r := New()
+	if err := r.Register(parsedClassifierTool{}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if !r.IsConcurrencySafe("parsed_classifier", map[string]any{"parallel": true}) {
+		t.Fatal("parsed classifier should allow the call")
+	}
+	if r.IsConcurrencySafe("parsed_classifier", map[string]any{"parallel": false}) {
+		t.Fatal("parsed classifier should reject the call")
+	}
+}
+
+func TestConcurrencyClassifierPanicsFailClosed(t *testing.T) {
+	r := New()
+	if err := r.Register(panickingClassifierTool{}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if r.IsConcurrencySafe("panic_classifier", map[string]any{}) {
+		t.Fatal("classifier panic must fail closed to exclusive execution")
+	}
+}
+
+func TestExecutionErrorsExposeDshCodes(t *testing.T) {
+	r := New()
+	if _, err := r.Execute(context.Background(), "missing", json.RawMessage(`{}`)); ErrorInfoOf(err).Code != "UNKNOWN_TOOL" {
+		t.Fatalf("unknown tool error = %+v", ErrorInfoOf(err))
+	}
+	tool := &fakeTool{name: "needs_name", schema: map[string]any{
+		"type":       "object",
+		"properties": map[string]any{"name": map[string]any{"type": "string"}},
+		"required":   []string{"name"},
+	}}
+	if err := r.Register(tool); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	r.SetPolicy(Policy{Enabled: []string{"needs_name"}})
+	if _, err := r.Execute(context.Background(), "needs_name", json.RawMessage(`{}`)); ErrorInfoOf(err).Code != "INVALID_ARGS" {
+		t.Fatalf("invalid args error = %+v", ErrorInfoOf(err))
+	}
+}
+
 func TestSpecsSorted(t *testing.T) {
 	r := New()
 	r.Register(&fakeTool{name: "zebra"})
@@ -150,7 +226,7 @@ func TestReadFile(t *testing.T) {
 	}
 	r := New()
 	r.Register(ReadFile{})
-	args, _ := json.Marshal(map[string]string{"path": path})
+	args, _ := json.Marshal(map[string]string{"file_path": path})
 	res, err := r.Execute(context.Background(), "read", args)
 	if err != nil {
 		t.Fatalf("read: %v", err)
@@ -168,23 +244,23 @@ func TestReadFileWindowAndRoot(t *testing.T) {
 	}
 	r := New()
 	r.Register(NewReadFile(root))
-	res, err := r.Execute(context.Background(), "read", json.RawMessage(`{"path":"note.txt","offset":2,"limit":1}`))
+	res, err := r.Execute(context.Background(), "read", json.RawMessage(`{"file_path":"note.txt","offset":2,"limit":1}`))
 	if err != nil {
 		t.Fatalf("read window: %v", err)
 	}
 	if res.Output != "2\ttwo" {
 		t.Fatalf("read window = %q", res.Output)
 	}
-	if _, err := r.Execute(context.Background(), "read", json.RawMessage(`{"path":"../outside.txt"}`)); err == nil {
-		t.Fatal("read must reject a path outside the workspace root")
+	if res, err := r.Execute(context.Background(), "read", json.RawMessage(`{"file_path":"../outside.txt"}`)); err != nil || !res.IsError {
+		t.Fatalf("read must reject a path outside the workspace root: result=%+v err=%v", res, err)
 	}
 }
 
 func TestReadFileMissing(t *testing.T) {
 	r := New()
 	r.Register(ReadFile{})
-	if _, err := r.Execute(context.Background(), "read", json.RawMessage(`{"path":"/definitely/not/here"}`)); err == nil {
-		t.Fatal("missing file should fail")
+	if res, err := r.Execute(context.Background(), "read", json.RawMessage(`{"file_path":"/definitely/not/here"}`)); err != nil || !res.IsError {
+		t.Fatalf("missing file should fail: result=%+v err=%v", res, err)
 	}
 }
 
@@ -200,12 +276,13 @@ func TestExecuteGate(t *testing.T) {
 	r.SetPolicy(Policy{Enabled: []string{"gated"}})
 
 	var gateCalls []string
-	r.SetGate(func(ctx context.Context, name string, args json.RawMessage) error {
-		gateCalls = append(gateCalls, name)
-		if name == "gated" {
-			return fmt.Errorf("denied: user said no")
+	denied := true
+	r.AddPreExecuteHook(func(ctx context.Context, exec Execution) (PreToolDecision, error) {
+		gateCalls = append(gateCalls, exec.Name)
+		if denied && exec.Name == "gated" {
+			return PreToolDecision{}, fmt.Errorf("denied: user said no")
 		}
-		return nil
+		return PreToolDecision{Kind: "allow"}, nil
 	})
 
 	if _, err := r.Execute(context.Background(), "gated", json.RawMessage(`{}`)); err == nil {
@@ -220,8 +297,8 @@ func TestExecuteGate(t *testing.T) {
 		t.Fatalf("gate calls = %v, want [gated]", gateCalls)
 	}
 
-	// A nil gate return lets the tool run.
-	r.SetGate(func(ctx context.Context, name string, args json.RawMessage) error { return nil })
+	// The same installed pre-hook now allows the next execution.
+	denied = false
 	res, err := r.Execute(context.Background(), "gated", json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatalf("gated tool after nil gate return: %v", err)
@@ -260,9 +337,9 @@ func TestExecuteGateRunsAfterValidation(t *testing.T) {
 	r.Register(ft)
 	r.SetPolicy(Policy{Enabled: []string{"needs_path"}})
 	called := false
-	r.SetGate(func(ctx context.Context, name string, args json.RawMessage) error {
+	r.AddPreExecuteHook(func(ctx context.Context, exec Execution) (PreToolDecision, error) {
 		called = true
-		return nil
+		return PreToolDecision{Kind: "allow"}, nil
 	})
 	if _, err := r.Execute(context.Background(), "needs_path", json.RawMessage(`{}`)); err == nil {
 		t.Fatal("missing required arg must be rejected (D7)")

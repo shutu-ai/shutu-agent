@@ -102,12 +102,12 @@ func TestSearchInvalidRegex(t *testing.T) {
 	}
 }
 
-// TestSearchSkipsIgnoredDirs covers #4: the .git and node_modules subtrees are
-// skipped while sibling and nested non-ignored files are still searched.
+// TestSearchSkipsIgnoredDirs covers the VCS boundary; dependency directories
+// remain searchable to match dsh's --no-ignore behavior.
 func TestSearchSkipsIgnoredDirs(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, ".git", "config"), "needle hidden\n")
-	writeFile(t, filepath.Join(dir, "node_modules", "pkg", "index.js"), "needle hidden\n")
+	writeFile(t, filepath.Join(dir, "node_modules", "pkg", "index.js"), "needle dependency\n")
 	writeFile(t, filepath.Join(dir, "keep.txt"), "needle visible\n")
 	writeFile(t, filepath.Join(dir, "sub", "ok.go"), "needle nested\n")
 
@@ -115,15 +115,15 @@ func TestSearchSkipsIgnoredDirs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
-	if len(hits) != 2 {
-		t.Fatalf("hits = %v, want only keep.txt and sub/ok.go (ignored dirs skipped)", hits)
+	if len(hits) != 3 {
+		t.Fatalf("hits = %v, want keep.txt, node_modules and sub/ok.go", hits)
 	}
 	bases := map[string]bool{}
 	for _, h := range hits {
 		bases[filepath.Base(h.Path)] = true
 	}
-	if !bases["keep.txt"] || !bases["ok.go"] {
-		t.Fatalf("hits = %v, want keep.txt and sub/ok.go", hits)
+	if !bases["keep.txt"] || !bases["index.js"] || !bases["ok.go"] {
+		t.Fatalf("hits = %v, want keep.txt, index.js and sub/ok.go", hits)
 	}
 }
 

@@ -152,42 +152,41 @@ func TestRegisterMcpsEnabledRegistersAndBridges(t *testing.T) {
 		t.Fatalf("a.mcp has %d clients, want 2", len(a.mcp))
 	}
 
-	// Registry carries the mcp_* tools plus every bridged tool under the
-	// mcp.<server>.<tool> prefix.
+	// Registry carries every bridged tool under dsh's namespaced prefix.
 	specs := map[string]llm.ToolSchema{}
 	for _, s := range a.reg.Specs() {
 		specs[s.Name] = s
 	}
-	for _, want := range []string{"mcp_list", "mcp_call", "mcp.fs.read", "mcp.echo.echo"} {
+	for _, want := range []string{"mcp__fs__read", "mcp__echo__echo"} {
 		if _, ok := specs[want]; !ok {
 			t.Fatalf("registered specs lack %q (have %v)", want, specNames(a.reg))
 		}
 	}
 	// Schema passthrough: the bridged tool's parameters are the server's
 	// inputSchema (verbatim properties + the object type guard).
-	bridged := specs["mcp.fs.read"]
+	bridged := specs["mcp__fs__read"]
 	props, _ := bridged.Parameters["properties"].(map[string]any)
 	if len(props) != 1 || props["path"] == nil {
-		t.Fatalf("mcp.fs.read parameters = %v, want the server's path property passed through", bridged.Parameters)
+		t.Fatalf("mcp__fs__read parameters = %v, want the server's path property passed through", bridged.Parameters)
 	}
 	if bridged.Parameters["type"] != "object" {
-		t.Fatalf("mcp.fs.read parameters type = %v, want object", bridged.Parameters["type"])
+		t.Fatalf("mcp__fs__read parameters type = %v, want object", bridged.Parameters["type"])
 	}
 	if !strings.HasPrefix(bridged.Description, "Read a file") {
-		t.Fatalf("mcp.fs.read description = %q, want the server description", bridged.Description)
+		t.Fatalf("mcp__fs__read description = %q, want the server description", bridged.Description)
 	}
 
 	// The bridged name is whitelisted at runtime (reg.Allow), so the registry
 	// Execute gate runs it; D7 validates against the passed-through schema.
-	res, err := a.reg.Execute(context.Background(), "mcp.fs.read", json.RawMessage(`{"path":"/x"}`))
+	res, err := a.reg.Execute(context.Background(), "mcp__fs__read", json.RawMessage(`{"path":"/x"}`))
 	if err != nil {
-		t.Fatalf("execute bridged mcp.fs.read: %v", err)
+		t.Fatalf("execute bridged mcp__fs__read: %v", err)
 	}
 	if res.Output != "fs:read" {
 		t.Fatalf("bridged output = %q, want fs:read", res.Output)
 	}
-	if _, err := a.reg.Execute(context.Background(), "mcp.fs.read", json.RawMessage(`{}`)); err == nil {
-		t.Fatal("bridged mcp.fs.read must reject args missing the required path (D7)")
+	if _, err := a.reg.Execute(context.Background(), "mcp__fs__read", json.RawMessage(`{}`)); err == nil {
+		t.Fatal("bridged mcp__fs__read must reject args missing the required path (D7)")
 	}
 	// Call delegation: the stored bridged client received the exact tool name
 	// and the model's args passed through.
@@ -199,31 +198,8 @@ func TestRegisterMcpsEnabledRegistersAndBridges(t *testing.T) {
 		t.Fatalf("bridged call = %q %v, want read with {path:/x}", bc.lastTool, bc.lastArgs)
 	}
 
-	// mcp_call via the registry: a fresh client per call, the result is
-	// rendered, and mcp/call lands in the session log (D3).
-	callRes, err := a.reg.Execute(context.Background(), "mcp_call", json.RawMessage(`{"server":"echo","tool":"echo","args":{"text":"hi"}}`))
-	if err != nil {
-		t.Fatalf("execute mcp_call: %v", err)
-	}
-	if callRes.Output != "echo:echo" {
-		t.Fatalf("mcp_call output = %q, want echo:echo", callRes.Output)
-	}
-	if !hasEvent(a.log, session.EventMcpCall) {
-		t.Fatal("mcp/call event missing from the session log after mcp_call")
-	}
-
-	// mcp_list via the registry: the tool table is returned and mcp/list lands.
-	listRes, err := a.reg.Execute(context.Background(), "mcp_list", json.RawMessage(`{"server":"echo"}`))
-	if err != nil {
-		t.Fatalf("execute mcp_list: %v", err)
-	}
-	if !strings.Contains(listRes.Output, "- echo") {
-		t.Fatalf("mcp_list output = %q, want the echo tool", listRes.Output)
-	}
-	if !hasEvent(a.log, session.EventMcpList) {
-		t.Fatal("mcp/list event missing from the session log after mcp_list")
-	}
-	// Log-only (D3): the mcp/* events never derive into model messages.
+	// Bridged MCP calls are namespaced first-class tools; selector tools are not
+	// exposed in dsh's model catalog.
 	if msgs := a.log.DeriveHistory(); len(msgs) != 0 {
 		t.Fatalf("mcp/* events must not derive into messages: %+v", msgs)
 	}

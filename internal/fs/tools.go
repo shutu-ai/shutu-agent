@@ -26,9 +26,9 @@ package fs
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
+	agenttools "github.com/jabing/shutu-agent/internal/tools"
 	"os"
 	"path/filepath"
 	"strings"
@@ -100,37 +100,41 @@ func (FsReadTool) Schema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"path":   map[string]any{"type": "string"},
-			"offset": map[string]any{"type": "integer", "minimum": 1},
-			"limit":  map[string]any{"type": "integer", "minimum": 1},
+			"file_path": map[string]any{"type": "string"},
+			"offset":    map[string]any{"type": "integer", "minimum": 1},
+			"limit":     map[string]any{"type": "integer", "minimum": 1},
 		},
-		"required":             []string{"path"},
+		"required":             []string{"file_path"},
 		"additionalProperties": false,
 	}
 }
 
-func (t FsReadTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t FsReadTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
-		Path   string `json:"path"`
-		Offset int    `json:"offset"`
-		Limit  int    `json:"limit"`
+		FilePath string `json:"file_path"`
+		Path     string `json:"path"` // legacy direct-call compatibility; not in the model schema
+		Offset   int    `json:"offset"`
+		Limit    int    `json:"limit"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("read: %w", err)
 	}
-	if strings.TrimSpace(a.Path) == "" {
+	if a.FilePath == "" {
+		a.FilePath = a.Path
+	}
+	if strings.TrimSpace(a.FilePath) == "" {
 		return "", fmt.Errorf("read: empty path")
 	}
-	content, err := t.t.f.Read(ctx, a.Path, 0)
+	content, err := t.t.f.Read(ctx, a.FilePath, 0)
 	if err != nil {
 		return "", fmt.Errorf("read: %w", err)
 	}
-	version, err := t.t.f.Fingerprint(ctx, a.Path)
+	version, err := t.t.f.Fingerprint(ctx, a.FilePath)
 	if err != nil {
 		return "", fmt.Errorf("read: fingerprint: %w", err)
 	}
-	t.t.observed[t.t.key(a.Path)] = version
-	t.t.emit(session.EventFsRead, session.NewFsRead(a.Path, len(content)))
+	t.t.observed[t.t.key(a.FilePath)] = version
+	t.t.emit(session.EventFsRead, session.NewFsRead(a.FilePath, len(content)))
 	return formatReadWindow(content, a.Offset, a.Limit), nil
 }
 
@@ -214,40 +218,44 @@ func (FsReadImageTool) Schema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"path": map[string]any{"type": "string"},
+			"file_path": map[string]any{"type": "string"},
 		},
-		"required":             []string{"path"},
+		"required":             []string{"file_path"},
 		"additionalProperties": false,
 	}
 }
 
-func (t FsReadImageTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
-	_, text, err := t.ExecuteContent(ctx, args)
-	return text, err
+func (t FsReadImageTool) Execute(ctx context.Context, args any) (string, error) {
+	result, err := t.ExecuteResult(ctx, args)
+	return result.Output, err
 }
 
-func (t FsReadImageTool) ExecuteContent(ctx context.Context, args json.RawMessage) ([]llm.ContentBlock, string, error) {
+func (t FsReadImageTool) ExecuteResult(ctx context.Context, args any) (agenttools.ToolResult, error) {
 	var a struct {
-		Path string `json:"path"`
+		FilePath string `json:"file_path"`
+		Path     string `json:"path"` // legacy direct-call compatibility; not in the model schema
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
-		return nil, "", fmt.Errorf("read_image: %w", err)
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
+		return agenttools.ToolResult{}, fmt.Errorf("read_image: %w", err)
 	}
-	if strings.TrimSpace(a.Path) == "" {
-		return nil, "", fmt.Errorf("read_image: empty path")
+	if a.FilePath == "" {
+		a.FilePath = a.Path
+	}
+	if strings.TrimSpace(a.FilePath) == "" {
+		return agenttools.ToolResult{}, fmt.Errorf("read_image: empty path")
 	}
 	mediaType := map[string]string{
 		".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
 		".webp": "image/webp", ".gif": "image/gif",
-	}[strings.ToLower(filepath.Ext(a.Path))]
+	}[strings.ToLower(filepath.Ext(a.FilePath))]
 	if mediaType == "" {
-		return nil, "", fmt.Errorf("read_image: unsupported image type")
+		return agenttools.ToolResult{}, fmt.Errorf("read_image: unsupported image type")
 	}
-	data, err := t.t.f.ReadBytes(ctx, a.Path, 20*1024*1024)
+	data, err := t.t.f.ReadBytes(ctx, a.FilePath, 20*1024*1024)
 	if err != nil {
-		return nil, "", fmt.Errorf("read_image: %w", err)
+		return agenttools.ToolResult{}, fmt.Errorf("read_image: %w", err)
 	}
-	full := a.Path
+	full := a.FilePath
 	if !filepath.IsAbs(full) {
 		full = filepath.Join(t.t.f.Root(), full)
 	}
@@ -256,8 +264,8 @@ func (t FsReadImageTool) ExecuteContent(ctx context.Context, args json.RawMessag
 		Bytes:     int64(len(data)),
 		Path:      filepath.Clean(full),
 	}
-	t.t.emit(session.EventFsRead, session.NewFsRead(a.Path, len(data)))
-	return []llm.ContentBlock{{Kind: llm.BlockImage, Image: ref}}, "image " + a.Path, nil
+	t.t.emit(session.EventFsRead, session.NewFsRead(a.FilePath, len(data)))
+	return agenttools.ToolResult{Output: "image " + a.FilePath, Content: []llm.ContentBlock{{Kind: llm.BlockImage, Image: ref}}}, nil
 }
 
 func (t *FsTools) checkWriteObservation(ctx context.Context, path string) error {
@@ -295,7 +303,7 @@ func (FsWriteTool) Schema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"path": map[string]any{
+			"file_path": map[string]any{
 				"type":        "string",
 				"description": "file path inside the allowed fs root (relative to fs.root, or an absolute path within it)",
 			},
@@ -304,34 +312,38 @@ func (FsWriteTool) Schema() map[string]any {
 				"description": "the text content to write (creates or overwrites the file)",
 			},
 		},
-		"required":             []string{"path", "content"},
+		"required":             []string{"file_path", "content"},
 		"additionalProperties": false,
 	}
 }
 
-func (t FsWriteTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t FsWriteTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
-		Path    string  `json:"path"`
-		Content *string `json:"content"` // nil = key absent (rejected); *"" = an explicitly empty file (valid)
+		FilePath string  `json:"file_path"`
+		Path     string  `json:"path"`    // legacy direct-call compatibility; not in the model schema
+		Content  *string `json:"content"` // nil = key absent (rejected); *"" = an explicitly empty file (valid)
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("write: %w", err)
 	}
-	if strings.TrimSpace(a.Path) == "" {
+	if a.FilePath == "" {
+		a.FilePath = a.Path
+	}
+	if strings.TrimSpace(a.FilePath) == "" {
 		return "", fmt.Errorf("write: empty path")
 	}
 	if a.Content == nil {
 		return "", fmt.Errorf("write: missing content")
 	}
-	if err := t.t.checkWriteObservation(ctx, a.Path); err != nil {
+	if err := t.t.checkWriteObservation(ctx, a.FilePath); err != nil {
 		return "", fmt.Errorf("write: %w", err)
 	}
-	if err := t.t.f.Write(ctx, a.Path, *a.Content); err != nil {
+	if err := t.t.f.Write(ctx, a.FilePath, *a.Content); err != nil {
 		return "", fmt.Errorf("write: %w", err)
 	}
-	delete(t.t.observed, t.t.key(a.Path))
-	t.t.emit(session.EventFsWrite, session.NewFsWrite(a.Path))
-	return fmt.Sprintf("wrote %s (%d bytes)", a.Path, len(*a.Content)), nil
+	delete(t.t.observed, t.t.key(a.FilePath))
+	t.t.emit(session.EventFsWrite, session.NewFsWrite(a.FilePath))
+	return fmt.Sprintf("wrote %s (%d bytes)", a.FilePath, len(*a.Content)), nil
 }
 
 // FsListTool lists the direct (non-recursive) children of a directory inside
@@ -362,11 +374,11 @@ func (FsListTool) Schema() map[string]any {
 	}
 }
 
-func (t FsListTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t FsListTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		Dir string `json:"dir"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("list: %w", err)
 	}
 	if strings.TrimSpace(a.Dir) == "" {
@@ -399,7 +411,7 @@ func (FsEditTool) Schema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"path": map[string]any{
+			"file_path": map[string]any{
 				"type":        "string",
 				"description": "file path inside the allowed fs root (relative to fs.root, or an absolute path within it)",
 			},
@@ -416,31 +428,35 @@ func (FsEditTool) Schema() map[string]any {
 				"description": "replace every occurrence instead of only the first",
 			},
 		},
-		"required":             []string{"path", "old_string", "new_string"},
+		"required":             []string{"file_path", "old_string", "new_string"},
 		"additionalProperties": false,
 	}
 }
 
-func (t FsEditTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t FsEditTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
-		Path       string `json:"path"`
+		FilePath   string `json:"file_path"`
+		Path       string `json:"path"` // legacy direct-call compatibility; not in the model schema
 		OldString  string `json:"old_string"`
 		NewString  string `json:"new_string"`
 		ReplaceAll bool   `json:"replace_all"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("edit: %w", err)
 	}
-	if strings.TrimSpace(a.Path) == "" {
+	if a.FilePath == "" {
+		a.FilePath = a.Path
+	}
+	if strings.TrimSpace(a.FilePath) == "" {
 		return "", fmt.Errorf("edit: empty path")
 	}
 	if a.OldString == "" {
 		return "", fmt.Errorf("edit: empty old_string")
 	}
-	if err := t.t.requireObserved(ctx, a.Path); err != nil {
+	if err := t.t.requireObserved(ctx, a.FilePath); err != nil {
 		return "", fmt.Errorf("edit: %w", err)
 	}
-	content, err := t.t.f.Read(ctx, a.Path, 0)
+	content, err := t.t.f.Read(ctx, a.FilePath, 0)
 	if err != nil {
 		return "", fmt.Errorf("edit: %w", err)
 	}
@@ -449,21 +465,21 @@ func (t FsEditTool) Execute(ctx context.Context, args json.RawMessage) (string, 
 		n = -1
 	}
 	if !strings.Contains(content, a.OldString) {
-		return "", fmt.Errorf("edit: old_string not found in %s", a.Path)
+		return "", fmt.Errorf("edit: old_string not found in %s", a.FilePath)
 	}
 	updated := strings.Replace(content, a.OldString, a.NewString, n)
 	if updated == content {
-		return "", fmt.Errorf("edit: old_string not found in %s", a.Path)
+		return "", fmt.Errorf("edit: old_string not found in %s", a.FilePath)
 	}
-	if err := t.t.requireObserved(ctx, a.Path); err != nil {
+	if err := t.t.requireObserved(ctx, a.FilePath); err != nil {
 		return "", fmt.Errorf("edit: %w", err)
 	}
-	if err := t.t.f.Write(ctx, a.Path, updated); err != nil {
+	if err := t.t.f.Write(ctx, a.FilePath, updated); err != nil {
 		return "", fmt.Errorf("edit: %w", err)
 	}
-	delete(t.t.observed, t.t.key(a.Path))
-	t.t.emit(session.EventFsWrite, session.NewFsWrite(a.Path))
-	return fmt.Sprintf("edited %s", a.Path), nil
+	delete(t.t.observed, t.t.key(a.FilePath))
+	t.t.emit(session.EventFsWrite, session.NewFsWrite(a.FilePath))
+	return fmt.Sprintf("edited %s", a.FilePath), nil
 }
 
 // formatEntries renders one listing as model-facing text: a header with the

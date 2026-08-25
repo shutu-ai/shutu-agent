@@ -185,6 +185,15 @@ func NewSession(opts SessionOpts) (*Session, error) {
 // ID 返回会话 id（hex 编码的 8 随机字节）。
 func (s *Session) ID() string { return s.id }
 
+// PID returns the child process id when the shell has started. It is exposed
+// for dsh's terminal_signal result; on platforms without a process id it is 0.
+func (s *Session) PID() int {
+	if s.cmd == nil || s.cmd.Process == nil {
+		return 0
+	}
+	return s.cmd.Process.Pid
+}
+
 // StartedAt 返回会话创建时间。
 func (s *Session) StartedAt() time.Time { return s.startedAt }
 
@@ -278,6 +287,13 @@ func (s *Session) Write(text string, submit bool) (WriteResult, error) {
 // Read 从滚动缓冲读取一个窗口：从尾部倒数 offset 行起，取 count 行。
 // 返回的 bool 为 true 表示返回窗口之前仍有更早内容，或缓冲发生过截断。
 func (s *Session) Read(offset, count int) (string, bool) {
+	text, _, _, _, truncated := s.ReadWindow(offset, count)
+	return text, truncated
+}
+
+// ReadWindow is the dsh terminal_read projection: it returns the selected
+// newest-relative page together with retained line coordinates.
+func (s *Session) ReadWindow(offset, count int) (text string, totalLines, lineBegin, lineEnd int, truncated bool) {
 	if offset < 0 {
 		offset = 0
 	}
@@ -291,7 +307,7 @@ func (s *Session) Read(offset, count int) (string, bool) {
 	}
 	total := len(lines)
 	if offset >= total {
-		return "", true
+		return "", total, offset, offset, true
 	}
 	start := total - offset - count
 	if start < 0 {
@@ -301,7 +317,7 @@ func (s *Session) Read(offset, count int) (string, bool) {
 	if end > total {
 		end = total
 	}
-	return strings.Join(lines[start:end], "\n"), snapshotTruncated || start > 0
+	return strings.Join(lines[start:end], "\n"), total, start, end, snapshotTruncated || start > 0
 }
 
 // Consume 返回自上次 Consume 以来累积的输出（委托给缓冲）。

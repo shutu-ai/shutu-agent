@@ -62,8 +62,8 @@ func TestFsToolSchemas(t *testing.T) {
 		t.Fatalf("write schema = %+v, want type object / additionalProperties false", write)
 	}
 	wreq, _ := write["required"].([]string)
-	if len(wreq) != 2 || wreq[0] != "path" || wreq[1] != "content" {
-		t.Fatalf("write required = %v, want [path content]", wreq)
+	if len(wreq) != 2 || wreq[0] != "file_path" || wreq[1] != "content" {
+		t.Fatalf("write required = %v, want [file_path content]", wreq)
 	}
 	wprops, _ := write["properties"].(map[string]any)
 	if _, ok := wprops["content"]; !ok {
@@ -84,8 +84,8 @@ func TestFsToolSchemas(t *testing.T) {
 		t.Fatalf("edit schema = %+v, want type object / additionalProperties false", edit)
 	}
 	ereq, _ := edit["required"].([]string)
-	if len(ereq) != 3 || ereq[0] != "path" || ereq[1] != "old_string" || ereq[2] != "new_string" {
-		t.Fatalf("edit required = %v, want [path old_string new_string]", ereq)
+	if len(ereq) != 3 || ereq[0] != "file_path" || ereq[1] != "old_string" || ereq[2] != "new_string" {
+		t.Fatalf("edit required = %v, want [file_path old_string new_string]", ereq)
 	}
 
 	read := ft.Read().Schema()

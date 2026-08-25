@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -85,7 +84,7 @@ func newACPMCP(ctx context.Context, a *app, owner string, log *session.Log) (*ac
 				_ = s.Close()
 				return nil, fmt.Errorf("ACP MCP server %q advertised an empty tool name", name)
 			}
-			fullName := "mcp." + name + "." + tool.Name
+			fullName := "mcp__" + name + "__" + tool.Name
 			if _, exists := s.advertised[fullName]; exists {
 				_ = s.Close()
 				return nil, fmt.Errorf("ACP MCP tool %q is advertised more than once", fullName)
@@ -106,10 +105,7 @@ func (s *acpMCP) tools() []agenttools.Tool {
 	if s.closed {
 		return nil
 	}
-	result := []agenttools.Tool{
-		acpMCPListTool{service: s},
-		acpMCPCallTool{service: s},
-	}
+	result := []agenttools.Tool{}
 	names := make([]string, 0, len(s.advertised))
 	for name := range s.advertised {
 		names = append(names, name)
@@ -244,9 +240,9 @@ type acpMCPTool struct {
 func (t acpMCPTool) Name() string           { return t.name }
 func (t acpMCPTool) Description() string    { return t.tool.Description }
 func (t acpMCPTool) Schema() map[string]any { return normalizeSchema(t.tool.InputSchema) }
-func (t acpMCPTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t acpMCPTool) Execute(ctx context.Context, args any) (string, error) {
 	var values map[string]any
-	if err := json.Unmarshal(args, &values); err != nil {
+	if err := agenttools.DecodeArgs(args, &values); err != nil {
 		return "", fmt.Errorf("%s: %w", t.name, err)
 	}
 	return t.service.callAdvertised(ctx, t.name, values)
@@ -268,11 +264,11 @@ func (acpMCPListTool) Schema() map[string]any {
 		"additionalProperties": false,
 	}
 }
-func (t acpMCPListTool) Execute(_ context.Context, args json.RawMessage) (string, error) {
+func (t acpMCPListTool) Execute(_ context.Context, args any) (string, error) {
 	var values struct {
 		Server string `json:"server"`
 	}
-	if err := json.Unmarshal(args, &values); err != nil {
+	if err := agenttools.DecodeArgs(args, &values); err != nil {
 		return "", fmt.Errorf("mcp_list: %w", err)
 	}
 	return t.service.list(values.Server)
@@ -296,13 +292,13 @@ func (acpMCPCallTool) Schema() map[string]any {
 		"additionalProperties": false,
 	}
 }
-func (t acpMCPCallTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t acpMCPCallTool) Execute(ctx context.Context, args any) (string, error) {
 	var values struct {
 		Server string         `json:"server"`
 		Tool   string         `json:"tool"`
 		Args   map[string]any `json:"args"`
 	}
-	if err := json.Unmarshal(args, &values); err != nil {
+	if err := agenttools.DecodeArgs(args, &values); err != nil {
 		return "", fmt.Errorf("mcp_call: %w", err)
 	}
 	return t.service.callContext(ctx, values.Server, values.Tool, values.Args)

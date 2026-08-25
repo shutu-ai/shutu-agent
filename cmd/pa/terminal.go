@@ -15,9 +15,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"strings"
 
 	"github.com/jabing/shutu-agent/internal/config"
+	"github.com/jabing/shutu-agent/internal/jobs"
 	"github.com/jabing/shutu-agent/internal/terminal"
 	"github.com/jabing/shutu-agent/internal/tools"
 )
@@ -31,6 +33,15 @@ import (
 func (a *app) registerTerminal() error {
 	if !config.Enabled(a.cfg.Terminal.Enabled) {
 		return nil
+	}
+	if runtime.GOOS != "windows" {
+		bash := tools.NewRunCommandForWorkdirAndJobs(a.sessionCWD, func() jobs.Registry {
+			return a.jobs
+		}, func() string { return a.currentID }, a.jobs != nil)
+		if err := a.reg.Register(bash); err != nil {
+			return fmt.Errorf("pa: register %s: %w", bash.Name(), err)
+		}
+		return a.registerModelTerminalTools()
 	}
 	pwsh := tools.NewPwsh(tools.PwshOpts{
 		Workdir: a.cfg.Terminal.Workdir, // default working dir (session workspace)
@@ -49,7 +60,7 @@ func (a *app) registerTerminal() error {
 	if err := a.reg.Register(pwsh); err != nil {
 		return fmt.Errorf("pa: register %s: %w", pwsh.Name(), err)
 	}
-	return nil
+	return a.registerModelTerminalTools()
 }
 
 // terminalAccess adapts the app to the M9 session accessor used by /term: it

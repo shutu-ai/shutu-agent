@@ -176,7 +176,7 @@ func TestLoadRunCommandEnabledAppendsToWhitelist(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	for _, name := range []string{"get_time", "read", "bash"} {
+	for _, name := range []string{"read", "bash"} {
 		if !contains(cfg.Tools.Enabled, name) {
 			t.Errorf("whitelist %v lacks %q", cfg.Tools.Enabled, name)
 		}

@@ -55,7 +55,6 @@ var ErrLimit = errors.New("fssearch: search limit reached")
 // node_modules/vendor are a shutu safety addition over dsh's --no-ignore).
 var ignoredDirs = map[string]bool{
 	".git": true, ".hg": true, ".svn": true,
-	"node_modules": true, "vendor": true,
 }
 
 // Search finds Query (a regular expression, dsh grep semantics) in file

@@ -25,7 +25,8 @@ func (f *fakeSensitiveTool) Description() string { return "fake sensitive tool" 
 func (f *fakeSensitiveTool) Schema() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{}}
 }
-func (f *fakeSensitiveTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (f *fakeSensitiveTool) OutputSchema() map[string]any { return map[string]any{"type": "string"} }
+func (f *fakeSensitiveTool) Execute(ctx context.Context, args any) (string, error) {
 	f.executed = true
 	return "ran", nil
 }
@@ -146,8 +147,8 @@ func TestRegisterInteractsEnabledRegistersToolsAndEvents(t *testing.T) {
 		t.Fatal("interact/status event missing from the session log after interact_status")
 	}
 	// An unknown id errors.
-	if _, err := a.reg.Execute(context.Background(), "interact_status", json.RawMessage(`{"id":"req-99"}`)); err == nil {
-		t.Fatal("interact_status of an unknown id must error")
+	if res, err := a.reg.Execute(context.Background(), "interact_status", json.RawMessage(`{"id":"req-99"}`)); err != nil || !res.IsError {
+		t.Fatalf("interact_status of an unknown id must return a structured error: result=%+v err=%v", res, err)
 	}
 	// The interact/* rows never derive into model messages (log-only).
 	if msgs := a.log.DeriveHistory(); len(msgs) != 0 {
@@ -237,7 +238,7 @@ func TestSensitiveGateMissedDoesNotIntercept(t *testing.T) {
 	}
 	defer a.interacts.Close()
 
-	res, err := a.reg.Execute(context.Background(), "read", json.RawMessage(`{"path":"x"}`))
+	res, err := a.reg.Execute(context.Background(), "read", json.RawMessage(`{"file_path":"x"}`))
 	if err != nil {
 		t.Fatalf("non-sensitive read: %v", err)
 	}

@@ -45,7 +45,8 @@ func (a *app) registerFs() error {
 		}
 	}
 	ft := fs.NewFsTools(svc, onEvent)
-	fileTools := []tools.Tool{ft.Read(), ft.Write(), ft.List(), ft.Edit()}
+	// dsh exposes read/write/edit; directory discovery is provided by glob.
+	fileTools := []tools.Tool{ft.Read(), ft.Write(), ft.Edit()}
 	if a.multimodalEnabled() {
 		fileTools = append(fileTools, ft.ReadImage())
 	}

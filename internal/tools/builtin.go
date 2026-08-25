@@ -17,7 +17,7 @@ func (GetTime) Name() string { return "get_time" }
 
 // ConcurrencySafe marks this read-only, argument-free tool as safe to run
 // alongside another independent call in the same dsh-style tool batch.
-func (GetTime) ConcurrencySafe(json.RawMessage) bool { return true }
+func (GetTime) ConcurrencySafe(any) bool { return true }
 
 func (GetTime) Description() string { return "return the current time in RFC 3339 format" }
 
@@ -29,7 +29,7 @@ func (GetTime) Schema() map[string]any {
 	}
 }
 
-func (GetTime) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (GetTime) Execute(ctx context.Context, args any) (string, error) {
 	return time.Now().Format(time.RFC3339), nil
 }
 
@@ -67,7 +67,7 @@ func (ReadFile) Name() string { return "read" }
 // ConcurrencySafe marks filesystem reads as safe to overlap. The tool does
 // not mutate registry/session state; callers that need observation semantics
 // use the separate fs package instead.
-func (ReadFile) ConcurrencySafe(json.RawMessage) bool { return true }
+func (ReadFile) ConcurrencySafe(any) bool { return true }
 
 func (ReadFile) Description() string { return "read a text file from the local filesystem (read-only)" }
 
@@ -75,7 +75,7 @@ func (ReadFile) Schema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"path": map[string]any{
+			"file_path": map[string]any{
 				"type":        "string",
 				"description": "file path inside the workspace",
 			},
@@ -90,20 +90,21 @@ func (ReadFile) Schema() map[string]any {
 				"description": "maximum lines; defaults to 2000",
 			},
 		},
-		"required":             []string{"path"},
+		"required":             []string{"file_path"},
 		"additionalProperties": false,
 	}
 }
 
-func (r ReadFile) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (r ReadFile) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
-		Path string `json:"path"`
+		FilePath string `json:"file_path"`
+		Path     string `json:"path"` // legacy direct-call compatibility; not in the model schema
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("read: %w", err)
 	}
 	var extras map[string]json.RawMessage
-	if err := json.Unmarshal(args, &extras); err != nil {
+	if err := DecodeArgs(args, &extras); err != nil {
 		return "", fmt.Errorf("read: %w", err)
 	}
 	var offset, limit int
@@ -117,7 +118,10 @@ func (r ReadFile) Execute(ctx context.Context, args json.RawMessage) (string, er
 			return "", fmt.Errorf("read: limit: %w", err)
 		}
 	}
-	path := a.Path
+	path := a.FilePath
+	if path == "" {
+		path = a.Path
+	}
 	root := r.Root
 	if r.RootFunc != nil {
 		root = r.RootFunc()
