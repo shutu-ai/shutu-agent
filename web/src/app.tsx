@@ -126,6 +126,7 @@ export function App({ store }: { store: WebStore }) {
   const [draft, setDraft] = useState('')
   const [search, setSearch] = useState('')
   const [sendError, setSendError] = useState<string | null>(null)
+  const [token, setToken] = useState(() => store.getToken())
   const selected = state.sessions.find(session => session.id === state.selectedId)
   const filtered = useMemo(() => {
     const query = search.trim().toLocaleLowerCase()
@@ -157,6 +158,15 @@ export function App({ store }: { store: WebStore }) {
     }
   }
 
+  const authenticate = async (): Promise<void> => {
+    const value = token.trim()
+    if (!value) return
+    localStorage.setItem('shutu.web.token', value)
+    try { await store.authenticate(value) } catch (error) {
+      setSendError(error instanceof Error ? error.message : String(error))
+    }
+  }
+
   return <div className="shell">
     <aside className="sidebar">
       <div className="brand"><span className="brand-mark">S</span><span>Shutu</span><span className="brand-sub">DSH web</span></div>
@@ -176,7 +186,7 @@ export function App({ store }: { store: WebStore }) {
       <nav className="tabs" role="tablist"><button role="tab" aria-selected={tab === 'chat'} className={tab === 'chat' ? 'tab selected' : 'tab'} onClick={() => setTab('chat')}>Conversation</button><button role="tab" aria-selected={tab === 'trajectory'} className={tab === 'trajectory' ? 'tab selected' : 'tab'} onClick={() => setTab('trajectory')}>Trajectory <span>{state.events.length}</span></button></nav>
       {(state.error || sendError) && <div className="error-banner"><span>{state.error || sendError}</span><button onClick={() => { setSendError(null); void store.start() }}>Retry</button></div>}
       <section className="content-panel">
-        {state.loading ? <div className="empty"><div className="spinner" />Loading session…</div> : state.selectedId === null ? <div className="empty"><strong>Start a new conversation</strong><span>Select a session or send a message from the agent.</span></div> : filtered.length === 0 ? <div className="empty"><strong>{search ? 'No matching events' : 'No events yet'}</strong><span>{search ? 'Try a different search term.' : 'Events will appear here as the session runs.'}</span></div> : <>{tab === 'trajectory' && <DshTimeline events={filtered} />}<VirtualEvents events={filtered} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} /></>}
+        {state.authRequired ? <form className="auth-card" onSubmit={event => { event.preventDefault(); void authenticate() }}><strong>Authentication required</strong><span>Enter the bearer token configured for the Shutu web server.</span><input aria-label="Bearer token" type="password" autoComplete="current-password" value={token} onChange={event => setToken(event.target.value)} placeholder="Bearer token" /><button type="submit" disabled={token.trim() === ''}>Connect</button></form> : state.loading ? <div className="empty"><div className="spinner" />Loading session…</div> : state.selectedId === null ? <div className="empty"><strong>Start a new conversation</strong><span>Select a session or send a message from the agent.</span></div> : filtered.length === 0 ? <div className="empty"><strong>{search ? 'No matching events' : 'No events yet'}</strong><span>{search ? 'Try a different search term.' : 'Events will appear here as the session runs.'}</span></div> : <>{tab === 'trajectory' && <DshTimeline events={filtered} />}<VirtualEvents events={filtered} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} /></>}
       </section>
       <form className="composer" onSubmit={event => { event.preventDefault(); if (state.sending) void stopRun(); else void submit() }}><textarea value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); if (!state.sending) void submit() } }} placeholder={state.sending ? 'Agent is running…' : 'Send a message…'} rows={2} /><button type="submit" disabled={state.selectedId === null || (!state.sending && draft.trim() === '')}>{state.sending ? 'Stop' : 'Send'} <span>{state.sending ? '■' : '↵'}</span></button></form>
     </main>

@@ -7,7 +7,8 @@ import { WebStore } from './store'
 const root = document.getElementById('root')
 if (root === null) throw new Error('shutu web: missing #root')
 
-const api = new ShutuApi()
+const savedToken = typeof localStorage === 'undefined' ? '' : localStorage.getItem('shutu.web.token') ?? ''
+const api = new ShutuApi('', savedToken)
 const store = new WebStore(api)
 const ctx = new Context()
 ctx.reflect.provide('shutuApi', api)

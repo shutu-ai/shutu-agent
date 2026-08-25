@@ -57,14 +57,26 @@ export interface WebApi {
   sendMessage(sessionId: string, text: string, signal?: AbortSignal): Promise<void>
   stop(sessionId: string, signal?: AbortSignal): Promise<void>
   stream(sessionId: string, lastSeq: number, signal: AbortSignal, onEvent: EventListener): Promise<void>
+  setToken?(token: string): void
+  getToken?(): string
+}
+
+export class ShutuApiError extends Error {
+  constructor(message: string, readonly status: number) { super(message) }
 }
 
 export class ShutuApi implements WebApi {
+  private tokenValue: string
+
   constructor(
     private readonly baseUrl = '',
-    private readonly token = '',
+    token = '',
     private readonly fetcher: typeof fetch = globalThis.fetch.bind(globalThis),
-  ) {}
+  ) { this.tokenValue = token }
+
+  setToken(token: string): void { this.tokenValue = token.trim() }
+
+  getToken(): string { return this.tokenValue }
 
   private url(path: string): URL {
     return new URL(path, this.baseUrl || window.location.origin)
@@ -72,7 +84,7 @@ export class ShutuApi implements WebApi {
 
   private headers(): Headers {
     const headers = new Headers({ Accept: 'application/json' })
-    if (this.token !== '') headers.set('Authorization', `Bearer ${this.token}`)
+    if (this.tokenValue !== '') headers.set('Authorization', `Bearer ${this.tokenValue}`)
     return headers
   }
 
@@ -80,7 +92,7 @@ export class ShutuApi implements WebApi {
     const headers = this.headers()
     new Headers(init.headers).forEach((value, key) => headers.set(key, value))
     const response = await this.fetcher(this.url(path), { ...init, headers })
-    if (!response.ok) throw new Error(`请求失败：HTTP ${response.status}`)
+    if (!response.ok) throw new ShutuApiError(`Request failed: HTTP ${response.status}`, response.status)
     return response.json() as Promise<T>
   }
 
@@ -97,10 +109,7 @@ export class ShutuApi implements WebApi {
 
   async sendMessage(sessionId: string, text: string, signal?: AbortSignal): Promise<void> {
     await this.json<{ ok: true }>(`/api/sessions/${encodeURIComponent(sessionId)}/message`, {
-      method: 'POST',
-      signal,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text }),
+      method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }),
     })
   }
 
@@ -115,7 +124,7 @@ export class ShutuApi implements WebApi {
     headers.set('Accept', 'text/event-stream')
     if (lastSeq > 0) headers.set('Last-Event-ID', String(lastSeq))
     const response = await this.fetcher(this.url(`/api/sessions/${encodeURIComponent(sessionId)}/events/stream`), { signal, headers })
-    if (!response.ok || response.body === null) throw new Error(`实时连接失败：HTTP ${response.status}`)
+    if (!response.ok || response.body === null) throw new ShutuApiError(`Stream failed: HTTP ${response.status}`, response.status)
 
     const reader = response.body.getReader()
     const decoder = new TextDecoder()

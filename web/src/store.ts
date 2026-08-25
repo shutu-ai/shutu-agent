@@ -1,4 +1,5 @@
 import type { EventView, SessionSummary, WebApi } from './api'
+import { ShutuApiError } from './api'
 
 export interface WebState {
   sessions: readonly SessionSummary[]
@@ -10,11 +11,12 @@ export interface WebState {
   sending: boolean
   connected: boolean
   error: string | null
+  authRequired: boolean
 }
 
 const EMPTY: WebState = {
   sessions: [], selectedId: null, events: [], hasOlder: false,
-  loading: false, loadingOlder: false, sending: false, connected: false, error: null,
+  loading: false, loadingOlder: false, sending: false, connected: false, error: null, authRequired: false,
 }
 
 export class WebStore {
@@ -41,11 +43,11 @@ export class WebStore {
   async start(): Promise<void> {
     try {
       const sessions = await this.api.listSessions()
-      this.patch({ sessions, error: null })
+      this.patch({ sessions, error: null, authRequired: false })
       const first = sessions[0]
       if (first !== undefined) await this.open(first.id)
     } catch (error) {
-      this.patch({ error: error instanceof Error ? error.message : String(error) })
+      this.patch({ error: error instanceof Error ? error.message : String(error), authRequired: isUnauthorized(error) })
     }
   }
 
@@ -55,7 +57,7 @@ export class WebStore {
     const abort = new AbortController()
     this.streamAbort = abort
     this.knownSeqs.clear()
-    this.patch({ selectedId: sessionId, events: [], hasOlder: false, loading: true, loadingOlder: false, sending: false, connected: false, error: null })
+    this.patch({ selectedId: sessionId, events: [], hasOlder: false, loading: true, loadingOlder: false, sending: false, connected: false, error: null, authRequired: false })
     try {
       const page = await this.api.loadEvents(sessionId, { limit: 100 }, abort.signal)
       if (generation !== this.generation) return
@@ -64,7 +66,7 @@ export class WebStore {
       void this.streamLoop(sessionId, page.last_seq ?? page.events.at(-1)?.seq ?? 0, abort, generation)
     } catch (error) {
       if (abort.signal.aborted) return
-      this.patch({ loading: false, error: error instanceof Error ? error.message : String(error) })
+      this.patch({ loading: false, error: error instanceof Error ? error.message : String(error), authRequired: isUnauthorized(error) })
     }
   }
 
@@ -100,6 +102,14 @@ export class WebStore {
     this.patch({ sending: false })
   }
 
+  getToken(): string { return this.api.getToken?.() ?? '' }
+
+  async authenticate(token: string): Promise<void> {
+    this.api.setToken?.(token)
+    this.patch({ authRequired: false, error: null })
+    await this.start()
+  }
+
   private async streamLoop(sessionId: string, initialSeq: number, abort: AbortController, generation: number): Promise<void> {
     let cursor = initialSeq
     while (!abort.signal.aborted && generation === this.generation) {
@@ -120,4 +130,8 @@ export class WebStore {
       await new Promise(resolve => setTimeout(resolve, 500))
     }
   }
+}
+
+function isUnauthorized(error: unknown): boolean {
+  return error instanceof ShutuApiError && error.status === 401
 }

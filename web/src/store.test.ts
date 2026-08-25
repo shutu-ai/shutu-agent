@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { EventPage, EventView, SessionSummary, WebApi } from './api'
+import { ShutuApiError, type EventPage, type EventView, type SessionSummary, type WebApi } from './api'
 import { WebStore } from './store'
 
 const session = (id: string): SessionSummary => ({
@@ -72,5 +72,27 @@ describe('WebStore', () => {
     expect(store.getSnapshot().selectedId).toBe('two')
     expect(store.getSnapshot().events.map(item => item.seq)).toEqual([20])
     expect(store.getSnapshot().loadingOlder).toBe(false)
+  })
+
+  it('marks bearer authentication as required and retries after a token update', async () => {
+    let authorized = false
+    const api: WebApi = {
+      listSessions: async () => {
+        if (!authorized) throw new ShutuApiError('unauthorized', 401)
+        return [session('secure')]
+      },
+      loadEvents: async () => page([]),
+      sendMessage: async () => undefined,
+      stop: async () => undefined,
+      stream: async (_id, _lastSeq, signal) => waitForAbort(signal),
+      setToken: () => { authorized = true },
+    }
+    const store = new WebStore(api)
+
+    await store.start()
+    expect(store.getSnapshot().authRequired).toBe(true)
+    await store.authenticate('token')
+    expect(store.getSnapshot().authRequired).toBe(false)
+    expect(store.getSnapshot().selectedId).toBe('secure')
   })
 })

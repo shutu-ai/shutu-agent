@@ -81,6 +81,12 @@ pre { margin: 3px 0 0; overflow: auto; color: #b9c8da; font: 11px/1.45 ui-monosp
 .history-loading { position: sticky; z-index: 2; top: 0; width: max-content; margin: 0 auto 5px; border: 1px solid #34584b; border-radius: 12px; padding: 3px 9px; color: #a9e8c1; background: #142b27; font-size: 11px; }
 .empty { display: grid; height: 100%; min-height: 260px; place-content: center; justify-items: center; gap: 8px; color: #7c8ba0; text-align: center; }
 .empty strong { color: #cdd8e5; font-size: 16px; }
+.auth-card { display: grid; width: min(420px, 100%); margin: auto; gap: 10px; border: 1px solid #2d4659; border-radius: 12px; padding: 22px; background: #111d2a; }
+.auth-card strong { color: #eaf3fb; font-size: 17px; }
+.auth-card span { color: #8292a6; font-size: 12px; }
+.auth-card input { border: 1px solid #2a3d50; border-radius: 7px; outline: 0; padding: 9px 10px; color: #e7edf5; background: #0b131d; }
+.auth-card button { border: 0; border-radius: 7px; padding: 9px; color: #09131c; background: #9de9bd; font-weight: 700; }
+.auth-card button:disabled { opacity: .45; }
 .spinner { width: 20px; height: 20px; border: 2px solid #2d4050; border-top-color: #9de9bd; border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .composer { display: flex; gap: 10px; margin: 8px 38px 26px; border: 1px solid #2a384a; border-radius: 12px; padding: 9px; background: #111a26; }
