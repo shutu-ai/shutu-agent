@@ -87,10 +87,10 @@ func TestRegisterWebEnabledRegistersAndValidates(t *testing.T) {
 
 	// A valid web_search with no key: the tool is wired, and the env-key
 	// gating produces the readable no-provider error (no network).
-	if _, err := a.reg.Execute(context.Background(), "web_search", json.RawMessage(`{"queries":["golang"]}`)); err == nil {
-		t.Fatal("web_search without DEEPSEEK_API_KEY must error")
-	} else if !strings.Contains(err.Error(), "no search provider") {
-		t.Errorf("err = %q, want the no-provider hint", err)
+	if res, err := a.reg.Execute(context.Background(), "web_search", json.RawMessage(`{"queries":["golang"]}`)); err != nil || !res.IsError {
+		t.Fatalf("web_search without DEEPSEEK_API_KEY must return a structured error: result=%+v err=%v", res, err)
+	} else if !strings.Contains(res.Output, "no search provider") {
+		t.Errorf("output = %q, want the no-provider hint", res.Output)
 	}
 	// A failed call logs nothing at the tool layer (D3: web/search-request
 	// only fires inside a provider OnRequest; the tool layer emits no web

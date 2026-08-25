@@ -167,8 +167,8 @@ func TestKBSearchSchemaValidation(t *testing.T) {
 // mistakes a stale id for a live entry).
 func TestKBReadNotFound(t *testing.T) {
 	r, _ := newKBToolRegistry(t)
-	if _, err := r.Execute(context.Background(), "kb_read", json.RawMessage(`{"id":"kb-nope"}`)); err == nil {
-		t.Fatal("kb_read on an unknown id must fail")
+	if res, err := r.Execute(context.Background(), "kb_read", json.RawMessage(`{"id":"kb-nope"}`)); err != nil || !res.IsError {
+		t.Fatalf("kb_read on an unknown id must return a structured error: result=%+v err=%v", res, err)
 	}
 }
 

@@ -23,8 +23,8 @@ package spill
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	agenttools "github.com/jabing/shutu-agent/internal/tools"
 	"strings"
 
 	"github.com/jabing/shutu-agent/internal/session"
@@ -116,12 +116,12 @@ func (SpillWriteTool) Schema() map[string]any {
 	}
 }
 
-func (t SpillWriteTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t SpillWriteTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		Content string `json:"content"`
 		Source  string `json:"source"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("spill_write: %w", err)
 	}
 	if strings.TrimSpace(a.Content) == "" {
@@ -173,12 +173,12 @@ func (SpillRecallTool) Schema() map[string]any {
 	}
 }
 
-func (t SpillRecallTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t SpillRecallTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		Query string `json:"query"`
 		Limit int    `json:"limit"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("spill_recall: %w", err)
 	}
 	hits, err := t.t.e.Recall(ctx, a.Query, a.Limit)
@@ -209,7 +209,7 @@ func (SpillListTool) Schema() map[string]any {
 	}
 }
 
-func (t SpillListTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t SpillListTool) Execute(ctx context.Context, args any) (string, error) {
 	all, err := t.t.e.List(ctx)
 	if err != nil {
 		return "", fmt.Errorf("spill_list: %w", err)
@@ -245,11 +245,11 @@ func (SpillDeleteTool) Schema() map[string]any {
 	}
 }
 
-func (t SpillDeleteTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t SpillDeleteTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		ID string `json:"id"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("spill_delete: %w", err)
 	}
 	if err := t.t.e.Remove(ctx, a.ID); err != nil {

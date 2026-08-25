@@ -207,15 +207,15 @@ compaction:
 
 # Skill capability (M5d; design.md §3 / ADR 2026-08-18-m5-agent-core.md
 # 决策 ④). Off by default (D10): when disabled no skill provider/registry is
-# initialized, skill_load is neither registered nor whitelisted, and no skill
+# initialized, skill is neither registered nor whitelisted, and no skill
 # catalog pre-step injector is wired. Skills are trusted local files loaded as
 # model instruction text — never executed. When enabled, each turn's first
 # request carries the skill catalog (sorted name + description, bounded) and
-# skill_load loads a skill's full body (bounded) on demand; skill/catalog and
+# skill loads a skill's full body (bounded) on demand; skill/catalog and
 # skill/load are logged as facts (D3).
 skill:
-  # Master switch. false ⇒ no skill provider/registry is created and skill_load
-  # is neither registered nor whitelisted (默认关闭，不初始化).
+  # Master switch. false means no skill provider/registry is created and skill
+  # is neither registered nor whitelisted.
   enabled: true
   # Additional custom skill directories (source "custom", rank 300), scanned in
   # order. Empty by default.
@@ -223,7 +223,7 @@ skill:
   # Bound on the injected skill catalog (name + description), in chars;
   # 0/absent ⇒ 500.
   catalog_max_chars: 500
-  # Bound on the skill body skill_load returns to the model, in chars
+  # Bound on the skill body skill returns to the model, in chars
   # (Unicode-safe truncation, 防超长注入); 0/absent ⇒ 8000.
   body_max_chars: 8000
 
@@ -493,8 +493,8 @@ eval:
 # enabled, ralph runs a bounded multi-round fresh-agent loop over an immutable
 # objective: each round spawns a brand-new subagent (no session inheritance,
 # only a bounded structured report crosses rounds) sharing the workspace on disk
-# as long-term memory (D-GAP-3, 对齐 dsh tool-ralph). A worker reports DONE /
-# BLOCKED / round-limit; the final report reaches the model through the tool's
+# as long-term memory (D-GAP-3, aligned with dsh tool-ralph). A worker returns a
+# strict continue/complete/blocked report; the final envelope reaches the model through the tool's
 # tool/result, and ralph/run is logged as a fact (D3). The tool runs on the
 # serial tool path (D5). Enabling ralph also requires subagent (the loop spawns
 # children through the subagent Runtime).

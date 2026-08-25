@@ -86,7 +86,7 @@ func Search(ctx context.Context, query string, opts Options) ([]Hit, error)
 - `FsSearchTool`：持有 `cwd string`（path 缺省时的根）与 `searchFn`（测试注入或默认 Search）。照 `internal/fs/tools.go` 模式实现 tools.Tool：
   - `Name() string` → fs_search；`Description()` → "搜索目录下文件内容（子串或正则），返回匹配文件与行"。
   - `Schema()` → 上文 JSON（path/query/pattern/regex/max_results/case_sensitive；required [query]）。
-  - `Execute(ctx, args json.RawMessage) (string, error)`：unmarshal → query 空拒绝 → `Search`（缺省 path → cwd；MaxResults 缺省 → DefaultMaxResults）→ 格式化：每命中 `path:line: text`（path 用相对展示：相对 cwd 更可读，实施时定）→ 末尾 `N matches`；`ErrLimit` → 结果 + ` (limit reached)` 后缀；无命中 → `no matches for "<query>" in <path>`。
+  - `Execute(ctx, args any) (string, error)`：unmarshal → query 空拒绝 → `Search`（缺省 path → cwd；MaxResults 缺省 → DefaultMaxResults）→ 格式化：每命中 `path:line: text`（path 用相对展示：相对 cwd 更可读，实施时定）→ 末尾 `N matches`；`ErrLimit` → 结果 + ` (limit reached)` 后缀；无命中 → `no matches for "<query>" in <path>`。
 - `tools_test.go`：直接构造 FsSearchTool{searchFn:...} 断言 Execute 输出格式（命中/无命中/空 query 拒绝）。
 
 ### 4. internal/config/config.go + config.yaml

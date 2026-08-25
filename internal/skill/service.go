@@ -10,7 +10,7 @@
 // The default provider is the filesystem provider (filesystem.go), which
 // discovers <name>/SKILL.md bundles and flat <name>.md files from project and
 // user roots, non-recursively. Skills are trusted local files loaded as model
-// instruction text — never executed. The catalog injection and skill_load tool
+// instruction text — never executed. The catalog injection and skill tool
 // wiring are M5d-2 (ADR 决策 ④ 裁剪). This package never imports config, jobs,
 // subagent, session or the loop; consumers depend only on the seam's
 // interfaces (D2).
@@ -55,6 +55,25 @@ type Candidate struct {
 	Source      string
 	Rank        int
 	Path        string
+	// Invocation carries the dsh frontmatter policy when the provider can
+	// discover it without loading the full body. A nil policy means the
+	// provider did not publish policy metadata; dsh defaults both entry
+	// points to enabled in that case.
+	Invocation *InvocationPolicy
+}
+
+// InvocationPolicy controls which actor may load a skill. It is shared by
+// candidates and definitions so model-facing consumers can filter user-only
+// skills without reading their bodies.
+type InvocationPolicy struct {
+	ModelInvocable bool
+	UserInvocable  bool
+}
+
+// CandidateModelInvocable reports the dsh-compatible default for candidates
+// from providers that do not expose frontmatter metadata.
+func CandidateModelInvocable(c Candidate) bool {
+	return c.Invocation == nil || c.Invocation.ModelInvocable
 }
 
 // Definition is a fully loaded skill (ADR 决策 ④). Content is the Markdown
@@ -69,6 +88,16 @@ type Definition struct {
 	Path           string
 	ModelInvocable bool
 	UserInvocable  bool
+	// Invocation is non-nil when the provider explicitly supplied invocation
+	// metadata. A nil value preserves the dsh default (both enabled) for
+	// providers that only implement the original body-loading seam.
+	Invocation *InvocationPolicy
+}
+
+// DefinitionModelInvocable reports the dsh-compatible default for definitions
+// from providers that do not publish invocation metadata.
+func DefinitionModelInvocable(def *Definition) bool {
+	return def != nil && (def.Invocation == nil || def.Invocation.ModelInvocable)
 }
 
 // Provider is one skill backend (ADR 决策 ④, D2). Multiple providers coexist in

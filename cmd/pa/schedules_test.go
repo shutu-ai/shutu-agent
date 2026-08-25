@@ -198,8 +198,8 @@ func TestRegisterSchedulesEnabledRegistersAndValidates(t *testing.T) {
 		t.Fatal("schedule/delete event missing from the session log after schedule_delete")
 	}
 	// Deleting an unknown id errors.
-	if _, err := a.reg.Execute(context.Background(), "schedule_delete", json.RawMessage(`{"id":"sched-99"}`)); err == nil {
-		t.Fatal("schedule_delete of an unknown id must error")
+	if res, err := a.reg.Execute(context.Background(), "schedule_delete", json.RawMessage(`{"id":"sched-99"}`)); err != nil || !res.IsError {
+		t.Fatalf("schedule_delete of an unknown id must return a structured error: result=%+v err=%v", res, err)
 	}
 }
 

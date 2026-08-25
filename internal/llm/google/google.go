@@ -72,12 +72,12 @@ type Config struct {
 
 // googleProvider is the llm.Provider implementing the Gemini Generative AI API.
 type googleProvider struct {
-	id             string
-	baseURL        string
-	apiKey         string
-	model          string
+	id              string
+	baseURL         string
+	apiKey          string
+	model           string
 	maxOutputTokens int
-	client         *http.Client
+	client          *http.Client
 
 	supportsImages       bool
 	maxRequestImageBytes int
@@ -104,13 +104,13 @@ func New(cfg Config) *googleProvider {
 		cfg.MaxRequestImageBytes = defaultMaxRequestImageBytes
 	}
 	return &googleProvider{
-		id:               cfg.ID,
-		baseURL:          strings.TrimRight(cfg.BaseURL, "/"),
-		apiKey:           cfg.APIKey,
-		model:            cfg.Model,
-		maxOutputTokens:  cfg.MaxOutputTokens,
-		client:           cfg.HTTPClient,
-		supportsImages:   cfg.SupportsImages,
+		id:                   cfg.ID,
+		baseURL:              strings.TrimRight(cfg.BaseURL, "/"),
+		apiKey:               cfg.APIKey,
+		model:                cfg.Model,
+		maxOutputTokens:      cfg.MaxOutputTokens,
+		client:               cfg.HTTPClient,
+		supportsImages:       cfg.SupportsImages,
 		maxRequestImageBytes: cfg.MaxRequestImageBytes,
 	}
 }
@@ -150,10 +150,10 @@ func (p *googleProvider) Stream(ctx context.Context, req llm.ChatRequest) (llm.S
 	msgs := llm.OffloadRequestImages(req.Messages, p.maxRequestImageBytes)
 
 	body := requestBody{
-		Model:          p.model,
-		System:         extractSystem(msgs),
-		Contents:       toContents(msgs, p.maxRequestImageBytes),
-		Tools:          toTools(req.Tools),
+		Model:            p.model,
+		System:           extractSystem(msgs),
+		Contents:         toContents(msgs, p.maxRequestImageBytes),
+		Tools:            toTools(req.Tools),
 		GenerationConfig: generationConfig{MaxOutputTokens: p.maxOutputTokens},
 	}
 	payload, err := json.Marshal(body)
@@ -235,10 +235,10 @@ func errorDetail(resp *http.Response) string {
 // —— wire shapes for the Gemini generateContent request body ——
 
 type part struct {
-	Text           string            `json:"text,omitempty"`
-	Thought        bool              `json:"thought,omitempty"`
-	InlineData     *inlineData       `json:"inlineData,omitempty"`
-	FunctionCall   *wireFunctionCall `json:"functionCall,omitempty"`
+	Text           string              `json:"text,omitempty"`
+	Thought        bool                `json:"thought,omitempty"`
+	InlineData     *inlineData         `json:"inlineData,omitempty"`
+	FunctionCall   *wireFunctionCall   `json:"functionCall,omitempty"`
 	FunctionResult *wireFunctionResult `json:"functionResponse,omitempty"`
 }
 
@@ -277,10 +277,10 @@ type generationConfig struct {
 }
 
 type requestBody struct {
-	Model          string            `json:"model"`
-	System         *systemPart       `json:"systemInstruction,omitempty"`
-	Contents       []content         `json:"contents"`
-	Tools          []tool            `json:"tools,omitempty"`
+	Model            string           `json:"model"`
+	System           *systemPart      `json:"systemInstruction,omitempty"`
+	Contents         []content        `json:"contents"`
+	Tools            []tool           `json:"tools,omitempty"`
 	GenerationConfig generationConfig `json:"generationConfig,omitempty"`
 }
 

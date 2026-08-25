@@ -14,7 +14,9 @@ import (
 // classifyContentType 按 Content-Type 返回 "html" / "text" / "unsupported"。
 // html: text/html, application/xhtml+xml；
 // text: 其他 text/*、application/json、application/xml、application/javascript、
-//   +json/+xml 结构化类型等；
+//
+//	+json/+xml 结构化类型等；
+//
 // unsupported: 其余（二进制 image/*、application/pdf、application/octet-stream 等）。
 func classifyContentType(ct string) string {
 	mt, _, err := mime.ParseMediaType(ct)

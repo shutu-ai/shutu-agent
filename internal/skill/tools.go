@@ -1,5 +1,5 @@
 // tools.go — the M5d-2 Consumer half of the skill seam (design.md §8 Consumer /
-// D2, dispatch-m5d-2 §3): skill_load is registered into the tools.Registry by
+// D2, dispatch-m5d-2 §3): skill is registered into the tools.Registry by
 // the composition root (cmd/pa) when skill.enabled, and auto-whitelisted by
 // config.applyDefaults the same way the job_*/subagent_* tools are. It
 // implements the tools.Tool method set structurally (Go structural typing), so
@@ -11,7 +11,7 @@
 // kebab-case check is repeated here so a direct call can never bypass it.
 //
 // D3 event logging follows the M5a-2 tool-layer decision (ADR 决策 ① 实施说明 /
-// dispatch-m5d-2 §3): skill_load emits skill/load on a successful load through
+// dispatch-m5d-2 §3): skill emits skill/load on a successful load through
 // the injected onEvent sink (the composition root wires it to the session log),
 // and the loaded body reaches the model through the returned text, which the
 // loop logs as tool/result. Every append happens inside a tool Execute — the
@@ -21,15 +21,15 @@ package skill
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	agenttools "github.com/jabing/shutu-agent/internal/tools"
 
 	"github.com/jabing/shutu-agent/internal/session"
 )
 
 // ToolName is the skill consumer tool name (whitelisted when skill.enabled;
 // see config.skillToolNames).
-const ToolName = "skill_load"
+const ToolName = "skill"
 
 // SkillTools bundles the shared state of the skill consumer tools: the
 // Registry service, the model-facing body bound, and the event sink.
@@ -48,7 +48,7 @@ func NewSkillTools(reg Registry, bodyMaxChars int, onEvent func(typ string, data
 	return &SkillTools{reg: reg, bodyMaxChars: bodyMaxChars, onEvent: onEvent}
 }
 
-// Load returns the skill_load tool.
+// Load returns the skill tool.
 func (t *SkillTools) Load() SkillLoadTool { return SkillLoadTool{t: t} }
 
 // emit forwards one skill/* event payload to the injected sink (D3).
@@ -84,22 +84,25 @@ func (SkillLoadTool) Schema() map[string]any {
 	}
 }
 
-func (t SkillLoadTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t SkillLoadTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		Name string `json:"name"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
-		return "", fmt.Errorf("skill_load: %w", err)
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
+		return "", fmt.Errorf("skill: %w", err)
 	}
 	if !IsSkillName(a.Name) {
-		return "", fmt.Errorf("skill_load: invalid skill name %q (kebab-case expected)", a.Name)
+		return "", fmt.Errorf("skill: invalid skill name %q (kebab-case expected)", a.Name)
 	}
 	def, err := t.t.reg.Get(ctx, a.Name)
 	if err != nil {
-		return "", fmt.Errorf("skill_load: %w", err)
+		return "", fmt.Errorf("skill: %w", err)
 	}
 	if def == nil {
-		return "", fmt.Errorf("skill_load: unknown skill %q", a.Name)
+		return "", fmt.Errorf("skill: unknown skill %q", a.Name)
+	}
+	if !DefinitionModelInvocable(def) {
+		return "", fmt.Errorf("skill: %q is not available for model invocation", a.Name)
 	}
 	body := TruncateSkillBody(def.Content, t.t.bodyMaxChars)
 	// skill/load is a log-only fact (D3); the body the model sees is bounded

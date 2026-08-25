@@ -1,7 +1,7 @@
 // skills.go — the M5d-2 composition-root orchestration (dispatch-m5d-2
 // §4/§5). This is where the skill capability seam is wired into the REPL:
 // registerSkills creates the filesystem provider + Registry and registers
-// skill_load when skill.enabled (D10), wires the D3 event sink so skill/*
+// skill when skill.enabled (D10), wires the D3 event sink so skill/*
 // events are appended to the active session log, and the "skill" pre-step
 // catalog injector (registered after the compaction injector) makes every
 // turn's first request carry the bounded skill catalog. The loop's turn/step
@@ -27,7 +27,7 @@ import (
 )
 
 // registerSkills creates the filesystem provider + skill Registry and
-// registers skill_load when skill.enabled, and wires the D3 event sink. When
+// registers skill when skill.enabled, and wires the D3 event sink. When
 // skill is disabled it creates nothing and registers nothing (D10, mirrors
 // registerKB/registerJobs/registerSubagent/registerCompaction). The deferred
 // Close in main.go releases the registry and its providers at shutdown.
@@ -52,7 +52,7 @@ func (a *app) registerSkills() error {
 	}
 	a.skills = reg
 	// D3 event sink: skill/* events are appended to the active session log.
-	// The callback only ever runs inside a skill_load tool Execute or the
+	// The callback only ever runs inside a skill tool Execute or the
 	// pre-step catalog injector — the serial main-loop path (D5). a.log is
 	// read at call time, so a session switch (/new, /resume) is honored the
 	// same way as the kb/jobs/subagent wiring.
@@ -120,7 +120,7 @@ func (a *app) skillInvocationPreStep(ctx context.Context, userText string) []llm
 			fmt.Fprintln(os.Stderr, "[skill invocation failed open]", err)
 			continue
 		}
-		if def == nil || !def.UserInvocable {
+		if def == nil || (def.Invocation != nil && !def.Invocation.UserInvocable) {
 			continue
 		}
 		body := skill.TruncateSkillBody(def.Content, a.cfg.Skill.BodyMaxChars)
@@ -173,17 +173,23 @@ func (a *app) skillCatalogPreStep(ctx context.Context, _ string) []llm.Message {
 		fmt.Fprintln(os.Stderr, "[skill catalog failed open]", err)
 		return nil
 	}
-	if len(cands) == 0 {
+	modelCands := make([]skill.Candidate, 0, len(cands))
+	for _, c := range cands {
+		if skill.CandidateModelInvocable(c) {
+			modelCands = append(modelCands, c)
+		}
+	}
+	if len(modelCands) == 0 {
 		return nil
 	}
-	text := formatSkillCatalog(cands, a.cfg.Skill.CatalogMaxChars)
+	text := formatSkillCatalog(modelCands, a.cfg.Skill.CatalogMaxChars)
 	if text == "" {
 		return nil
 	}
-	version := skillCatalogVersion(cands)
+	version := skillCatalogVersion(modelCands)
 	if version != a.skillCatalogVersion {
 		a.skillCatalogVersion = version
-		if _, err := a.log.Append(session.EventSkillCatalog, session.NewSkillCatalog(len(cands), version)); err != nil {
+		if _, err := a.log.Append(session.EventSkillCatalog, session.NewSkillCatalog(len(modelCands), version)); err != nil {
 			fmt.Fprintln(os.Stderr, "pa: skill/catalog event:", err)
 		}
 	}

@@ -16,7 +16,7 @@ import (
 // it (in production config.applyDefaults + PolicyFromConfig do this).
 func skillPolicy() tools.Policy {
 	return tools.Policy{
-		Enabled:     []string{"skill_load"},
+		Enabled:     []string{ToolName},
 		Timeout:     0,
 		OutputLimit: 0,
 	}

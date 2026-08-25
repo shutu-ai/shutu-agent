@@ -20,7 +20,6 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -179,7 +178,7 @@ func (t PwshTool) Schema() map[string]any {
 // non-zero exit, a timeout and a killed process are NORMAL results carrying
 // markers (the model decides how to react); only infrastructure failures
 // (validation, spawn, interruption) are errors — the dsh render contract.
-func (t PwshTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t PwshTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		Command         string `json:"command"`
 		Description     string `json:"description"`
@@ -187,7 +186,7 @@ func (t PwshTool) Execute(ctx context.Context, args json.RawMessage) (string, er
 		Workdir         string `json:"workdir"`
 		RunInBackground bool   `json:"run_in_background"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("pwsh: %w", err)
 	}
 	if strings.TrimSpace(a.Command) == "" {

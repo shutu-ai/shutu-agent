@@ -11,8 +11,8 @@ type fakeProvider struct {
 	available bool
 }
 
-func (f *fakeProvider) ID() string                 { return f.id }
-func (f *fakeProvider) Available() bool            { return f.available }
+func (f *fakeProvider) ID() string      { return f.id }
+func (f *fakeProvider) Available() bool { return f.available }
 func (f *fakeProvider) Stream(context.Context, ChatRequest) (StreamReader, error) {
 	return nil, nil
 }

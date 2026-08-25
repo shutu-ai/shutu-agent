@@ -23,8 +23,8 @@ package subagent
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	agenttools "github.com/jabing/shutu-agent/internal/tools"
 	"strings"
 	"sync"
 
@@ -232,7 +232,7 @@ func (SubagentSpawnTool) Schema() map[string]any {
 	}
 }
 
-func (t SubagentSpawnTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t SubagentSpawnTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		Prompt             string   `json:"prompt"`
 		Label              string   `json:"label"`
@@ -242,7 +242,7 @@ func (t SubagentSpawnTool) Execute(ctx context.Context, args json.RawMessage) (s
 		Provider           string   `json:"provider"`
 		Continuable        bool     `json:"continuable"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("subagent_spawn: %w", err)
 	}
 	if strings.TrimSpace(a.Prompt) == "" {
@@ -304,12 +304,12 @@ func (SubagentSendTool) Schema() map[string]any {
 		"additionalProperties": false,
 	}
 }
-func (t SubagentSendTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t SubagentSendTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		ID      string `json:"id"`
 		Message string `json:"message"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("%s: %w", ToolSendName, err)
 	}
 	info, _, _ := t.t.lookup(a.ID)
@@ -342,7 +342,7 @@ func (SubagentInterruptTool) Schema() map[string]any {
 		"additionalProperties": false,
 	}
 }
-func (t SubagentInterruptTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t SubagentInterruptTool) Execute(ctx context.Context, args any) (string, error) {
 	return SubagentCancelTool{t: t.t}.Execute(ctx, args)
 }
 
@@ -366,12 +366,12 @@ func (SubagentReportTool) Schema() map[string]any {
 		"additionalProperties": false,
 	}
 }
-func (t SubagentReportTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t SubagentReportTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		ID      string `json:"id"`
 		Content string `json:"content"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("%s: %w", ToolReportName, err)
 	}
 	info, _, _ := t.t.lookup(a.ID)
@@ -404,14 +404,14 @@ func (SubagentResumeTool) Schema() map[string]any {
 		"additionalProperties": false,
 	}
 }
-func (t SubagentResumeTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t SubagentResumeTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		ID          string `json:"id"`
 		Message     string `json:"message"`
 		Provider    string `json:"provider"`
 		Continuable bool   `json:"continuable"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("%s: %w", ToolResumeName, err)
 	}
 	provider := strings.TrimSpace(a.Provider)
@@ -458,11 +458,11 @@ func (SubagentStatusTool) Schema() map[string]any {
 	}
 }
 
-func (t SubagentStatusTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t SubagentStatusTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		ID string `json:"id"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("subagent_status: %w", err)
 	}
 	info, res, settled := t.t.lookup(a.ID)
@@ -509,12 +509,12 @@ func (SubagentCancelTool) Schema() map[string]any {
 	}
 }
 
-func (t SubagentCancelTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t SubagentCancelTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		ID     string `json:"id"`
 		Reason string `json:"reason"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("subagent_cancel: %w", err)
 	}
 	info, _, _ := t.t.lookup(a.ID)
@@ -555,11 +555,11 @@ func (SubagentListTool) Schema() map[string]any {
 	}
 }
 
-func (t SubagentListTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t SubagentListTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		ParentSession string `json:"parent_session"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("subagent_list: %w", err)
 	}
 	parent := a.ParentSession

@@ -21,7 +21,7 @@ import (
 // (in production config.applyDefaults + PolicyFromConfig do this).
 func skillsPolicy() tools.Policy {
 	return tools.Policy{
-		Enabled:     []string{"skill_load"},
+		Enabled:     []string{skill.ToolName},
 		Timeout:     0,
 		OutputLimit: 0,
 	}
@@ -118,8 +118,8 @@ func TestRegisterSkillsEnabledRegistersAndLoads(t *testing.T) {
 		t.Fatal("skill registry must be created when skill.enabled=true")
 	}
 	names := registeredSkillNames(a)
-	if !containsStr(names, "skill_load") {
-		t.Fatalf("registered tools %v lack skill_load", names)
+	if !containsStr(names, skill.ToolName) {
+		t.Fatalf("registered tools %v lack %s", names, skill.ToolName)
 	}
 
 	// D7: bad arguments are rejected before any tool code runs.
@@ -130,13 +130,13 @@ func TestRegisterSkillsEnabledRegistersAndLoads(t *testing.T) {
 		`{"name":"has_underscore"}`,
 		`{"name":"x","extra":1}`,
 	} {
-		if _, err := a.reg.Execute(context.Background(), "skill_load", json.RawMessage(args)); err == nil {
+		if _, err := a.reg.Execute(context.Background(), skill.ToolName, json.RawMessage(args)); err == nil {
 			t.Errorf("skill_load with args %s must be rejected (D7)", args)
 		}
 	}
 
 	// A valid call loads the project-dsh skill and lands skill/load (D3).
-	res, err := a.reg.Execute(context.Background(), "skill_load", json.RawMessage(`{"name":"review-bash"}`))
+	res, err := a.reg.Execute(context.Background(), skill.ToolName, json.RawMessage(`{"name":"review-bash"}`))
 	if err != nil {
 		t.Fatalf("skill_load via registry: %v", err)
 	}
@@ -148,13 +148,13 @@ func TestRegisterSkillsEnabledRegistersAndLoads(t *testing.T) {
 	}
 
 	// The custom-dir skill is loadable too (skill.dirs flows through).
-	if _, err := a.reg.Execute(context.Background(), "skill_load", json.RawMessage(`{"name":"custom-tool"}`)); err != nil {
+	if _, err := a.reg.Execute(context.Background(), skill.ToolName, json.RawMessage(`{"name":"custom-tool"}`)); err != nil {
 		t.Fatalf("skill_load custom-tool: %v", err)
 	}
 
 	// An unknown skill errors (tool-layer handling, not a panic).
-	if _, err := a.reg.Execute(context.Background(), "skill_load", json.RawMessage(`{"name":"nope"}`)); err == nil {
-		t.Fatal("skill_load of an unknown skill must error")
+	if res, err := a.reg.Execute(context.Background(), skill.ToolName, json.RawMessage(`{"name":"nope"}`)); err != nil || !res.IsError {
+		t.Fatalf("skill_load of an unknown skill must return a structured error: result=%+v err=%v", res, err)
 	}
 }
 
@@ -361,7 +361,7 @@ func TestLoopPreStepSkillCatalog(t *testing.T) {
 	model := &compactScriptedLLM{steps: [][]llm.StreamEvent{
 		{ // step 1: the model calls skill_load
 			{Kind: llm.StreamFinish, FinishReason: "tool_calls", ToolCalls: []llm.ToolCall{
-				{ID: "call_1", Name: "skill_load", Arguments: `{"name":"review-bash"}`},
+				{ID: "call_1", Name: skill.ToolName, Arguments: `{"name":"review-bash"}`},
 			}},
 		},
 		{ // step 2: the model answers
@@ -408,7 +408,7 @@ func TestLoopPreStepSkillCatalog(t *testing.T) {
 			Name   string `json:"name"`
 			Output string `json:"output"`
 		}
-		if json.Unmarshal(ev.Data, &d) == nil && d.Name == "skill_load" &&
+		if json.Unmarshal(ev.Data, &d) == nil && d.Name == skill.ToolName &&
 			strings.Contains(d.Output, "<skill_content") && strings.Contains(d.Output, "go vet") {
 			foundResult = true
 		}

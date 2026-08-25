@@ -144,8 +144,8 @@ func TestRegisterCodePolicyDeadlineBoundsSandboxRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run_code after the policy deadline must be a normal timeout result, not an error: %v", err)
 	}
-	if !strings.Contains(res.Output, "[timed out") {
-		t.Fatalf("run_code output = %q, want a timeout marker (the code.timeout bound cut the run)", res.Output)
+	if !res.IsError || res.Error == nil || res.Error.Code != "TOOL_TIMEOUT" {
+		t.Fatalf("run_code result = %+v, want structured timeout (the code.timeout bound cut the run)", res)
 	}
 }
 

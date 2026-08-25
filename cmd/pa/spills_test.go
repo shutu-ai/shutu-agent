@@ -156,8 +156,8 @@ func TestRegisterSpillsEnabledRegistersAndValidates(t *testing.T) {
 		t.Fatal("spill/delete event missing from the session log after spill_delete")
 	}
 	// Deleting an unknown id errors.
-	if _, err := a.reg.Execute(context.Background(), "spill_delete", json.RawMessage(`{"id":"memo-nope"}`)); err == nil {
-		t.Fatal("spill_delete of an unknown id must error")
+	if res, err := a.reg.Execute(context.Background(), "spill_delete", json.RawMessage(`{"id":"memo-nope"}`)); err != nil || !res.IsError {
+		t.Fatalf("spill_delete of an unknown id must return a structured error: result=%+v err=%v", res, err)
 	}
 	// The spill/* rows stay in the log and never derive into messages (log-only).
 	if msgs := a.log.DeriveHistory(); len(msgs) != 0 {

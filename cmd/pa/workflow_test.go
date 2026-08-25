@@ -135,9 +135,9 @@ func TestWorkflowRunCycleError(t *testing.T) {
 	if err := app.registerWorkflow(); err != nil {
 		t.Fatalf("registerWorkflow: %v", err)
 	}
-	_, err := app.reg.Execute(context.Background(), workflow.WorkflowRunToolName,
+	res, err := app.reg.Execute(context.Background(), workflow.WorkflowRunToolName,
 		json.RawMessage(`{"tasks":[{"id":"a","prompt":"x","depends_on":["b"]},{"id":"b","prompt":"y","depends_on":["a"]}]}`))
-	if err == nil || !strings.Contains(err.Error(), "cycle") {
-		t.Fatalf("cyclic DAG err = %v, want cycle error", err)
+	if err != nil || !res.IsError || !strings.Contains(res.Output, "cycle") {
+		t.Fatalf("cyclic DAG result = %+v, err=%v, want structured cycle error", res, err)
 	}
 }

@@ -31,7 +31,8 @@ func (b blockUntilCtxDone) Description() string { return "blocks until the conte
 func (b blockUntilCtxDone) Schema() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{}}
 }
-func (b blockUntilCtxDone) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (b blockUntilCtxDone) OutputSchema() map[string]any { return map[string]any{"type": "string"} }
+func (b blockUntilCtxDone) Execute(ctx context.Context, args any) (string, error) {
 	<-ctx.Done()
 	return "", ctx.Err()
 }
@@ -93,12 +94,12 @@ func TestExecuteTimeout(t *testing.T) {
 	})
 
 	start := time.Now()
-	_, err := r.Execute(context.Background(), "slow_tool", json.RawMessage(`{}`))
-	if err == nil {
-		t.Fatal("expected timeout error")
+	res, err := r.Execute(context.Background(), "slow_tool", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("timeout must be a structured result: %v", err)
 	}
-	if !strings.Contains(err.Error(), "timed out") {
-		t.Fatalf("error = %v, want timeout mention", err)
+	if !res.IsError || res.Error == nil || res.Error.Code != "TOOL_TIMEOUT" || !strings.Contains(res.Output, "timed out") {
+		t.Fatalf("result = %+v, want structured timeout", res)
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("timeout took %v, want immediate interruption", elapsed)
@@ -152,7 +153,8 @@ func (w *waiterTool) Description() string { return "waits" }
 func (w *waiterTool) Schema() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{}}
 }
-func (w *waiterTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (w *waiterTool) OutputSchema() map[string]any { return map[string]any{"type": "string"} }
+func (w *waiterTool) Execute(ctx context.Context, args any) (string, error) {
 	select {
 	case <-ctx.Done():
 		return "", ctx.Err()

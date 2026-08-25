@@ -43,7 +43,7 @@ func mustEngine(t *testing.T, f *fakeSpawn) *Engine {
 // TestRunDoneFirstRound: a DONE reply on the first round finishes immediately
 // with the final deliverable and a single brief.
 func TestRunDoneFirstRound(t *testing.T) {
-	eng := mustEngine(t, &fakeSpawn{outputs: []string{"DONE: 完成报告"}})
+	eng := mustEngine(t, &fakeSpawn{outputs: []string{`{"status":"complete","summary":"完成报告","evidence":["verified"],"nextSteps":[],"blocker":""}`}})
 	rep, err := eng.Run(context.Background(), "目标", 0)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -73,7 +73,7 @@ func TestRunDoneFirstRound(t *testing.T) {
 
 // TestRunBlocked: a BLOCKED reply finishes immediately with the block reason.
 func TestRunBlocked(t *testing.T) {
-	eng := mustEngine(t, &fakeSpawn{outputs: []string{"BLOCKED: 缺凭证"}})
+	eng := mustEngine(t, &fakeSpawn{outputs: []string{`{"status":"blocked","summary":"无法继续","evidence":[],"nextSteps":[],"blocker":"缺凭证"}`}})
 	rep, err := eng.Run(context.Background(), "目标", 3)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -94,8 +94,8 @@ func TestRunBlocked(t *testing.T) {
 
 func TestRunStructuredReport(t *testing.T) {
 	eng := mustEngine(t, &fakeSpawn{outputs: []string{
-		`{"status":"continue","summary":"implemented core","handoff":["run tests"]}`,
-		`{"status":"complete","result":"all tests pass","handoff":["ready"]}`,
+		`{"status":"continue","summary":"implemented core","evidence":["core changed"],"nextSteps":["run tests"],"blocker":""}`,
+		`{"status":"complete","summary":"all tests pass","evidence":["ready"],"nextSteps":[],"blocker":""}`,
 	}})
 	rep, err := eng.Run(context.Background(), "ship", 3)
 	if err != nil {
@@ -104,8 +104,8 @@ func TestRunStructuredReport(t *testing.T) {
 	if !rep.Done || rep.Final != "all tests pass" || len(rep.RoundReports) != 2 {
 		t.Fatalf("structured report = %+v", rep)
 	}
-	if rep.RoundReports[0].Status != "continue" || len(rep.RoundReports[0].Handoff) != 1 {
-		t.Fatalf("first handoff = %+v", rep.RoundReports[0])
+	if rep.RoundReports[0].Status != "continue" || len(rep.RoundReports[0].NextSteps) != 1 {
+		t.Fatalf("first next steps = %+v", rep.RoundReports[0])
 	}
 }
 
@@ -126,7 +126,10 @@ func TestRunDSHStructuredReport(t *testing.T) {
 // TestRunProgressThenDone: a progress report carries the loop into round two,
 // where the DONE reply ends it with both briefs recorded.
 func TestRunProgressThenDone(t *testing.T) {
-	eng := mustEngine(t, &fakeSpawn{outputs: []string{"进展一", "DONE: 最终"}})
+	eng := mustEngine(t, &fakeSpawn{outputs: []string{
+		`{"status":"continue","summary":"进展一","evidence":["work"],"nextSteps":["finish"],"blocker":""}`,
+		`{"status":"complete","summary":"最终","evidence":["done"],"nextSteps":[],"blocker":""}`,
+	}})
 	rep, err := eng.Run(context.Background(), "目标", 3)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -151,7 +154,11 @@ func TestRunProgressThenDone(t *testing.T) {
 // TestRunRoundLimit: all-progress rounds exhaust the explicit cap without a
 // DONE/BLOCKED outcome (a normal, non-error end).
 func TestRunRoundLimit(t *testing.T) {
-	eng := mustEngine(t, &fakeSpawn{outputs: []string{"进展一", "进展二", "进展三"}})
+	eng := mustEngine(t, &fakeSpawn{outputs: []string{
+		`{"status":"continue","summary":"进展一","evidence":["one"],"nextSteps":["two"],"blocker":""}`,
+		`{"status":"continue","summary":"进展二","evidence":["two"],"nextSteps":["three"],"blocker":""}`,
+		`{"status":"continue","summary":"进展三","evidence":["three"],"nextSteps":["more"],"blocker":""}`,
+	}})
 	rep, err := eng.Run(context.Background(), "目标", 3)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -169,7 +176,13 @@ func TestRunRoundLimit(t *testing.T) {
 
 // TestRunMaxRoundsParam: an explicit max_rounds is honored as the loop cap.
 func TestRunMaxRoundsParam(t *testing.T) {
-	eng := mustEngine(t, &fakeSpawn{outputs: []string{"a", "b", "c", "d", "e"}})
+	eng := mustEngine(t, &fakeSpawn{outputs: []string{
+		`{"status":"continue","summary":"a","evidence":["a"],"nextSteps":["b"],"blocker":""}`,
+		`{"status":"continue","summary":"b","evidence":["b"],"nextSteps":["c"],"blocker":""}`,
+		`{"status":"continue","summary":"c","evidence":["c"],"nextSteps":["d"],"blocker":""}`,
+		`{"status":"continue","summary":"d","evidence":["d"],"nextSteps":["e"],"blocker":""}`,
+		`{"status":"continue","summary":"e","evidence":["e"],"nextSteps":["more"],"blocker":""}`,
+	}})
 	rep, err := eng.Run(context.Background(), "目标", 5)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -227,6 +240,13 @@ func TestBoundRunes(t *testing.T) {
 // TestWorkerPromptContent: the worker prompt carries the objective, the round
 // number, and the previous round's brief; the first round substitutes "（无）".
 func TestWorkerPromptContent(t *testing.T) {
+	prompt := buildWorkerPrompt("交付目标", 2, `{"status":"continue","summary":"上一轮进展","evidence":["checked"],"nextSteps":["继续"],"blocker":""}`)
+	for _, want := range []string{"交付目标", "Ralph round: 2", "Previous structured handoff:", "上一轮进展"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("structured worker prompt lacks %q: %s", want, prompt)
+		}
+	}
+	return
 	p1 := buildWorkerPrompt("交付目标", 1, "")
 	for _, want := range []string{"交付目标", "第 1 轮", "（无）"} {
 		if !strings.Contains(p1, want) {

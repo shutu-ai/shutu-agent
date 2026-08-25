@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	agenttools "github.com/jabing/shutu-agent/internal/tools"
 	"strings"
 	"time"
 )
@@ -20,14 +21,14 @@ func NewDurableScheduleTools(s *DurableScheduler, now func() time.Time) *Durable
 	return &DurableScheduleTools{s: s, now: now}
 }
 
-func (t DurableCreateTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t DurableCreateTool) Execute(ctx context.Context, args any) (string, error) {
 	var in struct {
 		Prompt       string `json:"prompt"`
 		AfterSeconds *int64 `json:"after_seconds"`
 		At           string `json:"at"`
 		EverySeconds *int64 `json:"every_seconds"`
 	}
-	if err := json.Unmarshal(args, &in); err != nil {
+	if err := agenttools.DecodeArgs(args, &in); err != nil {
 		return "", fmt.Errorf("schedule_create: %w", err)
 	}
 	record, err := t.t.s.Create(ctx, DurableCreateRequest{Prompt: in.Prompt, AfterSeconds: in.AfterSeconds, At: in.At, EverySeconds: in.EverySeconds}, t.t.now())
@@ -67,7 +68,7 @@ func (DurableListTool) Schema() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}
 }
 
-func (t DurableListTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t DurableListTool) Execute(ctx context.Context, args any) (string, error) {
 	views, err := t.t.s.List(ctx, t.t.now())
 	if err != nil {
 		return "", fmt.Errorf("schedule_list: %w", err)
@@ -83,11 +84,11 @@ func (DurableDeleteTool) Schema() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{"id": map[string]any{"type": "string", "minLength": 1}}, "required": []string{"id"}, "additionalProperties": false}
 }
 
-func (t DurableDeleteTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t DurableDeleteTool) Execute(ctx context.Context, args any) (string, error) {
 	var in struct {
 		ID string `json:"id"`
 	}
-	if err := json.Unmarshal(args, &in); err != nil {
+	if err := agenttools.DecodeArgs(args, &in); err != nil {
 		return "", fmt.Errorf("schedule_delete: %w", err)
 	}
 	if in.ID == "" || strings.TrimSpace(in.ID) != in.ID {

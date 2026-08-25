@@ -25,12 +25,12 @@ func (structuredOutputTool) Description() string {
 
 func (t structuredOutputTool) Schema() map[string]any { return t.schema }
 
-func (t structuredOutputTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t structuredOutputTool) Execute(ctx context.Context, args any) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
 	var value any
-	if err := json.Unmarshal(args, &value); err != nil {
+	if err := tools.DecodeArgs(args, &value); err != nil {
 		return "", fmt.Errorf("structured_output: invalid JSON: %w", err)
 	}
 	if t.capture != nil {

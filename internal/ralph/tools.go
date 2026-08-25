@@ -12,7 +12,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	agenttools "github.com/jabing/shutu-agent/internal/tools"
 	"strings"
+	"sync/atomic"
 
 	"github.com/jabing/shutu-agent/internal/session"
 )
@@ -55,7 +57,7 @@ func (RalphTool) Schema() map[string]any {
 				"minLength":   1,
 				"description": "immutable objective to drive the loop",
 			},
-			"max_rounds": map[string]any{
+			"maxRounds": map[string]any{
 				"type":        "integer",
 				"minimum":     1,
 				"description": "loop cap (default 256; deployment maximum 256)",
@@ -69,23 +71,81 @@ func (RalphTool) Schema() map[string]any {
 // Execute drives the loop over the model-provided objective and returns the
 // bounded final report. An empty objective is rejected; engine-level failures
 // (spawn errors) are wrapped.
-func (t *RalphTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t *RalphTool) Execute(ctx context.Context, args any) (string, error) {
+	result, err := t.ExecuteResult(ctx, args)
+	if err != nil {
+		return "", err
+	}
+	return result.Output, nil
+}
+
+var runSequence uint64
+
+// ExecuteResult exposes the dsh-compatible structured Ralph envelope while
+// Execute remains the required legacy method of the tool seam.
+func (t *RalphTool) ExecuteResult(ctx context.Context, args any) (agenttools.ToolResult, error) {
 	var a struct {
 		Objective string `json:"objective"`
-		MaxRounds int    `json:"max_rounds"`
+		MaxRounds int    `json:"maxRounds"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
-		return "", fmt.Errorf("ralph: %w", err)
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
+		return agenttools.ToolResult{}, fmt.Errorf("ralph: %w", err)
 	}
+	return t.execute(ctx, a)
+}
+
+func (t *RalphTool) execute(ctx context.Context, a struct {
+	Objective string `json:"objective"`
+	MaxRounds int    `json:"maxRounds"`
+}) (agenttools.ToolResult, error) {
 	if strings.TrimSpace(a.Objective) == "" {
-		return "", fmt.Errorf("ralph: empty objective")
+		return agenttools.ToolResult{}, fmt.Errorf("ralph: empty objective")
 	}
 	rep, err := t.eng.Run(ctx, a.Objective, a.MaxRounds)
 	if err != nil {
-		return "", fmt.Errorf("ralph: %w", err)
+		return agenttools.ToolResult{}, fmt.Errorf("ralph: %w", err)
 	}
 	t.emit(session.EventRalphRun, session.NewRalphRun(rep.Objective, rep.Rounds, rep.Done, rep.Blocked))
-	return formatReport(rep), nil
+	value := canonicalResult(rep)
+	encoded, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return agenttools.ToolResult{}, fmt.Errorf("ralph: encode result: %w", err)
+	}
+	return agenttools.ToolResult{
+		Value:  value,
+		Output: string(encoded),
+	}, nil
+}
+
+// Execute keeps direct callers on the same canonical path as the registry.
+func (t *RalphTool) ExecuteText(ctx context.Context, args any) (string, error) {
+	result, err := t.ExecuteResult(ctx, args)
+	if err != nil {
+		return "", err
+	}
+	return result.Output, nil
+}
+
+func canonicalResult(rep Report) map[string]any {
+	status := "budget-limited"
+	if rep.Done {
+		status = "complete"
+	} else if rep.Blocked {
+		status = "blocked"
+	}
+	var report RoundReport
+	if len(rep.RoundReports) > 0 {
+		report = rep.RoundReports[len(rep.RoundReports)-1]
+	}
+	return map[string]any{
+		"runId":         fmt.Sprintf("ralph-%d", atomic.AddUint64(&runSequence, 1)),
+		"agentsStarted": rep.Rounds,
+		"result": map[string]any{
+			"status":        status,
+			"roundsStarted": rep.Rounds,
+			"report":        report,
+		},
+	}
 }
 
 // formatReport renders the bounded final report: the objective head, the rounds

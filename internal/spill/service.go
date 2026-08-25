@@ -29,9 +29,9 @@ import (
 
 // Memo is one conversation-derived memory row.
 type Memo struct {
-	ID        string    // content-hash id ("memo-<hex>"); same content → same id
-	Content   string    // memo body (a durable fact derived from conversation)
-	Source    string    // provenance ("session:<seq>", "session:<seq>:tool:<name>", "auto", …)
+	ID        string // content-hash id ("memo-<hex>"); same content → same id
+	Content   string // memo body (a durable fact derived from conversation)
+	Source    string // provenance ("session:<seq>", "session:<seq>:tool:<name>", "auto", …)
 	CreatedAt time.Time
 }
 

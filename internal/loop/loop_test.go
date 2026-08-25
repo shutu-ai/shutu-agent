@@ -279,8 +279,9 @@ func (p parallelTool) Description() string { return "test-only parallel read" }
 func (p parallelTool) Schema() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}
 }
-func (p parallelTool) ConcurrencySafe(json.RawMessage) bool { return true }
-func (p parallelTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (p parallelTool) OutputSchema() map[string]any { return map[string]any{"type": "string"} }
+func (p parallelTool) ConcurrencySafe(any) bool     { return true }
+func (p parallelTool) Execute(ctx context.Context, args any) (string, error) {
 	current := atomic.AddInt32(&p.state.current, 1)
 	for {
 		max := atomic.LoadInt32(&p.state.max)
@@ -368,6 +369,18 @@ func TestRunUnknownToolLogsErrorAndContinues(t *testing.T) {
 	if !foundError {
 		t.Fatalf("expected tool/error, got %v", types)
 	}
+	for _, ev := range events {
+		if ev.Type == session.EventToolResult && strings.Contains(string(ev.Data), "nonexistent") {
+			if !strings.Contains(string(ev.Data), `"code":"UNKNOWN_TOOL"`) {
+				t.Fatalf("unknown tool result lost dsh code: %s", ev.Data)
+			}
+			if !strings.Contains(string(ev.Data), `"sourceEventSeqs":[`) {
+				t.Fatalf("unknown tool result lost source event linkage: %s", ev.Data)
+			}
+			return
+		}
+	}
+	t.Fatal("unknown tool result was not durable")
 }
 
 // TestRunRecallHookIsDurable verifies the M4b recall extension point: the
@@ -589,7 +602,8 @@ func (t cancellingTool) Description() string { return "cancels the turn when dis
 func (t cancellingTool) Schema() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{}}
 }
-func (t cancellingTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t cancellingTool) OutputSchema() map[string]any { return map[string]any{"type": "string"} }
+func (t cancellingTool) Execute(ctx context.Context, args any) (string, error) {
 	t.cancel()
 	return "done", nil
 }
@@ -638,7 +652,8 @@ func (b blockingTool) Description() string { return "blocks until the context is
 func (b blockingTool) Schema() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{}}
 }
-func (b blockingTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (b blockingTool) OutputSchema() map[string]any { return map[string]any{"type": "string"} }
+func (b blockingTool) Execute(ctx context.Context, args any) (string, error) {
 	<-ctx.Done()
 	return "", ctx.Err()
 }
@@ -677,6 +692,18 @@ func TestRunToolTimeoutLogsToolError(t *testing.T) {
 	if !found {
 		t.Fatalf("expected a tool/error with a timeout message; events: %+v", log.Events())
 	}
+	for _, ev := range log.Events() {
+		if ev.Type == session.EventToolResult && strings.Contains(string(ev.Data), "sleep_tool") && strings.Contains(string(ev.Data), "timed out") {
+			if !strings.Contains(string(ev.Data), `"code":"TOOL_TIMEOUT"`) {
+				t.Fatalf("timeout result lost dsh code: %s", ev.Data)
+			}
+			if !strings.Contains(string(ev.Data), `"sourceEventSeqs":[`) {
+				t.Fatalf("timeout result lost source event linkage: %s", ev.Data)
+			}
+			return
+		}
+	}
+	t.Fatal("timeout result was not durable")
 }
 
 // bigResultTool returns a payload larger than any test output cap.
@@ -687,7 +714,8 @@ func (b bigResultTool) Description() string { return "returns a lot of text" }
 func (b bigResultTool) Schema() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{}}
 }
-func (b bigResultTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (b bigResultTool) OutputSchema() map[string]any { return map[string]any{"type": "string"} }
+func (b bigResultTool) Execute(ctx context.Context, args any) (string, error) {
 	return b.text, nil
 }
 

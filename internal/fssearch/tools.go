@@ -15,9 +15,9 @@ package fssearch
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
+	agenttools "github.com/jabing/shutu-agent/internal/tools"
 	"io/fs"
 	"path/filepath"
 	"sort"
@@ -60,7 +60,7 @@ func (GrepTool) Name() string { return GrepToolName }
 
 // ConcurrencySafe marks grep as a read-only filesystem query. dsh may run
 // independent grep calls in parallel and commit their results in model order.
-func (GrepTool) ConcurrencySafe(json.RawMessage) bool { return true }
+func (GrepTool) ConcurrencySafe(any) bool { return true }
 
 func (GrepTool) Description() string {
 	return "Search file contents with a regular expression. Returns matching lines with line numbers, grouped by file. " +
@@ -95,13 +95,13 @@ func (GrepTool) Schema() map[string]any {
 // "Found N matches" header, per-file "path\nLine N: text" sections, and — when
 // a scan cap cut the result short — the could-not-save footer. A no-hit
 // search reports "No matches found". Read-only — never writes.
-func (t GrepTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t GrepTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		Pattern string `json:"pattern"`
 		Path    string `json:"path"`
 		Include string `json:"include"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("grep: %w", err)
 	}
 	if a.Pattern == "" {
@@ -256,7 +256,7 @@ func NewGlobToolForCWD(cwd func() string) GlobTool {
 func (GlobTool) Name() string { return GlobToolName }
 
 // ConcurrencySafe marks glob as a read-only filesystem query.
-func (GlobTool) ConcurrencySafe(json.RawMessage) bool { return true }
+func (GlobTool) ConcurrencySafe(any) bool { return true }
 
 func (GlobTool) Description() string {
 	return "Find files whose paths match a glob pattern. Returns matching file paths — never directories — including hidden files; VCS metadata directories are excluded."
@@ -286,12 +286,12 @@ func (GlobTool) Schema() map[string]any {
 // matching paths, one per line, sorted by modification time (newest first).
 // No matches reports "No files found"; an over-cap result shows the first
 // page plus the dsh could-not-save footer.
-func (t GlobTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t GlobTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		Pattern string `json:"pattern"`
 		Path    string `json:"path"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("glob: %w", err)
 	}
 	if strings.TrimSpace(a.Pattern) == "" {

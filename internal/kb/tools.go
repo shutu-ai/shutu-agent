@@ -14,8 +14,8 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
+	agenttools "github.com/jabing/shutu-agent/internal/tools"
 	"strings"
 )
 
@@ -83,12 +83,12 @@ func (KBSearchTool) Schema() map[string]any {
 	}
 }
 
-func (t KBSearchTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t KBSearchTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		Query string `json:"query"`
 		Limit int    `json:"limit"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("kb_search: %w", err)
 	}
 	limit := a.Limit
@@ -131,11 +131,11 @@ func (KBReadTool) Schema() map[string]any {
 	}
 }
 
-func (t KBReadTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t KBReadTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		ID string `json:"id"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("kb_read: %w", err)
 	}
 	e, err := t.kb.Get(ctx, a.ID)
@@ -199,14 +199,14 @@ func (KBAddTool) Schema() map[string]any {
 	}
 }
 
-func (t KBAddTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t KBAddTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		Title string   `json:"title"`
 		Body  string   `json:"body"`
 		Type  string   `json:"type"`
 		Tags  []string `json:"tags"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("kb_add: %w", err)
 	}
 	source, err := manualSource()

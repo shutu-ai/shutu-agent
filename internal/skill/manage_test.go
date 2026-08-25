@@ -237,9 +237,9 @@ func TestManageAddFlatAndBundle(t *testing.T) {
 func TestManageAddZipAutoDetect(t *testing.T) {
 	m, _, _ := mgr(t)
 	zipBytes := buildZip(t, map[string]string{
-		"my-zipped/SKILL.md":          "---\nname: my-zipped\ndescription: zipped skill\n---\n# Z\nBody.\n",
-		"my-zipped/notes.md":          "# notes",
-		"__MACOSX/my-zipped/._junk":   "junk",
+		"my-zipped/SKILL.md":        "---\nname: my-zipped\ndescription: zipped skill\n---\n# Z\nBody.\n",
+		"my-zipped/notes.md":        "# notes",
+		"__MACOSX/my-zipped/._junk": "junk",
 	})
 	if _, err := m.AddSkill(context.Background(), "zip", []AddFile{
 		{Path: "my-zipped.zip", Base64: base64.StdEncoding.EncodeToString(zipBytes)},

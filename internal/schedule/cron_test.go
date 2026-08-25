@@ -29,25 +29,25 @@ func TestParseCronSpecValid(t *testing.T) {
 
 func TestParseCronSpecRejectsInvalid(t *testing.T) {
 	invalid := []string{
-		"",                 // empty
-		"0 9 * *",          // 4 fields
-		"0 9 * * * *",      // 6 fields (seconds not supported)
-		"61 * * * *",       // minute out of range
-		"0 24 * * *",       // hour out of range
-		"0 0 0 * *",        // day 0
-		"0 0 32 * *",       // day 32
-		"0 0 * 13 *",       // month 13
-		"0 0 * * 7",        // weekday 7
-		"0 0 * * 8",        // weekday out of range
-		"*/0 * * * *",      // zero step
-		"*/x * * * *",      // non-numeric step
-		"x 0 * * *",        // non-numeric value
-		"0 0 31 2 *",       // Feb 31: never matches
-		"0 0 30 2 *",       // Feb 30: never matches
-		"0 0 31 4 *",       // Apr 31: never matches
-		"0 0 5-3 * *",      // reversed range
-		"@daily",           // aliases not supported
-		"* * * * MON",      // names not supported
+		"",            // empty
+		"0 9 * *",     // 4 fields
+		"0 9 * * * *", // 6 fields (seconds not supported)
+		"61 * * * *",  // minute out of range
+		"0 24 * * *",  // hour out of range
+		"0 0 0 * *",   // day 0
+		"0 0 32 * *",  // day 32
+		"0 0 * 13 *",  // month 13
+		"0 0 * * 7",   // weekday 7
+		"0 0 * * 8",   // weekday out of range
+		"*/0 * * * *", // zero step
+		"*/x * * * *", // non-numeric step
+		"x 0 * * *",   // non-numeric value
+		"0 0 31 2 *",  // Feb 31: never matches
+		"0 0 30 2 *",  // Feb 30: never matches
+		"0 0 31 4 *",  // Apr 31: never matches
+		"0 0 5-3 * *", // reversed range
+		"@daily",      // aliases not supported
+		"* * * * MON", // names not supported
 	}
 	for _, spec := range invalid {
 		if e, err := parseCronSpec(spec); err == nil {

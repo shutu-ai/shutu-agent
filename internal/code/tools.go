@@ -31,8 +31,8 @@ package code
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	agenttools "github.com/jabing/shutu-agent/internal/tools"
 	"strings"
 	"time"
 
@@ -129,14 +129,14 @@ func (CodeRunTool) Schema() map[string]any {
 	}
 }
 
-func (t CodeRunTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t CodeRunTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		Lang    string  `json:"lang"`
 		Code    string  `json:"code"`
 		Timeout float64 `json:"timeout"`
 		Cwd     string  `json:"cwd"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("run_code: %w", err)
 	}
 	lang := a.Lang

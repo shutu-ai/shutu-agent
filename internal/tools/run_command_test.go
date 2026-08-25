@@ -256,9 +256,10 @@ func TestRunCommandCancelled(t *testing.T) {
 	args := json.RawMessage(`{"command":"` + sleepCommand(30) + `","description":"wait for cancellation"}`)
 
 	var err error
+	var result ToolResult
 	done := make(chan struct{})
 	go func() {
-		_, err = r.Execute(ctx, "bash", args)
+		result, err = r.Execute(ctx, "bash", args)
 		close(done)
 	}()
 	time.Sleep(150 * time.Millisecond) // let the command start
@@ -269,7 +270,7 @@ func TestRunCommandCancelled(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("executing command was not interrupted by cancellation")
 	}
-	if err == nil || !strings.Contains(err.Error(), "interrupted") {
-		t.Fatalf("err = %v, want interruption error", err)
+	if err != nil || !result.IsError || result.Error == nil || result.Error.Code != "ABORTED" {
+		t.Fatalf("result = %+v, err = %v, want structured interruption", result, err)
 	}
 }

@@ -23,8 +23,8 @@ package schedule
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	agenttools "github.com/jabing/shutu-agent/internal/tools"
 	"strings"
 	"time"
 
@@ -104,13 +104,13 @@ func (ScheduleCreateTool) Schema() map[string]any {
 	}
 }
 
-func (t ScheduleCreateTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t ScheduleCreateTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		Kind    string `json:"kind"`
 		Spec    string `json:"spec"`
 		Payload string `json:"payload"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("schedule_create: %w", err)
 	}
 	kind := TriggerKind(a.Kind)
@@ -147,7 +147,7 @@ func (ScheduleListTool) Schema() map[string]any {
 	}
 }
 
-func (t ScheduleListTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t ScheduleListTool) Execute(ctx context.Context, args any) (string, error) {
 	all, err := t.t.e.List(ctx)
 	if err != nil {
 		return "", fmt.Errorf("schedule_list: %w", err)
@@ -183,11 +183,11 @@ func (ScheduleDeleteTool) Schema() map[string]any {
 	}
 }
 
-func (t ScheduleDeleteTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t ScheduleDeleteTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		ID string `json:"id"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("schedule_delete: %w", err)
 	}
 	if err := t.t.e.Remove(ctx, a.ID); err != nil {

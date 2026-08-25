@@ -20,7 +20,8 @@ func (bigOutputTool) Description() string { return "returns a lot of text" }
 func (bigOutputTool) Schema() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{}}
 }
-func (b bigOutputTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (bigOutputTool) OutputSchema() map[string]any { return map[string]any{"type": "string"} }
+func (b bigOutputTool) Execute(ctx context.Context, args any) (string, error) {
 	return b.text, nil
 }
 

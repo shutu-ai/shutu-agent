@@ -109,7 +109,7 @@ type Config struct {
 	// after the callback has compacted the append-only session surface.
 	RecoverContextOverflow func(context.Context) bool
 	// MaxParallelToolCalls bounds the rolling pool for explicitly
-	// concurrency-safe tools. Zero uses dsh's default of four.
+	// concurrency-safe tools. Zero uses dsh's default of ten.
 	MaxParallelToolCalls int
 }
 
@@ -136,7 +136,7 @@ func New(cfg Config) *Loop {
 
 func maxParallelToolCalls(value int) int {
 	if value <= 0 {
-		return 4
+		return 10
 	}
 	return value
 }
@@ -463,14 +463,15 @@ func (l *Loop) step(ctx context.Context, turnNumber, stepNumber int) (done bool,
 }
 
 type toolCallOutcome struct {
-	call llm.ToolCall
-	res  tools.ToolResult
-	err  error
+	call    llm.ToolCall
+	callSeq uint64
+	res     tools.ToolResult
+	err     error
 }
 
-// executeCalls implements dsh's exclusive/parallel barrier semantics. Tools
-// opt into overlap through Registry.IsConcurrencySafe; all results are still
-// committed to the append-only log in model order.
+// executeCalls implements dsh's exclusive/parallel barrier semantics. Policy
+// and approval preparation is ordered, safe bodies use a bounded rolling pool,
+// and all results are committed in model order.
 func (l *Loop) executeCalls(ctx context.Context, turnNumber, stepNumber int, calls []llm.ToolCall) error {
 	for next := 0; next < len(calls); {
 		if err := ctx.Err(); err != nil {
@@ -480,9 +481,13 @@ func (l *Loop) executeCalls(ctx context.Context, turnNumber, stepNumber int, cal
 			return fmt.Errorf("loop: cancelled: %w", err)
 		}
 
-		args := []byte(calls[next].Arguments)
-		if !l.tools.IsConcurrencySafe(calls[next].Name, args) || l.maxParallelToolCalls <= 1 {
-			outcome, err := l.startToolCall(ctx, turnNumber, stepNumber, calls[next])
+		parsed, parseErr := tools.ParseArguments([]byte(calls[next].Arguments))
+		if parseErr != nil || !l.tools.IsConcurrencySafe(calls[next].Name, parsed) || l.maxParallelToolCalls <= 1 {
+			prepareArgs := any(parsed)
+			if parseErr != nil {
+				prepareArgs = []byte(calls[next].Arguments)
+			}
+			outcome, err := l.startToolCall(ctx, turnNumber, stepNumber, calls[next], prepareArgs)
 			if err != nil {
 				return err
 			}
@@ -492,64 +497,136 @@ func (l *Loop) executeCalls(ctx context.Context, turnNumber, stepNumber int, cal
 			next++
 			continue
 		}
-
-		// Build one contiguous parallel group. An exclusive call is a barrier,
-		// so it is left for the next iteration after this pool drains.
-		end := next
-		for end < len(calls) && end-next < l.maxParallelToolCalls {
-			if !l.tools.IsConcurrencySafe(calls[end].Name, []byte(calls[end].Arguments)) {
-				break
-			}
-			end++
+		if err := l.executeParallelGroup(ctx, turnNumber, stepNumber, calls, &next); err != nil {
+			return err
 		}
-		outcomes := make([]toolCallOutcome, end-next)
-		done := make([]chan struct{}, end-next)
-		started := 0
-		for started < len(outcomes) && ctx.Err() == nil {
-			call := calls[next+started]
-			if _, err := l.log.Append(session.EventToolCall,
-				session.NewToolCall(turnNumber, stepNumber, call.ID, call.Name, call.Arguments)); err != nil {
-				return err
-			}
-			idx := started
-			done[idx] = make(chan struct{})
-			go func() {
-				outcomes[idx] = toolCallOutcome{call: call}
-				outcomes[idx].res, outcomes[idx].err = l.tools.Execute(ctx, call.Name, []byte(call.Arguments))
-				close(done[idx])
-			}()
-			started++
-		}
-		for i := 0; i < started; i++ {
-			<-done[i]
-			if err := l.commitToolOutcome(turnNumber, stepNumber, outcomes[i]); err != nil {
-				return err
-			}
-		}
-		if started < len(outcomes) {
-			if err := l.appendAbortedCalls(turnNumber, stepNumber, calls[next+started:end]); err != nil {
-				return err
-			}
-			return fmt.Errorf("loop: cancelled: %w", ctx.Err())
-		}
-		next = end
 	}
 	return nil
 }
 
-func (l *Loop) startToolCall(ctx context.Context, turnNumber, stepNumber int, call llm.ToolCall) (toolCallOutcome, error) {
-	if _, err := l.log.Append(session.EventToolCall,
-		session.NewToolCall(turnNumber, stepNumber, call.ID, call.Name, call.Arguments)); err != nil {
+type settledToolCall struct {
+	index   int
+	outcome toolCallOutcome
+}
+
+// executeParallelGroup keeps the next unstarted call as a live barrier. This
+// is important when a completed tool replaces or disables a later tool: dsh
+// reclassifies that later call before starting it, rather than using a stale
+// group classification.
+func (l *Loop) executeParallelGroup(ctx context.Context, turnNumber, stepNumber int, calls []llm.ToolCall, next *int) error {
+	start := *next
+	committed := start
+	started := start
+	ready := make(map[int]toolCallOutcome)
+	running := make(map[int]struct{})
+	settled := make(chan settledToolCall, len(calls)-start)
+
+	commitReady := func() error {
+		for committed < started {
+			outcome, ok := ready[committed]
+			if !ok {
+				return nil
+			}
+			if err := l.commitToolOutcome(turnNumber, stepNumber, outcome); err != nil {
+				return err
+			}
+			delete(ready, committed)
+			committed++
+		}
+		return nil
+	}
+
+	drain := func() {
+		for len(running) > 0 {
+			settledCall := <-settled
+			delete(running, settledCall.index)
+			ready[settledCall.index] = settledCall.outcome
+		}
+	}
+
+	fill := func() error {
+		for ctx.Err() == nil && *next < len(calls) && len(running)+len(ready) < l.maxParallelToolCalls {
+			call := calls[*next]
+			parsed, parseErr := tools.ParseArguments([]byte(call.Arguments))
+			if parseErr != nil || !l.tools.IsConcurrencySafe(call.Name, parsed) {
+				break
+			}
+			idx := *next
+			callEvent, err := l.log.Append(session.EventToolCall,
+				session.NewToolCall(turnNumber, stepNumber, call.ID, call.Name, call.Arguments))
+			if err != nil {
+				return err
+			}
+			(*next)++
+			started++
+			prepared, err := l.tools.Prepare(ctx, call.ID, call.Name, parsed)
+			if err != nil {
+				ready[idx] = toolCallOutcome{call: call, callSeq: callEvent.Seq, err: err}
+				if err := commitReady(); err != nil {
+					return err
+				}
+				continue
+			}
+			running[idx] = struct{}{}
+			go func(index int, modelCall llm.ToolCall, execution *tools.PreparedExecution, sourceSeq uint64) {
+				result, execErr := l.tools.ExecutePrepared(ctx, execution)
+				settled <- settledToolCall{index: index, outcome: toolCallOutcome{call: modelCall, callSeq: sourceSeq, res: result, err: execErr}}
+			}(idx, call, prepared, callEvent.Seq)
+			if err := commitReady(); err != nil {
+				drain()
+				return err
+			}
+		}
+		return nil
+	}
+
+	for {
+		if err := fill(); err != nil {
+			drain()
+			return err
+		}
+		if err := commitReady(); err != nil {
+			drain()
+			return err
+		}
+		if ctx.Err() != nil {
+			drain()
+			if err := commitReady(); err != nil {
+				return err
+			}
+			if err := l.appendAbortedCalls(turnNumber, stepNumber, calls[*next:]); err != nil {
+				return err
+			}
+			return fmt.Errorf("loop: cancelled: %w", ctx.Err())
+		}
+		if len(running) == 0 {
+			return nil
+		}
+		settledCall := <-settled
+		delete(running, settledCall.index)
+		ready[settledCall.index] = settledCall.outcome
+	}
+}
+
+func (l *Loop) startToolCall(ctx context.Context, turnNumber, stepNumber int, call llm.ToolCall, parsed any) (toolCallOutcome, error) {
+	callEvent, err := l.log.Append(session.EventToolCall,
+		session.NewToolCall(turnNumber, stepNumber, call.ID, call.Name, call.Arguments))
+	if err != nil {
 		return toolCallOutcome{}, err
 	}
-	res, err := l.tools.Execute(ctx, call.Name, []byte(call.Arguments))
-	return toolCallOutcome{call: call, res: res, err: err}, nil
+	prepared, err := l.tools.Prepare(ctx, call.ID, call.Name, parsed)
+	if err != nil {
+		return toolCallOutcome{call: call, callSeq: callEvent.Seq, err: err}, nil
+	}
+	res, err := l.tools.ExecutePrepared(ctx, prepared)
+	return toolCallOutcome{call: call, callSeq: callEvent.Seq, res: res, err: err}, nil
 }
 
 func (l *Loop) commitToolOutcome(turnNumber, stepNumber int, outcome toolCallOutcome) error {
 	if outcome.err != nil {
+		info := tools.ErrorInfoOf(outcome.err)
 		_, err := l.log.Append(session.EventToolResult,
-			session.NewToolErrorAt(turnNumber, stepNumber, outcome.call.ID, outcome.call.Name, outcome.err.Error()))
+			session.NewToolErrorAtCodeWithSource(turnNumber, stepNumber, outcome.call.ID, outcome.call.Name, outcome.err.Error(), info.Code, outcome.callSeq))
 		return err
 	}
 	var spill *session.SpillRef
@@ -558,15 +635,19 @@ func (l *Loop) commitToolOutcome(turnNumber, stepNumber int, outcome toolCallOut
 	}
 	var payload any
 	if outcome.res.IsError {
+		code := "TOOL_RESULT_ERROR"
+		if outcome.res.Error != nil && outcome.res.Error.Code != "" {
+			code = outcome.res.Error.Code
+		}
 		if len(outcome.res.Content) > 0 {
-			payload = session.NewToolErrorResultWithContentAt(turnNumber, stepNumber, outcome.call.ID, outcome.call.Name, outcome.res.Output, outcome.res.Content)
+			payload = session.NewToolErrorResultWithContentAtCodeWithSource(turnNumber, stepNumber, outcome.call.ID, outcome.call.Name, outcome.res.Output, outcome.res.Content, code, outcome.callSeq)
 		} else {
-			payload = session.NewToolErrorResultAt(turnNumber, stepNumber, outcome.call.ID, outcome.call.Name, outcome.res.Output, spill)
+			payload = session.NewToolErrorResultAtCodeWithSource(turnNumber, stepNumber, outcome.call.ID, outcome.call.Name, outcome.res.Output, spill, code, outcome.callSeq)
 		}
 	} else {
-		payload = session.NewToolResultAt(turnNumber, stepNumber, outcome.call.ID, outcome.call.Name, outcome.res.Output, spill)
+		payload = session.NewToolResultAtWithSource(turnNumber, stepNumber, outcome.call.ID, outcome.call.Name, outcome.res.Output, spill, outcome.callSeq)
 		if len(outcome.res.Content) > 0 {
-			payload = session.NewToolResultWithContentAt(turnNumber, stepNumber, outcome.call.ID, outcome.call.Name, outcome.res.Output, outcome.res.Content)
+			payload = session.NewToolResultWithContentAtSource(turnNumber, stepNumber, outcome.call.ID, outcome.call.Name, outcome.res.Output, outcome.res.Content, outcome.callSeq)
 		}
 	}
 	_, err := l.log.Append(session.EventToolResult, payload)
@@ -575,12 +656,13 @@ func (l *Loop) commitToolOutcome(turnNumber, stepNumber int, outcome toolCallOut
 
 func (l *Loop) appendAbortedCalls(turnNumber, stepNumber int, calls []llm.ToolCall) error {
 	for _, call := range calls {
-		if _, err := l.log.Append(session.EventToolCall,
-			session.NewToolCall(turnNumber, stepNumber, call.ID, call.Name, call.Arguments)); err != nil {
+		callEvent, err := l.log.Append(session.EventToolCall,
+			session.NewToolCall(turnNumber, stepNumber, call.ID, call.Name, call.Arguments))
+		if err != nil {
 			return err
 		}
 		if _, err := l.log.Append(session.EventToolResult,
-			session.NewAbortedToolResultAt(turnNumber, stepNumber, call.ID, call.Name)); err != nil {
+			session.NewAbortedToolResultAtWithSource(turnNumber, stepNumber, call.ID, call.Name, callEvent.Seq)); err != nil {
 			return err
 		}
 	}

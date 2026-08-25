@@ -13,6 +13,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	agenttools "github.com/jabing/shutu-agent/internal/tools"
 	"strings"
 
 	"github.com/jabing/shutu-agent/internal/session"
@@ -122,14 +123,14 @@ func (WorkflowRunTool) Schema() map[string]any {
 // per-task summary. An empty tasks array is rejected; engine-level errors
 // (ErrCycle, validation) are wrapped and passed through. The workflow/run
 // event carries only the counts (D3 — 只记元数据, 不落输出全文).
-func (t *WorkflowRunTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t *WorkflowRunTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		Meta   map[string]any `json:"meta"`
 		Args   any            `json:"args"`
 		Script string         `json:"script"`
 		Tasks  []Task         `json:"tasks"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("workflow_run: %w", err)
 	}
 	if a.Script != "" {

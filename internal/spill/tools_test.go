@@ -29,7 +29,7 @@ func newSpillToolsWithEvents(t *testing.T) (*engine, *SpillTools, *[]eventRec) {
 
 // execTool is the subset of tools.Tool the spill tools implement structurally.
 type execTool interface {
-	Execute(ctx context.Context, args json.RawMessage) (string, error)
+	Execute(ctx context.Context, args any) (string, error)
 }
 
 // mustExec runs one tool Execute and fails the test on error.

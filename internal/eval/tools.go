@@ -9,8 +9,8 @@ package eval
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	agenttools "github.com/jabing/shutu-agent/internal/tools"
 	"strings"
 
 	"github.com/jabing/shutu-agent/internal/session"
@@ -86,13 +86,13 @@ func (EvalRunTool) Schema() map[string]any {
 	}
 }
 
-func (t EvalRunTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t EvalRunTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		TaskID   string   `json:"task_id"`
 		Output   string   `json:"output"`
 		Criteria []string `json:"criteria"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("eval_run: %w", err)
 	}
 	if strings.TrimSpace(a.Output) == "" {
@@ -135,11 +135,11 @@ func (EvalResultTool) Schema() map[string]any {
 	}
 }
 
-func (t EvalResultTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t EvalResultTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		ID string `json:"id"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("eval_result: %w", err)
 	}
 	rec, err := t.t.eng.Get(ctx, a.ID)
@@ -174,11 +174,11 @@ func (EvalListTool) Schema() map[string]any {
 	}
 }
 
-func (t EvalListTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t EvalListTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		Limit int `json:"limit"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("eval_list: %w", err)
 	}
 	recs, err := t.t.eng.List(ctx)

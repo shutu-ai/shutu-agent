@@ -69,12 +69,12 @@ type Config struct {
 
 // openaiResponsesProvider is the llm.Provider implementing the Responses API.
 type openaiResponsesProvider struct {
-	id             string
-	baseURL        string
-	apiKey         string
-	model          string
-	client         *http.Client
-	supportsImages bool
+	id                   string
+	baseURL              string
+	apiKey               string
+	model                string
+	client               *http.Client
+	supportsImages       bool
 	maxRequestImageBytes int
 }
 
@@ -96,12 +96,12 @@ func New(cfg Config) *openaiResponsesProvider {
 		cfg.MaxRequestImageBytes = defaultMaxRequestImageBytes
 	}
 	return &openaiResponsesProvider{
-		id:             cfg.ID,
-		baseURL:        strings.TrimRight(cfg.BaseURL, "/"),
-		apiKey:         cfg.APIKey,
-		model:          cfg.Model,
-		client:         cfg.HTTPClient,
-		supportsImages: cfg.SupportsImages,
+		id:                   cfg.ID,
+		baseURL:              strings.TrimRight(cfg.BaseURL, "/"),
+		apiKey:               cfg.APIKey,
+		model:                cfg.Model,
+		client:               cfg.HTTPClient,
+		supportsImages:       cfg.SupportsImages,
 		maxRequestImageBytes: cfg.MaxRequestImageBytes,
 	}
 }
@@ -219,10 +219,10 @@ func errorDetail(resp *http.Response) string {
 // —— wire shapes for the Responses request body ——
 
 type requestBody struct {
-	Model  string          `json:"model"`
+	Model  string           `json:"model"`
 	Input  []map[string]any `json:"input"`
-	Tools  []wireTool      `json:"tools,omitempty"`
-	Stream bool            `json:"stream"`
+	Tools  []wireTool       `json:"tools,omitempty"`
+	Stream bool             `json:"stream"`
 }
 
 type wireTool struct {
@@ -268,16 +268,16 @@ func toInput(msgs []llm.Message, maxRequestImageBytes int) []map[string]any {
 			// reasoning block, dsh/pi-ai 范式), before the message item.
 			if r := m.Reasoning(); r != "" {
 				out = append(out, map[string]any{
-					"type": "reasoning",
-					"id":   nextID(),
+					"type":    "reasoning",
+					"id":      nextID(),
 					"content": []any{map[string]any{"type": "reasoning_text", "text": r}},
 				})
 			}
 			if t := m.Text(); t != "" {
 				out = append(out, map[string]any{
-					"type": "message",
-					"role": "assistant",
-					"id":   nextID(),
+					"type":    "message",
+					"role":    "assistant",
+					"id":      nextID(),
 					"content": []any{map[string]any{"type": "output_text", "text": t, "annotations": []any{}}},
 				})
 			}

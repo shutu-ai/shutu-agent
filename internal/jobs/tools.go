@@ -31,6 +31,14 @@ import (
 	"github.com/jabing/shutu-agent/internal/session"
 )
 
+func decodeArgs(args any, dst any) error {
+	raw, err := json.Marshal(args)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, dst)
+}
+
 // Tool names (whitelisted when jobs.enabled; see config.jobsToolNames).
 const (
 	ToolStartName  = "job_start"
@@ -188,14 +196,14 @@ func (JobStartTool) Schema() map[string]any {
 	}
 }
 
-func (t JobStartTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t JobStartTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		Command      string `json:"command"`
 		Kind         string `json:"kind"`
 		Label        string `json:"label"`
 		OwnerSession string `json:"owner_session"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := decodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("job_start: %w", err)
 	}
 	if strings.TrimSpace(a.Command) == "" {
@@ -260,11 +268,11 @@ func (JobStatusTool) Schema() map[string]any {
 	}
 }
 
-func (t JobStatusTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t JobStatusTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		ID string `json:"id"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := decodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("job_status: %w", err)
 	}
 	snap, err := t.t.reg.Get(ctx, a.ID, t.t.callerSession())
@@ -305,12 +313,12 @@ func (JobCancelTool) Schema() map[string]any {
 	}
 }
 
-func (t JobCancelTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t JobCancelTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		ID     string `json:"id"`
 		Reason string `json:"reason"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := decodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("job_cancel: %w", err)
 	}
 	if a.Reason == "" {
@@ -360,12 +368,12 @@ func (JobWaitTool) Schema() map[string]any {
 	}
 }
 
-func (t JobWaitTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t JobWaitTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		ID             string `json:"id"`
 		TimeoutSeconds int    `json:"timeout_seconds"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := decodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("job_wait: %w", err)
 	}
 	if a.TimeoutSeconds <= 0 {
@@ -408,11 +416,11 @@ func (JobReadTool) Schema() map[string]any {
 	}
 }
 
-func (t JobReadTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t JobReadTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		ID string `json:"id"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := decodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("job_read: %w", err)
 	}
 	out, snap, err := t.t.reg.Read(ctx, a.ID, t.t.callerSession())
@@ -444,13 +452,13 @@ func (DshJobOutputTool) Schema() map[string]any {
 		"timeout_ms": map[string]any{"type": "integer", "minimum": 1},
 	}, "required": []string{"job_id"}, "additionalProperties": false}
 }
-func (t DshJobOutputTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t DshJobOutputTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		JobID     string `json:"job_id"`
 		Wait      bool   `json:"wait"`
 		TimeoutMS *int   `json:"timeout_ms"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := decodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("job_output: %w", err)
 	}
 	if a.Wait {
@@ -502,12 +510,12 @@ func (DshJobKillTool) Schema() map[string]any {
 		"reason": map[string]any{"type": "string"},
 	}, "required": []string{"job_id"}, "additionalProperties": false}
 }
-func (t DshJobKillTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t DshJobKillTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		JobID  string `json:"job_id"`
 		Reason string `json:"reason"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := decodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("job_kill: %w", err)
 	}
 	if a.Reason == "" {
@@ -542,7 +550,7 @@ func (DshJobListTool) Description() string { return "list background jobs visibl
 func (DshJobListTool) Schema() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}
 }
-func (t DshJobListTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t DshJobListTool) Execute(ctx context.Context, args any) (string, error) {
 	snaps, err := t.t.reg.List(ctx, t.t.callerSession())
 	if err != nil {
 		return "", fmt.Errorf("job_list: %w", err)

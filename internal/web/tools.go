@@ -21,9 +21,9 @@ package web
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
+	agenttools "github.com/jabing/shutu-agent/internal/tools"
 	"net/url"
 	"strings"
 	"time"
@@ -51,13 +51,13 @@ const (
 // Options 是工具层的产品上限（来自 WebConfig，默认见 NewWebTools）。SearchID/
 // FetchID 为空串时落到 provider 的稳定 id（deepseek-official / http）。
 type Options struct {
-	SearchID           string // 默认 "deepseek-official"
-	FetchID            string // 默认 "http"
-	SearchMaxResults   int    // 单次/合并后来源上限，默认 8
-	SearchMaxQueries   int    // 一次调用查询数上限，默认 4
-	SearchTimeoutMs    int    // 外层搜索超时，默认 30000
-	FetchTimeoutMs     int    // 外层抓取超时，默认 30000
-	FetchMaxOutputChars int   // web_fetch 返回给模型的 body 上限，默认 200000
+	SearchID            string // 默认 "deepseek-official"
+	FetchID             string // 默认 "http"
+	SearchMaxResults    int    // 单次/合并后来源上限，默认 8
+	SearchMaxQueries    int    // 一次调用查询数上限，默认 4
+	SearchTimeoutMs     int    // 外层搜索超时，默认 30000
+	FetchTimeoutMs      int    // 外层抓取超时，默认 30000
+	FetchMaxOutputChars int    // web_fetch 返回给模型的 body 上限，默认 200000
 }
 
 // WebTools 捆绑两个 web 工具共享状态：Engine、选择的 provider id、上限、事件
@@ -134,11 +134,11 @@ func (t WebSearchTool) Schema() map[string]any {
 	}
 }
 
-func (t WebSearchTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t WebSearchTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		Queries []string `json:"queries"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("web_search: %w", err)
 	}
 	queries, err := parseSearchArgs(a.Queries, t.t.opts.SearchMaxQueries)
@@ -362,11 +362,11 @@ func (WebFetchTool) Schema() map[string]any {
 	}
 }
 
-func (t WebFetchTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t WebFetchTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		URL string `json:"url"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("web_fetch: %w", err)
 	}
 	if strings.TrimSpace(a.URL) == "" {

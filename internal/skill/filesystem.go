@@ -143,6 +143,10 @@ func (f *Filesystem) Get(ctx context.Context, c Candidate) (*Definition, error) 
 		Path:           c.Path,
 		ModelInvocable: parsed.modelInvocable,
 		UserInvocable:  parsed.userInvocable,
+		Invocation: &InvocationPolicy{
+			ModelInvocable: parsed.modelInvocable,
+			UserInvocable:  parsed.userInvocable,
+		},
 	}, nil
 }
 
@@ -187,6 +191,10 @@ func (f *Filesystem) scanRoot(ctx context.Context, root fsRoot) ([]Candidate, er
 			Source:      root.source,
 			Rank:        root.rank,
 			Path:        path,
+			Invocation: &InvocationPolicy{
+				ModelInvocable: parsed.modelInvocable,
+				UserInvocable:  parsed.userInvocable,
+			},
 		})
 	}
 	return out, nil

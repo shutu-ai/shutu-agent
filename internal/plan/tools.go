@@ -24,8 +24,8 @@ package plan
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	agenttools "github.com/jabing/shutu-agent/internal/tools"
 	"strings"
 
 	"github.com/jabing/shutu-agent/internal/session"
@@ -174,13 +174,13 @@ func (PlanGoalTool) Schema() map[string]any {
 	}
 }
 
-func (t PlanGoalTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t PlanGoalTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		Title     string `json:"title"`
 		Objective string `json:"objective"`
 		MaxRounds int    `json:"max_rounds"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("plan_goal: %w", err)
 	}
 	if strings.TrimSpace(a.Title) == "" {
@@ -249,13 +249,13 @@ func (PlanPlanTool) Schema() map[string]any {
 	}
 }
 
-func (t PlanPlanTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t PlanPlanTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		GoalID string   `json:"goal_id"`
 		Title  string   `json:"title"`
 		Steps  []string `json:"steps"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("plan_plan: %w", err)
 	}
 	if strings.TrimSpace(a.Title) == "" {
@@ -313,13 +313,13 @@ func (PlanTodoTool) Schema() map[string]any {
 	}
 }
 
-func (t PlanTodoTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t PlanTodoTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		PlanID     string   `json:"plan_id"`
 		Title      string   `json:"title"`
 		Acceptance []string `json:"acceptance"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("plan_todo: %w", err)
 	}
 	if strings.TrimSpace(a.Title) == "" {
@@ -384,7 +384,7 @@ func (PlanStatusTool) Schema() map[string]any {
 	}
 }
 
-func (t PlanStatusTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t PlanStatusTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		Scope    string `json:"scope"`
 		ID       string `json:"id"`
@@ -392,7 +392,7 @@ func (t PlanStatusTool) Execute(ctx context.Context, args json.RawMessage) (stri
 		Reason   string `json:"reason"`
 		Revision int    `json:"revision"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("plan_status: %w", err)
 	}
 	if !validScope(a.Scope) {
@@ -449,7 +449,7 @@ func (PlanListTool) Schema() map[string]any {
 	}
 }
 
-func (t PlanListTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t PlanListTool) Execute(ctx context.Context, args any) (string, error) {
 	goals, err := t.t.e.List(ctx)
 	if err != nil {
 		return "", fmt.Errorf("plan_list: %w", err)
@@ -492,12 +492,12 @@ func (PlanRemoveTool) Schema() map[string]any {
 	}
 }
 
-func (t PlanRemoveTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t PlanRemoveTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		Scope string `json:"scope"`
 		ID    string `json:"id"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("plan_remove: %w", err)
 	}
 	if !validScope(a.Scope) {

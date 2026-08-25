@@ -144,11 +144,11 @@ func TestRegisterPlansEnabledRegistersAndValidates(t *testing.T) {
 	if !hasEvent(a.log, session.EventPlanDelete) {
 		t.Fatal("plan/delete event missing from the session log after plan_remove")
 	}
-	if _, err := a.reg.Execute(context.Background(), "plan_remove", json.RawMessage(`{"scope":"goal","id":"goal-99"}`)); err == nil {
-		t.Fatal("plan_remove of an unknown id must error")
+	if res, err := a.reg.Execute(context.Background(), "plan_remove", json.RawMessage(`{"scope":"goal","id":"goal-99"}`)); err != nil || !res.IsError {
+		t.Fatalf("plan_remove of an unknown id must return a structured error: result=%+v err=%v", res, err)
 	}
-	if _, err := a.reg.Execute(context.Background(), "plan_status", json.RawMessage(`{"scope":"plan","id":"plan-99","status":"done"}`)); err == nil {
-		t.Fatal("plan_status of an unknown id must error")
+	if res, err := a.reg.Execute(context.Background(), "plan_status", json.RawMessage(`{"scope":"plan","id":"plan-99","status":"done"}`)); err != nil || !res.IsError {
+		t.Fatalf("plan_status of an unknown id must return a structured error: result=%+v err=%v", res, err)
 	}
 }
 

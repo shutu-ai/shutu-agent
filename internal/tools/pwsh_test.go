@@ -325,8 +325,8 @@ func TestPwshTimeoutAtRegistryBound(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a registry-bound timeout must be a normal result, not an error: %v", err)
 	}
-	if !strings.Contains(res.Output, "[timed out after ") {
-		t.Fatalf("output = %q, want the timeout marker", res.Output)
+	if !res.IsError || res.Error == nil || res.Error.Code != "TOOL_TIMEOUT" {
+		t.Fatalf("result = %+v, want structured timeout", res)
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("timeout took %v, want a prompt kill", elapsed)

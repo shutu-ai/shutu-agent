@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	agenttools "github.com/jabing/shutu-agent/internal/tools"
 	"strings"
 	"sync"
 
@@ -171,13 +171,13 @@ func (t acpTerminalTool) Schema() map[string]any {
 	}
 }
 
-func (t acpTerminalTool) Execute(_ context.Context, args json.RawMessage) (string, error) {
+func (t acpTerminalTool) Execute(_ context.Context, args any) (string, error) {
 	switch t.name {
 	case acpTerminalStart:
 		var p struct {
 			Command string `json:"command"`
 		}
-		if err := json.Unmarshal(args, &p); err != nil {
+		if err := agenttools.DecodeArgs(args, &p); err != nil {
 			return "", err
 		}
 		return t.service.Start(p.Command)
@@ -186,7 +186,7 @@ func (t acpTerminalTool) Execute(_ context.Context, args json.RawMessage) (strin
 			Text   string `json:"text"`
 			Submit *bool  `json:"submit"`
 		}
-		if err := json.Unmarshal(args, &p); err != nil {
+		if err := agenttools.DecodeArgs(args, &p); err != nil {
 			return "", err
 		}
 		submit := true
@@ -199,7 +199,7 @@ func (t acpTerminalTool) Execute(_ context.Context, args json.RawMessage) (strin
 			Offset int `json:"offset"`
 			Count  int `json:"count"`
 		}
-		if err := json.Unmarshal(args, &p); err != nil {
+		if err := agenttools.DecodeArgs(args, &p); err != nil {
 			return "", err
 		}
 		if p.Count == 0 {
@@ -210,7 +210,7 @@ func (t acpTerminalTool) Execute(_ context.Context, args json.RawMessage) (strin
 		var p struct {
 			Kind string `json:"kind"`
 		}
-		if err := json.Unmarshal(args, &p); err != nil {
+		if err := agenttools.DecodeArgs(args, &p); err != nil {
 			return "", err
 		}
 		return "terminal signal sent", t.service.Signal(p.Kind)

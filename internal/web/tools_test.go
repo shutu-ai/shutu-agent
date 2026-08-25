@@ -289,8 +289,8 @@ func TestWebSearchOverMaxQueriesRejectedByD7(t *testing.T) {
 		t.Fatal("3 queries with maxQueries=2 must be rejected at the D7 gate")
 	}
 	// 2 个查询通过 D7（进入实现；无 provider → ErrNoProvider，证明校验已放行）。
-	if _, err := reg.Execute(context.Background(), "web_search", json.RawMessage(`{"queries":["a","b"]}`)); err == nil {
-		t.Fatal("expected the no-provider error after D7 passed")
+	if res, err := reg.Execute(context.Background(), "web_search", json.RawMessage(`{"queries":["a","b"]}`)); err != nil || !res.IsError {
+		t.Fatalf("web_search must return a structured no-provider error after D7 passed: result=%+v err=%v", res, err)
 	}
 }
 

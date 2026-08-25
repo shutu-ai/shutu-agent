@@ -19,16 +19,16 @@ type eventCapture struct {
 // the bounded report text (objective head / rounds / outcome / final), and
 // emits the ralph/run event with the lean payload (D3).
 func TestRalphToolExecuteFormatsReport(t *testing.T) {
-	eng := mustEngine(t, &fakeSpawn{outputs: []string{"DONE: 完成报告"}})
+	eng := mustEngine(t, &fakeSpawn{outputs: []string{`{"status":"complete","summary":"完成报告","evidence":["verified"],"nextSteps":[],"blocker":""}`}})
 	var events []eventCapture
 	tool := NewRalphTool(eng, func(typ string, data any) {
 		events = append(events, eventCapture{typ: typ, data: data})
 	})
-	out, err := tool.Execute(context.Background(), json.RawMessage(`{"objective":"交付目标","max_rounds":1}`))
+	out, err := tool.Execute(context.Background(), json.RawMessage(`{"objective":"交付目标","maxRounds":1}`))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	for _, want := range []string{"ralph: 交付目标", "rounds: 1/1", "outcome: done", "final: 完成报告", "round 1: 完成报告"} {
+	for _, want := range []string{"complete", "agentsStarted", "完成报告"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("report %q lacks %q", out, want)
 		}
@@ -57,24 +57,21 @@ func TestRalphToolExecuteFormatsReport(t *testing.T) {
 // TestRalphToolExecuteBlocked verifies a BLOCKED outcome renders the blocked
 // outcome and the block reason.
 func TestRalphToolExecuteBlocked(t *testing.T) {
-	eng := mustEngine(t, &fakeSpawn{outputs: []string{"BLOCKED: 缺凭证"}})
+	eng := mustEngine(t, &fakeSpawn{outputs: []string{`{"status":"blocked","summary":"无法继续","evidence":[],"nextSteps":[],"blocker":"缺凭证"}`}})
 	tool := NewRalphTool(eng, nil)
-	out, err := tool.Execute(context.Background(), json.RawMessage(`{"objective":"x","max_rounds":3}`))
+	out, err := tool.Execute(context.Background(), json.RawMessage(`{"objective":"x","maxRounds":3}`))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	if !strings.Contains(out, "outcome: blocked") {
-		t.Errorf("report %q lacks the blocked outcome", out)
-	}
-	if !strings.Contains(out, "final: 缺凭证") {
-		t.Errorf("report %q lacks the block reason", out)
+	if !strings.Contains(out, "blocked") || !strings.Contains(out, "缺凭证") {
+		t.Errorf("report %q lacks the blocked result", out)
 	}
 }
 
 // TestRalphToolExecuteRejectsEmptyObjective: an empty (or whitespace-only /
 // absent) objective is rejected before any loop runs.
 func TestRalphToolExecuteRejectsEmptyObjective(t *testing.T) {
-	eng := mustEngine(t, &fakeSpawn{outputs: []string{"DONE: x"}})
+	eng := mustEngine(t, &fakeSpawn{outputs: []string{`{"status":"complete","summary":"x","evidence":["x"],"nextSteps":[],"blocker":""}`}})
 	tool := NewRalphTool(eng, nil)
 	for _, args := range []string{`{}`, `{"objective":""}`, `{"objective":"   "}`} {
 		if _, err := tool.Execute(context.Background(), json.RawMessage(args)); err == nil {
@@ -86,16 +83,17 @@ func TestRalphToolExecuteRejectsEmptyObjective(t *testing.T) {
 // TestRalphToolExecuteRoundLimit: an all-progress run settles at the round cap
 // and renders the round-limit outcome.
 func TestRalphToolExecuteRoundLimit(t *testing.T) {
-	eng := mustEngine(t, &fakeSpawn{outputs: []string{"进展一", "进展二", "进展三"}})
+	eng := mustEngine(t, &fakeSpawn{outputs: []string{
+		`{"status":"continue","summary":"进展一","evidence":["one"],"nextSteps":["two"],"blocker":""}`,
+		`{"status":"continue","summary":"进展二","evidence":["two"],"nextSteps":["three"],"blocker":""}`,
+		`{"status":"continue","summary":"进展三","evidence":["three"],"nextSteps":["more"],"blocker":""}`,
+	}})
 	tool := NewRalphTool(eng, nil)
-	out, err := tool.Execute(context.Background(), json.RawMessage(`{"objective":"x","max_rounds":3}`))
+	out, err := tool.Execute(context.Background(), json.RawMessage(`{"objective":"x","maxRounds":3}`))
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	if !strings.Contains(out, "outcome: round-limit") {
-		t.Errorf("report %q lacks the round-limit outcome", out)
-	}
-	if !strings.Contains(out, "rounds: 3/3") {
-		t.Errorf("report %q lacks rounds: 3/3", out)
+	if !strings.Contains(out, "budget-limited") || !strings.Contains(out, "agentsStarted") {
+		t.Errorf("report %q lacks the budget-limited structured result", out)
 	}
 }

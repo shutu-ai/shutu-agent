@@ -49,11 +49,11 @@ const (
 // Schedule is one recurring trigger. Callers receive fresh value copies, never
 // live registry state.
 type Schedule struct {
-	ID        string     // provider-issued id ("sched-N" under the memory provider)
+	ID        string // provider-issued id ("sched-N" under the memory provider)
 	Kind      TriggerKind
-	Spec      string     // interval: "30m"/"1h30m"; cron: "0 9 * * *"
-	Payload   string     // action text handed to the executor when the trigger fires
-	Enabled   bool       // false schedules are never fired by Tick
+	Spec      string // interval: "30m"/"1h30m"; cron: "0 9 * * *"
+	Payload   string // action text handed to the executor when the trigger fires
+	Enabled   bool   // false schedules are never fired by Tick
 	CreatedAt time.Time
 	LastFire  *time.Time // set once the schedule has fired at least once; nil otherwise
 	NextFire  time.Time  // zero means never scheduled

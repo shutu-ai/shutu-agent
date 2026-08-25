@@ -2,7 +2,6 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -104,7 +103,7 @@ func (t RunCommand) Schema() map[string]any {
 // "[exit code: N]" plus the output (a normal result, so the model sees what
 // the command printed); a context cancellation or timeout is reported as an
 // error (the Execute pipeline maps it to tool/error).
-func (t RunCommand) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t RunCommand) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		Command         string `json:"command"`
 		Description     string `json:"description"`
@@ -112,7 +111,7 @@ func (t RunCommand) Execute(ctx context.Context, args json.RawMessage) (string, 
 		Workdir         string `json:"workdir"`
 		RunInBackground bool   `json:"run_in_background"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("run_command: %w", err)
 	}
 	if strings.TrimSpace(a.Command) == "" {

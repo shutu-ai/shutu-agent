@@ -121,7 +121,7 @@ turn/end
 type Tool interface {
     Name() string
     Schema() map[string]any   // JSON Schema，进入模型请求
-    Execute(ctx context.Context, args json.RawMessage) (string, error)
+    Execute(ctx context.Context, args any) (string, error)
 }
 type Registry struct{ ... }  // Register / Specs / Execute（入口统一校验）
 ```

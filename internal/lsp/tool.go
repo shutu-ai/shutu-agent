@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	agenttools "github.com/jabing/shutu-agent/internal/tools"
 	"io"
 	"net/url"
 	"os"
@@ -98,14 +99,14 @@ func (Tool) Schema() map[string]any {
 	}
 }
 
-func (t *Tool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t *Tool) Execute(ctx context.Context, args any) (string, error) {
 	var in struct {
 		Operation string `json:"operation"`
 		FilePath  string `json:"file_path"`
 		Line      int    `json:"line"`
 		Character int    `json:"character"`
 	}
-	if err := json.Unmarshal(args, &in); err != nil {
+	if err := agenttools.DecodeArgs(args, &in); err != nil {
 		return "", fmt.Errorf("lsp: %w", err)
 	}
 	if !contains(operations, in.Operation) {

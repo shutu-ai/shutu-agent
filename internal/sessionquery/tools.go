@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	agenttools "github.com/jabing/shutu-agent/internal/tools"
 	"sort"
 	"strings"
 	"time"
@@ -128,12 +129,12 @@ func (SearchTool) Schema() map[string]any {
 		"required": []string{"query"},
 	}
 }
-func (t SearchTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t SearchTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		Query string `json:"query"`
 		Limit int    `json:"limit"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("%s: %w", SessionSearchToolName, err)
 	}
 	query, err := normalizeQuery(a.Query)
@@ -189,7 +190,7 @@ func (EventSearchTool) Schema() map[string]any {
 		"required": []string{"query"},
 	}
 }
-func (t EventSearchTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t EventSearchTool) Execute(ctx context.Context, args any) (string, error) {
 	// Use a second struct because encoding/json tags on an anonymous combined
 	// declaration are easy to get wrong and would silently widen the contract.
 	var in struct {
@@ -197,7 +198,7 @@ func (t EventSearchTool) Execute(ctx context.Context, args json.RawMessage) (str
 		Query     string `json:"query"`
 		Limit     int    `json:"limit"`
 	}
-	if err := json.Unmarshal(args, &in); err != nil {
+	if err := agenttools.DecodeArgs(args, &in); err != nil {
 		return "", fmt.Errorf("%s: %w", EventSearchToolName, err)
 	}
 	query, err := normalizeQuery(in.Query)
@@ -249,11 +250,11 @@ func (TraceTool) Schema() map[string]any {
 		"session_id": map[string]any{"type": "string", "description": "target session; defaults to the current session"},
 	}}
 }
-func (t TraceTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t TraceTool) Execute(ctx context.Context, args any) (string, error) {
 	var in struct {
 		SessionID string `json:"session_id"`
 	}
-	if err := json.Unmarshal(args, &in); err != nil {
+	if err := agenttools.DecodeArgs(args, &in); err != nil {
 		return "", fmt.Errorf("%s: %w", SessionTraceToolName, err)
 	}
 	id := t.tools.targetID(in.SessionID)
@@ -283,12 +284,12 @@ func (EventTraceTool) Schema() map[string]any {
 		"seq":        map[string]any{"type": "integer", "minimum": 1, "description": "target event sequence"},
 	}, "required": []string{"seq"}}
 }
-func (t EventTraceTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t EventTraceTool) Execute(ctx context.Context, args any) (string, error) {
 	var in struct {
 		SessionID string `json:"session_id"`
 		Seq       uint64 `json:"seq"`
 	}
-	if err := json.Unmarshal(args, &in); err != nil {
+	if err := agenttools.DecodeArgs(args, &in); err != nil {
 		return "", fmt.Errorf("%s: %w", EventTraceToolName, err)
 	}
 	id := t.tools.targetID(in.SessionID)
@@ -349,13 +350,13 @@ func (EventReadTool) Schema() map[string]any {
 		"after":      map[string]any{"type": "integer", "minimum": 0, "maximum": MaxEventWindow, "description": "following events to summarize"},
 	}, "required": []string{"seq"}}
 }
-func (t EventReadTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t EventReadTool) Execute(ctx context.Context, args any) (string, error) {
 	var in struct {
 		SessionID     string `json:"session_id"`
 		Seq           uint64 `json:"seq"`
 		Before, After int
 	}
-	if err := json.Unmarshal(args, &in); err != nil {
+	if err := agenttools.DecodeArgs(args, &in); err != nil {
 		return "", fmt.Errorf("%s: %w", EventReadToolName, err)
 	}
 	id := t.tools.targetID(in.SessionID)

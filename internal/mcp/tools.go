@@ -37,6 +37,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	agenttools "github.com/jabing/shutu-agent/internal/tools"
 	"sort"
 	"strings"
 
@@ -142,11 +143,11 @@ func (McpListTool) Schema() map[string]any {
 	}
 }
 
-func (t McpListTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t McpListTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		Server string `json:"server"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("mcp_list: %w", err)
 	}
 	srv, ok := t.t.findServer(a.Server)
@@ -206,13 +207,13 @@ func (McpCallTool) Schema() map[string]any {
 	}
 }
 
-func (t McpCallTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t McpCallTool) Execute(ctx context.Context, args any) (string, error) {
 	var a struct {
 		Server string         `json:"server"`
 		Tool   string         `json:"tool"`
 		Args   map[string]any `json:"args"`
 	}
-	if err := json.Unmarshal(args, &a); err != nil {
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("mcp_call: %w", err)
 	}
 	srv, ok := t.t.findServer(a.Server)

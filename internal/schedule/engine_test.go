@@ -120,13 +120,13 @@ func TestEngineAddRejectsInvalid(t *testing.T) {
 		kind TriggerKind
 		spec string
 	}{
-		{TriggerKind("bogus"), "30m"},       // unknown kind
-		{KindInterval, "0s"},                // zero interval
-		{KindInterval, "-5m"},               // negative interval
-		{KindInterval, "nope"},              // non-duration
-		{KindCron, "0 0 31 2 *"},            // never matches
-		{KindCron, "61 * * * *"},            // out of range
-		{KindCron, "@daily"},                // unsupported alias
+		{TriggerKind("bogus"), "30m"}, // unknown kind
+		{KindInterval, "0s"},          // zero interval
+		{KindInterval, "-5m"},         // negative interval
+		{KindInterval, "nope"},        // non-duration
+		{KindCron, "0 0 31 2 *"},      // never matches
+		{KindCron, "61 * * * *"},      // out of range
+		{KindCron, "@daily"},          // unsupported alias
 	}
 	for _, c := range bad {
 		if s, err := e.Add(context.Background(), c.kind, c.spec, "x"); err == nil {

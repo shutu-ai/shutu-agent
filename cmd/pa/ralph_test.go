@@ -97,7 +97,7 @@ func TestRegisterRalphDisabledRegistersNothing(t *testing.T) {
 // TestRegisterRalphEnabled verifies the enabled path: the ralph tool is
 // registered and whitelisted (Execute succeeds through the registry).
 func TestRegisterRalphEnabled(t *testing.T) {
-	app := makeRalphApp(true, ralphFakeLLM{text: "DONE: 完成"})
+	app := makeRalphApp(true, ralphFakeLLM{text: `{"status":"complete","summary":"完成","evidence":["verified"],"nextSteps":[],"blocker":""}`})
 	app.reg.SetPolicy(ralphPolicy())
 	if err := app.registerSubagent(); err != nil {
 		t.Fatalf("registerSubagent: %v", err)
@@ -125,7 +125,7 @@ func TestRegisterRalphEnabled(t *testing.T) {
 // child answers "DONE: 完成", the report renders the done outcome and the
 // deliverable, and the ralph/run event lands in the session log (D3).
 func TestRalphRunE2E(t *testing.T) {
-	app := makeRalphApp(true, ralphFakeLLM{text: "DONE: 完成"})
+	app := makeRalphApp(true, ralphFakeLLM{text: `{"status":"complete","summary":"完成","evidence":["verified"],"nextSteps":[],"blocker":""}`})
 	app.reg.SetPolicy(ralphPolicy())
 	if err := app.registerSubagent(); err != nil {
 		t.Fatalf("registerSubagent: %v", err)
@@ -138,8 +138,8 @@ func TestRalphRunE2E(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ralph via registry: %v", err)
 	}
-	if !strings.Contains(res.Output, "outcome: done") || !strings.Contains(res.Output, "完成") {
-		t.Fatalf("ralph output = %q, want done outcome + 完成", res.Output)
+	if !strings.Contains(res.Output, "complete") || !strings.Contains(res.Output, "完成") {
+		t.Fatalf("ralph output = %q, want structured complete result", res.Output)
 	}
 	if !hasEvent(app.log, session.EventRalphRun) {
 		t.Fatal("ralph/run event missing from the session log after ralph Execute")
@@ -149,7 +149,7 @@ func TestRalphRunE2E(t *testing.T) {
 // TestRalphRunBlocked drives a ralph run whose child answers "BLOCKED: 缺凭证":
 // the report renders the blocked outcome and the block reason.
 func TestRalphRunBlocked(t *testing.T) {
-	app := makeRalphApp(true, ralphFakeLLM{text: "BLOCKED: 缺凭证"})
+	app := makeRalphApp(true, ralphFakeLLM{text: `{"status":"blocked","summary":"无法继续","evidence":[],"nextSteps":[],"blocker":"缺凭证"}`})
 	app.reg.SetPolicy(ralphPolicy())
 	if err := app.registerSubagent(); err != nil {
 		t.Fatalf("registerSubagent: %v", err)
@@ -162,7 +162,7 @@ func TestRalphRunBlocked(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ralph via registry: %v", err)
 	}
-	if !strings.Contains(res.Output, "outcome: blocked") || !strings.Contains(res.Output, "缺凭证") {
-		t.Fatalf("ralph output = %q, want blocked outcome + 缺凭证", res.Output)
+	if !strings.Contains(res.Output, "blocked") || !strings.Contains(res.Output, "缺凭证") {
+		t.Fatalf("ralph output = %q, want structured blocked result", res.Output)
 	}
 }
