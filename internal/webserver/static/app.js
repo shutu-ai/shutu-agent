@@ -1630,9 +1630,11 @@ function appendSessionItem(container, s) {
   // the New Session label and NO trailing cells — no timestamp, no row verbs
   // (rename/fork/archive); the status dot follows the dsh rule (idle = no
   // visible dot, the fixed slot keeps alignment).
+  const isRunning = state === "ongoing" || state === "running";
   li.innerHTML = `
     <span class="si-dot" data-state="${state}"></span>
     <span class="si-title${s.blank ? " empty" : ""}">${esc(title)}</span>
+    ${isRunning ? '<span class="si-spinner" aria-hidden="true"></span>' : ""}
     ${s.blank ? "" : `<span class="si-time">${fmtShort(s.updated_at)}</span>`}
     ${s.blank ? "" : `<button class="si-menu" title="会话操作">${PA_ICONS.ellipsis}</button>`}`;
   li.addEventListener("click", (e) => {
@@ -3372,9 +3374,9 @@ async function loadSessionConfig(id) {
   syncModelSeat();
 }
 
-// The backend state projection mirrors dsh's session-level plan/goal/todo and
-// memory indicators. Keep it compact so it remains useful while the transcript
-// grows, and refresh it only on session open and after a completed turn.
+// The backend state projection mirrors dsh's session-level plan/goal/todo
+// indicators. Keep it compact so it remains useful while the transcript grows,
+// and refresh it only on session open and after a completed turn.
 function currentGoalFromProjection(state) {
   const goals = Array.isArray(state?.goals) ? state.goals : [];
   return goals.find((goal) => !["complete", "completed", "cancelled"].includes(String(goal.status || "").toLowerCase())) || null;
@@ -3454,7 +3456,6 @@ async function loadSessionState(id) {
     if (state.plan_mode) parts.push("计划模式");
     if (activeGoal) parts.push(`目标：${esc(activeGoal.objective || activeGoal.title || "进行中")}`);
     if (steps.length) parts.push(`任务 ${done}/${steps.length}`);
-    if (state.memory_enabled) parts.push(`记忆 ${Array.isArray(state.memories) ? state.memories.length : 0}`);
     if (!parts.length) return;
     sessionStateEl.innerHTML = parts.map((part) => `<span class="session-state-item">${part}</span>`).join("");
     sessionStateEl.classList.remove("hidden");
