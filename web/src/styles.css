@@ -326,3 +326,28 @@ body[data-theme="light"] .running-pill.done { color: #496177; background: #edf3f
   .running-summary, .running-columns { grid-template-columns: 1fr; }
   .running-summary { margin: 12px 0; }
 }
+
+.event-images { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 9px; }
+.event-images img, .event-image-loading { width: 72px; height: 58px; border: 1px solid #2d4659; border-radius: 7px; object-fit: cover; background: #0b111a; }
+.event-image-loading { display: grid; place-items: center; padding: 5px; color: #718096; font-size: 9px; text-align: center; }
+.event-actions { display: flex; gap: 4px; margin-top: 7px; }
+.event-actions button { border: 0; border-radius: 5px; padding: 2px 5px; color: #738398; background: transparent; cursor: pointer; filter: grayscale(1); opacity: .7; }
+.event-actions button:hover, .event-actions button.selected { color: #dce7f2; background: #1b2938; filter: none; opacity: 1; }
+.composer { flex-wrap: wrap; }
+.composer-row { display: flex; align-items: end; gap: 9px; width: 100%; }
+.attach-button { display: grid; width: 30px; height: 30px; place-items: center; border: 1px solid #2a384a; border-radius: 7px; color: #9baabc; background: #14202d; cursor: pointer; font-size: 15px; }
+.attach-button:hover { color: #a9e8c1; border-color: #557a64; }
+.attach-button input { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+.attachment-preview-list { display: flex; flex-wrap: wrap; gap: 8px; width: 100%; padding: 1px 2px 2px; }
+.attachment-preview { position: relative; width: 62px; height: 48px; }
+.attachment-preview img { width: 100%; height: 100%; border: 1px solid #365344; border-radius: 6px; object-fit: cover; }
+.attachment-preview button { position: absolute; top: -6px; right: -6px; width: 18px; height: 18px; border: 1px solid #0b121b; border-radius: 50%; padding: 0; color: #fff; background: #6d3c3c; cursor: pointer; line-height: 15px; }
+body[data-theme="light"] .event-images img, body[data-theme="light"] .event-image-loading { border-color: #d4e0e8; background: #f5f8fb; }
+body[data-theme="light"] .event-actions button:hover, body[data-theme="light"] .event-actions button.selected { color: #203042; background: #edf3f8; }
+body[data-theme="light"] .attach-button { border-color: #d4e0e8; color: #496177; background: #f5f8fb; }
+.system-swatch { background: linear-gradient(135deg, #f8fafc 50%, #1b2938 50%); }
+
+@media (max-width: 600px) {
+  .composer-row textarea { min-width: 0; }
+  .event-images img, .event-image-loading { width: 62px; height: 50px; }
+}

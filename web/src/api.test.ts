@@ -34,6 +34,35 @@ describe('ShutuApi', () => {
     ])
   })
 
+  it('maps feedback, image upload, protected image download and image messages', async () => {
+    const requests: { path: string; method: string; body?: string; multipart?: boolean }[] = []
+    const api = new ShutuApi('https://shutu.test', 'secret', async (input, init) => {
+      const path = new URL(String(input)).pathname
+      requests.push({ path, method: init?.method ?? 'GET', body: typeof init?.body === 'string' ? init.body : undefined, multipart: init?.body instanceof FormData })
+      if (path.endsWith('/attachments')) return new Response(JSON.stringify({ id: 'img-1', media_type: 'image/png', bytes: 4 }), { status: 201 })
+      if (path.endsWith('/feedback')) return new Response(JSON.stringify([]), { status: 200 })
+      if (path.includes('/feedback/')) return new Response(JSON.stringify({ session_id: 's1', seq: 2, rating: 'positive' }), { status: 200 })
+      if (path.endsWith('/attachments/img-1')) return new Response(new Blob(['data'], { type: 'image/png' }), { status: 200 })
+      return new Response(JSON.stringify({ ok: true }), { status: 200 })
+    })
+
+    await api.uploadAttachment('s1', new File(['data'], 'photo.png', { type: 'image/png' }))
+    await api.sendMessage('s1', '带图', ['img-1'])
+    await api.listFeedback('s1')
+    await api.putFeedback('s1', 2, 'positive')
+    await api.deleteFeedback('s1', 2)
+    await expect(api.loadAttachment('s1', 'img-1')).resolves.toBeInstanceOf(Blob)
+
+    expect(requests).toEqual([
+      { path: '/api/sessions/s1/attachments', method: 'POST', body: undefined, multipart: true },
+      { path: '/api/sessions/s1/message', method: 'POST', body: '{"text":"带图","images":["img-1"]}', multipart: false },
+      { path: '/api/sessions/s1/feedback', method: 'GET', body: undefined, multipart: false },
+      { path: '/api/sessions/s1/feedback/2', method: 'PUT', body: '{"rating":"positive","note":""}', multipart: false },
+      { path: '/api/sessions/s1/feedback/2', method: 'DELETE', body: undefined, multipart: false },
+      { path: '/api/sessions/s1/attachments/img-1', method: 'GET', body: undefined, multipart: false },
+    ])
+  })
+
   it('builds encoded cursor requests with bearer authentication', async () => {
     let requestURL = ''
     let requestHeaders: Headers | undefined

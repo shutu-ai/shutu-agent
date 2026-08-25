@@ -1,4 +1,4 @@
-import type { ConfigView, EventView, RunningSnapshot, SessionSummary, WebApi } from './api'
+import type { AttachmentView, ConfigView, EventView, FeedbackView, RunningSnapshot, SessionSummary, WebApi } from './api'
 import { ShutuApiError } from './api'
 
 export interface WebState {
@@ -174,12 +174,12 @@ export class WebStore {
     }
   }
 
-  async send(text: string): Promise<void> {
+  async send(text: string, images: string[] = []): Promise<void> {
     const id = this.state.selectedId
-    if (id === null || text.trim() === '') return
+    if (id === null || (text.trim() === '' && images.length === 0)) return
     this.patch({ sending: true })
     try {
-      await this.api.sendMessage(id, text.trim())
+      await this.api.sendMessage(id, text.trim(), images)
       await this.refreshSessions()
     } finally { this.patch({ sending: false }) }
   }
@@ -195,6 +195,26 @@ export class WebStore {
 
   getConfig(signal?: AbortSignal): Promise<ConfigView> {
     return this.api.getConfig(signal)
+  }
+
+  listFeedback(sessionId: string, signal?: AbortSignal): Promise<FeedbackView[]> {
+    return this.api.listFeedback(sessionId, signal)
+  }
+
+  putFeedback(sessionId: string, seq: number, rating: 'positive' | 'negative', note = ''): Promise<FeedbackView> {
+    return this.api.putFeedback(sessionId, seq, rating, note)
+  }
+
+  async deleteFeedback(sessionId: string, seq: number): Promise<void> {
+    await this.api.deleteFeedback(sessionId, seq)
+  }
+
+  uploadAttachment(sessionId: string, file: File): Promise<AttachmentView> {
+    return this.api.uploadAttachment(sessionId, file)
+  }
+
+  loadAttachment(sessionId: string, attachmentId: string, signal?: AbortSignal): Promise<Blob> {
+    return this.api.loadAttachment(sessionId, attachmentId, signal)
   }
 
   async loadRunning(sessionId: string, signal?: AbortSignal): Promise<RunningSnapshot> {

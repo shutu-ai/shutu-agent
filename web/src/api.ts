@@ -20,6 +20,27 @@ export interface EventDetails {
   [key: string]: unknown
 }
 
+export interface ImageView {
+  id: string
+  media_type: string
+  bytes?: number
+  width?: number
+  height?: number
+}
+
+export interface AttachmentView extends ImageView {
+  bytes: number
+}
+
+export interface FeedbackView {
+  session_id: string
+  seq: number
+  rating: 'positive' | 'negative'
+  note?: string
+  created_at?: string
+  updated_at?: string
+}
+
 export interface EventView {
   seq: number
   type: string
@@ -32,6 +53,7 @@ export interface EventView {
   tool_output?: string
   tool_args?: string
   call_id?: string
+  images?: ImageView[]
   context_message?: boolean
   compaction_summary?: string
   compaction_tokens?: number
@@ -94,6 +116,11 @@ export interface WebApi {
   getConfig(signal?: AbortSignal): Promise<ConfigView>
   listSubagents(sessionId: string, signal?: AbortSignal): Promise<SubagentView[]>
   listJobs(sessionId: string, signal?: AbortSignal): Promise<JobView[]>
+  listFeedback(sessionId: string, signal?: AbortSignal): Promise<FeedbackView[]>
+  putFeedback(sessionId: string, seq: number, rating: 'positive' | 'negative', note?: string, signal?: AbortSignal): Promise<FeedbackView>
+  deleteFeedback(sessionId: string, seq: number, signal?: AbortSignal): Promise<void>
+  uploadAttachment(sessionId: string, file: File, signal?: AbortSignal): Promise<AttachmentView>
+  loadAttachment(sessionId: string, attachmentId: string, signal?: AbortSignal): Promise<Blob>
   listSessions(signal?: AbortSignal): Promise<SessionSummary[]>
   createSession(signal?: AbortSignal): Promise<{ id: string }>
   resumeSession(sessionId: string, signal?: AbortSignal): Promise<void>
@@ -101,7 +128,7 @@ export interface WebApi {
   archiveSession(sessionId: string, signal?: AbortSignal): Promise<void>
   deleteSession(sessionId: string, signal?: AbortSignal): Promise<void>
   loadEvents(sessionId: string, cursor?: EventPageCursor, signal?: AbortSignal): Promise<EventPage>
-  sendMessage(sessionId: string, text: string, signal?: AbortSignal): Promise<void>
+  sendMessage(sessionId: string, text: string, images?: string[], signal?: AbortSignal): Promise<void>
   stop(sessionId: string, signal?: AbortSignal): Promise<void>
   stream(sessionId: string, lastSeq: number, signal: AbortSignal, onEvent: EventListener): Promise<void>
   setToken?(token: string): void
@@ -143,6 +170,14 @@ export class ShutuApi implements WebApi {
     return response.json() as Promise<T>
   }
 
+  private async blob(path: string, init: RequestInit = {}): Promise<Blob> {
+    const headers = this.headers()
+    new Headers(init.headers).forEach((value, key) => headers.set(key, value))
+    const response = await this.fetcher(this.url(path), { ...init, headers })
+    if (!response.ok) throw new ShutuApiError(`Request failed: HTTP ${response.status}`, response.status)
+    return response.blob()
+  }
+
   listSessions(signal?: AbortSignal): Promise<SessionSummary[]> {
     return this.json<SessionSummary[]>('/api/sessions', { signal })
   }
@@ -159,6 +194,30 @@ export class ShutuApi implements WebApi {
   listJobs(sessionId: string, signal?: AbortSignal): Promise<JobView[]> {
     const query = new URLSearchParams({ session_id: sessionId })
     return this.json<{ jobs: JobView[] }>(`/api/jobs?${query}`, { signal }).then(result => result.jobs ?? [])
+  }
+
+  listFeedback(sessionId: string, signal?: AbortSignal): Promise<FeedbackView[]> {
+    return this.json<FeedbackView[]>(`/api/sessions/${encodeURIComponent(sessionId)}/feedback`, { signal })
+  }
+
+  putFeedback(sessionId: string, seq: number, rating: 'positive' | 'negative', note = '', signal?: AbortSignal): Promise<FeedbackView> {
+    return this.json<FeedbackView>(`/api/sessions/${encodeURIComponent(sessionId)}/feedback/${seq}`, {
+      method: 'PUT', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rating, note }),
+    })
+  }
+
+  async deleteFeedback(sessionId: string, seq: number, signal?: AbortSignal): Promise<void> {
+    await this.json<{ ok: true }>(`/api/sessions/${encodeURIComponent(sessionId)}/feedback/${seq}`, { method: 'DELETE', signal })
+  }
+
+  async uploadAttachment(sessionId: string, file: File, signal?: AbortSignal): Promise<AttachmentView> {
+    const body = new FormData()
+    body.append('file', file, file.name)
+    return this.json<AttachmentView>(`/api/sessions/${encodeURIComponent(sessionId)}/attachments`, { method: 'POST', signal, body })
+  }
+
+  loadAttachment(sessionId: string, attachmentId: string, signal?: AbortSignal): Promise<Blob> {
+    return this.blob(`/api/sessions/${encodeURIComponent(sessionId)}/attachments/${encodeURIComponent(attachmentId)}`, { signal })
   }
 
   async createSession(signal?: AbortSignal): Promise<{ id: string }> {
@@ -190,9 +249,9 @@ export class ShutuApi implements WebApi {
     return this.json<EventPage>(`/api/sessions/${encodeURIComponent(sessionId)}/events?${query}`, { signal })
   }
 
-  async sendMessage(sessionId: string, text: string, signal?: AbortSignal): Promise<void> {
+  async sendMessage(sessionId: string, text: string, images: string[] = [], signal?: AbortSignal): Promise<void> {
     await this.json<{ ok: true }>(`/api/sessions/${encodeURIComponent(sessionId)}/message`, {
-      method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }),
+      method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, images }),
     })
   }
 

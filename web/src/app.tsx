@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
-import type { ConfigView, EventDetails, EventView, JobView, RunningSnapshot, SessionSummary, SubagentView } from './api'
+import type { AttachmentView, ConfigView, EventDetails, EventView, FeedbackView, ImageView, JobView, RunningSnapshot, SessionSummary, SubagentView } from './api'
 import { projectDshConversation, type DshConversationNode, type DshConversationSnapshot } from './dsh-conversation'
 import { projectDshTrajectory, type DshTimelineMode } from './dsh-trajectory'
 import { WebStore } from './store'
@@ -141,7 +141,7 @@ function SessionBrowser({
 }
 
 type SettingsSection = 'general' | 'model' | 'capabilities' | 'tools'
-type ThemePreference = 'dark' | 'light'
+type ThemePreference = 'dark' | 'light' | 'system'
 
 const CAPABILITY_LABELS: Record<string, string> = {
   code_enabled: '代码执行', compaction_enabled: '上下文压缩', eval_enabled: '评估工具',
@@ -201,7 +201,7 @@ function SettingsPage({ store, theme, onThemeChange, onBack }: {
   return <div className="settings-page">
     <header className="settings-topbar">
       <button className="settings-back" type="button" onClick={onBack}>‹ 返回聊天</button>
-      <div className="settings-theme-toggle" role="group" aria-label="主题"><button type="button" className={theme === 'light' ? 'selected' : ''} onClick={() => onThemeChange('light')}>浅色</button><button type="button" className={theme === 'dark' ? 'selected' : ''} onClick={() => onThemeChange('dark')}>深色</button></div>
+      <div className="settings-theme-toggle" role="group" aria-label="主题"><button type="button" className={theme === 'light' ? 'selected' : ''} onClick={() => onThemeChange('light')}>浅色</button><button type="button" className={theme === 'dark' ? 'selected' : ''} onClick={() => onThemeChange('dark')}>深色</button><button type="button" className={theme === 'system' ? 'selected' : ''} onClick={() => onThemeChange('system')}>系统</button></div>
     </header>
     <main className="settings-panel">
       <div className="settings-heading"><div><span className="eyebrow">DSH WEB</span><h1>设置</h1><p>查看当前运行配置与已启用能力。</p></div><button className="settings-close" type="button" onClick={onBack} aria-label="关闭设置">×</button></div>
@@ -210,7 +210,7 @@ function SettingsPage({ store, theme, onThemeChange, onBack }: {
         <section className="settings-content" aria-live="polite">
           {loading && <div className="settings-state"><div className="spinner" />正在加载配置…</div>}
           {!loading && error && <div className="settings-state settings-error"><strong>配置读取失败</strong><span>{error}</span><button type="button" onClick={() => setReload(value => value + 1)}>重试</button></div>}
-          {!loading && !error && config !== null && section === 'general' && <div className="settings-section"><h2>通用设置</h2><p className="settings-description">这些选项描述当前 Web 工作区的运行方式。</p><div className="setting-group"><h3>外观</h3><div className="appearance-options"><button type="button" className={theme === 'light' ? 'selected' : ''} onClick={() => onThemeChange('light')}><span className="appearance-swatch light-swatch" />浅色</button><button type="button" className={theme === 'dark' ? 'selected' : ''} onClick={() => onThemeChange('dark')}><span className="appearance-swatch dark-swatch" />深色</button></div></div><div className="setting-row"><div><strong>运行模式</strong><span>当前 Agent 的默认权限与行为模式</span></div><code>{configText(config, 'mode')}</code></div><div className="setting-row"><div><strong>Web 地址</strong><span>当前服务监听地址</span></div><code>{configText(config, 'web_server_addr')}</code></div><div className="setting-row"><div><strong>配置文件</strong><span>配置由服务启动时加载，Web 端只读展示</span></div><span className="readonly-badge">只读</span></div><div className="settings-note">修改配置文件或能力开关后，重启 Shutu 服务才能生效。</div></div>}
+          {!loading && !error && config !== null && section === 'general' && <div className="settings-section"><h2>通用设置</h2><p className="settings-description">这些选项描述当前 Web 工作区的运行方式。</p><div className="setting-group"><h3>外观</h3><div className="appearance-options"><button type="button" className={theme === 'light' ? 'selected' : ''} onClick={() => onThemeChange('light')}><span className="appearance-swatch light-swatch" />浅色</button><button type="button" className={theme === 'dark' ? 'selected' : ''} onClick={() => onThemeChange('dark')}><span className="appearance-swatch dark-swatch" />深色</button><button type="button" className={theme === 'system' ? 'selected' : ''} onClick={() => onThemeChange('system')}><span className="appearance-swatch system-swatch" />系统</button></div></div><div className="setting-row"><div><strong>运行模式</strong><span>当前 Agent 的默认权限与行为模式</span></div><code>{configText(config, 'mode')}</code></div><div className="setting-row"><div><strong>Web 地址</strong><span>当前服务监听地址</span></div><code>{configText(config, 'web_server_addr')}</code></div><div className="setting-row"><div><strong>配置文件</strong><span>配置由服务启动时加载，Web 端只读展示</span></div><span className="readonly-badge">只读</span></div><div className="settings-note">修改配置文件或能力开关后，重启 Shutu 服务才能生效。</div></div>}
           {!loading && !error && config !== null && section === 'model' && <div className="settings-section"><h2>模型</h2><p className="settings-description">当前连接使用的模型配置。</p><article className="model-card"><div className="model-card-head"><div className="model-avatar">D</div><div><strong>DeepSeek</strong><span>{configText(config, 'llm_provider')}</span></div><span className="readonly-badge">只读</span></div><div className="model-fields"><div><span>模型 ID</span><code>{configText(config, 'model')}</code></div><div><span>API 地址</span><code>{configText(config, 'base_url', '使用默认地址')}</code></div><div><span>会话模式</span><code>{configText(config, 'mode')}</code></div></div></article><div className="settings-note">模型切换与凭据管理由服务端配置负责，当前页面不直接修改提供方。</div></div>}
           {!loading && !error && config !== null && section === 'capabilities' && <div className="settings-section"><h2>能力开关</h2><p className="settings-description">根据服务端配置自动发现的功能开关。</p><div className="capability-list">{capabilities.map(([key, value]) => <div className="capability-row" key={key}><div><strong>{CAPABILITY_LABELS[key] ?? key.replace(/_enabled$/, '')}</strong><span>{key}</span></div><span className={`capability-status ${value ? 'on' : 'off'}`}>{value ? '已启用' : '已关闭'}</span></div>)}</div></div>}
           {!loading && !error && config !== null && section === 'tools' && <div className="settings-section"><h2>工具</h2><p className="settings-description">当前注册并可供 Agent 使用的工具。</p><div className="tool-summary"><strong>{toolCount}</strong><span>个工具已启用</span></div><div className="tool-list">{tools.length > 0 ? tools.map(tool => <span className="tool-chip" key={tool}>{tool}</span>) : <span className="muted">服务端未返回工具清单。</span>}</div><div className="settings-note">工具的实际可用性还会受到对应能力开关和当前会话权限影响。</div></div>}
@@ -232,7 +232,31 @@ function detailEntries(details: EventDetails | undefined): [string, string][] {
     .map(([key, value]) => [key, detailText(value)])
 }
 
-function EventCard({ event }: { event: EventView }) {
+function EventImages({ store, sessionId, images }: { store: WebStore; sessionId: string; images: readonly ImageView[] }) {
+  const imageKey = images.map(image => image.id).join(',')
+  const [urls, setUrls] = useState<Record<string, string>>({})
+  useEffect(() => {
+    const abort = new AbortController()
+    const objectUrls: string[] = []
+    void Promise.all(images.map(async image => {
+      try {
+        const blob = await store.loadAttachment(sessionId, image.id, abort.signal)
+        const url = URL.createObjectURL(blob)
+        objectUrls.push(url)
+        return [image.id, url] as const
+      } catch {
+        return null
+      }
+    })).then(entries => {
+      if (abort.signal.aborted) return
+      setUrls(Object.fromEntries(entries.filter((entry): entry is readonly [string, string] => entry !== null)))
+    })
+    return () => { abort.abort(); objectUrls.forEach(url => URL.revokeObjectURL(url)) }
+  }, [imageKey, sessionId, store])
+  return <div className="event-images">{images.map(image => urls[image.id] ? <img key={image.id} src={urls[image.id]} alt="消息附件" /> : <span className="event-image-loading" key={image.id}>图片加载中…</span>)}</div>
+}
+
+function EventCard({ event, store, sessionId, feedback, onFeedback }: { event: EventView; store: WebStore; sessionId: string; feedback?: FeedbackView; onFeedback: (seq: number, rating: 'positive' | 'negative') => void }) {
   const [expanded, setExpanded] = useState(false)
   const text = event.tool_output || event.reasoning || event.summary || event.compaction_summary || 'No content'
   const entries = detailEntries(event.details)
@@ -253,12 +277,14 @@ function EventCard({ event }: { event: EventView }) {
       <div className="event-content">
         {event.call_id && <span className="call-id">call {event.call_id}</span>}
         <div className="event-text">{text}</div>
+        {event.images && event.images.length > 0 && <EventImages store={store} sessionId={sessionId} images={event.images} />}
         {event.tool_args && <div className="code-block"><span>Input</span><pre>{event.tool_args}</pre></div>}
         {tokenUsage !== undefined && <span className="token-chip">Tokens {detailText(tokenUsage)}</span>}
         {hasExtra && <button className="text-button" onClick={() => setExpanded(value => !value)}>{expanded ? 'Collapse details' : 'Expand details'}</button>}
         {expanded && entries.length > 0 && <div className="details-grid">
           {entries.map(([key, value]) => <div className="detail-item" key={key}><span>{key}</span><pre>{value}</pre></div>)}
         </div>}
+        {event.type === 'assistant/message' && <div className="event-actions" aria-label="消息反馈"><button type="button" className={feedback?.rating === 'positive' ? 'selected' : ''} onClick={() => onFeedback(event.seq, 'positive')} aria-label="有帮助">👍</button><button type="button" className={feedback?.rating === 'negative' ? 'selected' : ''} onClick={() => onFeedback(event.seq, 'negative')} aria-label="没帮助">👎</button></div>}
       </div>
     </article>
   )
@@ -303,9 +329,12 @@ function conversationNodeLabel(node: DshConversationNode): string {
   }
 }
 
-function DshConversation({ events, sessionId, onReachTop, loadingOlder }: {
+function DshConversation({ events, sessionId, store, feedbackBySeq, onFeedback, onReachTop, loadingOlder }: {
   events: readonly EventView[]
   sessionId: string
+  store: WebStore
+  feedbackBySeq: Readonly<Record<number, FeedbackView>>
+  onFeedback: (seq: number, rating: 'positive' | 'negative') => void
   onReachTop: () => void
   loadingOlder: boolean
 }) {
@@ -352,7 +381,7 @@ function DshConversation({ events, sessionId, onReachTop, loadingOlder }: {
         if (raw === undefined) return null
         return <section className={`conversation-node conversation-virtual-row ${node.kind}`} key={`${node.kind}:${node.seq}`} style={{ transform: `translateY(${(start + index) * CONVERSATION_ROW_HEIGHT}px)` }}>
           <div className="conversation-node-head"><span>{conversationNodeLabel(node)}</span><span>#{node.seq}</span></div>
-          <EventCard event={raw} />
+          <EventCard event={raw} store={store} sessionId={sessionId} feedback={feedbackBySeq[raw.seq]} onFeedback={onFeedback} />
         </section>
       })}
     </div>
@@ -369,8 +398,12 @@ function DshConversationHeader({ snapshot }: { snapshot: DshConversationSnapshot
   </div>
 }
 
-function VirtualEvents({ events, onReachTop, loadingOlder, focusSeq }: {
+function VirtualEvents({ events, store, sessionId, feedbackBySeq, onFeedback, onReachTop, loadingOlder, focusSeq }: {
   events: readonly EventView[]
+  store: WebStore
+  sessionId: string
+  feedbackBySeq: Readonly<Record<number, FeedbackView>>
+  onFeedback: (seq: number, rating: 'positive' | 'negative') => void
   onReachTop: () => void
   loadingOlder: boolean
   focusSeq: number | null
@@ -420,7 +453,7 @@ function VirtualEvents({ events, onReachTop, loadingOlder, focusSeq }: {
     {loadingOlder && <div className="history-loading">Loading earlier events…</div>}
     <div className="virtual-canvas" style={{ height: events.length * ROW_HEIGHT }}>
       {visible.map((event, index) => <div className="virtual-row" key={event.seq} style={{ transform: `translateY(${(start + index) * ROW_HEIGHT}px)` }}>
-        <EventCard event={event} />
+        <EventCard event={event} store={store} sessionId={sessionId} feedback={feedbackBySeq[event.seq]} onFeedback={onFeedback} />
       </div>)}
     </div>
   </div>
@@ -529,9 +562,15 @@ export function App({ store }: { store: WebStore }) {
   const [focusedSeq, setFocusedSeq] = useState<number | null>(null)
   const [token, setToken] = useState(() => store.getToken())
   const [settingsOpen, setSettingsOpen] = useState(() => typeof window !== 'undefined' && window.location.hash === '#/settings')
+  const [feedbackBySeq, setFeedbackBySeq] = useState<Record<number, FeedbackView>>({})
+  const [pendingImages, setPendingImages] = useState<readonly { ref: AttachmentView; previewUrl: string }[]>([])
+  const [uploading, setUploading] = useState(false)
   const [theme, setTheme] = useState<ThemePreference>(() => {
     if (typeof localStorage === 'undefined') return 'dark'
-    try { return localStorage.getItem('shutu.web.theme') === 'light' ? 'light' : 'dark' } catch { return 'dark' }
+    try {
+      const stored = localStorage.getItem('shutu.web.theme')
+      return stored === 'light' || stored === 'system' ? stored : 'dark'
+    } catch { return 'dark' }
   })
   const selected = state.sessions.find(session => session.id === state.selectedId)
   const filtered = useMemo(() => {
@@ -547,6 +586,22 @@ export function App({ store }: { store: WebStore }) {
   useEffect(() => { void store.start() }, [store])
 
   useEffect(() => {
+    if (state.selectedId === null) {
+      setFeedbackBySeq({})
+      return
+    }
+    const abort = new AbortController()
+    setFeedbackBySeq({})
+    void store.listFeedback(state.selectedId, abort.signal).then(items => {
+      if (abort.signal.aborted) return
+      setFeedbackBySeq(Object.fromEntries(items.map(item => [item.seq, item])))
+    }).catch(error => {
+      if (!abort.signal.aborted) setSendError(error instanceof Error ? error.message : String(error))
+    })
+    return () => abort.abort()
+  }, [state.selectedId, store])
+
+  useEffect(() => {
     const syncRoute = () => setSettingsOpen(window.location.hash === '#/settings')
     window.addEventListener('hashchange', syncRoute)
     window.addEventListener('popstate', syncRoute)
@@ -554,9 +609,20 @@ export function App({ store }: { store: WebStore }) {
   }, [])
 
   useEffect(() => {
-    document.body.dataset.theme = theme
-    document.documentElement.style.colorScheme = theme
+    const media = window.matchMedia('(prefers-color-scheme: light)')
+    const applyTheme = () => {
+      const resolved = theme === 'system' ? (media.matches ? 'light' : 'dark') : theme
+      document.body.dataset.theme = resolved
+      document.documentElement.style.colorScheme = resolved
+    }
+    applyTheme()
+    if (theme !== 'system') {
+      try { localStorage.setItem('shutu.web.theme', theme) } catch { /* optional preference */ }
+      return
+    }
+    media.addEventListener('change', applyTheme)
     try { localStorage.setItem('shutu.web.theme', theme) } catch { /* optional preference */ }
+    return () => media.removeEventListener('change', applyTheme)
   }, [theme])
 
   const setSettingsRoute = (open: boolean): void => {
@@ -567,13 +633,58 @@ export function App({ store }: { store: WebStore }) {
 
   const submit = async (): Promise<void> => {
     const value = draft.trim()
-    if (!value) return
+    if (!value && pendingImages.length === 0) return
     setDraft('')
     setSendError(null)
-    try { await store.send(value) } catch (error) {
+    try {
+      await store.send(value, pendingImages.map(item => item.ref.id))
+      pendingImages.forEach(item => URL.revokeObjectURL(item.previewUrl))
+      setPendingImages([])
+    } catch (error) {
       setDraft(value)
       setSendError(error instanceof Error ? error.message : String(error))
     }
+  }
+
+  const attachFiles = async (files: FileList | null): Promise<void> => {
+    if (state.selectedId === null || files === null) return
+    const candidates = Array.from(files).slice(0, 4)
+    const invalid = candidates.find(file => !file.type.startsWith('image/') || file.size > 10 * 1024 * 1024)
+    if (invalid !== undefined) {
+      setSendError('仅支持 10MB 以内的图片附件。')
+      return
+    }
+    setUploading(true)
+    setSendError(null)
+    try {
+      const uploaded = await Promise.all(candidates.map(async file => ({
+        ref: await store.uploadAttachment(state.selectedId as string, file),
+        previewUrl: URL.createObjectURL(file),
+      })))
+      setPendingImages(previous => [...previous, ...uploaded].slice(0, 10))
+    } catch (error) {
+      setSendError(error instanceof Error ? error.message : String(error))
+    } finally { setUploading(false) }
+  }
+
+  const removePendingImage = (id: string): void => {
+    const item = pendingImages.find(candidate => candidate.ref.id === id)
+    if (item !== undefined) URL.revokeObjectURL(item.previewUrl)
+    setPendingImages(previous => previous.filter(candidate => candidate.ref.id !== id))
+  }
+
+  const submitFeedback = async (seq: number, rating: 'positive' | 'negative'): Promise<void> => {
+    if (state.selectedId === null) return
+    const current = feedbackBySeq[seq]
+    try {
+      if (current?.rating === rating) {
+        await store.deleteFeedback(state.selectedId, seq)
+        setFeedbackBySeq(previous => { const next = { ...previous }; delete next[seq]; return next })
+      } else {
+        const item = await store.putFeedback(state.selectedId, seq, rating)
+        setFeedbackBySeq(previous => ({ ...previous, [seq]: item }))
+      }
+    } catch (error) { setSendError(error instanceof Error ? error.message : String(error)) }
   }
 
   const stopRun = async (): Promise<void> => {
@@ -605,9 +716,9 @@ export function App({ store }: { store: WebStore }) {
       {search.trim() !== '' && <div className="search-status" role="status" aria-live="polite">{filtered.length} matching loaded events{state.hasOlder ? ' · scroll to load older history' : ''}</div>}
       {(state.error || sendError) && <div className="error-banner"><span>{state.error || sendError}</span><button onClick={() => { setSendError(null); void store.start() }}>Retry</button></div>}
       <section className="content-panel">
-        {state.authRequired ? <form className="auth-card" onSubmit={event => { event.preventDefault(); void authenticate() }}><strong>Authentication required</strong><span>Enter the bearer token configured for the Shutu web server.</span><input aria-label="Bearer token" type="password" autoComplete="current-password" value={token} onChange={event => setToken(event.target.value)} placeholder="Bearer token" /><button type="submit" disabled={token.trim() === ''}>Connect</button></form> : state.loading ? <div className="empty"><div className="spinner" />Loading session…</div> : tab === 'running' ? <RunningPanel store={store} sessionId={state.selectedId} /> : state.selectedId === null ? <div className="empty"><strong>Start a new conversation</strong><span>Select a session or send a message from the agent.</span></div> : filtered.length === 0 ? <div className="empty"><strong>{search ? 'No matching events' : 'No events yet'}</strong><span>{search ? 'Try a different search term.' : 'Events will appear here as the session runs.'}</span></div> : tab === 'trajectory' ? <><DshTimeline events={filtered} onSelectSeq={setFocusedSeq} /><VirtualEvents events={filtered} focusSeq={focusedSeq} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} /></> : <DshConversation events={filtered} sessionId={state.selectedId} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} />}
+        {state.authRequired ? <form className="auth-card" onSubmit={event => { event.preventDefault(); void authenticate() }}><strong>Authentication required</strong><span>Enter the bearer token configured for the Shutu web server.</span><input aria-label="Bearer token" type="password" autoComplete="current-password" value={token} onChange={event => setToken(event.target.value)} placeholder="Bearer token" /><button type="submit" disabled={token.trim() === ''}>Connect</button></form> : state.loading ? <div className="empty"><div className="spinner" />Loading session…</div> : tab === 'running' ? <RunningPanel store={store} sessionId={state.selectedId} /> : state.selectedId === null ? <div className="empty"><strong>Start a new conversation</strong><span>Select a session or send a message from the agent.</span></div> : filtered.length === 0 ? <div className="empty"><strong>{search ? 'No matching events' : 'No events yet'}</strong><span>{search ? 'Try a different search term.' : 'Events will appear here as the session runs.'}</span></div> : tab === 'trajectory' ? <><DshTimeline events={filtered} onSelectSeq={setFocusedSeq} /><VirtualEvents events={filtered} store={store} sessionId={state.selectedId} feedbackBySeq={feedbackBySeq} onFeedback={submitFeedback} focusSeq={focusedSeq} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} /></> : <DshConversation events={filtered} sessionId={state.selectedId} store={store} feedbackBySeq={feedbackBySeq} onFeedback={submitFeedback} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} />}
       </section>
-      <form className="composer" onSubmit={event => { event.preventDefault(); if (state.sending) void stopRun(); else void submit() }}><textarea value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); if (!state.sending) void submit() } }} placeholder={state.sending ? 'Agent is running…' : 'Send a message…'} rows={2} /><button type="submit" disabled={state.selectedId === null || (!state.sending && draft.trim() === '')}>{state.sending ? 'Stop' : 'Send'} <span>{state.sending ? '■' : '↵'}</span></button></form>
+      <form className="composer" onSubmit={event => { event.preventDefault(); if (state.sending) void stopRun(); else void submit() }}>{pendingImages.length > 0 && <div className="attachment-preview-list">{pendingImages.map(item => <div className="attachment-preview" key={item.ref.id}><img src={item.previewUrl} alt="待发送图片" /><button type="button" onClick={() => removePendingImage(item.ref.id)} aria-label="移除附件">×</button></div>)}</div>}<div className="composer-row"><label className="attach-button" aria-label="添加图片"><input type="file" accept="image/*" multiple disabled={state.selectedId === null || state.sending || uploading} onChange={event => { void attachFiles(event.currentTarget.files); event.currentTarget.value = '' }} />📎</label><textarea value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); if (!state.sending) void submit() } }} placeholder={uploading ? '正在上传图片…' : state.sending ? 'Agent is running…' : 'Send a message…'} rows={2} /><button type="submit" disabled={state.selectedId === null || uploading || (!state.sending && draft.trim() === '' && pendingImages.length === 0)}>{state.sending ? 'Stop' : 'Send'} <span>{state.sending ? '■' : '↵'}</span></button></div></form>
     </main>
   </div>
 }
