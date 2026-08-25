@@ -6,14 +6,18 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/jabing/shutu-agent/internal/config"
+	"github.com/jabing/shutu-agent/internal/session"
 	"github.com/jabing/shutu-agent/internal/store"
 )
 
@@ -126,6 +130,66 @@ func TestRegisterWebServerEnabledServes(t *testing.T) {
 	}
 	if code := get("/", "tok"); code != http.StatusOK {
 		t.Fatalf("static index with token -> %d, want 200", code)
+	}
+}
+
+// TestRegisterWebServerEventSourcePublishesSSE verifies the complete
+// composition-root path: EventHub.Publish -> webserver subscription -> HTTP
+// SSE frame. The lower webserver package already tests an injected fake source;
+// this test proves cmd/pa wires the real source into that handler.
+func TestRegisterWebServerEventSourcePublishesSSE(t *testing.T) {
+	a, st := makeWebServerApp(t, true, "tok")
+	defer st.Close()
+	if err := st.CreateSession(context.Background(), "s-1", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.registerWebServer(); err != nil {
+		t.Fatalf("registerWebServer: %v", err)
+	}
+	defer a.webserver.Close()
+
+	ts := httptest.NewServer(a.webserver.Handler())
+	defer ts.Close()
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/api/sessions/s-1/events/stream", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer tok")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET event stream: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("event stream status = %d, want 200", resp.StatusCode)
+	}
+	if contentType := resp.Header.Get("Content-Type"); !strings.Contains(contentType, "text/event-stream") {
+		t.Fatalf("event stream content type = %q", contentType)
+	}
+
+	raw, err := json.Marshal(map[string]any{"text": "live from event hub"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.hub.Publish("s-1", session.Event{
+		Seq: 1, Type: session.EventUserMessage, Version: session.EventVersion,
+		At: time.Now().UTC(), Data: raw,
+	})
+
+	reader := bufio.NewReader(resp.Body)
+	found := false
+	for lineCount := 0; lineCount < 16; lineCount++ {
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			t.Fatalf("read SSE frame: %v", readErr)
+		}
+		if strings.Contains(line, `"seq":1`) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("SSE stream did not contain the published event")
 	}
 }
 
