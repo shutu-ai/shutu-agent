@@ -246,22 +246,21 @@ func TestWorkerPromptContent(t *testing.T) {
 			t.Fatalf("structured worker prompt lacks %q: %s", want, prompt)
 		}
 	}
-	return
 	p1 := buildWorkerPrompt("交付目标", 1, "")
-	for _, want := range []string{"交付目标", "第 1 轮", "（无）"} {
+	for _, want := range []string{"交付目标", "Ralph round: 1", "(none — this is the first round)"} {
 		if !strings.Contains(p1, want) {
 			t.Errorf("round-1 prompt lacks %q:\n%s", want, p1)
 		}
 	}
 	p2 := buildWorkerPrompt("交付目标", 2, "上一轮进展")
-	if !strings.Contains(p2, "第 2 轮") {
+	if !strings.Contains(p2, "Ralph round: 2") {
 		t.Errorf("round-2 prompt lacks the round number:\n%s", p2)
 	}
 	if !strings.Contains(p2, "上一轮进展") {
 		t.Errorf("round-2 prompt lacks the previous brief:\n%s", p2)
 	}
-	if strings.Contains(p2, "（无）") {
-		t.Errorf("round-2 prompt must not contain （无） when a previous brief exists:\n%s", p2)
+	if strings.Contains(p2, "(none — this is the first round)") {
+		t.Errorf("round-2 prompt must not contain the first-round handoff when a previous brief exists:\n%s", p2)
 	}
 }
 
