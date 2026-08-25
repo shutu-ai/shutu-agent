@@ -137,6 +137,7 @@ type Server struct {
 	// it serves (获取可用模型). nil (the default) makes the API answer 501.
 	setDiscoverFn func(ctx context.Context, request ProviderDiscover) ([]ProviderModel, error)
 	mcpRefreshFn  func(ctx context.Context) ([]map[string]any, error)
+	mcpManageFn   func(ctx context.Context, action string, edit MCPServerEdit) ([]map[string]any, error)
 
 	// 技能设置页 (dsh-skill-mcp-panel 对齐): the skill-management dispatcher for
 	// /api/config/skills. It lists every skill with scope/rel/disabled state,
@@ -178,6 +179,16 @@ type ProviderModel struct {
 	Name          string `json:"name,omitempty"`
 	ContextWindow int    `json:"context_window,omitempty"`
 	MaxTokens     int    `json:"max_tokens,omitempty"`
+}
+
+// MCPServerEdit is the sanitized Web settings payload for one stdio MCP
+// server. Configuration changes are persisted by the composition root and
+// take effect after restart; refresh remains available for live diagnostics.
+type MCPServerEdit struct {
+	OriginalName string   `json:"original_name"`
+	Name         string   `json:"name"`
+	Cmd          string   `json:"cmd"`
+	Args         []string `json:"args"`
 }
 
 // QueueItem is one user message waiting behind the active turn. Placement is
@@ -247,6 +258,11 @@ func (s *Server) SetSkillManager(fn func(ctx context.Context, action string, req
 // runtime inventory page. It does not mutate configuration or secrets.
 func (s *Server) SetMCPManager(fn func(ctx context.Context) ([]map[string]any, error)) {
 	s.mcpRefreshFn = fn
+}
+
+// SetMCPConfigManager wires add/update/delete persistence for MCP servers.
+func (s *Server) SetMCPConfigManager(fn func(ctx context.Context, action string, edit MCPServerEdit) ([]map[string]any, error)) {
+	s.mcpManageFn = fn
 }
 
 // SetInteractionManager wires the live approval surface used by DSH Web.
@@ -396,6 +412,7 @@ func New(st store.Store, token, addr string) (*Server, error) {
 	// M10 W2 (ADR D-WEB2-D): the read-only sanitized config view.
 	mux.Handle("GET /api/config", s.requireAuth(http.HandlerFunc(s.handleConfig)))
 	mux.Handle("POST /api/config/mcp/refresh", s.requireAuth(http.HandlerFunc(s.handleMCPRefresh)))
+	mux.Handle("POST /api/config/mcp", s.requireAuth(http.HandlerFunc(s.handleMCPManage)))
 	// M10 W4 (ADR D-WEB2-H): the read-only subagent and background-job panels.
 	mux.Handle("GET /api/subagents", s.requireAuth(http.HandlerFunc(s.handleSubagents)))
 	mux.Handle("GET /api/jobs", s.requireAuth(http.HandlerFunc(s.handleJobs)))
@@ -689,6 +706,32 @@ func (s *Server) handleMCPRefresh(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"servers": servers})
 }
 
+func (s *Server) handleMCPManage(w http.ResponseWriter, r *http.Request) {
+	if s.mcpManageFn == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "mcp config manager not wired"})
+		return
+	}
+	var body struct {
+		Action string `json:"action"`
+		MCPServerEdit
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON body"})
+		return
+	}
+	action := strings.TrimSpace(body.Action)
+	if action != "add" && action != "update" && action != "delete" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "action must be add, update, or delete"})
+		return
+	}
+	servers, err := s.mcpManageFn(r.Context(), action, body.MCPServerEdit)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"servers": servers, "restart_required": true})
+}
+
 // handleSettingsGet implements GET /api/settings (the General-settings rows:
 // agent preset / permission preset / default terminal). Stored values come
 // from the durable settings table; the *_current values come from the config
@@ -703,6 +746,7 @@ func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) {
 		"agent_preset":       stored["agent_preset"],
 		"permission_preset":  stored["permission_preset"],
 		"terminal_shell":     stored["terminal_shell"],
+		"language":           stored["language"],
 		"mode_options":       []string{"minimal", "standard", "code"},
 		"permission_options": []string{"readonly", "standard", "full"},
 		"terminal_options":   []string{"off", "powershell", "gitbash", "wsl"},
@@ -730,6 +774,7 @@ func (s *Server) handleSettingsPatch(w http.ResponseWriter, r *http.Request) {
 		AgentPreset      string `json:"agent_preset"`
 		PermissionPreset string `json:"permission_preset"`
 		TerminalShell    string `json:"terminal_shell"`
+		Language         string `json:"language"`
 	}
 	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body)
 	if body.AgentPreset != "" {
@@ -759,6 +804,16 @@ func (s *Server) handleSettingsPatch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.store.SetSetting(r.Context(), "terminal_shell", body.TerminalShell); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+	}
+	if body.Language != "" {
+		if body.Language != "zh" && body.Language != "en" {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid language"})
+			return
+		}
+		if err := s.store.SetSetting(r.Context(), "language", body.Language); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
 		}

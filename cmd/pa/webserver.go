@@ -207,6 +207,7 @@ func (a *app) registerWebServer() error {
 	// always lists the skill files it manages.
 	srv.SetSkillManager(a.webSkills)
 	srv.SetMCPManager(a.webRefreshMCP)
+	srv.SetMCPConfigManager(a.webManageMCP)
 	// DSH Web approval surface: resolve the same live interact engine that the
 	// sensitive-tool gate is waiting on. The engine is optional by capability;
 	// an unconfigured interact seam answers 501 from the generic server.
@@ -1266,6 +1267,69 @@ func (a *app) webRefreshMCP(ctx context.Context) ([]map[string]any, error) {
 		servers = append(servers, row)
 	}
 	return servers, nil
+}
+
+func (a *app) webManageMCP(ctx context.Context, action string, edit webserver.MCPServerEdit) ([]map[string]any, error) {
+	name := strings.TrimSpace(edit.Name)
+	original := strings.TrimSpace(edit.OriginalName)
+	if action == "delete" {
+		if original == "" {
+			original = name
+		}
+		if original == "" {
+			return nil, errors.New("mcp server name is required")
+		}
+	} else {
+		if name == "" || strings.TrimSpace(edit.Cmd) == "" {
+			return nil, errors.New("mcp server name and command are required")
+		}
+		if strings.ContainsAny(name, `/\\`) || strings.ContainsAny(name, " \t\r\n") {
+			return nil, errors.New("mcp server name must not contain spaces or path separators")
+		}
+	}
+	next := append([]config.McpServer(nil), a.cfg.Mcp.Servers...)
+	find := func(key string) int {
+		for i := range next {
+			if next[i].Name == key {
+				return i
+			}
+		}
+		return -1
+	}
+	switch action {
+	case "add":
+		if find(name) >= 0 {
+			return nil, fmt.Errorf("mcp server %q already exists", name)
+		}
+		next = append(next, config.McpServer{Name: name, Cmd: strings.TrimSpace(edit.Cmd), Args: append([]string(nil), edit.Args...)})
+	case "update":
+		if original == "" {
+			original = name
+		}
+		idx := find(original)
+		if idx < 0 {
+			return nil, fmt.Errorf("mcp server %q not found", original)
+		}
+		if name != original && find(name) >= 0 {
+			return nil, fmt.Errorf("mcp server %q already exists", name)
+		}
+		next[idx] = config.McpServer{Name: name, Cmd: strings.TrimSpace(edit.Cmd), Args: append([]string(nil), edit.Args...)}
+	case "delete":
+		idx := find(original)
+		if idx < 0 {
+			return nil, fmt.Errorf("mcp server %q not found", original)
+		}
+		next = append(next[:idx], next[idx+1:]...)
+	}
+	raw, err := json.Marshal(next)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.store.SetSetting(ctx, "mcp.servers", string(raw)); err != nil {
+		return nil, err
+	}
+	a.cfg.Mcp.Servers = next
+	return a.webMCPServers(), nil
 }
 
 // modelReasoning describes one model's selectable thinking efforts (dsh

@@ -83,6 +83,12 @@ func main() {
 		fmt.Fprintln(os.Stderr, "pa: settings:", err)
 		os.Exit(1)
 	}
+	if raw := settings["mcp.servers"]; raw != "" {
+		var servers []config.McpServer
+		if err := json.Unmarshal([]byte(raw), &servers); err == nil {
+			cfg.Mcp.Servers = servers
+		}
+	}
 	permissionPreset := settings["permission_preset"] // "" | "readonly" | "standard" | "full"
 	if v, ok := settings["agent_preset"]; ok &&
 		(v == config.ModeMinimal || v == config.ModeStandard || v == config.ModeCode) {

@@ -1033,6 +1033,42 @@ func TestMCPRefreshAPI(t *testing.T) {
 	}
 }
 
+func TestMCPManageAPI(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+	var action string
+	var edit MCPServerEdit
+	srv.SetMCPConfigManager(func(ctx context.Context, gotAction string, gotEdit MCPServerEdit) ([]map[string]any, error) {
+		action, edit = gotAction, gotEdit
+		return []map[string]any{{"name": gotEdit.Name}}, nil
+	})
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/config/mcp", "tok", `{"action":"add","name":"demo","cmd":"npx","args":["server"]}`)
+	if rec.Code != http.StatusOK || action != "add" || edit.Name != "demo" || edit.Cmd != "npx" {
+		t.Fatalf("mcp manage = %d %s action=%q edit=%+v", rec.Code, rec.Body.String(), action, edit)
+	}
+	if rec := doReqBody(t, srv.Handler(), "POST", "/api/config/mcp", "tok", `{"action":"invalid"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid mcp action = %d, want 400", rec.Code)
+	}
+	srv2, _ := newTestServer(t, "tok")
+	if rec := doReqBody(t, srv2.Handler(), "POST", "/api/config/mcp", "tok", `{"action":"add"}`); rec.Code != http.StatusNotImplemented {
+		t.Fatalf("unwired mcp manage = %d, want 501", rec.Code)
+	}
+}
+
+func TestLanguageSetting(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+	rec := doReqBody(t, srv.Handler(), "PATCH", "/api/settings", "tok", `{"language":"en"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("language patch = %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doReq(t, srv.Handler(), "GET", "/api/settings", "tok")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"language":"en"`) {
+		t.Fatalf("language get = %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := doReqBody(t, srv.Handler(), "PATCH", "/api/settings", "tok", `{"language":"fr"}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid language = %d, want 400", rec.Code)
+	}
+}
+
 func mustData(t *testing.T, v any) json.RawMessage {
 	t.Helper()
 	b, err := json.Marshal(v)

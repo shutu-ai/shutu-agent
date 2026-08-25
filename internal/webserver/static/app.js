@@ -8,6 +8,7 @@
 // ---- storage keys -------------------------------------------------------
 const KEY_TOKEN = "pa_token";
 const KEY_THEME = "pa_theme";
+const KEY_LANG = "pa_language";
 const KEY_CURRENT = "pa_current";
 const KEY_QUEUE = "pa_queued_messages";
 const KEY_RECENT_WS = "pa_recent_workspace"; // dsh recentWorkspaceId: where 新会话 lands
@@ -624,6 +625,11 @@ function renderHelpBody(text) {
     if (!match) return `<div class="command-help-line">${esc(line)}</div>`;
     return `<div class="command-help-line">${esc(match[1])}<strong>${esc(match[2])}</strong>${esc(match[3] + match[4])}</div>`;
   }).join("");
+}
+function currentLanguage() { return localStorage.getItem(KEY_LANG) === "en" ? "en" : "zh"; }
+function applyLanguage() {
+  document.documentElement.lang = currentLanguage() === "en" ? "en" : "zh-CN";
+  document.documentElement.dataset.locale = currentLanguage();
 }
 function slashCommandName(text) {
   const match = String(text || "").trim().match(/^\/([^\s]+)/);
@@ -4593,6 +4599,7 @@ function renderGeneral(c) {
   const ap = localStorage.getItem("pa_agent_preset") || "standard";
   const pp = localStorage.getItem("pa_permission_preset") || "standard";
   const ts = localStorage.getItem("pa_terminal_shell") || "off";
+  const language = currentLanguage();
   const sec = settingsSectionEl();
   sec.innerHTML = `<h2>通用设置</h2>` +
     appearance +
@@ -4638,6 +4645,21 @@ function renderGeneral(c) {
       renderGeneral(c);
     });
   });
+  const languageSelect = sec.querySelector("#lang-select");
+  if (languageSelect) {
+    const englishOption = languageSelect.querySelector("option[value='en']");
+    if (englishOption) englishOption.disabled = false;
+    languageSelect.value = language;
+    languageSelect.addEventListener("change", async () => {
+      const next = languageSelect.value === "en" ? "en" : "zh";
+      localStorage.setItem(KEY_LANG, next);
+      applyLanguage();
+      try {
+        await api("/api/settings", { method: "PATCH", body: JSON.stringify({ language: next }) });
+      } catch (e) { if (e.message !== "unauthorized") console.debug("save language", e); }
+      renderGeneral(c);
+    });
+  }
   const enter = sec.querySelector("#enter-select");
   if (enter) enter.addEventListener("change", (e) => { localStorage.setItem("pa_enter", e.target.value); });
   // Durably persist the three host-backed rows on change.
@@ -4660,6 +4682,10 @@ function renderGeneral(c) {
     try {
       const res = await api("/api/settings");
       const d = await res.json();
+      if (d.language === "en" || d.language === "zh") {
+        localStorage.setItem(KEY_LANG, d.language);
+        applyLanguage();
+      }
       if (d.agent_preset && sec.querySelector("#agent-preset-select")) sec.querySelector("#agent-preset-select").value = d.agent_preset;
       if (d.permission_preset && sec.querySelector("#permission-select")) sec.querySelector("#permission-select").value = d.permission_preset;
       if (d.terminal_shell && sec.querySelector("#terminal-select")) sec.querySelector("#terminal-select").value = d.terminal_shell;
@@ -5345,8 +5371,42 @@ function renderPlugins(c) {
     button.textContent = "刷新 MCP";
     button.addEventListener("click", () => void refreshMCPInventory(button));
     title.appendChild(button);
+    renderMCPManager(sec, c);
   }, 0);
   sec.innerHTML = `<h2>运行时清单</h2><p class="intro">对齐 DSH 插件清单：展示当前 Web 进程发现到的能力、命令、技能、模型提供方和 MCP 服务状态。</p><div class="plugin-summary">${rows.map(([title, value, detail]) => `<div class="plugin-summary-card"><span>${esc(title)}</span><strong>${esc(value)}</strong><small>${esc(detail)}</small></div>`).join("")}</div><h3 class="plugin-list-title">能力状态</h3><div class="plugin-list">${capRows.map((key) => { const short = key.replace(/_enabled$/, ""); return `<div class="plugin-row"><span>${esc(CAPABILITY_NAMES[short] || short)}</span><code>${esc(key)}</code><span class="cap-badge ${c[key] ? "on" : ""}">${c[key] ? "已启用" : "未启用"}</span></div>`; }).join("")}</div><h3 class="plugin-list-title">MCP 服务</h3><div class="plugin-list">${mcpServers.length ? mcpServers.map((item) => `<div class="plugin-row"><span>${esc(item.name || "MCP")}</span><code>${esc(item.cmd || "")}</code><span>${Number(item.tool_count || 0)} 个工具</span><span class="cap-badge ${item.connected ? "on" : ""}">${item.connected ? "已连接" : "未连接"}</span></div>`).join("") : `<div class="plugin-empty">当前未配置 MCP 服务</div>`}</div>`;
+}
+
+function renderMCPManager(sec, c) {
+  if (sec.querySelector(".mcp-manager")) return;
+  const servers = Array.isArray(c.mcp_servers) ? c.mcp_servers : [];
+  const box = document.createElement("section");
+  box.className = "mcp-manager plugin-mcp-manager";
+  box.innerHTML = `<h3 class="plugin-list-title">MCP 配置</h3><p class="intro">新增、编辑或删除 stdio 服务。配置会持久化，重启后启动新服务。</p><div class="mcp-form"><input data-mcp-name placeholder="名称"><input data-mcp-cmd placeholder="命令，例如 npx"><input data-mcp-args placeholder="参数，按空格分隔"><button type="button" class="sec-btn" data-mcp-add>新增服务</button></div><div class="plugin-list mcp-config-list">${servers.length ? servers.map((item) => `<div class="plugin-row"><span>${esc(item.name || "")}</span><code>${esc(item.cmd || "")}</code><span>${esc((item.args || []).join(" "))}</span><button type="button" class="sec-btn" data-mcp-edit="${esc(item.name || "")}">编辑</button><button type="button" class="sec-btn danger" data-mcp-delete="${esc(item.name || "")}">删除</button></div>`).join("") : `<div class="plugin-empty">暂无 MCP 配置</div>`}</div>`;
+  sec.appendChild(box);
+  const name = box.querySelector("[data-mcp-name]"), cmd = box.querySelector("[data-mcp-cmd]"), args = box.querySelector("[data-mcp-args]");
+  box.querySelector("[data-mcp-add]")?.addEventListener("click", () => void mcpManage("add", { name: name.value.trim(), cmd: cmd.value.trim(), args: args.value.trim() ? args.value.trim().split(/\s+/) : [] }));
+  box.querySelectorAll("[data-mcp-edit]").forEach((button) => button.addEventListener("click", () => {
+    const item = servers.find((entry) => entry.name === button.dataset.mcpEdit);
+    if (!item) return;
+    name.value = item.name || ""; cmd.value = item.cmd || ""; args.value = (item.args || []).join(" ");
+    name.dataset.originalName = item.name || "";
+    box.querySelector("[data-mcp-add]").textContent = "保存修改";
+    box.querySelector("[data-mcp-add]").onclick = () => void mcpManage("update", { original_name: name.dataset.originalName, name: name.value.trim(), cmd: cmd.value.trim(), args: args.value.trim() ? args.value.trim().split(/\s+/) : [] });
+  }));
+  box.querySelectorAll("[data-mcp-delete]").forEach((button) => button.addEventListener("click", () => void mcpManage("delete", { original_name: button.dataset.mcpDelete })));
+}
+
+async function mcpManage(action, payload) {
+  try {
+    const res = await api("/api/config/mcp", { method: "POST", body: JSON.stringify(Object.assign({ action }, payload)) });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    settingsConfig = Object.assign({}, settingsConfig, { mcp_servers: body.servers || [] });
+    renderPlugins(settingsConfig);
+    toast("MCP 配置已保存，重启后完全生效");
+  } catch (e) {
+    if (e.message !== "unauthorized") toast(`MCP 配置失败：${e.message}`);
+  }
 }
 
 async function refreshMCPInventory(button) {
@@ -6021,6 +6081,7 @@ function boot() {
   syncSidebarToggle();
   initThemeSystem();
   applyTheme();
+  applyLanguage();
   syncGrow();
   updatePlaceholder();
   syncPermSelect();
