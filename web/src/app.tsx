@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import type { EventDetails, EventView } from './api'
+import { projectDshTrajectory, type DshTimelineMode } from './dsh-trajectory'
 import { WebStore } from './store'
 import './styles.css'
 
@@ -64,6 +65,21 @@ function EventCard({ event }: { event: EventView }) {
       </div>
     </article>
   )
+}
+
+function DshTimeline({ events }: { events: readonly EventView[] }) {
+  const [mode, setMode] = useState<DshTimelineMode>('sequence')
+  const [selected, setSelected] = useState<number | null>(null)
+  const { timeline } = useMemo(() => projectDshTrajectory(events, mode), [events, mode])
+  if (timeline === null) return null
+  const span = Math.max(1, timeline.end - timeline.start)
+  return <section className="dsh-timeline" aria-label="Trajectory timeline">
+    <div className="timeline-head"><div><strong>Timeline</strong><span>{timeline.spans.length} records</span></div><select aria-label="Timeline mode" value={mode} onChange={event => { setMode(event.target.value as DshTimelineMode); setSelected(null) }}><option value="sequence">Sequence</option><option value="duration">Duration</option><option value="time">Recorded time</option><option value="actual">Actual time</option></select></div>
+    <div className="timeline-track">
+      {timeline.spans.map(item => <button key={`${item.index}-${item.start}`} className={`timeline-span lane-${item.lane} ${item.isError ? 'error' : ''} ${selected === item.index ? 'selected' : ''}`} style={{ left: `${((item.start - timeline.start) / span) * 100}%`, width: `${Math.max(1.2, ((item.end - item.start) / span) * 100)}%` }} title={item.label || item.kind} aria-label={`${item.kind} ${item.label || item.index}`} onClick={() => setSelected(item.index)} />)}
+    </div>
+    <div className="timeline-legend"><span><i className="lane-dot lane-0" />Model</span><span><i className="lane-dot lane-1" />Assistant</span><span><i className="lane-dot lane-2" />Tools</span>{selected !== null && <span className="timeline-selected">Record #{selected}</span>}</div>
+  </section>
 }
 
 function VirtualEvents({ events, onReachTop, loadingOlder }: {
@@ -160,7 +176,7 @@ export function App({ store }: { store: WebStore }) {
       <nav className="tabs" role="tablist"><button role="tab" aria-selected={tab === 'chat'} className={tab === 'chat' ? 'tab selected' : 'tab'} onClick={() => setTab('chat')}>Conversation</button><button role="tab" aria-selected={tab === 'trajectory'} className={tab === 'trajectory' ? 'tab selected' : 'tab'} onClick={() => setTab('trajectory')}>Trajectory <span>{state.events.length}</span></button></nav>
       {(state.error || sendError) && <div className="error-banner"><span>{state.error || sendError}</span><button onClick={() => { setSendError(null); void store.start() }}>Retry</button></div>}
       <section className="content-panel">
-        {state.loading ? <div className="empty"><div className="spinner" />Loading session…</div> : state.selectedId === null ? <div className="empty"><strong>Start a new conversation</strong><span>Select a session or send a message from the agent.</span></div> : filtered.length === 0 ? <div className="empty"><strong>{search ? 'No matching events' : 'No events yet'}</strong><span>{search ? 'Try a different search term.' : 'Events will appear here as the session runs.'}</span></div> : <VirtualEvents events={filtered} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} />}
+        {state.loading ? <div className="empty"><div className="spinner" />Loading session…</div> : state.selectedId === null ? <div className="empty"><strong>Start a new conversation</strong><span>Select a session or send a message from the agent.</span></div> : filtered.length === 0 ? <div className="empty"><strong>{search ? 'No matching events' : 'No events yet'}</strong><span>{search ? 'Try a different search term.' : 'Events will appear here as the session runs.'}</span></div> : <>{tab === 'trajectory' && <DshTimeline events={filtered} />}<VirtualEvents events={filtered} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} /></>}
       </section>
       <form className="composer" onSubmit={event => { event.preventDefault(); if (state.sending) void stopRun(); else void submit() }}><textarea value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); if (!state.sending) void submit() } }} placeholder={state.sending ? 'Agent is running…' : 'Send a message…'} rows={2} /><button type="submit" disabled={state.selectedId === null || (!state.sending && draft.trim() === '')}>{state.sending ? 'Stop' : 'Send'} <span>{state.sending ? '■' : '↵'}</span></button></form>
     </main>

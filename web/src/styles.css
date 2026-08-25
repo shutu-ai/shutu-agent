@@ -35,6 +35,23 @@ h1 { max-width: 52vw; margin: 0; overflow: hidden; color: #f1f5fa; font-size: 20
 .tab { border: 0; border-bottom: 2px solid transparent; padding: 13px 2px 11px; color: #748197; background: transparent; }
 .tab.selected { border-bottom-color: #9de9bd; color: #e8f7ee; }
 .tab span { margin-left: 5px; color: #718096; font-size: 11px; }
+.dsh-timeline { margin: 0 9px 13px 18px; border: 1px solid #243244; border-radius: 10px; padding: 10px 12px 8px; background: #0f1823; }
+.timeline-head, .timeline-legend { display: flex; align-items: center; gap: 12px; color: #78879b; font-size: 10px; }
+.timeline-head { justify-content: space-between; margin-bottom: 9px; }
+.timeline-head div { display: flex; align-items: baseline; gap: 8px; }
+.timeline-head strong { color: #d6e1ed; font-size: 12px; }
+.timeline-head select { border: 1px solid #2a384a; border-radius: 5px; padding: 3px 6px; color: #aebdcd; background: #14202d; font-size: 10px; }
+.timeline-track { position: relative; height: 22px; overflow: hidden; border-radius: 5px; background: repeating-linear-gradient(90deg, #162330 0, #162330 calc(20% - 1px), #253547 20%); }
+.timeline-span { position: absolute; top: 4px; height: 14px; min-width: 3px; border: 0; border-radius: 3px; opacity: .88; }
+.timeline-span:hover, .timeline-span.selected { z-index: 1; outline: 2px solid #e7f8ed; opacity: 1; }
+.timeline-span.lane-0, .lane-dot.lane-0 { background: #7596b8; }
+.timeline-span.lane-1, .lane-dot.lane-1 { background: #9de9bd; }
+.timeline-span.lane-2, .lane-dot.lane-2 { background: #e6b26e; }
+.timeline-span.error { background: #ef7d71; }
+.timeline-legend { margin-top: 7px; }
+.timeline-legend span { display: inline-flex; align-items: center; gap: 4px; }
+.lane-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; }
+.timeline-selected { margin-left: auto; color: #a9e8c1; }
 .error-banner { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 14px 38px 0; border: 1px solid #6d3c3c; border-radius: 8px; padding: 9px 12px; color: #ffb2a8; background: #291b22; }
 .error-banner button { border: 1px solid #91504a; border-radius: 5px; padding: 3px 10px; color: #ffd4cc; background: transparent; }
 .content-panel { min-height: 0; padding: 18px 38px 8px; }
