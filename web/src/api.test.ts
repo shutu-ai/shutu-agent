@@ -41,4 +41,26 @@ describe('ShutuApi', () => {
     expect(requestHeaders?.get('Accept')).toBe('text/event-stream')
     expect(events).toEqual([8, 9])
   })
+
+  it('maps sidebar session actions to the new session endpoints', async () => {
+    const requests: { path: string; method: string; body?: string }[] = []
+    const api = new ShutuApi('https://shutu.test', '', async (input, init) => {
+      requests.push({ path: new URL(String(input)).pathname, method: init?.method ?? 'GET', body: typeof init?.body === 'string' ? init.body : undefined })
+      return new Response(JSON.stringify({ id: 'new-session', title: 'Renamed' }), { status: 200 })
+    })
+
+    await api.createSession()
+    await api.resumeSession('session-1')
+    await api.renameSession('session-1', 'Renamed')
+    await api.archiveSession('session-1')
+    await api.deleteSession('session-1')
+
+    expect(requests).toEqual([
+      { path: '/api/sessions', method: 'POST', body: '{}' },
+      { path: '/api/sessions/session-1/resume', method: 'POST' },
+      { path: '/api/sessions/session-1/title', method: 'PATCH', body: '{"title":"Renamed"}' },
+      { path: '/api/sessions/session-1/archive', method: 'POST' },
+      { path: '/api/sessions/session-1', method: 'DELETE' },
+    ])
+  })
 })

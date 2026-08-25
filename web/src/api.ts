@@ -9,6 +9,10 @@ export interface SessionSummary {
   blank: boolean
   event_count: number
   updated_at: string
+  workspace_id?: string
+  archived?: boolean
+  sort?: number
+  flat_sort?: number
   status?: SessionStatus
 }
 
@@ -53,6 +57,11 @@ export type EventListener = (event: EventView) => void
 
 export interface WebApi {
   listSessions(signal?: AbortSignal): Promise<SessionSummary[]>
+  createSession(signal?: AbortSignal): Promise<{ id: string }>
+  resumeSession(sessionId: string, signal?: AbortSignal): Promise<void>
+  renameSession(sessionId: string, title: string, signal?: AbortSignal): Promise<{ title: string }>
+  archiveSession(sessionId: string, signal?: AbortSignal): Promise<void>
+  deleteSession(sessionId: string, signal?: AbortSignal): Promise<void>
   loadEvents(sessionId: string, cursor?: EventPageCursor, signal?: AbortSignal): Promise<EventPage>
   sendMessage(sessionId: string, text: string, signal?: AbortSignal): Promise<void>
   stop(sessionId: string, signal?: AbortSignal): Promise<void>
@@ -98,6 +107,28 @@ export class ShutuApi implements WebApi {
 
   listSessions(signal?: AbortSignal): Promise<SessionSummary[]> {
     return this.json<SessionSummary[]>('/api/sessions', { signal })
+  }
+
+  async createSession(signal?: AbortSignal): Promise<{ id: string }> {
+    return this.json<{ id: string }>('/api/sessions', { method: 'POST', signal, body: '{}' })
+  }
+
+  async resumeSession(sessionId: string, signal?: AbortSignal): Promise<void> {
+    await this.json<{ id: string }>(`/api/sessions/${encodeURIComponent(sessionId)}/resume`, { method: 'POST', signal })
+  }
+
+  async renameSession(sessionId: string, title: string, signal?: AbortSignal): Promise<{ title: string }> {
+    return this.json<{ title: string }>(`/api/sessions/${encodeURIComponent(sessionId)}/title`, {
+      method: 'PATCH', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title }),
+    })
+  }
+
+  async archiveSession(sessionId: string, signal?: AbortSignal): Promise<void> {
+    await this.json<{ ok: true }>(`/api/sessions/${encodeURIComponent(sessionId)}/archive`, { method: 'POST', signal })
+  }
+
+  async deleteSession(sessionId: string, signal?: AbortSignal): Promise<void> {
+    await this.json<{ ok: true }>(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE', signal })
   }
 
   loadEvents(sessionId: string, cursor: EventPageCursor = {}, signal?: AbortSignal): Promise<EventPage> {

@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
-import type { EventDetails, EventView } from './api'
+import type { EventDetails, EventView, SessionSummary } from './api'
 import { projectDshConversation, type DshConversationNode, type DshConversationSnapshot } from './dsh-conversation'
 import { projectDshTrajectory, type DshTimelineMode } from './dsh-trajectory'
 import { WebStore } from './store'
@@ -23,6 +23,121 @@ function formatTime(value: string): string {
   return Number.isNaN(date.valueOf()) ? value : date.toLocaleString(undefined, {
     month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit',
   })
+}
+
+function relativeTime(value: string, now = Date.now()): string {
+  const timestamp = Date.parse(value)
+  if (!Number.isFinite(timestamp)) return ''
+  const seconds = Math.max(0, Math.floor((now - timestamp) / 1000))
+  if (seconds < 60) return 'just now'
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`
+  if (seconds < 2592000) return `${Math.floor(seconds / 86400)}d`
+  if (seconds < 31536000) return `${Math.floor(seconds / 2592000)}mo`
+  return `${Math.floor(seconds / 31536000)}y`
+}
+
+function sessionTitle(session: SessionSummary): string {
+  return session.blank ? 'New session' : session.title || session.id
+}
+
+function sessionStatus(session: SessionSummary): { tone: 'running' | 'done' | 'idle'; label: string } {
+  const state = session.status?.state?.toLowerCase()
+  if (state === 'ongoing' || state === 'running') return { tone: 'running', label: 'Running' }
+  if (state === 'done' || state === 'completed') return { tone: 'done', label: 'Completed' }
+  return { tone: 'idle', label: 'Idle' }
+}
+
+type SidebarDialog =
+  | { kind: 'rename'; session: SessionSummary }
+  | { kind: 'archive' | 'delete'; session: SessionSummary }
+  | { kind: 'settings' }
+
+function SessionBrowser({
+  sessions,
+  selectedId,
+  store,
+  onError,
+}: {
+  sessions: readonly SessionSummary[]
+  selectedId: string | null
+  store: WebStore
+  onError: (error: unknown) => void
+}) {
+  const [query, setQuery] = useState('')
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [expanded, setExpanded] = useState(false)
+  const [collapsed, setCollapsed] = useState(() => {
+    if (typeof localStorage === 'undefined') return false
+    try { return localStorage.getItem('shutu.web.sidebar-collapsed') === 'true' } catch { return false }
+  })
+  const [menuId, setMenuId] = useState<string | null>(null)
+  const [dialog, setDialog] = useState<SidebarDialog | null>(null)
+  const [draftTitle, setDraftTitle] = useState('')
+  const [working, setWorking] = useState(false)
+  const filtered = useMemo(() => {
+    const needle = query.trim().toLocaleLowerCase()
+    if (!needle) return sessions
+    return sessions.filter(session => `${sessionTitle(session)} ${session.id}`.toLocaleLowerCase().includes(needle))
+  }, [query, sessions])
+  const visible = expanded || query.trim() !== '' ? filtered : filtered.slice(0, 5)
+  const overflow = Math.max(0, filtered.length - 5)
+
+  useEffect(() => {
+    if (typeof localStorage === 'undefined') return
+    try { localStorage.setItem('shutu.web.sidebar-collapsed', String(collapsed)) } catch { /* optional preference */ }
+  }, [collapsed])
+
+  const run = async (operation: () => Promise<void>): Promise<void> => {
+    setWorking(true)
+    try { await operation(); setDialog(null); setMenuId(null) }
+    catch (error) { onError(error) }
+    finally { setWorking(false) }
+  }
+
+  return <>
+    <aside className={`sidebar ${collapsed ? 'collapsed' : ''}`} aria-label="Session sidebar">
+      <div className="brand-row">
+        <button className="brand" type="button" onClick={() => void run(() => store.createSession())} aria-label="New session">
+          <span className="brand-mark">S</span><span>Shutu</span><span className="brand-sub">DSH web</span>
+        </button>
+        <button className="sidebar-toggle" type="button" onClick={() => setCollapsed(value => !value)} aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'} title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}>{collapsed ? '›' : '‹'}</button>
+      </div>
+      <button className="new-session" type="button" onClick={() => void run(() => store.createSession())}>
+        <span aria-hidden="true">＋</span> New session
+      </button>
+      <div className="sidebar-section-head">
+        <span>Sessions</span><span className="session-count">{filtered.length}</span>
+        <button type="button" className="sidebar-icon-button" onClick={() => setSearchOpen(value => !value)} aria-label="Search sessions" title="Search sessions">⌕</button>
+      </div>
+      {searchOpen && <div className="session-search-wrap"><input autoFocus value={query} onChange={event => setQuery(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') { setQuery(''); setSearchOpen(false) } }} placeholder="Search sessions…" aria-label="Search sessions" /><button type="button" onClick={() => { setQuery(''); setSearchOpen(false) }} aria-label="Clear session search">×</button></div>}
+      <div className="session-list" role="tree" aria-label="Sessions">
+        {visible.map(session => {
+          const status = sessionStatus(session)
+          const menuOpen = menuId === session.id
+          return <div className={`session-row ${session.id === selectedId ? 'active' : ''}`} key={session.id} role="treeitem" aria-selected={session.id === selectedId}>
+            <button className="session" type="button" onClick={() => { setMenuId(null); void store.open(session.id) }}>
+              <span className={`session-state ${status.tone}`} aria-label={status.label} title={status.label} />
+              <span className="session-copy"><span className="session-title">{sessionTitle(session)}</span><small>{relativeTime(session.updated_at)} · {session.event_count} events</small></span>
+            </button>
+            <button className="session-actions" type="button" onClick={event => { event.stopPropagation(); setMenuId(menuOpen ? null : session.id) }} aria-label={`Actions for ${sessionTitle(session)}`} aria-expanded={menuOpen}>⋯</button>
+            {menuOpen && <div className="session-menu" role="menu">
+              <button type="button" role="menuitem" onClick={() => { setDraftTitle(session.title || ''); setDialog({ kind: 'rename', session }); setMenuId(null) }}>Rename</button>
+              <button type="button" role="menuitem" onClick={() => { setDialog({ kind: 'archive', session }); setMenuId(null) }}>Archive</button>
+              <button type="button" role="menuitem" className="danger-action" onClick={() => { setDialog({ kind: 'delete', session }); setMenuId(null) }}>Delete</button>
+            </div>}
+          </div>
+        })}
+        {overflow > 0 && !expanded && query.trim() === '' && <button className="session-overflow" type="button" onClick={() => setExpanded(true)}>Show {overflow} more sessions</button>}
+        {expanded && query.trim() === '' && overflow > 0 && <button className="session-overflow" type="button" onClick={() => setExpanded(false)}>Show fewer sessions</button>}
+        {visible.length === 0 && <div className="sidebar-empty">{query ? 'No matching sessions' : 'No sessions yet'}</div>}
+      </div>
+      <button className="settings-button" type="button" onClick={() => setDialog({ kind: 'settings' })}><span aria-hidden="true">⚙</span> Settings</button>
+    </aside>
+    {dialog?.kind === 'rename' && <div className="sidebar-dialog-backdrop" role="presentation" onMouseDown={() => !working && setDialog(null)}><form className="sidebar-dialog" role="dialog" aria-modal="true" aria-labelledby="rename-session-title" onSubmit={event => { event.preventDefault(); void run(() => store.renameSession(dialog.session.id, draftTitle.trim())) }} onMouseDown={event => event.stopPropagation()}><h2 id="rename-session-title">Rename session</h2><input autoFocus value={draftTitle} onChange={event => setDraftTitle(event.target.value)} maxLength={120} aria-label="Session name" /><div className="dialog-actions"><button type="button" onClick={() => setDialog(null)} disabled={working}>Cancel</button><button type="submit" disabled={working || draftTitle.trim() === ''}>Save</button></div></form></div>}
+    {(dialog?.kind === 'archive' || dialog?.kind === 'delete') && <div className="sidebar-dialog-backdrop" role="presentation" onMouseDown={() => !working && setDialog(null)}><div className="sidebar-dialog" role="dialog" aria-modal="true" aria-labelledby="session-action-title" onMouseDown={event => event.stopPropagation()}><h2 id="session-action-title">{dialog.kind === 'archive' ? 'Archive session?' : 'Delete session?'}</h2><p>{dialog.kind === 'archive' ? 'The session will leave the active list and remain in storage.' : 'This permanently removes the session and its events.'}</p><div className="dialog-actions"><button type="button" onClick={() => setDialog(null)} disabled={working}>Cancel</button><button type="button" className={dialog.kind === 'delete' ? 'danger-button' : ''} disabled={working} onClick={() => void run(() => dialog.kind === 'archive' ? store.archiveSession(dialog.session.id) : store.deleteSession(dialog.session.id))}>{dialog.kind === 'archive' ? 'Archive' : 'Delete'}</button></div></div></div>}
+    {dialog?.kind === 'settings' && <div className="sidebar-dialog-backdrop" role="presentation" onMouseDown={() => setDialog(null)}><div className="sidebar-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title" onMouseDown={event => event.stopPropagation()}><h2 id="settings-title">Settings</h2><p>Settings panel is reserved for the next work package.</p><div className="dialog-actions"><button type="button" onClick={() => setDialog(null)}>Close</button></div></div></div>}
+  </>
 }
 
 function detailText(value: unknown): string {
@@ -286,16 +401,7 @@ export function App({ store }: { store: WebStore }) {
   }
 
   return <div className="shell">
-    <aside className="sidebar">
-      <div className="brand"><span className="brand-mark">S</span><span>Shutu</span><span className="brand-sub">DSH web</span></div>
-      <div className="sidebar-title">Sessions <span>{state.sessions.length}</span></div>
-      <div className="session-list">
-        {state.sessions.map(session => <button className={session.id === state.selectedId ? 'session active' : 'session'} key={session.id} onClick={() => { void store.open(session.id) }}>
-          <span className="session-title">{session.title || session.id}</span><small>{session.event_count} events</small>
-        </button>)}
-        {state.sessions.length === 0 && !state.loading && <div className="sidebar-empty">No sessions yet</div>}
-      </div>
-    </aside>
+    <SessionBrowser sessions={state.sessions} selectedId={state.selectedId} store={store} onError={error => setSendError(error instanceof Error ? error.message : String(error))} />
     <main className="main-panel">
       <header className="topbar">
         <div><h1>{selected?.title || (state.selectedId ? state.selectedId : 'Conversation')}</h1><div className="status-line"><span className={state.connected ? 'status-dot online' : 'status-dot'} />{state.connected ? 'Live' : 'Reconnecting'}</div></div>

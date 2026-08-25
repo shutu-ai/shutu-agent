@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { ShutuApiError, type EventPage, type EventView, type SessionSummary, type WebApi } from './api'
-import { WebStore } from './store'
+import { sortSessions, WebStore } from './store'
 
 const session = (id: string): SessionSummary => ({
   id, title: id, blank: false, event_count: 2, updated_at: '2026-08-25T00:00:00Z',
@@ -20,10 +20,25 @@ const waitForAbort = (signal: AbortSignal): Promise<void> => new Promise(resolve
 })
 
 describe('WebStore', () => {
+  it('sorts sidebar sessions by updated time with stable id fallback', () => {
+    const sorted = sortSessions([
+      { ...session('older'), updated_at: '2026-08-25T00:00:00Z' },
+      { ...session('newer'), updated_at: '2026-08-25T01:00:00Z' },
+      { ...session('same-b'), updated_at: 'invalid' },
+      { ...session('same-a'), updated_at: 'invalid' },
+    ])
+    expect(sorted.map(item => item.id)).toEqual(['newer', 'older', 'same-b', 'same-a'])
+  })
+
   it('loads a session and de-duplicates live events by sequence', async () => {
     let emitted = false
     const api: WebApi = {
       listSessions: async () => [session('one')],
+      createSession: async () => ({ id: 'new' }),
+      resumeSession: async () => undefined,
+      renameSession: async (_id, title) => ({ title }),
+      archiveSession: async () => undefined,
+      deleteSession: async () => undefined,
       loadEvents: async () => page([event(1)]),
       sendMessage: async () => undefined,
       stop: async () => undefined,
@@ -52,6 +67,11 @@ describe('WebStore', () => {
     const olderPage = new Promise<EventPage>(resolve => { resolveOlder = resolve })
     const api: WebApi = {
       listSessions: async () => [],
+      createSession: async () => ({ id: 'new' }),
+      resumeSession: async () => undefined,
+      renameSession: async (_id, title) => ({ title }),
+      archiveSession: async () => undefined,
+      deleteSession: async () => undefined,
       loadEvents: async (id, cursor) => {
         if (id === 'one' && cursor?.beforeSeq !== undefined) return olderPage
         return page([event(id === 'one' ? 10 : 20)], true)
@@ -81,6 +101,11 @@ describe('WebStore', () => {
         if (!authorized) throw new ShutuApiError('unauthorized', 401)
         return [session('secure')]
       },
+      createSession: async () => ({ id: 'new' }),
+      resumeSession: async () => undefined,
+      renameSession: async (_id, title) => ({ title }),
+      archiveSession: async () => undefined,
+      deleteSession: async () => undefined,
       loadEvents: async () => page([]),
       sendMessage: async () => undefined,
       stop: async () => undefined,
