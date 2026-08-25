@@ -23,7 +23,7 @@ import (
 // registerSubagent creates the SpawnProvider + Runtime and registers the four
 // subagent_* tools when subagent.enabled, and wires the D3 event sink. When
 // subagent is disabled it creates nothing and registers nothing (D10, mirrors
-// registerJobs/registerKB).
+// registerJobs).
 func (a *app) registerSubagent() error {
 	if !config.Enabled(a.cfg.Subagent.Enabled) {
 		return nil
@@ -68,7 +68,7 @@ func (a *app) registerSubagent() error {
 	// serial main-loop path — so the session log is never touched from a
 	// background child goroutine (D5; the dispatch-m5b-2 §2 tool-layer
 	// decision). a.log is read at call time, so a session switch (/new,
-	// /resume) is honored the same way as the kb/jobs wiring.
+	// /resume) is honored the same way as the other session-bound event wiring.
 	onEvent := func(typ string, data any) {
 		if _, err := a.log.Append(typ, data); err != nil {
 			fmt.Fprintln(os.Stderr, "pa: "+typ+" event:", err)

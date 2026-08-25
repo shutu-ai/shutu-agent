@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -30,19 +29,6 @@ const (
 	// DefaultRunCommandTimeout is dsh bash's fresh-process default. It is a
 	// per-tool override, so other tools retain the 30s global policy.
 	DefaultRunCommandTimeout = 120 * time.Second
-
-	// M4a kb defaults (dispatch-m4a §3): the knowledge base is off by default
-	// (D10); a bounded Search/Recall returns 5 hits by default. The database
-	// path defaults to <data_dir>/kb/knowledge.sqlite (resolved in
-	// applyDefaults so it follows a custom data_dir).
-	DefaultKBTopK = 5
-
-	// M4b kb defaults (dispatch-m4b §5): proactive recall injects 3 hits per
-	// round by default (0 disables proactive recall); the lightweight catalog
-	// is injected into the system prompt by default. These are accessed through
-	// KBConfig.RecallLimitValue / KBConfig.CatalogValue, which apply the
-	// defaults when the YAML field is absent.
-	DefaultKBRecallLimit = 3
 
 	// M5a jobs defaults (dispatch-m5a-2 §3): the per-owner active-job cap is
 	// 10 when jobs.max_concurrent_jobs_per_owner is absent or non-positive
@@ -227,7 +213,6 @@ type Config struct {
 	// (like the live model switch) — it never enters config.yaml.
 	ReasoningEffort string             `yaml:"-"`             // runtime selection; empty keeps provider default
 	Tools           ToolsConfig        `yaml:"tools"`         // tool-execution policy (M3)
-	KB              KBConfig           `yaml:"kb"`            // knowledge-base policy (M4a kernel)
 	Jobs            JobsConfig         `yaml:"jobs"`          // background-job policy (M5a)
 	Subagent        SubagentConfig     `yaml:"subagent"`      // subagent policy (M5b)
 	Compaction      CompactionConfig   `yaml:"compaction"`    // context-compaction policy (M5c)
@@ -485,7 +470,6 @@ type ExternalProviderConfig struct {
 // CompactionConfig is the context-compaction policy (dispatch-m5c-2a §2 /
 // dispatch-m5c-2 §2 / ADR 2026-08-18-m5-agent-core.md 决策 ③). Compaction is
 // off by default (D10): when disabled the composition root neither registers
-// the automatic pre-step trigger nor the /compact command. Unlike kb/jobs/
 // subagent, enabling compaction whitelists no tools — compaction has no
 // consumer tools (automatic triggering runs through the loop pre-step
 // injector, manual through the /compact command, dispatch-m5c-2 §2).
@@ -778,63 +762,10 @@ type DeepSeekWebConfig struct {
 	MaxUses int `yaml:"max_uses"` // 默认 5
 }
 
-// KBConfig is the knowledge-base policy (dispatch-m4a §3 / dispatch-m4b §5).
-// The knowledge base is off by default (D10). RecallLimit and Catalog are
 // pointers so an absent YAML field (→ the default) is distinguishable from an
 // explicit 0/false, which carries real meaning here: recall_limit 0 disables
 // proactive recall and catalog false suppresses the system-prompt catalog.
 // Read them through RecallLimitValue / CatalogValue, never directly.
-type KBConfig struct {
-	// Enabled gates the whole capability: when false, no KB provider is
-	// initialized (kb.OpenSQLite is never called) and the kb_* tools are
-	// neither registered nor whitelisted (D10).
-	Enabled *bool `yaml:"enabled"`
-	// DBPath is the SQLite database file; "" defaults to
-	// <data_dir>/kb/knowledge.sqlite.
-	DBPath string `yaml:"db_path"`
-	// TopK is the default result count for a bounded Search/Recall (<=0 uses
-	// the default 5).
-	TopK int `yaml:"top_k"`
-	// RecallLimit is the per-round proactive recall count (dispatch-m4b §5):
-	// 0 disables proactive recall, nil (absent) means the default 3.
-	RecallLimit *int `yaml:"recall_limit"`
-	// Catalog toggles injecting the lightweight KB catalog (name/description,
-	// no bodies) into the system prompt; nil (absent) means true.
-	Catalog *bool `yaml:"catalog"`
-	// Extraction toggles the post-answer extraction writeback (dispatch-m4c
-	// §3): when false, the composition root never invokes kb.Extract. nil
-	// (absent) means true — within an enabled kb the extraction defaults on,
-	// matching the config.yaml documentation.
-	Extraction *bool `yaml:"extraction"`
-}
-
-// RecallLimitValue returns the effective per-round proactive recall count:
-// the configured value, 0 when explicitly disabled, or DefaultKBRecallLimit
-// when absent.
-func (k KBConfig) RecallLimitValue() int {
-	if k.RecallLimit == nil || *k.RecallLimit < 0 {
-		return DefaultKBRecallLimit
-	}
-	return *k.RecallLimit
-}
-
-// CatalogValue returns whether the lightweight KB catalog is injected into
-// the system prompt (true by default).
-func (k KBConfig) CatalogValue() bool {
-	if k.Catalog == nil {
-		return true
-	}
-	return *k.Catalog
-}
-
-// ExtractionValue returns whether the post-answer extraction writeback runs
-// (true by default; false skips extraction even when kb is enabled).
-func (k KBConfig) ExtractionValue() bool {
-	if k.Extraction == nil {
-		return true
-	}
-	return *k.Extraction
-}
 
 // ToolsConfig is the M3 tool-execution policy: the whitelist, the per-tool
 // execute deadline, the output limit, and the optional run_command policy.
@@ -954,28 +885,8 @@ func applyDefaults(cfg *Config) {
 	if cfg.Tools.RunCommand.Enabled && !contains(cfg.Tools.Enabled, "bash") {
 		cfg.Tools.Enabled = append(cfg.Tools.Enabled, "bash")
 	}
-	// Enabling kb whitelists its three consumer tools as well, so the single
-	// kb.enabled switch turns the whole capability (provider + tools + recall)
-	// on; default off (D10, dispatch-m4b §1 — mirrors run_command).
-	if Enabled(cfg.KB.Enabled) {
-		for _, name := range kbToolNames {
-			if !contains(cfg.Tools.Enabled, name) {
-				cfg.Tools.Enabled = append(cfg.Tools.Enabled, name)
-			}
-		}
-	}
-	// M4a kb defaults: off by default; the database path follows data_dir; a
-	// bounded search returns 5 hits. An explicitly-set db_path is used
-	// verbatim (it may point anywhere, e.g. an absolute path).
-	if cfg.KB.DBPath == "" {
-		cfg.KB.DBPath = filepath.Join(cfg.DataDir, "kb", "knowledge.sqlite")
-	}
-	if cfg.KB.TopK <= 0 {
-		cfg.KB.TopK = DefaultKBTopK
-	}
 	// Enabling jobs whitelists its five consumer tools as well, so the single
 	// jobs.enabled switch turns the whole capability (registry + tools + event
-	// logging) on; default off (D10, dispatch-m5a-2 §3 — mirrors kb).
 	if Enabled(cfg.Jobs.Enabled) {
 		for _, name := range jobsToolNames {
 			if !contains(cfg.Tools.Enabled, name) {
@@ -990,7 +901,6 @@ func applyDefaults(cfg *Config) {
 	// Enabling subagent whitelists its four consumer tools as well, so the
 	// single subagent.enabled switch turns the whole capability (runtime +
 	// provider + tools + event logging) on; default off (D10, dispatch-m5b-2
-	// §3 — mirrors kb/jobs).
 	if Enabled(cfg.Subagent.Enabled) {
 		for _, name := range subagentToolNames {
 			if !contains(cfg.Tools.Enabled, name) {
@@ -1045,7 +955,6 @@ func applyDefaults(cfg *Config) {
 	// 500 chars and the returned skill body to 8000 chars. Enabling skill
 	// whitelists its single consumer tool skill, so the one
 	// skill.enabled switch turns the whole capability (provider + registry +
-	// tool + catalog injector) on (mirrors kb/jobs/subagent). Non-positive
 	// bounds are clamped to the defaults (校验非负: a negative configured value
 	// can never survive to the wiring).
 	if Enabled(cfg.Skill.Enabled) {
@@ -1065,7 +974,6 @@ func applyDefaults(cfg *Config) {
 	// is 1m. Enabling schedule whitelists its three consumer tools, so the one
 	// schedule.enabled switch turns the whole capability (Provider + Engine +
 	// tools + pre-step trigger + fire event/job wiring) on (mirrors
-	// kb/jobs/subagent/skill). Non-positive cadence is clamped to the default
 	// (校验非负: a negative configured value can never survive to the wiring).
 	if Enabled(cfg.Schedule.Enabled) {
 		for _, name := range scheduleToolNames {
@@ -1080,7 +988,6 @@ func applyDefaults(cfg *Config) {
 	// M6b-2 plan defaults: off by default (D10). Enabling plan whitelists its
 	// six consumer tools, so the one plan.enabled switch turns the whole
 	// capability (Provider + Engine + tools + event logging) on (mirrors
-	// kb/jobs/subagent/skill/schedule).
 	if Enabled(cfg.Plan.Enabled) {
 		for _, name := range planToolNames {
 			if !contains(cfg.Tools.Enabled, name) {
@@ -1089,11 +996,9 @@ func applyDefaults(cfg *Config) {
 		}
 	}
 	// M6c-2 spill defaults: off by default (D10); auto_spill defaults on
-	// within an enabled spill (AutoSpillValue, mirroring kb extraction).
 	// Enabling spill whitelists its four consumer tools, so the one
 	// spill.enabled switch turns the whole capability (Provider + Engine +
 	// tools + event logging + auto-sedimentation) on (mirrors
-	// kb/jobs/subagent/skill/schedule/plan).
 	if Enabled(cfg.Spill.Enabled) {
 		for _, name := range spillToolNames {
 			if !contains(cfg.Tools.Enabled, name) {
@@ -1104,7 +1009,6 @@ func applyDefaults(cfg *Config) {
 	// M6d-2 interact defaults: off by default (D10). Enabling interact
 	// whitelists its two consumer tools, so the one interact.enabled switch
 	// turns the whole capability (Provider + Engine + tools + event logging +
-	// the sensitive-tool gate) on (mirrors kb/jobs/subagent/skill/schedule/
 	// plan/spill). sensitive_tools is left verbatim: empty means the gate is
 	// not installed even when enabled (no gating by default).
 	if Enabled(cfg.Interact.Enabled) {
@@ -1119,7 +1023,6 @@ func applyDefaults(cfg *Config) {
 	// provider default <project>/.sandbox). Enabling code whitelists its single
 	// consumer tool run_code, so the one code.enabled switch turns the whole
 	// capability (Provider + Engine + tool + event logging) on (mirrors
-	// kb/jobs/subagent/skill/schedule/plan/spill/interact). Non-positive bounds
 	// are clamped to the defaults (校验非负: a negative configured value can
 	// never survive to the wiring). allow_network stays verbatim: false by
 	// default (declarative no-network boundary).
@@ -1139,7 +1042,6 @@ func applyDefaults(cfg *Config) {
 	// M6f-2 mcp defaults: off by default (D10). Enabling mcp whitelists its two
 	// consumer tools mcp_list and mcp_call, so the one mcp.enabled switch turns
 	// the whole capability (Factory + mcp_* tools + server bridging + event
-	// logging) on (mirrors kb/jobs/subagent/skill/schedule/plan/spill/interact/
 	// code). Bridged server tools (mcp.<server>.<tool>) cannot be whitelisted
 	// here — their names are only known at runtime — so the composition root
 	// whitelists each one as it is registered.
@@ -1158,7 +1060,6 @@ func applyDefaults(cfg *Config) {
 	// constructor — there is nothing to default here. Enabling fs whitelists
 	// its three consumer tools, so the one fs.enabled switch turns the whole
 	// capability (FileService + fs_* tools + event logging) on (mirrors
-	// kb/jobs/subagent/skill/schedule/plan/spill/interact/code/mcp).
 	if cfg.Fs.Enabled == nil {
 		cfg.Fs.Enabled = Bool(true)
 	}
@@ -1176,7 +1077,6 @@ func applyDefaults(cfg *Config) {
 	// fetch bounds and DeepSeek provider parameters fall back to the defaults.
 	// Enabling web whitelists its two consumer tools web_search and web_fetch,
 	// so the one web.enabled switch turns the whole capability (Engine +
-	// providers + tools) on (mirrors kb/jobs/subagent/skill/schedule/plan/
 	// spill/interact/code/mcp/fs). web.enabled is the single switch for both
 	// search and fetch (no search_enabled/fetch_enabled split, dispatch-m7-2
 	// §6). Non-positive bounds are clamped to the defaults (校验非负: a negative
@@ -1314,7 +1214,6 @@ func applyDefaults(cfg *Config) {
 	// undecided → fail); the history cap is 100; enabled defaults off (D10,
 	// bool 零值即关). Enabling eval whitelists its three consumer tools, so the
 	// single eval.enabled switch turns the whole capability on (mirrors
-	// kb/jobs/subagent/skill/schedule/plan/spill/interact/code/mcp/fs/web/
 	// terminal).
 	if cfg.Eval.ManualFallback == nil {
 		v := true
@@ -1336,7 +1235,6 @@ func applyDefaults(cfg *Config) {
 	// D-GAP-1 fs-search defaults: enabled by default to match dsh base. Enabling fs_search
 	// whitelists its two consumer tools grep and glob, so the one fs_search.
 	// enabled switch turns the whole capability (search engine + tools) on
-	// (mirrors kb/jobs/subagent/skill/schedule/plan/spill/interact/code/mcp/
 	// fs/web/terminal/eval).
 	if cfg.FsSearch.Enabled == nil {
 		cfg.FsSearch.Enabled = Bool(true)
@@ -1350,7 +1248,6 @@ func applyDefaults(cfg *Config) {
 	}
 	// GAP-2 ralph defaults: the sample config enables it. Enabling ralph whitelists its
 	// single consumer tool ralph, so the one ralph.enabled switch turns the
-	// whole capability (engine + tool + event logging) on (mirrors kb/jobs/
 	// subagent/skill/schedule/plan/spill/interact/code/mcp/fs/web/terminal/eval/
 	// fs_search).
 	if Enabled(cfg.Ralph.Enabled) {
@@ -1366,7 +1263,6 @@ func applyDefaults(cfg *Config) {
 	// GAP-3 workflow defaults: the sample config enables it; the ready-task concurrency
 	// cap is 4. Enabling workflow whitelists its single consumer tool
 	// workflow_run, so the one workflow.enabled switch turns the whole
-	// capability (engine + tool + event logging) on (mirrors kb/jobs/subagent/
 	// skill/schedule/plan/spill/interact/code/mcp/fs/web/terminal/eval/
 	// fs_search/ralph). Non-positive caps are clamped to the default (校验非负).
 	if Enabled(cfg.Workflow.Enabled) {
@@ -1466,7 +1362,6 @@ func ApplyModePreset(cfg *Config) {
 	cfg.Ralph.Enabled = Bool(false)    // minimal 不含 fresh-agent 循环 (D-MODE-2)
 	cfg.Workflow.Enabled = Bool(false) // minimal 不含 workflow DAG 编排 (D-MODE-2)
 	cfg.WebServer.Enabled = false      // minimal 不含 web 门户 (D-MODE-2)
-	cfg.KB.Enabled = Bool(false)
 	cfg.Jobs.Enabled = Bool(false)
 	cfg.Subagent.Enabled = Bool(false)
 	cfg.Compaction.Enabled = Bool(false)
@@ -1488,12 +1383,6 @@ func ApplyModePreset(cfg *Config) {
 	cfg.Tools.RunCommand.Enabled = false
 	cfg.Tools.Enabled = append([]string(nil), minimalEnabledTools...)
 }
-
-// kbToolNames are the knowledge-base consumer tools (design.md §8 Consumer /
-// dispatch-m4b §1). They are registered and whitelisted only when kb is
-// enabled; keeping the names here makes the "kb.enabled ⇒ 工具自动白名单" rule a
-// single, tested fact shared by applyDefaults and the composition root.
-var kbToolNames = []string{"kb_search", "kb_read", "kb_add"}
 
 // jobsToolNames are the background-job consumer tools (dispatch-m5a-2 §2),
 // including dsh's canonical output/kill/list projections. They are registered

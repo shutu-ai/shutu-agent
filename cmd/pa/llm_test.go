@@ -135,7 +135,7 @@ func TestRegisterLLMSelectedProviderUnavailableFailsClosed(t *testing.T) {
 
 // TestLLMStatusOutput verifies the /llm-status report (dispatch-m8-2 §6/§7):
 // the selected provider marked *, availability per registered provider, and the
-// modalities line (照 /kb-status 风格).
+// modalities line.
 func TestLLMStatusOutput(t *testing.T) {
 	t.Setenv("DEEPSEEK_API_KEY", "test-key")
 	t.Setenv("OPENAI_API_KEY", "openai-key")

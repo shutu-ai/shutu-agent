@@ -180,34 +180,6 @@ func TestLoadNotFound(t *testing.T) {
 	}
 }
 
-// TestKBRecallEventPersistsAndReplays verifies the M4a kb/recall event type
-// travels the durable append path end to end: session.Log sink → SQLiteStore →
-// replay (design.md §3 / D8, D3 机制在 M4a 就位).
-func TestKBRecallEventPersistsAndReplays(t *testing.T) {
-	st := openSQLite(t)
-	ctx := context.Background()
-	const id = "s-kb"
-	log := session.New()
-	log.SetSink(func(ev session.Event) error {
-		return st.AppendEvents(ctx, id, []session.Event{ev})
-	})
-	if _, err := log.Append(session.EventKBRecall, session.NewKBRecall("架构", []session.RecallHit{
-		{ID: "kb-1", Title: "架构决策记录", Snippet: "我们决定采用 SQLite FTS5…", Type: "decision", Score: 0.9},
-	})); err != nil {
-		t.Fatalf("append: %v", err)
-	}
-	events, err := st.LoadSession(ctx, id)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if len(events) != 1 || events[0].Type != session.EventKBRecall {
-		t.Fatalf("replayed = %+v, want one %q event", events, session.EventKBRecall)
-	}
-	if !bytes.Contains(events[0].Data, []byte("架构决策记录")) {
-		t.Errorf("payload lost in round trip: %s", events[0].Data)
-	}
-}
-
 // TestAppendMaterializesSession verifies appending to a never-created session
 // materializes its row (defensive) and it then appears in /list.
 func TestAppendMaterializesSession(t *testing.T) {

@@ -40,17 +40,6 @@ const (
 	EventFeedbackRecord   = "feedback/record"    // dsh /feedback; log-only
 	EventWebCommandResult = "web/command-result" // Web-only command acknowledgement
 
-	// M4 knowledge-base events (design.md §3): kb/recall lands with the M4a
-	// kernel so the D3 logging mechanism exists before any orchestration;
-	// kb/add arrives with M4b (explicit writes) and kb/extract with M4c
-	// (post-answer extraction writeback). DeriveHistory ignores these types
-	// (the recall is injected into context by the caller, design.md §8; the
-	// extraction outcome is a log fact, not conversation), so adding them never
-	// changes the turn/step structure (D4).
-	EventKBRecall  = "kb/recall"
-	EventKBAdd     = "kb/add"
-	EventKBExtract = "kb/extract"
-
 	// M5a background-job events (design.md §3 / ADR 2026-08-18-m5-agent-core.md
 	// 决策 ① / dispatch-m5a-2): job/start lands when a job registers
 	// successfully, job/status on a non-terminal transition (e.g.
@@ -972,71 +961,15 @@ func newToolResult(turn, step int, callID, name, output string, content []llm.Co
 	return result
 }
 
-// RecallHit is one knowledge-entry projection carried by a kb/recall event:
 // the bounded summary the model is about to see. It is a plain data shape so
-// the session package never depends on the kb package.
-type RecallHit struct {
-	ID      string   `json:"id"`
-	Title   string   `json:"title"`
-	Snippet string   `json:"snippet,omitempty"` // bounded body fragment
-	Type    string   `json:"type,omitempty"`
-	Tags    []string `json:"tags,omitempty"`
-	Scope   string   `json:"scope,omitempty"`
-	Source  string   `json:"source,omitempty"`
-	Score   float64  `json:"score"`
-}
-
-type kbRecallData struct {
-	Query string      `json:"query"`
-	Hits  []RecallHit `json:"hits,omitempty"`
-}
-
-// NewKBRecall builds the kb/recall payload (design.md §8 / D3). M4b's recall
 // orchestration calls this immediately before injecting the recall into the
 // model context, so the model-visible input is durably logged. DeriveHistory
 // treats it as opaque data.
-func NewKBRecall(query string, hits []RecallHit) any {
-	return kbRecallData{Query: query, Hits: hits}
-}
-
-// kbAddData is the kb/add payload: a bounded summary of an explicit knowledge
-// write (dispatch-m4b §3). Only the summary is logged, never the full body, so
 // the log stays lean. DeriveHistory treats it as opaque data.
-type kbAddData struct {
-	EntryID string   `json:"entryId"`
-	Title   string   `json:"title"`
-	Type    string   `json:"type"`
-	Tags    []string `json:"tags,omitempty"`
-	Source  string   `json:"source,omitempty"`
-	Version int      `json:"version"`
-}
-
-// NewKBAdd builds the kb/add payload recorded when an explicit write lands
-// (dispatch-m4b §3 / D3).
-func NewKBAdd(entryID, title, typ string, tags []string, source string, version int) any {
-	return kbAddData{EntryID: entryID, Title: title, Type: typ, Tags: tags, Source: source, Version: version}
-}
-
-// kbExtractData is the kb/extract payload: the outcome of a post-answer
-// extraction job (dispatch-m4c §2 / D3). Status is one of created | skipped |
 // failed; Reason explains a skip or failure; IDs carries the ids of the entries
 // created by a successful run. Only the summary is logged, never the model
 // output or entry bodies. DeriveHistory treats it as opaque data.
-type kbExtractData struct {
-	Status  string   `json:"status"` // created | skipped | failed
-	Session string   `json:"session,omitempty"`
-	Turn    int      `json:"turn,omitempty"`
-	Reason  string   `json:"reason,omitempty"`
-	IDs     []string `json:"ids,omitempty"` // created entry ids
-}
-
-// NewKBExtract builds the kb/extract payload recorded when the post-answer
-// extraction writeback finishes for one session:turn (dispatch-m4c §2 / D3).
 // status is created | skipped | failed.
-func NewKBExtract(status, sessionID string, turn int, reason string, ids []string) any {
-	return kbExtractData{Status: status, Session: sessionID, Turn: turn, Reason: reason, IDs: ids}
-}
-
 // jobStartData is the job/start payload: the registry-issued id plus the
 // registration facts (kind/label/owner). DeriveHistory treats it as opaque
 // data.
@@ -1164,7 +1097,6 @@ func NewWorkflowRun(total, completed, failed int) any {
 }
 
 // summaryHead returns a bounded, whitespace-compacted head of s for a log
-// summary (mirrors kb.Snippet's bound; kept here so the session package owns
 // the on-disk bound it serializes). It is shared by job/done, subagent/end,
 // compaction/summary and skill/load (all bounded to 200 runes, dispatch-m5a-2
 // §1 / dispatch-m5b-2 §1 / dispatch-m5c-2 §1 / dispatch-m5d-2 §1).

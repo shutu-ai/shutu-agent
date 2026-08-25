@@ -383,10 +383,9 @@ func TestRunUnknownToolLogsErrorAndContinues(t *testing.T) {
 	t.Fatal("unknown tool result was not durable")
 }
 
-// TestRunRecallHookIsDurable verifies the M4b recall extension point: the
-// Recall hook remains turn-scoped, while its context is durable and is carried
+// TestRunPreStepContextIsDurable verifies that pre-step context is carried
 // into the tool-result follow-up request.
-func TestRunRecallHookIsDurable(t *testing.T) {
+func TestRunPreStepContextIsDurable(t *testing.T) {
 	model := &scriptedLLM{steps: [][]llm.StreamEvent{
 		{ // step 1: model asks for get_time
 			{Kind: llm.StreamFinish, FinishReason: "tool_calls", ToolCalls: []llm.ToolCall{
@@ -399,48 +398,48 @@ func TestRunRecallHookIsDurable(t *testing.T) {
 		},
 	}}
 	log := session.New()
-	var recallCalls int
+	var injectCalls int
 	loop := New(Config{
 		LLM:    model,
 		Log:    log,
 		Tools:  newTestRegistry(t),
 		Prompt: prompt.New("You are helpful."),
 		Model:  "deepseek-chat",
-		Recall: func(ctx context.Context, userText string) []llm.Message {
-			recallCalls++
+		PreStep: []PreStepInjector{{Name: "context", Inject: func(ctx context.Context, userText string) []llm.Message {
+			injectCalls++
 			if userText != "what time is it" {
-				t.Errorf("recall received userText %q, want %q", userText, "what time is it")
+				t.Errorf("injector received userText %q, want %q", userText, "what time is it")
 			}
-			return []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("KB snippet: <架构决策记录>")}}}
-		},
+			return []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("durable context")}}}
+		}}},
 	})
 
 	if err := loop.Run(context.Background(), "what time is it"); err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if recallCalls != 1 {
-		t.Fatalf("recall hook called %d times, want 1 (once per turn)", recallCalls)
+	if injectCalls != 2 {
+		t.Fatalf("pre-step injector called %d times, want 2 (once per step)", injectCalls)
 	}
 	if len(model.calls) != 2 {
 		t.Fatalf("llm calls = %d, want 2", len(model.calls))
 	}
 	first := model.calls[0].Messages
-	if len(first) < 3 || first[0].Role != llm.RoleSystem || first[1].Role != llm.RoleUser || first[1].Text() != "what time is it" || first[2].Text() != "KB snippet: <架构决策记录>" {
-		t.Fatalf("first request messages = %+v, want system + user + durable recall", first)
+	if len(first) < 3 || first[0].Role != llm.RoleSystem || first[1].Role != llm.RoleUser || first[1].Text() != "what time is it" || first[2].Text() != "durable context" {
+		t.Fatalf("first request messages = %+v, want system + user + durable context", first)
 	}
 	found := false
 	for _, m := range model.calls[1].Messages {
-		if strings.Contains(m.Text(), "KB snippet") {
+		if strings.Contains(m.Text(), "durable context") {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("second request must carry the durable recall: %+v", model.calls[1].Messages)
+		t.Fatalf("second request must carry the durable context: %+v", model.calls[1].Messages)
 	}
 }
 
 // newTestRegistry is a helper returning a registry with get_time registered
-// (used by recall-hook tests).
+// (used by pre-step tests).
 func newTestRegistry(t *testing.T) *tools.Registry {
 	t.Helper()
 	reg := tools.New()
@@ -450,22 +449,22 @@ func newTestRegistry(t *testing.T) *tools.Registry {
 	return reg
 }
 
-// TestRunRecallHookReturnsNilKeepsTurnFlow verifies a nil recall result (no
-// hits or fail-open) changes nothing: the turn runs with a plain request.
-func TestRunRecallHookReturnsNilKeepsTurnFlow(t *testing.T) {
+// TestRunPreStepNilKeepsTurnFlow verifies a nil injector result changes
+// nothing: the turn runs with a plain request.
+func TestRunPreStepNilKeepsTurnFlow(t *testing.T) {
 	model := &scriptedLLM{steps: [][]llm.StreamEvent{{
 		{Kind: llm.StreamTextDelta, Text: "ok"},
 		{Kind: llm.StreamFinish, FinishReason: "stop"},
 	}}}
 	loop, _, _ := newTestLoop(t, model)
-	loop.recall = func(ctx context.Context, userText string) []llm.Message { return nil }
+	loop.preStep = []PreStepInjector{{Name: "empty", Inject: func(ctx context.Context, userText string) []llm.Message { return nil }}}
 
 	if err := loop.Run(context.Background(), "hello"); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	msgs := model.calls[0].Messages
 	if len(msgs) != 2 || msgs[0].Role != llm.RoleSystem || msgs[1].Role != llm.RoleUser {
-		t.Fatalf("request messages = %+v, want system + user only (no recall)", msgs)
+		t.Fatalf("request messages = %+v, want system + user only", msgs)
 	}
 }
 

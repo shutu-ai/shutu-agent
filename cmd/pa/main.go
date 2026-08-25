@@ -35,7 +35,6 @@ import (
 	hookrunner "github.com/jabing/shutu-agent/internal/hooks"
 	"github.com/jabing/shutu-agent/internal/interact"
 	"github.com/jabing/shutu-agent/internal/jobs"
-	"github.com/jabing/shutu-agent/internal/kb"
 	"github.com/jabing/shutu-agent/internal/llm"
 	"github.com/jabing/shutu-agent/internal/loop"
 	"github.com/jabing/shutu-agent/internal/mcp"
@@ -253,8 +252,6 @@ func main() {
 	}
 	// M8-2: registerLLM builds the provider registry and injects the selected
 	// provider into a.llm 鈥?the single llm.LLM the loop, compaction, subagent
-	// and kb extraction all consume (D2). It must run before registerSubagent /
-	// registerCompaction / registerKB, which read a.llm at wiring time.
 	if err := app.registerLLM(); err != nil {
 		fmt.Fprintln(os.Stderr, "pa:", err)
 		os.Exit(1)
@@ -264,16 +261,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "pa:", err)
 		os.Exit(1)
 	}
-	// M4b: wire the knowledge base seam 鈥?provider + kb_* tools + catalog 鈥?	// when kb.enabled (榛樿鍏抽棴, D10). kb.registerKB appends the kb_* tool names
 	// to nothing itself; config.applyDefaults already whitelisted them when
-	// kb.enabled was true.
-	if err := app.registerKB(); err != nil {
-		fmt.Fprintln(os.Stderr, "pa:", err)
-		os.Exit(1)
-	}
-	if app.kb != nil {
-		defer app.kb.Close()
-	}
 	// M5a-2: wire the jobs seam 鈥?Local registry + the five job_* tools + the
 	// D3 event sink 鈥?when jobs.enabled (榛樿鍏抽棴, D10). config.applyDefaults
 	// already whitelisted the job_* names when jobs.enabled was true. The
@@ -630,12 +618,10 @@ type app struct {
 	// by registerAttachments only when llm.multimodal.enabled; nil when disabled
 	// (D10) 鈥?/attach then errors.
 	attachStore *attachment.Store
-	kb          kb.KB // nil when kb disabled (D10)
-
-	currentID string
-	log       *session.Log
-	jobs      *jobs.Local      // nil when jobs disabled (D10)
-	subagents subagent.Runtime // nil when subagent disabled (D10)
+	currentID   string
+	log         *session.Log
+	jobs        *jobs.Local      // nil when jobs disabled (D10)
+	subagents   subagent.Runtime // nil when subagent disabled (D10)
 
 	compaction compaction.Engine // nil when compaction disabled (D10)
 	skills     skill.Registry    // nil when skill disabled (D10)
@@ -897,10 +883,7 @@ func (a *app) bindSpillOwner() {
 	})
 }
 
-// newLoop builds a Loop bound to the current session log. The Recall hook is
-// the M4b proactive-recall extension point (dispatch-m4b 搂2): it runs the
-// per-turn recall orchestration in cmd/pa; the loop's turn/step structure is
-// unchanged (D4).
+// The loop's turn/step structure remains unchanged (D4).
 func (a *app) newLoop() *loop.Loop {
 	return a.buildLoop(
 		func(delta string) { fmt.Print(delta) },
@@ -966,10 +949,8 @@ func (a *app) buildLoop(onText func(string), onError func(error), provider, mode
 		Provider:        provider,
 		ReasoningEffort: effort,
 		RuntimeContext:  a.runtimeContext,
-		Recall:          a.recall,
 		// M5c-2b: the "compaction" pre-step injector (auto token-pressure
 		// compaction) is appended when compaction is enabled; it runs after the
-		// M4b recall hook, inside the loop's existing pre-step extension point
 		// (D4 — the turn/step structure is unchanged).
 		PreStep:                a.preStepInjectors(),
 		RecoverContextOverflow: a.recoverContextOverflow,
@@ -1187,11 +1168,6 @@ func (a *app) repl(ctx context.Context) {
 		if err := a.runTurn(ctx, line, true); err != nil {
 			fmt.Fprintln(os.Stderr, "\npa:", err)
 		} else {
-			// M4c: post-answer extraction writeback, orchestrated by the
-			// composition root outside the loop (D4). Fail-open by contract:
-			// extractTurn never returns an error and never affects the next
-			// answer.
-			a.extractTurn(ctx, line)
 			// M6c-2: post-turn auto-sedimentation, orchestrated by the
 			// composition root outside the loop (D4). It runs once per
 			// completed turn on the serial REPL path (D5) and never duplicates:
@@ -1238,10 +1214,6 @@ func (a *app) command(ctx context.Context, line string) error {
 			return err
 		}
 		fmt.Printf("resumed session %s (%d events)\n", a.currentID, len(a.log.Events()))
-	case "/kb-status":
-		return a.kbStatus(ctx)
-	case "/kb-reindex":
-		return a.kbReindex(ctx)
 	case "/llm-status":
 		return a.llmStatus()
 	case "/attach":
@@ -1258,14 +1230,11 @@ func (a *app) command(ctx context.Context, line string) error {
 	return nil
 }
 
-// printHelp prints the complete command table (M3 CLI 瀹屽杽; M4b adds kb).
 func (a *app) printHelp() {
 	fmt.Println(`commands:
   /new              start a new session
   /list             list all sessions (most recently updated first)
   /resume <id>      resume an existing session by id
-  /kb-status        knowledge-base status (entries / db size / recent writes)
-  /kb-reindex       rebuild the knowledge-base FTS index
   /llm-status       LLM provider status (provider / model / modalities)
   /attach <path>    attach an image file as a multimodal user message (M8-3)
   /term <start|write|read|signal|stop>  persistent-shell terminal (M9)
@@ -1285,12 +1254,6 @@ startup:  pa [--config <path>]   config defaults to config.yaml`)
 		fmt.Println("multimodal: disabled (llm.multimodal.enabled=false)")
 	}
 	fmt.Printf("enabled tools: %s\n", strings.Join(a.cfg.Tools.Enabled, ", "))
-	if config.Enabled(a.cfg.KB.Enabled) {
-		fmt.Printf("knowledge base: enabled (db=%s, recall_limit=%d, catalog=%v)\n",
-			a.cfg.KB.DBPath, a.cfg.KB.RecallLimitValue(), a.cfg.KB.CatalogValue())
-	} else {
-		fmt.Println("knowledge base: disabled (kb.enabled=false)")
-	}
 	if config.Enabled(a.cfg.Jobs.Enabled) {
 		fmt.Printf("jobs: enabled (max_concurrent_jobs_per_owner=%d)\n", a.cfg.Jobs.MaxConcurrentJobsPerOwner)
 	} else {

@@ -29,7 +29,7 @@ import (
 // registerSkills creates the filesystem provider + skill Registry and
 // registers skill when skill.enabled, and wires the D3 event sink. When
 // skill is disabled it creates nothing and registers nothing (D10, mirrors
-// registerKB/registerJobs/registerSubagent/registerCompaction). The deferred
+// registerJobs/registerSubagent/registerCompaction). The deferred
 // Close in main.go releases the registry and its providers at shutdown.
 func (a *app) registerSkills() error {
 	if !config.Enabled(a.cfg.Skill.Enabled) {
@@ -55,7 +55,7 @@ func (a *app) registerSkills() error {
 	// The callback only ever runs inside a skill tool Execute or the
 	// pre-step catalog injector — the serial main-loop path (D5). a.log is
 	// read at call time, so a session switch (/new, /resume) is honored the
-	// same way as the kb/jobs/subagent wiring.
+	// same way as the other session-bound event wiring.
 	onEvent := func(typ string, data any) {
 		if _, err := a.log.Append(typ, data); err != nil {
 			fmt.Fprintln(os.Stderr, "pa: "+typ+" event:", err)
@@ -162,8 +162,8 @@ func (a *app) isUserSkillInvocation(ctx context.Context, text string) bool {
 // turn (dsh digestCatalogEntries semantics: the catalog is injected once and
 // updates are replacements) — so the UI shows the 上下文注入 row once per
 // catalog, not every turn. A disabled registry, an empty catalog or any
-// failure contributes no context (fail-open, the same contract as the kb
-// recall injector); the loop's per-injector budget is a second, larger bound.
+// failure contributes no context (fail-open); the loop's per-injector budget
+// is a second, larger bound.
 func (a *app) skillCatalogPreStep(ctx context.Context, _ string) []llm.Message {
 	if a.skills == nil {
 		return nil

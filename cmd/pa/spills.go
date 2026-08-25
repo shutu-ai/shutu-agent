@@ -7,7 +7,7 @@
 // turn-completion hook folds the completed turn's event log into new memories
 // on the serial path. The loop's turn/step structure is untouched (D4): the
 // auto-sedimentation runs after a completed turn in the REPL's serial flow
-// (next to the M4c extraction writeback), never inside a step and never from a
+// (after a completed turn), never inside a step and never from a
 // background goroutine (D5). AutoSpill itself is the pure policy kernel
 // (M6c-1); this wiring guarantees it is only ever invoked once per completed
 // turn on the serial path, and its content-hash idempotence means re-running
@@ -79,13 +79,13 @@ func (a *app) registerSpills() error {
 // current log into new memories through the engine's pure AutoSpill policy and
 // logs one spill/write fact (D3) per newly stored memo. It runs once per
 // completed turn, on the REPL's serial path (after a successful Loop.Run — the
-// same turn-completion slot as the M4c extraction writeback, D4), never from a
+// same turn-completion slot as other post-turn work, D4), never from a
 // background goroutine (D5). The before/after memo diff keeps the spill/write
 // events exact (only genuinely new memos are logged), and the engine's
 // content-hash idempotence plus the once-per-turn call guarantee the path
 // never duplicates — re-running over the same log adds nothing (不重复沉淀).
 // Every failure is surfaced as a stderr warning and contributes nothing
-// (fail-open, the same contract as the kb extraction / schedule tick hooks).
+// (fail-open, the same contract as the schedule tick hook).
 func (a *app) spillAutoSpill(ctx context.Context) {
 	if a.spills == nil || !a.cfg.Spill.AutoSpillValue() {
 		return

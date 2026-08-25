@@ -473,22 +473,6 @@ func TestStatsEmpty(t *testing.T) {
 	}
 }
 
-// TestKBAdminStub verifies the M10b placeholder (ADR D-WEB-6): the /api/kb/*
-// routes sit behind auth and answer 501 until KB 全量 lands.
-func TestKBAdminStub(t *testing.T) {
-	srv, _ := newTestServer(t, "tok")
-	h := srv.Handler()
-	if rec := doReq(t, h, "GET", "/api/kb", ""); rec.Code != http.StatusUnauthorized {
-		t.Fatalf("kb without token → %d, want 401", rec.Code)
-	}
-	for _, p := range []string{"/api/kb", "/api/kb/bases", "/api/kb/bases/b1/entries"} {
-		rec := doReq(t, h, "GET", p, "tok")
-		if rec.Code != http.StatusNotImplemented {
-			t.Fatalf("GET %s → %d, want 501", p, rec.Code)
-		}
-	}
-}
-
 // TestMessageRequiresAuth verifies the M10 W1 message API sits behind the same
 // bearer middleware as the rest (dispatch-m10-web2 §5).
 func TestMessageRequiresAuth(t *testing.T) {

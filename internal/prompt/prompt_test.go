@@ -27,7 +27,6 @@ func writePrompt(t *testing.T, dir, name, content string) {
 // independent of file creation order (dispatch-m2: 提示词分节).
 func TestLoadDirOrdersSections(t *testing.T) {
 	dir := t.TempDir()
-	writePrompt(t, dir, "30-knowledge.md", "knowledge body")
 	writePrompt(t, dir, "10-persona.md", "persona body")
 	writePrompt(t, dir, "20-skills.md", "skills body")
 
@@ -36,19 +35,18 @@ func TestLoadDirOrdersSections(t *testing.T) {
 		t.Fatalf("LoadDir: %v", err)
 	}
 	got := b.Build()
-	want := "persona body\n\nskills body\n\nknowledge body"
+	want := "persona body\n\nskills body"
 	if got != want {
 		t.Fatalf("Build() = %q, want %q", got, want)
 	}
 }
 
 // TestLoadDirSkipsEmptySections verifies an empty section file contributes
-// nothing (skills/knowledge are placeholders in M2, content lands in M4).
+// nothing.
 func TestLoadDirSkipsEmptySections(t *testing.T) {
 	dir := t.TempDir()
 	writePrompt(t, dir, "10-persona.md", "persona body")
-	writePrompt(t, dir, "20-skills.md", "")           // placeholder, no content yet
-	writePrompt(t, dir, "30-knowledge.md", "   \n\t") // whitespace only
+	writePrompt(t, dir, "20-skills.md", "") // placeholder, no content yet
 
 	b, err := LoadDir(dir)
 	if err != nil {

@@ -106,33 +106,6 @@ tools:
     # timeout: 60s
     # Fixed working directory; empty = the agent's process working directory.
     # workdir: ""
-
-# Knowledge base capability (M4a kernel + M4b tools/recall + M4c extraction;
-# design.md §8 / ADR 2026-08-18-m4-kb-architecture). Off by default (D10): when
-# disabled no KB provider is initialized and no kb_* tool is registered or
-# whitelisted. M4b adds the kb_search/kb_read/kb_add tools and the proactive
-# recall orchestration; M4c adds the post-answer extraction writeback.
-kb:
-  # Master switch. false ⇒ kb never opens a database (默认关闭，不初始化) and the
-  # kb_* tools are neither registered nor whitelisted.
-  enabled: true
-  # SQLite database file. Empty defaults to <data_dir>/kb/knowledge.sqlite
-  # (the value shown here is that default at the default data_dir).
-  db_path: data/kb/knowledge.sqlite
-  # Default result count for a bounded Search/Recall (0/absent ⇒ 5).
-  top_k: 5
-  # Per-round proactive recall count injected into the model context at the
-  # start of each turn (0 = proactive recall off; absent ⇒ 3).
-  recall_limit: 3
-  # Whether the lightweight knowledge-base catalog (name/description, no
-  # bodies) is injected into the system prompt (absent ⇒ true).
-  catalog: true
-  # Whether the post-answer extraction writeback runs after each completed
-  # turn, extracting durable knowledge from the conversation into the KB
-  # (absent ⇒ true; false = skip extraction entirely). Extraction is
-  # fail-open and never blocks the next answer.
-  extraction: true
-
 # Background-job capability (M5a; design.md §10 D5 / ADR 2026-08-18-m5-agent-core.md
 # 决策 ①). Off by default (D10): when disabled no registry is initialized and no
 # job_* tool is registered or whitelisted. job_start runs a command line as a
@@ -269,13 +242,10 @@ plan:
   # <data_dir>/memory.json), and — when auto_spill is on — every completed turn's
 # event log is folded into new memories on the serial path (D5). Memories are
 # logged as facts: spill/write, spill/recall, spill/list and spill/delete (D3).
-# The kb seam stays separate: kb is the explicit, user-queryable knowledge
-# base, spill is automatic conversation memory.
 spill:
   # Master switch. false ⇒ no spill Provider/Engine is created, the spill_*
   # tools are neither registered nor whitelisted, and no auto-sedimentation
   # path is wired (默认关闭，不初始化).
-  enabled: true
   # Whether the end-of-turn auto-sedimentation runs (Engine.AutoSpill over the
   # session event log), folding memory-worthy fragments into new memos after
   # each completed turn. Only takes effect when spill is enabled; absent ⇒ true.
@@ -520,7 +490,6 @@ workflow:
   sync_timeout_ms: 5000
 
 # Web 门户 (M10a, ADR 2026-08-20-m10-web-portal.md; 统一 webServer: dsh 式会话/
-# 事件浏览入口 + 后续 dashboard/KB 管理台). 默认关 D10: enabled=false 不启动
 # 监听. token 必填且只在此配置出现明文, 进程内只存 SHA-256 摘要; 空 token 且
 # enabled 时启动报错 (fail-closed 防裸奔). addr 默认本机 (个人门户不默认暴露).
 web_server:

@@ -29,7 +29,7 @@ func TestRunPreStepInjectorsInOrder(t *testing.T) {
 		Prompt: prompt.New("You are helpful."),
 		Model:  "deepseek-chat",
 		PreStep: []PreStepInjector{
-			{Name: "kb", Inject: func(ctx context.Context, userText string) []llm.Message {
+			{Name: "context", Inject: func(ctx context.Context, userText string) []llm.Message {
 				seenUserText = userText
 				return []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("ctx-a")}}}
 			}},
@@ -111,10 +111,8 @@ func TestRunPreStepIsRebuiltForEveryStep(t *testing.T) {
 	}
 }
 
-// TestRunRecallRunsBeforePreStep verifies the M4b Recall compatibility alias:
-// Recall, when set, is the first pre-step injector and PreStep injectors follow
-// it in order (ADR 总体决策: Recall 保留作为兼容别名，PreStep 首项).
-func TestRunRecallRunsBeforePreStep(t *testing.T) {
+// TestRunPreStepOrdering verifies that registered injectors retain their order.
+func TestRunPreStepOrdering(t *testing.T) {
 	model := &scriptedLLM{steps: [][]llm.StreamEvent{{
 		{Kind: llm.StreamFinish, FinishReason: "stop"},
 	}}}
@@ -124,9 +122,6 @@ func TestRunRecallRunsBeforePreStep(t *testing.T) {
 		Tools:  newTestRegistry(t),
 		Prompt: prompt.New("You are helpful."),
 		Model:  "deepseek-chat",
-		Recall: func(ctx context.Context, userText string) []llm.Message {
-			return []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("recall-msg")}}}
-		},
 		PreStep: []PreStepInjector{{Name: "extra", Inject: func(ctx context.Context, userText string) []llm.Message {
 			return []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("extra-msg")}}}
 		}}},
@@ -136,11 +131,11 @@ func TestRunRecallRunsBeforePreStep(t *testing.T) {
 		t.Fatalf("run: %v", err)
 	}
 	msgs := model.calls[0].Messages
-	if len(msgs) != 4 {
-		t.Fatalf("first request messages = %+v, want system + recall-msg + extra-msg + user", msgs)
+	if len(msgs) != 3 {
+		t.Fatalf("first request messages = %+v, want system + user + extra-msg", msgs)
 	}
-	if msgs[1].Text() != "hi" || msgs[2].Text() != "recall-msg" || msgs[3].Text() != "extra-msg" {
-		t.Fatalf("recall must precede pre-step injectors: %+v", msgs)
+	if msgs[1].Text() != "hi" || msgs[2].Text() != "extra-msg" {
+		t.Fatalf("pre-step injector ordering is wrong: %+v", msgs)
 	}
 }
 
@@ -258,8 +253,8 @@ func TestRunPreStepPanicContained(t *testing.T) {
 	}
 }
 
-// TestRunPreStepNilSafe verifies nil inputs change nothing: no Recall and no
-// PreStep injectors (or an injector with a nil Inject) leave the first request
+// TestRunPreStepNilSafe verifies nil inputs change nothing: no pre-step
+// injectors (or an injector with a nil Inject) leave the first request
 // as a plain system + user history request.
 func TestRunPreStepNilSafe(t *testing.T) {
 	// No injectors at all.

@@ -11,8 +11,7 @@ Current sections:
 | file                 | section   | note                              |
 |----------------------|-----------|-----------------------------------|
 | `10-persona.md`      | persona   | the agent's persona               |
-| `20-skills.md`       | skills    | mechanism in place; content in M4 |
-| `30-knowledge.md`    | knowledge | mechanism in place; content in M4 |
+| `20-skills.md`       | skills    | optional skill guidance            |
 
 Files without the `NNN-` prefix (like this README) are ignored, so documentation
 can live here. To add a section, add a file (e.g. `15-examples.md`) — no code

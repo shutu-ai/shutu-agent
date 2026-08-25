@@ -68,7 +68,7 @@ func (a *app) registerSchedules() error {
 	// The callback only ever runs inside a schedule_* tool Execute or the
 	// pre-step fire injector — the serial main-loop path (D5). a.log is read
 	// at call time, so a session switch (/new, /resume) is honored the same
-	// way as the kb/jobs/subagent/skill wiring.
+	// way as the other session-bound event wiring.
 	onEvent := func(typ string, data any) {
 		if _, err := a.log.Append(typ, data); err != nil {
 			fmt.Fprintln(os.Stderr, "pa: "+typ+" event:", err)
@@ -197,7 +197,7 @@ func (a *app) scheduleInjector() loop.PreStepInjector {
 // session. With no job engine the fire event is still logged. Every append
 // happens here on the serial pre-step path; a failing tick is surfaced as a
 // stderr warning and contributes no context (fail-open, the same contract as
-// the kb recall / skill catalog injectors). The injector returns no context
+// the skill catalog injector). The injector returns no context
 // message: schedule/fire is log-only and the fired payload reaches the model
 // through the enqueued job's tool/result.
 func (a *app) schedulePreStep(ctx context.Context, _ string) []llm.Message {

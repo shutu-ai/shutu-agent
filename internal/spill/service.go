@@ -7,9 +7,8 @@
 // depend only on the seam's interfaces (D2), so swapping or persisting the
 // backend never touches consumer code.
 //
-// Boundary with kb (ADR M6c 后果): kb is the explicit, user-queryable
-// knowledge base; spill is automatic conversation-derived memory. The two
-// seams stay independent (D9) — this package never imports the kb package.
+// Spill is automatic conversation-derived memory. Its seam stays independent
+// from the other storage-backed capabilities (D9).
 //
 // The default Provider is the in-memory memProvider (mem.go): every memo lives
 // in memory only — nothing is persisted and no files are touched — so a

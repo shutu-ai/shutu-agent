@@ -33,7 +33,6 @@ type BasicOpts struct {
 	// (fail-open is the wiring's concern).
 	LLM llm.LLM
 	// Model is the summary model name (advisory; the adapter owns the
-	// effective model, matching the kb.ExtractOpts convention).
 	Model string
 	// TokenThreshold is the pressure trigger: CompactIfNeeded compacts when the
 	// estimated surface size exceeds it. <= 0 disables pressure-triggered
@@ -356,7 +355,6 @@ Rules:
 
 // summarize folds the shadowed messages into one summary via the configured
 // LLM (the same internal/llm interface the loop uses; the whole answer is
-// accumulated from stream deltas, mirroring kb.callExtractionModel). Any model
 // failure is returned as an error — fail-open is the wiring's decision.
 func (e *BasicEngine) summarize(ctx context.Context, msgs []llm.Message) (string, error) {
 	if e.opts.LLM == nil {

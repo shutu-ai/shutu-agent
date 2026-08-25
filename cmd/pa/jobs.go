@@ -21,7 +21,7 @@ import (
 
 // registerJobs creates the Local registry and registers the dsh job tools when
 // jobs.enabled, and wires the D3 event sink. When jobs is disabled it
-// creates nothing and registers nothing (D10, mirrors registerKB).
+// creates nothing and registers nothing.
 func (a *app) registerJobs() error {
 	if !config.Enabled(a.cfg.Jobs.Enabled) {
 		return nil
@@ -32,7 +32,7 @@ func (a *app) registerJobs() error {
 	// main-loop path — so the session log is never touched from a background
 	// job goroutine (D5; the dispatch-m5a-2 §4 tool-layer decision). a.log is
 	// read at call time, so a session switch (/new, /resume) is honored the
-	// same way as the kb onAdded wiring.
+	// same way as the other session-bound event wiring.
 	onEvent := func(typ string, data any) {
 		if _, err := a.log.Append(typ, data); err != nil {
 			fmt.Fprintln(os.Stderr, "pa: "+typ+" event:", err)

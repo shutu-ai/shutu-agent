@@ -70,7 +70,7 @@ func (a *app) registerInteracts() error {
 	// The callback only ever runs inside an interact_* tool Execute or the
 	// sensitive-tool gate — the serial main-loop path (D5). a.log is read at
 	// call time, so a session switch (/new, /resume) is honored the same way
-	// as the kb/jobs/subagent/skill wiring.
+	// as the other session-bound event wiring.
 	onEvent := func(typ string, data any) {
 		if typ == session.EventInteractRequest {
 			var request struct {

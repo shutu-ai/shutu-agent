@@ -506,9 +506,8 @@ func (a *app) webMessage(ctx context.Context, sessionID, text string, images []l
 	if err := a.runTurn(turnCtx, text, false); err != nil {
 		return err
 	}
-	// Keep Web and REPL turn completion identical: extract explicit knowledge
-	// and sediment long-term memories before title/goal continuation runs.
-	a.extractTurn(ctx, text)
+	// Keep Web and REPL turn completion identical: persist long-term memories
+	// before title/goal continuation runs.
 	a.spillAutoSpill(ctx)
 	// session-title alignment (dsh): after the first eligible message, the
 	// deterministic fallback is stored and the asynchronous model title is
@@ -1202,7 +1201,6 @@ func (a *app) webConfig() map[string]any {
 		"fs_search_enabled":  config.Enabled(a.cfg.FsSearch.Enabled),
 		"ralph_enabled":      config.Enabled(a.cfg.Ralph.Enabled),
 		"workflow_enabled":   config.Enabled(a.cfg.Workflow.Enabled),
-		"kb_enabled":         config.Enabled(a.cfg.KB.Enabled),
 		"jobs_enabled":       config.Enabled(a.cfg.Jobs.Enabled),
 		"subagent_enabled":   config.Enabled(a.cfg.Subagent.Enabled),
 		"web_enabled":        config.Enabled(a.cfg.Web.Enabled),

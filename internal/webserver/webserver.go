@@ -1,6 +1,5 @@
 // webserver.go — the M10 unified web portal (ADR 2026-08-20-m10-web-portal.md
 // D-WEB-1~7): a single net/http server carrying the dsh-style session/event
-// browsing entry (M10a), the dashboard stats API (M10c) and later KB admin
 // (M10b). Data views are read-only (D-WEB-4); injected workspace actions
 // (messages, session controls and approval decisions) are explicit exceptions.
 // Every API route sits behind the bearer-token middleware; the frontend is vanilla
@@ -333,8 +332,6 @@ func New(st store.Store, token, addr string) (*Server, error) {
 	mux.HandleFunc("GET /static/{file...}", s.handleStatic)
 	mux.Handle("GET /api/health", s.requireAuth(http.HandlerFunc(s.handleHealth)))
 	mux.Handle("GET /api/stats", s.requireAuth(http.HandlerFunc(s.handleStats)))
-	mux.Handle("GET /api/kb", s.requireAuth(http.HandlerFunc(s.handleKBStub)))
-	mux.Handle("GET /api/kb/{rest...}", s.requireAuth(http.HandlerFunc(s.handleKBStub)))
 	mux.Handle("GET /api/sessions", s.requireAuth(http.HandlerFunc(s.handleSessions)))
 	mux.Handle("GET /api/sessions/{id}/events", s.requireAuth(http.HandlerFunc(s.handleEvents)))
 	mux.Handle("GET /api/sessions/{id}/state", s.requireAuth(http.HandlerFunc(s.handleSessionState)))
@@ -976,14 +973,6 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, st)
-}
-
-// handleKBStub is the M10b KB-admin placeholder (ADR D-WEB-6): the /api/kb/*
-// routes return 501 until the KB 全量 (content layer) lands and the real admin
-// data/API is mounted — the shell exists so the frontend can navigate, the
-// backend is honestly "not implemented".
-func (s *Server) handleKBStub(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "KB admin not implemented (KB 全量后挂)"})
 }
 
 // maxEventImages bounds how many image refs the events API exposes per message
@@ -3114,9 +3103,6 @@ func eventDetails(ev session.Event) map[string]any {
 		session.EventSpillRecall:        {"query", "count"},
 		session.EventSpillList:          {"count"},
 		session.EventSpillDelete:        {"id"},
-		session.EventKBRecall:           {"query"},
-		session.EventKBAdd:              {"entryId", "title", "type"},
-		session.EventKBExtract:          {"status", "session", "turn", "reason"},
 	}
 	keys, ok := allowed[ev.Type]
 	if !ok {
@@ -3194,21 +3180,6 @@ func summarize(ev session.Event) string {
 		}
 		if json.Unmarshal(ev.Data, &d) == nil {
 			return "tool " + d.Name + " error → " + boundRunes(d.Err, maxSummary)
-		}
-	case "kb/recall":
-		// dsh 上下文注入: 跨会话召回卡片 (query + hit count).
-		var d struct {
-			Query string `json:"query"`
-			Hits  []struct {
-				Title string `json:"title"`
-			} `json:"hits"`
-		}
-		if json.Unmarshal(ev.Data, &d) == nil {
-			s := "跨会话召回: " + boundRunes(d.Query, maxSummary)
-			if len(d.Hits) > 0 {
-				s += fmt.Sprintf(" (%d 条)", len(d.Hits))
-			}
-			return s
 		}
 	case "skill/catalog":
 		var d struct {

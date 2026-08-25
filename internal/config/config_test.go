@@ -14,7 +14,7 @@ import (
 // applyDefaults. Compaction is intentionally absent: it has no tools.
 func defaultOnCaps() []string {
 	var names []string
-	for _, group := range [][]string{kbToolNames, jobsToolNames, subagentToolNames,
+	for _, group := range [][]string{jobsToolNames, subagentToolNames,
 		skillToolNames, scheduleToolNames, planToolNames, spillToolNames,
 		interactToolNames, codeToolNames, mcpToolNames, fsToolNames,
 		[]string{"read_image"},
@@ -213,200 +213,6 @@ func TestLoadDefaultsEmptyRunCommandTimeoutToDshBash(t *testing.T) {
 	}
 }
 
-// M4a: kb is off by default (D10), the database path defaults to
-// <data_dir>/kb/knowledge.sqlite, and a bounded search returns 5 hits by
-// default (dispatch-m4a §3). M4b: proactive recall defaults to 3 hits/round
-// and the catalog defaults to injected (dispatch-m4b §5).
-func TestLoadKBDefaultsWhenAbsent(t *testing.T) {
-	cfg, err := Load(filepath.Join(t.TempDir(), "nope.yaml"))
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if !Enabled(cfg.KB.Enabled) {
-		t.Error("KB must be ENABLED by default (dsh 对齐; D10 default-off is now opt-out)")
-	}
-	wantPath := filepath.Join(cfg.DataDir, "kb", "knowledge.sqlite")
-	if cfg.KB.DBPath != wantPath {
-		t.Errorf("kb.db_path = %q, want %q", cfg.KB.DBPath, wantPath)
-	}
-	if cfg.KB.TopK != DefaultKBTopK {
-		t.Errorf("kb.top_k = %d, want %d", cfg.KB.TopK, DefaultKBTopK)
-	}
-	if got := cfg.KB.RecallLimitValue(); got != DefaultKBRecallLimit {
-		t.Errorf("kb.recall_limit (absent) = %d, want %d", got, DefaultKBRecallLimit)
-	}
-	if !cfg.KB.CatalogValue() {
-		t.Error("kb.catalog (absent) must default to true")
-	}
-}
-
-func TestLoadParsesKBSection(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	content := "kb:\n  enabled: true\n  db_path: /tmp/kb.sqlite\n  top_k: 3\n"
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if !Enabled(cfg.KB.Enabled) {
-		t.Error("kb.enabled should be true")
-	}
-	if cfg.KB.DBPath != "/tmp/kb.sqlite" {
-		t.Errorf("kb.db_path = %q, want /tmp/kb.sqlite", cfg.KB.DBPath)
-	}
-	if cfg.KB.TopK != 3 {
-		t.Errorf("kb.top_k = %d, want 3", cfg.KB.TopK)
-	}
-}
-
-// M4b: an explicit recall_limit / catalog is honored, and the defaults are
-// used for the fields left absent in the same file.
-func TestLoadParsesKBRecallAndCatalog(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	content := "kb:\n  enabled: true\n  recall_limit: 5\n  catalog: false\n"
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if got := cfg.KB.RecallLimitValue(); got != 5 {
-		t.Errorf("kb.recall_limit = %d, want 5", got)
-	}
-	if cfg.KB.CatalogValue() {
-		t.Error("kb.catalog = true, want false (explicitly disabled)")
-	}
-	if cfg.KB.TopK != DefaultKBTopK {
-		t.Errorf("absent kb.top_k = %d, want default %d", cfg.KB.TopK, DefaultKBTopK)
-	}
-}
-
-// M4b: recall_limit 0 means "proactive recall off" — it must survive the
-// absent-vs-zero distinction (0 is meaningful, not the default).
-func TestLoadRecallLimitZeroDisables(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte("kb:\n  enabled: true\n  recall_limit: 0\n"), 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if got := cfg.KB.RecallLimitValue(); got != 0 {
-		t.Errorf("kb.recall_limit = %d, want 0 (proactive recall off)", got)
-	}
-}
-
-// M4c: kb.extraction defaults to true when absent (dispatch-m4c §3 — within an
-// enabled kb the extraction writeback is on by default, matching config.yaml),
-// and an explicit false is honored.
-func TestLoadKBExtractionDefaultsAndDisables(t *testing.T) {
-	// Absent ⇒ true.
-	cfg, err := Load(filepath.Join(t.TempDir(), "nope.yaml"))
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if !cfg.KB.ExtractionValue() {
-		t.Error("kb.extraction (absent) must default to true")
-	}
-
-	// Explicit false ⇒ skipped.
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte("kb:\n  enabled: true\n  extraction: false\n"), 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	cfg2, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if cfg2.KB.ExtractionValue() {
-		t.Error("kb.extraction = true, want false (explicitly disabled)")
-	}
-
-	// Explicit true is honored too.
-	path2 := filepath.Join(t.TempDir(), "config2.yaml")
-	if err := os.WriteFile(path2, []byte("kb:\n  enabled: true\n  extraction: true\n"), 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	cfg3, err := Load(path2)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if !cfg3.KB.ExtractionValue() {
-		t.Error("kb.extraction = false, want true (explicitly enabled)")
-	}
-}
-
-// M4b: kb.enabled: true is the single switch that turns the whole capability
-// on — the three kb_* tools must also become whitelisted (dispatch-m4b §1,
-// mirrors run_command). When kb is disabled they must NOT be whitelisted.
-func TestLoadKBEnabledAppendsToolsToWhitelist(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte("kb:\n  enabled: true\n"), 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	for _, name := range kbToolNames {
-		if !contains(cfg.Tools.Enabled, name) {
-			t.Errorf("whitelist %v lacks %q after kb.enabled", cfg.Tools.Enabled, name)
-		}
-	}
-
-	// Default (kb disabled): no kb tool in the whitelist.
-	cfg2, err := Load(filepath.Join(t.TempDir(), "nope.yaml"))
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	for _, name := range kbToolNames {
-		if !contains(cfg2.Tools.Enabled, name) {
-			t.Errorf("whitelist %v must contain %q when kb ENABLED by default", cfg2.Tools.Enabled, name)
-		}
-	}
-}
-
-// An explicit db_path is used verbatim; only the empty default follows
-// data_dir.
-func TestLoadExplicitKBDBPathIsVerbatim(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	content := "data_dir: custom\nkb:\n  enabled: true\n  db_path: data/kb/knowledge.sqlite\n"
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if cfg.KB.DBPath != "data/kb/knowledge.sqlite" {
-		t.Errorf("kb.db_path = %q, want verbatim data/kb/knowledge.sqlite", cfg.KB.DBPath)
-	}
-}
-
-// The empty db_path default follows a custom data_dir.
-func TestLoadKBDBPathFollowsDataDir(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	content := "data_dir: /srv/pa-data\n"
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	want := filepath.Join("/srv/pa-data", "kb", "knowledge.sqlite")
-	if cfg.KB.DBPath != want {
-		t.Errorf("kb.db_path = %q, want %q", cfg.KB.DBPath, want)
-	}
-	if !Enabled(cfg.KB.Enabled) {
-		t.Error("KB must be ENABLED by default (dsh 对齐; D10 default-off is now opt-out)")
-	}
-}
-
 // M5a: jobs is off by default (D10), and the per-owner active-job cap defaults
 // to 10 (dispatch-m5a-2 §3).
 func TestLoadJobsDefaultsWhenAbsent(t *testing.T) {
@@ -431,7 +237,6 @@ func TestLoadJobsDefaultsWhenAbsent(t *testing.T) {
 
 // M5a: jobs.enabled: true is the single switch that turns the whole capability
 // on — the five job_* tools must also become whitelisted (dispatch-m5a-2 §3,
-// mirrors kb). An absent max falls back to the default 10.
 func TestLoadJobsEnabledAppendsToolsToWhitelist(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte("jobs:\n  enabled: true\n"), 0o600); err != nil {
@@ -545,7 +350,6 @@ func TestLoadSubagentParsesSectionAndFallsBack(t *testing.T) {
 
 // M5b: subagent.enabled: true is the single switch that turns the whole
 // capability on — the four subagent_* tools must also become whitelisted
-// (dispatch-m5b-2 §3, mirrors jobs/kb).
 func TestLoadSubagentEnabledAppendsToolsToWhitelist(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte("subagent:\n  enabled: true\n"), 0o600); err != nil {
@@ -599,7 +403,6 @@ func TestExternalProviderDefaults(t *testing.T) {
 
 // M5c: compaction is off by default (D10), the token-pressure threshold
 // defaults to 32000, the retained tail to 8 turns, and max_chars to 0 (the
-// engine default). Unlike kb/jobs/subagent, compaction has no consumer tools —
 // nothing may be whitelisted for it even when enabled (dispatch-m5c-2a §2).
 func TestLoadCompactionDefaultsWhenAbsent(t *testing.T) {
 	cfg, err := Load(filepath.Join(t.TempDir(), "nope.yaml"))
@@ -772,7 +575,6 @@ func TestLoadSkillParsesSectionAndFallsBack(t *testing.T) {
 
 // M5d: skill.enabled: true is the single switch that turns the whole capability
 // on — the skill_load tool must also become whitelisted (dispatch-m5d-2 §2,
-// mirrors kb/jobs/subagent).
 func TestLoadSkillEnabledAppendsToolsToWhitelist(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte("skill:\n  enabled: true\n"), 0o600); err != nil {
@@ -847,7 +649,6 @@ func TestLoadScheduleParsesSectionAndFallsBack(t *testing.T) {
 
 // M6a-2: schedule.enabled: true is the single switch that turns the whole
 // capability on — the schedule_* tools must also become whitelisted
-// (dispatch-m6a-2 §2, mirrors kb/jobs/subagent/skill).
 func TestLoadScheduleEnabledAppendsToolsToWhitelist(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte("schedule:\n  enabled: true\n"), 0o600); err != nil {
@@ -916,7 +717,6 @@ func TestLoadPlanParsesSection(t *testing.T) {
 
 // M6b-2: plan.enabled: true is the single switch that turns the whole
 // capability on — the six plan_* tools must also become whitelisted
-// (dispatch-m6b-2 §2, mirrors kb/jobs/subagent/skill/schedule).
 func TestLoadPlanEnabledAppendsToolsToWhitelist(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte("plan:\n  enabled: true\n"), 0o600); err != nil {
@@ -997,7 +797,6 @@ func TestLoadSpillParsesSection(t *testing.T) {
 
 // M6c-2: spill.enabled: true is the single switch that turns the whole
 // capability on — the four spill_* tools must also become whitelisted
-// (dispatch-m6c-2 §2, mirrors kb/jobs/subagent/skill/schedule/plan).
 func TestLoadSpillEnabledAppendsToolsToWhitelist(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte("spill:\n  enabled: true\n"), 0o600); err != nil {
@@ -1078,7 +877,6 @@ func TestLoadInteractParsesSection(t *testing.T) {
 
 // M6d-2: interact.enabled: true is the single switch that turns the whole
 // capability on — the two interact_* tools must also become whitelisted
-// (dispatch-m6d-2 §2, mirrors kb/jobs/subagent/skill/schedule/plan/spill).
 func TestLoadInteractEnabledAppendsToolsToWhitelist(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte("interact:\n  enabled: true\n"), 0o600); err != nil {
@@ -1174,7 +972,6 @@ func TestLoadCodeParsesSectionAndFallsBack(t *testing.T) {
 
 // M6e-2: code.enabled: true is the single switch that turns the whole
 // capability on — the run_code tool must also become whitelisted
-// (dispatch-m6e-2 §2, mirrors kb/jobs/subagent/skill/schedule/plan/spill/
 // interact).
 func TestLoadCodeEnabledAppendsToolsToWhitelist(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
@@ -1283,7 +1080,6 @@ func TestLoadMcpParsesSection(t *testing.T) {
 
 // M6f-2: mcp.enabled: true is the single switch that turns the whole
 // capability on — the mcp_list and mcp_call tools must also become whitelisted
-// (dispatch-m6f-2 §2, mirrors kb/jobs/subagent/skill/schedule/plan/spill/
 // interact/code).
 func TestLoadMcpEnabledAppendsToolsToWhitelist(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
@@ -1363,7 +1159,6 @@ func TestLoadFsParsesSection(t *testing.T) {
 
 // M6f-3: fs.enabled: true is the single switch that turns the whole
 // capability on — the three fs_* tools must also become whitelisted
-// (dispatch-m6f-3 §3, mirrors kb/jobs/subagent/skill/schedule/plan/spill/
 // interact/code/mcp).
 func TestLoadFsEnabledAppendsToolsToWhitelist(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
@@ -1735,7 +1530,6 @@ func TestLoadWebParsesSection(t *testing.T) {
 
 // M7-2: web.enabled: true is the single switch that turns the whole capability
 // on — the two web_* tools must also become whitelisted (dispatch-m7-2 §5,
-// mirrors kb/jobs/subagent/skill/schedule/plan/spill/interact/code/mcp/fs).
 func TestLoadWebEnabledAppendsToolsToWhitelist(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte("web:\n  enabled: true\n"), 0o600); err != nil {
@@ -2184,20 +1978,16 @@ func TestModeMinimalWhitelist(t *testing.T) {
 }
 
 // D-MODE-6: minimal is preset-first — user-explicitly-enabled capabilities
-// (kb, web) and an explicit tools whitelist are ignored and forced to the
 // minimal set.
 func TestModeMinimalPresetFirst(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	content := "mode: minimal\nkb:\n  enabled: true\nweb:\n  enabled: true\nfs_search:\n  enabled: true\nralph:\n  enabled: true\nworkflow:\n  enabled: true\ntools:\n  enabled: [web_search]\n"
+	content := "mode: minimal\nweb:\n  enabled: true\nfs_search:\n  enabled: true\nralph:\n  enabled: true\nworkflow:\n  enabled: true\ntools:\n  enabled: [web_search]\n"
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
-	}
-	if Enabled(cfg.KB.Enabled) {
-		t.Error("minimal must override an explicit kb.enabled: true (preset-first, D-MODE-6)")
 	}
 	if Enabled(cfg.Web.Enabled) {
 		t.Error("minimal must override an explicit web.enabled: true (preset-first, D-MODE-6)")
@@ -2220,20 +2010,16 @@ func TestModeMinimalPresetFirst(t *testing.T) {
 	}
 }
 
-// D-MODE-1: mode: standard touches nothing — an explicit kb.enabled: true
 // survives and every remaining cap equals a config with no mode set (default
 // standard, D10).
 func TestModeStandardUnchanged(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte("mode: standard\nkb:\n  enabled: true\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("mode: standard\n"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
-	}
-	if !Enabled(cfg.KB.Enabled) {
-		t.Error("standard must keep an explicit kb.enabled: true")
 	}
 	cfgDefault, err := Load(filepath.Join(t.TempDir(), "nope.yaml"))
 	if err != nil {
@@ -2245,26 +2031,22 @@ func TestModeStandardUnchanged(t *testing.T) {
 	}
 }
 
-// D-MODE-1/4: mode: code touches no capability cap — explicit kb.enabled and
 // terminal.enabled survive exactly as in standard (code only adds the Code
 // Mode prompt segment in the composition root).
 func TestModeCodeKeepsCaps(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte("mode: code\nkb:\n  enabled: true\nterminal:\n  enabled: true\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("mode: code\nterminal:\n  enabled: true\n"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if !Enabled(cfg.KB.Enabled) {
-		t.Error("code must keep kb.enabled: true (like standard)")
-	}
 	if !Enabled(cfg.Terminal.Enabled) {
 		t.Error("code must keep terminal.enabled: true (like standard)")
 	}
 	pathStd := filepath.Join(t.TempDir(), "config-std.yaml")
-	if err := os.WriteFile(pathStd, []byte("kb:\n  enabled: true\nterminal:\n  enabled: true\n"), 0o600); err != nil {
+	if err := os.WriteFile(pathStd, []byte("terminal:\n  enabled: true\n"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	cfgStd, err := Load(pathStd)
@@ -2327,9 +2109,8 @@ func TestWebServerDefaults(t *testing.T) {
 	}
 }
 
-// modeCapStates returns every capability master switch except kb (kb is
-// asserted per-test, e.g. it differs between an explicit kb.enabled and the
-// default), used to compare cap states across modes.
+// modeCapStates returns every capability master switch, used to compare cap
+// states across modes.
 func modeCapStates(cfg Config) map[string]bool {
 	return map[string]bool{
 		"terminal":       Enabled(cfg.Terminal.Enabled),

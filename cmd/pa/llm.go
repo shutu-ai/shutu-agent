@@ -6,9 +6,9 @@
 // ANTHROPIC_API_KEY is present, M8-2b), resolves cfg.LLM.Provider against the
 // registry (unknown id ⇒ fail-closed startup error, no silent fallback), and
 // injects the selected provider into a.llm — the single llm.LLM that the loop,
-// compaction, subagent and kb extraction all consume (D2). The registry is
-// kept on app.llmReg for /llm-status, which reports provider/model/modalities
-// in the /kb-status style. The loop's turn/step structure is untouched (D4):
+// compaction and subagent all consume. The registry is kept on app.llmReg for
+// /llm-status, which reports provider/model/modalities. The loop's turn/step
+// structure is untouched (D4):
 // the loop keeps calling a.llm.Stream and never sees the registry.
 package main
 
@@ -170,7 +170,7 @@ func (a *app) registerLLM() error {
 }
 
 // currentLLM returns the currently selected provider under the read lock. Every
-// consumer that wires a.llm into a component (loop, compaction, kb extraction,
+// consumer that wires a.llm into a component (loop, compaction,
 // subagent spawn, eval judge) reads through this so the live model switch can
 // swap the pointer safely (P5.1). Loop is re-wired every turn (buildLoop), so
 // a model switch takes effect on the very next message.
@@ -352,8 +352,7 @@ func llmCredentialEnv(id string) string {
 	return providerEnv(id)
 }
 
-// llmStatus prints the /llm-status report (dispatch-m8-2 §6, 照 /kb-status
-// 风格; M8-3 §4 adds modalities + multimodal): the selected provider (marked *),
+// llmStatus prints the /llm-status report: the selected provider (marked *),
 // every registered provider with its availability, the input modalities
 // (cfg.LLM.ModelInputModalities: text / text,image), and the multimodal gate
 // (enabled|disabled, D10). An unconfigured provider (key absent / bad base_url)

@@ -1,5 +1,5 @@
 // Package prompt assembles the system prompt from ordered sections (design.md
-// §7): persona → skills → knowledge → an automatic tool catalog. Sections are
+// §7): persona → skills → an automatic tool catalog. Sections are
 // loaded from files in a prompts directory, so sections can be added, removed,
 // or re-ordered without touching the loop (dispatch-m2 §3).
 package prompt

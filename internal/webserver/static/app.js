@@ -46,7 +46,7 @@ const composerText = $("composer-text"), composerBox = $("composer"), sendBtn = 
 const slashMenu = $("slash-menu");
 const growWrapEl = document.querySelector(".grow-wrap");
 const scrollBottomBtn = $("scroll-bottom");
-const settingsEl = $("settings"), placeholderEl = $("placeholder");
+const settingsEl = $("settings");
 const heroWsChip = $("hero-ws-chip"), heroWsLabel = $("hero-ws-label"), heroWsMenu = $("hero-ws-menu");
 const heroModeChip = $("hero-mode-chip"), heroModeLabel = $("hero-mode-label"), heroModeMenu = $("hero-mode-menu");
 const cmdBtn = $("cmd-btn"), cmdMenu = $("cmd-menu");
@@ -4043,7 +4043,6 @@ function renderEvent(ev, replay) {
       if (ev.type === "tool/error" && !ev.tool_name) addErrorRow(ev);
       else renderToolRow(ev);
       break;
-    case "kb/recall":
     case "skill/catalog":
     case "compaction/summary":
     case "compaction/end":
@@ -4604,7 +4603,7 @@ const SETTINGS_SECTIONS = [
 ];
 const CAPABILITY_NAMES = {
   terminal: "终端", fs: "文件系统", fs_search: "全文检索", ralph: "Ralph 循环",
-  workflow: "工作流", kb: "知识库", jobs: "后台任务", subagent: "子代理",
+  workflow: "工作流", jobs: "后台任务", subagent: "子代理",
   web: "联网", eval: "评测", code: "代码执行", interact: "交互确认",
   mcp: "MCP", skill: "技能", schedule: "定时", plan: "计划",
   spill: "溢出", compaction: "压缩", multimodal: "多模态",
@@ -5933,12 +5932,7 @@ async function route() {
   const h = location.hash;
   workspaceEl.classList.toggle("hidden", !(h === "" || h === "#/" || h.startsWith("#/chat")));
   settingsEl.classList.toggle("hidden", h !== "#/settings");
-  placeholderEl.classList.toggle("hidden", h !== "#/kb" && h !== "#/kb/");
   if (h === "#/settings") { renderSettings(); }
-  else if (h === "#/kb" || h === "#/kb/") {
-    $("ph-title").textContent = "知识库";
-    $("ph-note").textContent = "KB 全量后挂（占位）。";
-  }
 }
 window.addEventListener("hashchange", () => route());
 

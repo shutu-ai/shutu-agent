@@ -53,29 +53,21 @@ func TestWorthRemembering(t *testing.T) {
 func TestAutoSpillCandidatesExtraction(t *testing.T) {
 	events := []session.Event{
 		testEvent(t, 1, session.EventUserMessage, session.NewUserMessage("what is the release date?")),
-		// tool-call frame: empty text — excluded.
-		testEvent(t, 2, session.EventAssistantMessage, session.NewAssistantMessage("", []llm.ToolCall{{ID: "call_1", Name: "kb_search", Arguments: `{"q":"release"}`}}, "")),
-		testEvent(t, 3, session.EventToolResult, session.NewToolResult("call_1", "kb_search", "The release is scheduled for 2026-09-01.", nil)),
-		testEvent(t, 4, session.EventAssistantMessage, session.NewAssistantMessage("记住：发布定在 2026-09-01。", nil, "stop")),
+		testEvent(t, 2, session.EventToolResult, session.NewToolResult("call_1", "search_tool", "The release is scheduled for 2026-09-01.", nil)),
+		testEvent(t, 3, session.EventAssistantMessage, session.NewAssistantMessage("durable note", nil, "stop")),
 	}
-
 	got := autoSpillCandidates(events)
 	if len(got) != 2 {
 		t.Fatalf("candidates = %d, want 2: %+v", len(got), got)
 	}
-	// The tool/result summary comes first (event order), then the final
-	// assistant text; both survive the worthiness filter.
 	if got[0].content != "The release is scheduled for 2026-09-01." {
 		t.Fatalf("candidate[0].content = %q", got[0].content)
 	}
-	if got[0].source != "session:3:tool:kb_search" {
-		t.Fatalf("candidate[0].source = %q, want session:3:tool:kb_search", got[0].source)
-	}
-	if got[1].content != "记住：发布定在 2026-09-01。" {
+	if got[1].content != "durable note" {
 		t.Fatalf("candidate[1].content = %q", got[1].content)
 	}
-	if got[1].source != "session:4" {
-		t.Fatalf("candidate[1].source = %q, want session:4", got[1].source)
+	if got[1].source != "session:3" {
+		t.Fatalf("candidate[1].source = %q, want session:3", got[1].source)
 	}
 }
 

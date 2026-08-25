@@ -28,9 +28,9 @@ const maxSteps = 10
 // is truncated UTF-8-safely (fail-open: it can never block the answer).
 const maxInjectorChars = 4000
 
-// PreStepInjector is one registered pre-step context injector (ADR 2026-08-18
+// PreStepInjector is one registered pre-step context injector.
 // -m5-agent-core.md 总体决策: the unified pre-step injection extension point that
-// supersedes the single M4b Recall hook). Inject is called at each step after
+// Inject is called at each step after
 // user/message is appended, and its returned context is persisted before the
 // model request. OncePerTurn is used by side-effectful turn hooks such as
 // compaction and scheduling; Deduplicate is used by stable snapshots.
@@ -51,7 +51,6 @@ type Loop struct {
 	model                  string
 	provider               string
 	effort                 string
-	recall                 func(context.Context, string) []llm.Message // M4b hook, kept as the first injector
 	runtimeContext         func(context.Context, string) []llm.Message // dsh-style durable runtime snapshot
 	preStep                []PreStepInjector                           // additional injectors, in registration order
 	onText                 func(string)                                // optional sink for streamed assistant text (REPL)
@@ -79,24 +78,12 @@ type Config struct {
 	// ReasoningEffort is the thinking-effort default applied to every model
 	// request of this loop (dsh 思考强度; "" keeps the provider default).
 	ReasoningEffort string
-	// Recall, if set, is the proactive knowledge recall extension point
-	// (design.md §8, D4: new features hang on extension points). It is the
-	// first pre-step injector ("recall", ADR 2026-08-18-m5-agent-core.md 总体
-	// 决策): called after user/message is appended and returns extra context
-	// messages persisted into the session surface. The recall
-	// orchestration (query, KB.Recall, fail-open, kb/recall logging) lives
-	// entirely in cmd/pa; the loop just injects what it returns. Kept for
-	// backward compatibility with M4b; when both Recall and PreStep are set,
-	// Recall runs first and PreStep follows. The turn/step structure is
-	// unchanged.
-	Recall func(ctx context.Context, userText string) []llm.Message
 	// RuntimeContext supplies the dsh-style current runtime snapshot. It is
 	// projected after the current user message and deduplicated against the
 	// visible session surface.
 	RuntimeContext func(context.Context, string) []llm.Message
-	// PreStep registers additional pre-step context injectors beyond Recall
-	// (ADR 2026-08-18-m5-agent-core.md 总体决策). Injectors run in registration
-	// order after Recall, with returned context bounded to maxInjectorChars;
+	// PreStep registers additional pre-step context injectors. Injectors run in
+	// registration order, with returned context bounded to maxInjectorChars;
 	// OncePerTurn and Deduplicate control their cadence. A panicking injector is
 	// skipped (fail-open).
 	PreStep []PreStepInjector
@@ -124,7 +111,6 @@ func New(cfg Config) *Loop {
 		model:                  cfg.Model,
 		provider:               cfg.Provider,
 		effort:                 cfg.ReasoningEffort,
-		recall:                 cfg.Recall,
 		runtimeContext:         cfg.RuntimeContext,
 		preStep:                append([]PreStepInjector(nil), cfg.PreStep...),
 		onText:                 cfg.OnText,
@@ -196,17 +182,9 @@ func (l *Loop) Run(ctx context.Context, userText string) (runErr error) {
 	return fmt.Errorf("loop: exceeded %d steps per turn", maxSteps)
 }
 
-// effectiveInjectors returns the ordered pre-step injector list for one turn:
-// the M4b Recall hook first (as "recall", kept for backward compatibility),
-// then the registered PreStep injectors in order. Building it per turn lets the
-// composition root swap the Recall hook between turns. A nil Recall hook
-// contributes no injector.
+// effectiveInjectors returns the ordered pre-step injector list for one turn.
 func (l *Loop) effectiveInjectors() []PreStepInjector {
-	var out []PreStepInjector
-	if l.recall != nil {
-		out = append(out, PreStepInjector{Name: "recall", Inject: l.recall, OncePerTurn: true})
-	}
-	out = append(out, l.preStep...)
+	out := append([]PreStepInjector(nil), l.preStep...)
 	// Append the runtime snapshot last. This keeps the current user message as
 	// the newest conversational turn while pressure compaction selects its
 	// retained tail; the request still derives as user → context → history.

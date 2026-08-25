@@ -53,7 +53,7 @@ func defaultCompactionEstimator(log *session.Log) int {
 
 // registerCompaction creates the default BasicEngine when compaction.enabled,
 // and wires nothing when disabled (D10, mirrors registerJobs/registerSubagent).
-// Unlike kb/jobs/subagent there are no consumer tools to register or whitelist
+// Unlike jobs/subagent there are no consumer tools to register or whitelist
 // (compaction has none): automatic triggering runs through the loop pre-step
 // injector, manual through the /compact command. The engine holds no closable
 // resources (it shares the caller-owned LLM), so there is no deferred Close.
@@ -76,8 +76,8 @@ func (a *app) registerCompaction() error {
 // preStepInjectors returns the loop's registered pre-step injectors for the
 // current configuration: the "compaction" injector when the capability is
 // enabled, then the "skill" catalog injector when skill is enabled. The loop
-// runs the M4b Recall hook ("recall") first and then the PreStep injectors in
-// order, so the compaction injector lands after recall and the skill catalog
+// runs the registered PreStep injectors in order, so the compaction injector
+// lands before the skill catalog
 // after compaction as required (dispatch-m5c-2 §4 / dispatch-m5d-2 §4). The
 // turn/step structure is unchanged (D4).
 func (a *app) preStepInjectors() []loop.PreStepInjector {
@@ -119,7 +119,7 @@ func (a *app) preStepInjectors() []loop.PreStepInjector {
 // notice, not the summary body — the folded history already carries the summary
 // marker (M5c-1a). Every append happens here on the serial pre-step path (D5);
 // a failing compaction is surfaced as a stderr warning and contributes no
-// context (fail-open, the same contract as the kb recall injector).
+// context (fail-open).
 func (a *app) compactionInjector(est compactionEstimator) loop.PreStepInjector {
 	return loop.PreStepInjector{
 		Name:        "compaction",

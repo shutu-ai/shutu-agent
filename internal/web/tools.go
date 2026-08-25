@@ -1,7 +1,7 @@
 // tools.go — the M7-2 Consumer half of the web seam (design.md §10 D2,
 // dispatch-m7-2 §4): web_search and web_fetch are registered into the
 // tools.Registry by the composition root (cmd/pa) when web.enabled, and
-// auto-whitelisted by config.applyDefaults the same way the kb_*/job_*/fs_*/
+// auto-whitelisted by config.applyDefaults the same way the job_*/fs_*/
 // code_* tools are. The tools implement the tools.Tool method set structurally
 // (Go structural typing), so this package never imports the tools package —
 // the seam stays decoupled (D2).
