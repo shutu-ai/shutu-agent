@@ -322,6 +322,37 @@ body[data-theme="light"] .queue-actions button, body[data-theme="light"] .intera
 .session-controls select { max-width: 180px; border: 1px solid #30465a; border-radius: 5px; padding: 5px 7px; color: #cfe0ec; background: #152535; }
 body[data-theme="light"] .session-controls label { color: #6d8295; }
 body[data-theme="light"] .session-controls select { border-color: #b8cbd9; color: #365a73; background: #edf4f8; }
+.session-status-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 8px 38px 0; color: #8298ad; font-size: 11px; }
+.goal-bar { display: flex; min-width: 0; flex: 1 1 100%; align-items: center; gap: 6px; border: 1px solid #304b5d; border-radius: 7px; padding: 5px 7px; background: #111f2b; }
+.plan-chip, .goal-bar button { border: 1px solid #3b5c70; border-radius: 5px; padding: 4px 7px; color: #b9d9e8; background: #172c3c; cursor: pointer; font-size: 10px; }
+.plan-chip { border-color: #568b72; color: #a9e8c1; background: #17352e; }
+.plan-chip span { margin-left: 3px; color: #6f9b8a; }
+.goal-phase { border-radius: 999px; padding: 2px 6px; color: #e4c17d; background: #3a2d1e; font-size: 10px; text-transform: capitalize; }
+.goal-phase.paused { color: #b5c2d3; background: #2a3542; }
+.goal-phase.blocked { color: #ffb2a8; background: #43272c; }
+.goal-objective { min-width: 0; flex: 1; overflow: hidden; color: #d6e3ed; text-overflow: ellipsis; white-space: nowrap; }
+.goal-count { color: #748da1; font-size: 10px; white-space: nowrap; }
+.goal-bar input { min-width: 120px; flex: 1; border: 1px solid #3b5c70; border-radius: 5px; padding: 4px 6px; color: #dce8f2; background: #152535; font-size: 11px; }
+.goal-bar button:disabled { cursor: not-allowed; opacity: .45; }
+.goal-error { color: #ffb2a8; font-size: 10px; }
+body[data-theme="light"] .goal-bar { border-color: #c4d6e1; background: #f1f7fa; }
+body[data-theme="light"] .plan-chip, body[data-theme="light"] .goal-bar button { border-color: #b8cbd9; color: #365a73; background: #edf4f8; }
+body[data-theme="light"] .plan-chip { border-color: #8fc8ac; color: #2d7052; background: #e3f3ed; }
+body[data-theme="light"] .goal-objective { color: #29455d; }
+body[data-theme="light"] .goal-bar input { border-color: #b8cbd9; color: #365a73; background: #edf4f8; }
+.context-meter { display: grid; grid-template-columns: auto minmax(110px, 180px) auto; align-items: center; gap: 7px; }
+.context-meter > span { color: #b7c8d7; }
+.context-meter-track { height: 6px; overflow: hidden; border-radius: 999px; background: #203142; }
+.context-meter-track div { height: 100%; border-radius: inherit; background: #9de9bd; transition: width .25s ease; }
+.context-meter small { color: #71879b; font-size: 10px; font-variant-numeric: tabular-nums; }
+.session-state-badges { display: flex; flex-wrap: wrap; gap: 5px; }
+.session-badge { border: 1px solid #2c4053; border-radius: 999px; padding: 2px 7px; color: #899caf; background: #14212e; font-size: 10px; }
+.session-badge.active { border-color: #4d8068; color: #a9e8c1; background: #17352d; }
+body[data-theme="light"] .session-status-bar { color: #6d8295; }
+body[data-theme="light"] .context-meter > span { color: #365a73; }
+body[data-theme="light"] .context-meter-track { background: #dce8ef; }
+body[data-theme="light"] .session-badge { border-color: #c7d6e1; color: #6d8295; background: #edf4f8; }
+body[data-theme="light"] .session-badge.active { border-color: #8fc8ac; color: #2d7052; background: #e3f3ed; }
 .settings-controls { display: grid; gap: 12px; margin-bottom: 16px; border: 1px solid #2b4054; border-radius: 9px; padding: 13px; background: #101c29; }
 .settings-control-head { display: flex; justify-content: space-between; gap: 12px; }
 .settings-control-head div { display: grid; gap: 3px; }
@@ -367,16 +398,55 @@ body[data-theme="light"] .settings-controls { border-color: #ccd9e4; background:
 body[data-theme="light"] .settings-control-head strong { color: #29455d; }
 body[data-theme="light"] .settings-control-head span, body[data-theme="light"] .settings-control-grid small { color: #6d8295; }
 body[data-theme="light"] .settings-control-grid select, body[data-theme="light"] .settings-control-grid button { border-color: #b8cbd9; color: #365a73; background: #edf4f8; }
+.skills-manager { display: grid; gap: 12px; }
+.skills-manager-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.skills-manager-head h2 { margin: 0 0 3px; color: #e4eef6; font-size: 16px; }
+.skills-manager-head p { margin: 0; color: #8298ad; font-size: 12px; }
+.skills-layout { display: grid; grid-template-columns: minmax(220px, .8fr) minmax(0, 1.4fr); gap: 12px; min-height: 240px; }
+.skills-list, .skill-detail, .skill-add { border: 1px solid #2b4054; border-radius: 9px; background: #101c29; }
+.skills-list { display: grid; align-content: start; gap: 5px; padding: 8px; }
+.skill-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 5px; border: 1px solid transparent; border-radius: 7px; padding: 5px; }
+.skill-row.selected, .skill-row:hover { border-color: #35536a; background: #152535; }
+.skill-select { display: grid; min-width: 0; gap: 2px; border: 0; padding: 3px; color: #dce8f2; background: transparent; text-align: left; cursor: pointer; }
+.skill-select strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.skill-select span, .skill-select small { overflow: hidden; color: #8298ad; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.skill-select small { color: #62778d; font-size: 10px; }
+.skill-actions { display: flex; align-items: start; gap: 4px; }
+.skill-actions button, .skill-add > button { border: 1px solid #39536a; border-radius: 5px; padding: 5px 8px; color: #b9d3e6; background: #162838; cursor: pointer; font-size: 11px; }
+.skill-actions button:disabled, .skill-add > button:disabled { cursor: not-allowed; opacity: .45; }
+.skill-detail { min-width: 0; padding: 12px; }
+.skill-detail-head { display: flex; align-items: start; justify-content: space-between; gap: 10px; margin-bottom: 9px; }
+.skill-detail-head div { display: grid; gap: 3px; min-width: 0; }
+.skill-detail-head strong { color: #e4eef6; }
+.skill-detail-head span:not(.capability-status) { overflow: hidden; color: #8298ad; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.skill-detail pre { max-height: 300px; margin: 0; overflow: auto; color: #b6c8d8; font: 11px/1.55 ui-monospace, monospace; white-space: pre-wrap; }
+.skill-add { display: grid; gap: 9px; padding: 12px; }
+.skill-add h3 { margin: 0 0 3px; color: #e4eef6; font-size: 14px; }
+.skill-add p { margin: 0; color: #8298ad; font-size: 11px; }
+.skill-add-grid { display: grid; grid-template-columns: minmax(0, 1fr) 140px 140px; gap: 8px; }
+.skill-add label { display: grid; gap: 4px; color: #9ab0c2; font-size: 11px; }
+.skill-add input, .skill-add select, .skill-add textarea { min-width: 0; border: 1px solid #30465a; border-radius: 5px; padding: 7px; color: #dce8f2; background: #152535; }
+.skill-add textarea { resize: vertical; font: 11px/1.45 ui-monospace, monospace; }
+body[data-theme="light"] .skills-manager-head h2, body[data-theme="light"] .skill-detail-head strong, body[data-theme="light"] .skill-add h3 { color: #29455d; }
+body[data-theme="light"] .skills-manager-head p, body[data-theme="light"] .skill-select span, body[data-theme="light"] .skill-detail-head span:not(.capability-status), body[data-theme="light"] .skill-add p { color: #6d8295; }
+body[data-theme="light"] .skills-list, body[data-theme="light"] .skill-detail, body[data-theme="light"] .skill-add { border-color: #ccd9e4; background: #f8fbfd; }
+body[data-theme="light"] .skill-row.selected, body[data-theme="light"] .skill-row:hover { border-color: #b6cfdf; background: #edf4f8; }
+body[data-theme="light"] .skill-select { color: #29455d; }
+body[data-theme="light"] .skill-actions button, body[data-theme="light"] .skill-add > button, body[data-theme="light"] .skill-add input, body[data-theme="light"] .skill-add select, body[data-theme="light"] .skill-add textarea { border-color: #b8cbd9; color: #365a73; background: #edf4f8; }
+body[data-theme="light"] .skill-detail pre { color: #365a73; }
 
 @media (max-width: 800px) {
   .settings-control-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .provider-layout { grid-template-columns: 1fr; }
+  .skills-layout { grid-template-columns: 1fr; }
+  .skill-add-grid { grid-template-columns: 1fr 1fr; }
 }
 
 @media (max-width: 600px) {
   .provider-editor-grid, .mcp-editor { grid-template-columns: 1fr; }
   .mcp-row { grid-template-columns: minmax(0, 1fr) auto; }
   .mcp-row button { grid-row: 2; }
+  .skill-add-grid { grid-template-columns: 1fr; }
 }
 
 .running-panel { display: flex; min-height: 0; flex: 1; flex-direction: column; overflow: auto; padding: 2px 9px 24px 18px; }

@@ -214,4 +214,28 @@ describe('ShutuApi', () => {
       'PATCH /api/sessions/s1/config', 'GET /api/session.export?sessionId=s1&includeDescendants=true',
     ])
   })
+
+  it('maps P10 context, session state and skills APIs', async () => {
+    const requests: { path: string; method: string; body?: string }[] = []
+    const api = new ShutuApi('https://shutu.test', '', async (input, init) => {
+      const url = new URL(String(input))
+      requests.push({ path: `${url.pathname}${url.search}`, method: init?.method ?? 'GET', body: typeof init?.body === 'string' ? init.body : undefined })
+      if (url.pathname.endsWith('/context')) return new Response(JSON.stringify({ used_tokens: 20, context_window: 100, percent: 20 }), { status: 200 })
+      if (url.pathname.endsWith('/state')) return new Response(JSON.stringify({ session_id: 's1', plan_mode: true, goals: [{ id: 'g1' }] }), { status: 200 })
+      if (url.pathname === '/api/config/skills' && (init?.method ?? 'GET') === 'GET') return new Response(JSON.stringify({ skills: [{ name: 'demo', enabled: true }], groups: [], scopes: [{ id: 'global' }] }), { status: 200 })
+      return new Response(JSON.stringify({ name: 'demo', content: '# Demo' }), { status: 200 })
+    })
+
+    await expect(api.getContext('s/1')).resolves.toMatchObject({ used_tokens: 20, percent: 20 })
+    await expect(api.getSessionState('s/1')).resolves.toMatchObject({ plan_mode: true })
+    await expect(api.listSkills()).resolves.toMatchObject({ skills: [{ name: 'demo' }] })
+    await expect(api.skillAction('set_enabled', { name: 'demo', scope: 'global', enabled: false })).resolves.toMatchObject({ name: 'demo' })
+
+    expect(requests).toEqual([
+      { path: '/api/sessions/s%2F1/context', method: 'GET' },
+      { path: '/api/sessions/s%2F1/state', method: 'GET' },
+      { path: '/api/config/skills', method: 'GET' },
+      { path: '/api/config/skills', method: 'POST', body: '{"action":"set_enabled","name":"demo","scope":"global","enabled":false}' },
+    ])
+  })
 })

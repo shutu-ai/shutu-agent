@@ -126,6 +126,93 @@ export interface SessionConfigView {
   permission?: string
 }
 
+export interface ContextView {
+  used_tokens: number
+  context_window: number
+  percent: number
+}
+
+export interface GoalView {
+  id?: string
+  ID?: string
+  title?: string
+  Title?: string
+  objective?: string
+  Objective?: string
+  status?: string
+  Status?: string
+  plans?: string[]
+  Plans?: string[]
+  blockedReason?: string
+  BlockedReason?: string
+  maxRounds?: number
+  MaxRounds?: number
+  roundsStarted?: number
+  RoundsStarted?: number
+  revision?: number
+  Revision?: number
+}
+
+export interface SessionStateView {
+  session_id?: string
+  plan_mode?: boolean
+  plan_enabled?: boolean
+  goals?: GoalView[]
+  plans?: unknown[]
+  memory_enabled?: boolean
+  memories?: unknown[]
+}
+
+export interface SkillView {
+  name: string
+  description?: string
+  when_to_use?: string
+  enabled?: boolean
+  kind?: string
+  source?: string
+  scope?: string
+  rel?: string
+  model_invocable?: boolean
+  user_invocable?: boolean
+}
+
+export interface SkillGroupView {
+  id: string
+  name?: string
+  scopes?: Record<string, string[]>
+}
+
+export interface SkillScopeView {
+  id: string
+  label?: string
+}
+
+export interface SkillsView {
+  skills: SkillView[]
+  groups: SkillGroupView[]
+  scopes: SkillScopeView[]
+  enabled?: boolean
+}
+
+export interface SkillFileView {
+  path: string
+  base64: string
+}
+
+export interface SkillActionValues {
+  name?: string
+  scope?: string
+  from?: string
+  to?: string
+  mode?: string
+  kind?: string
+  enabled?: boolean
+  files?: SkillFileView[]
+  group_id?: string
+  group_name?: string
+  names?: string[]
+}
+
 export interface EventDetails {
   [key: string]: unknown
 }
@@ -157,6 +244,7 @@ export interface EventView {
   version: number
   time: string
   summary: string
+  command?: string
   details?: EventDetails
   reasoning?: string
   tool_name?: string
@@ -289,6 +377,10 @@ export interface WebApi {
   previewFile(sessionId: string, path: string, start?: number, end?: number, signal?: AbortSignal): Promise<FilePreview>
   getSessionConfig(sessionId: string, signal?: AbortSignal): Promise<SessionConfigView>
   updateSessionConfig(sessionId: string, values: Partial<SessionConfigView>, signal?: AbortSignal): Promise<SessionConfigView>
+  getContext(sessionId: string, signal?: AbortSignal): Promise<ContextView>
+  getSessionState(sessionId: string, signal?: AbortSignal): Promise<SessionStateView>
+  listSkills(signal?: AbortSignal): Promise<SkillsView>
+  skillAction(action: string, values?: SkillActionValues, signal?: AbortSignal): Promise<Record<string, unknown>>
   exportSession(sessionId: string, signal?: AbortSignal): Promise<Blob>
   forkSession(sessionId: string, signal?: AbortSignal): Promise<{ id: string }>
   listQueue(sessionId: string, signal?: AbortSignal): Promise<QueueItem[]>
@@ -484,6 +576,24 @@ export class ShutuApi implements WebApi {
 
   updateSessionConfig(sessionId: string, values: Partial<SessionConfigView>, signal?: AbortSignal): Promise<SessionConfigView> {
     return this.json<SessionConfigView>(`/api/sessions/${encodeURIComponent(sessionId)}/config`, { method: 'PATCH', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(values) })
+  }
+
+  getContext(sessionId: string, signal?: AbortSignal): Promise<ContextView> {
+    return this.json<ContextView>(`/api/sessions/${encodeURIComponent(sessionId)}/context`, { signal })
+  }
+
+  getSessionState(sessionId: string, signal?: AbortSignal): Promise<SessionStateView> {
+    return this.json<SessionStateView>(`/api/sessions/${encodeURIComponent(sessionId)}/state`, { signal })
+  }
+
+  listSkills(signal?: AbortSignal): Promise<SkillsView> {
+    return this.json<SkillsView>('/api/config/skills', { signal }).then(result => ({ skills: result.skills ?? [], groups: result.groups ?? [], scopes: result.scopes ?? [], enabled: result.enabled }))
+  }
+
+  skillAction(action: string, values: SkillActionValues = {}, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return this.json<Record<string, unknown>>('/api/config/skills', {
+      method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, ...values }),
+    })
   }
 
   exportSession(sessionId: string, signal?: AbortSignal): Promise<Blob> {

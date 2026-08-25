@@ -1,4 +1,4 @@
-import type { AttachmentView, ConfigView, EventView, FeedbackView, FilePreview, InteractionView, MCPServerView, ProviderModelView, QueueItem, RunningSnapshot, SessionConfigView, SessionFilesView, SessionSearchHit, SessionSummary, SettingsView, WebApi, WorkspaceList } from './api'
+import type { AttachmentView, ConfigView, ContextView, EventView, FeedbackView, FilePreview, InteractionView, MCPServerView, ProviderModelView, QueueItem, RunningSnapshot, SessionConfigView, SessionFilesView, SessionSearchHit, SessionStateView, SessionSummary, SettingsView, SkillActionValues, SkillsView, WebApi, WorkspaceList } from './api'
 import { ShutuApiError } from './api'
 
 export interface WebState {
@@ -311,6 +311,22 @@ export class WebStore {
 
   updateSessionConfig(sessionId: string, values: Partial<SessionConfigView>): Promise<SessionConfigView> {
     return this.api.updateSessionConfig(sessionId, values)
+  }
+
+  getContext(sessionId: string, signal?: AbortSignal): Promise<ContextView> {
+    return this.api.getContext(sessionId, signal)
+  }
+
+  getSessionState(sessionId: string, signal?: AbortSignal): Promise<SessionStateView> {
+    return this.api.getSessionState(sessionId, signal)
+  }
+
+  listSkills(signal?: AbortSignal): Promise<SkillsView> {
+    return this.api.listSkills(signal)
+  }
+
+  skillAction(action: string, values?: SkillActionValues, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    return this.api.skillAction(action, values, signal)
   }
 
   exportSession(sessionId: string, signal?: AbortSignal): Promise<Blob> {

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent } from 'react'
-import type { AttachmentView, CommandView, ConfigView, DirectoryListing, EventDetails, EventView, FeedbackView, ImageView, InteractionView, JobView, MCPServerView, ProviderModelView, ProviderView, QueueItem, RunningSnapshot, SessionSearchHit, SessionSummary, SettingsView, SubagentView, WorkspaceView } from './api'
+import type { AttachmentView, CommandView, ConfigView, ContextView, DirectoryListing, EventDetails, EventView, FeedbackView, GoalView, ImageView, InteractionView, JobView, MCPServerView, ProviderModelView, ProviderView, QueueItem, RunningSnapshot, SessionSearchHit, SessionStateView, SessionSummary, SettingsView, SkillView, SkillsView, SubagentView, WorkspaceView } from './api'
+import { ShutuApiError } from './api'
 import { projectDshConversation, type DshConversationNode, type DshConversationSnapshot } from './dsh-conversation'
 import { projectDshTrajectory, type DshTimelineMode } from './dsh-trajectory'
 import { WebStore } from './store'
@@ -288,7 +289,7 @@ function SessionBrowser({
   </>
 }
 
-type SettingsSection = 'general' | 'model' | 'capabilities' | 'tools' | 'runtime'
+type SettingsSection = 'general' | 'model' | 'capabilities' | 'tools' | 'runtime' | 'skills'
 type ThemePreference = 'dark' | 'light' | 'system'
 
 const CAPABILITY_LABELS: Record<string, string> = {
@@ -428,6 +429,99 @@ function McpManager({ store, servers, onSaved }: { store: WebStore; servers: rea
   return <section className="runtime-manager"><div className="runtime-manager-head"><div><h2>MCP 管理</h2><p>维护 stdio MCP 服务并刷新连接诊断。</p></div><div className="runtime-actions"><button type="button" disabled={busy} onClick={() => void refresh()}>刷新连接</button>{notice && <span className="settings-control-notice" role="status">{notice}</span>}</div></div><div className="mcp-list">{items.length === 0 ? <span className="muted">暂无 MCP 服务</span> : items.map(item => <div className="mcp-row" key={item.name}><div><strong>{item.name}</strong><small>{item.cmd} {(item.args ?? []).join(' ')}</small></div><span className={`mcp-state ${item.connected ? 'on' : ''}`}>{item.connected ? '已连接' : '未连接'}</span><button type="button" disabled={busy} onClick={() => { setEditing(item.name ?? ''); setForm({ name: item.name ?? '', cmd: item.cmd ?? '', args: (item.args ?? []).join(' ') }) }}>编辑</button><button type="button" disabled={busy} onClick={() => void remove(item.name ?? '')}>删除</button></div>)}</div><div className="mcp-editor"><label>名称<input value={form.name} onChange={event => setForm(previous => ({ ...previous, name: event.target.value }))} /></label><label>命令<input value={form.cmd} onChange={event => setForm(previous => ({ ...previous, cmd: event.target.value }))} /></label><label>参数<input value={form.args} onChange={event => setForm(previous => ({ ...previous, args: event.target.value }))} placeholder="按空格分隔" /></label><div className="runtime-actions"><button type="button" disabled={busy} onClick={() => void save()}>{editing ? '保存修改' : '新增 MCP'}</button>{editing && <button type="button" disabled={busy} onClick={reset}>取消</button>}</div></div></section>
 }
 
+function encodeBase64(value: string): string {
+  const bytes = new TextEncoder().encode(value)
+  let binary = ''
+  bytes.forEach(byte => { binary += String.fromCharCode(byte) })
+  return btoa(binary)
+}
+
+function SkillsManager({ store }: { store: WebStore }) {
+  const [data, setData] = useState<SkillsView | null>(null)
+  const [selected, setSelected] = useState<SkillView | null>(null)
+  const [content, setContent] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [form, setForm] = useState({ name: '', scope: 'global', kind: 'flat', content: '' })
+
+  const load = useCallback(async (signal?: AbortSignal): Promise<void> => {
+    setLoading(true)
+    setError(null)
+    try {
+      const next = await store.listSkills(signal)
+      if (signal?.aborted) return
+      setData(next)
+      setForm(previous => ({ ...previous, scope: previous.scope || next.scopes[0]?.id || 'global' }))
+      setSelected(previous => previous === null ? null : next.skills.find(item => item.name === previous.name && item.scope === previous.scope) ?? null)
+    } catch (reason) {
+      if (!signal?.aborted) setError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      if (!signal?.aborted) setLoading(false)
+    }
+  }, [store])
+
+  useEffect(() => {
+    const abort = new AbortController()
+    void load(abort.signal)
+    return () => abort.abort()
+  }, [load])
+
+  const open = async (skill: SkillView): Promise<void> => {
+    setSelected(skill)
+    setContent(null)
+    try {
+      const result = await store.skillAction('content', { name: skill.name, scope: skill.scope })
+      setContent(typeof result.content === 'string' ? result.content : '')
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
+  }
+
+  const toggle = async (skill: SkillView): Promise<void> => {
+    setBusy(true); setError(null)
+    try { await store.skillAction('set_enabled', { name: skill.name, scope: skill.scope, enabled: !skill.enabled }); await load() }
+    catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
+    finally { setBusy(false) }
+  }
+
+  const remove = async (skill: SkillView): Promise<void> => {
+    setBusy(true); setError(null)
+    try { await store.skillAction('delete', { name: skill.name, scope: skill.scope }); setSelected(null); setContent(null); await load() }
+    catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
+    finally { setBusy(false) }
+  }
+
+  const add = async (): Promise<void> => {
+    const name = form.name.trim()
+    if (name === '' || form.content.trim() === '') return
+    setBusy(true); setError(null)
+    try {
+      await store.skillAction('add', { kind: form.kind, scope: form.scope, files: [{ path: `${name}.md`, base64: encodeBase64(form.content) }] })
+      setForm(previous => ({ ...previous, name: '', content: '' }))
+      await load()
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
+    finally { setBusy(false) }
+  }
+
+  return <div className="skills-manager">
+    <div className="skills-manager-head"><div><h2>Skills</h2><p>查看、启用、停用和管理 Agent 技能文件。</p></div><span className="settings-control-notice" role="status">{data?.skills.length ?? 0} skills</span></div>
+    {loading && <div className="settings-state"><div className="spinner" />Loading skills…</div>}
+    {!loading && error && <div className="settings-state settings-error"><strong>Unable to load skills</strong><span>{error}</span><button type="button" onClick={() => void load()}>Retry</button></div>}
+    {!loading && data !== null && <>
+      <div className="skills-layout">
+        <div className="skills-list" role="list" aria-label="Skills list">
+          {data.skills.length === 0 && <span className="muted">No skills found.</span>}
+          {data.skills.map(skill => <div className={`skill-row ${selected?.name === skill.name && selected?.scope === skill.scope ? 'selected' : ''}`} key={`${skill.scope ?? ''}:${skill.name}`} role="listitem">
+            <button type="button" className="skill-select" onClick={() => void open(skill)}><strong>{skill.name}</strong><span>{skill.description || skill.when_to_use || skill.kind || 'Skill'}</span><small>{skill.scope || 'global'} · {skill.enabled === false ? 'disabled' : 'enabled'}</small></button>
+            <div className="skill-actions"><button type="button" disabled={busy} onClick={() => void toggle(skill)}>{skill.enabled === false ? 'Enable' : 'Disable'}</button><button type="button" disabled={busy} onClick={() => void remove(skill)}>Delete</button></div>
+          </div>)}
+        </div>
+        <article className="skill-detail">{selected === null ? <div className="settings-state">Select a skill to inspect its content.</div> : <><div className="skill-detail-head"><div><strong>{selected.name}</strong><span>{selected.source || selected.rel || selected.scope || 'global'}</span></div><span className={`capability-status ${selected.enabled === false ? 'off' : 'on'}`}>{selected.enabled === false ? 'Disabled' : 'Enabled'}</span></div><pre>{content === null ? 'Loading content…' : content || 'This skill has no readable content.'}</pre></>}</article>
+      </div>
+      <div className="skill-add"><div><h3>Add skill</h3><p>Paste a Markdown skill file. The name becomes the file name.</p></div><div className="skill-add-grid"><label>Name<input value={form.name} onChange={event => setForm(previous => ({ ...previous, name: event.target.value }))} placeholder="my-skill" /></label><label>Scope<select value={form.scope} onChange={event => setForm(previous => ({ ...previous, scope: event.target.value }))}>{data.scopes.length > 0 ? data.scopes.map(scope => <option key={scope.id} value={scope.id}>{scope.label || scope.id}</option>) : <option value="global">global</option>}</select></label><label>Kind<select value={form.kind} onChange={event => setForm(previous => ({ ...previous, kind: event.target.value }))}><option value="flat">flat</option><option value="project">project</option></select></label></div><textarea value={form.content} onChange={event => setForm(previous => ({ ...previous, content: event.target.value }))} placeholder="---\nname: my-skill\ndescription: ...\n---\n\nInstructions..." rows={7} /><button type="button" disabled={busy || form.name.trim() === '' || form.content.trim() === ''} onClick={() => void add()}>Add skill</button></div>
+    </>}
+  </div>
+}
+
 function SettingsPage({ store, theme, onThemeChange, onBack }: {
   store: WebStore
   theme: ThemePreference
@@ -464,6 +558,8 @@ function SettingsPage({ store, theme, onThemeChange, onBack }: {
   const tools = useMemo(() => Array.isArray(config?.tools_enabled)
     ? config.tools_enabled.filter((tool): tool is string => typeof tool === 'string')
     : [], [config])
+  const providers = useMemo(() => config?.providers ?? [], [config?.providers])
+  const mcpServers = useMemo(() => config?.mcp_servers ?? [], [config?.mcp_servers])
   const toolCount = typeof config?.tools_enabled_count === 'number' ? config.tools_enabled_count : tools.length
   const sections: { id: SettingsSection; label: string; hint: string }[] = [
     { id: 'general', label: '通用设置', hint: '界面与运行模式' },
@@ -472,6 +568,8 @@ function SettingsPage({ store, theme, onThemeChange, onBack }: {
     { id: 'tools', label: '工具', hint: `${toolCount} 个已注册工具` },
     { id: 'runtime', label: '运行时清单', hint: 'Provider 与 MCP' },
   ]
+
+  sections.push({ id: 'skills', label: 'Skills', hint: 'Agent 技能文件' })
 
   return <div className="settings-page">
     <header className="settings-topbar">
@@ -483,14 +581,15 @@ function SettingsPage({ store, theme, onThemeChange, onBack }: {
       <div className="settings-layout">
         <nav className="settings-nav" aria-label="设置分区">{sections.map(item => <button key={item.id} type="button" className={section === item.id ? 'selected' : ''} onClick={() => setSection(item.id)}><strong>{item.label}</strong><span>{item.hint}</span></button>)}</nav>
         <section className="settings-content" aria-live="polite">
-          {!loading && !error && config !== null && settings !== null && <SettingsControls store={store} config={config} settings={settings} onSaved={() => setReload(value => value + 1)} />}
+          {!loading && !error && config !== null && settings !== null && <SettingsControls store={store} config={{ ...config, providers }} settings={settings} onSaved={() => setReload(value => value + 1)} />}
           {loading && <div className="settings-state"><div className="spinner" />正在加载配置…</div>}
           {!loading && error && <div className="settings-state settings-error"><strong>配置读取失败</strong><span>{error}</span><button type="button" onClick={() => setReload(value => value + 1)}>重试</button></div>}
           {!loading && !error && config !== null && section === 'general' && <div className="settings-section"><h2>通用设置</h2><p className="settings-description">这些选项描述当前 Web 工作区的运行方式。</p><div className="setting-group"><h3>外观</h3><div className="appearance-options"><button type="button" className={theme === 'light' ? 'selected' : ''} onClick={() => onThemeChange('light')}><span className="appearance-swatch light-swatch" />浅色</button><button type="button" className={theme === 'dark' ? 'selected' : ''} onClick={() => onThemeChange('dark')}><span className="appearance-swatch dark-swatch" />深色</button><button type="button" className={theme === 'system' ? 'selected' : ''} onClick={() => onThemeChange('system')}><span className="appearance-swatch system-swatch" />系统</button></div></div><div className="setting-row"><div><strong>运行模式</strong><span>当前 Agent 的默认权限与行为模式</span></div><code>{configText(config, 'mode')}</code></div><div className="setting-row"><div><strong>Web 地址</strong><span>当前服务监听地址</span></div><code>{configText(config, 'web_server_addr')}</code></div><div className="setting-row"><div><strong>配置文件</strong><span>配置由服务启动时加载，Web 端只读展示</span></div><span className="readonly-badge">只读</span></div><div className="settings-note">修改配置文件或能力开关后，重启 Shutu 服务才能生效。</div></div>}
           {!loading && !error && config !== null && section === 'model' && <div className="settings-section"><h2>模型</h2><p className="settings-description">当前连接使用的模型配置。</p><article className="model-card"><div className="model-card-head"><div className="model-avatar">D</div><div><strong>DeepSeek</strong><span>{configText(config, 'llm_provider')}</span></div><span className="readonly-badge">只读</span></div><div className="model-fields"><div><span>模型 ID</span><code>{configText(config, 'model')}</code></div><div><span>API 地址</span><code>{configText(config, 'base_url', '使用默认地址')}</code></div><div><span>会话模式</span><code>{configText(config, 'mode')}</code></div></div></article><div className="settings-note">模型切换与凭据管理由服务端配置负责，当前页面不直接修改提供方。</div></div>}
           {!loading && !error && config !== null && section === 'capabilities' && <div className="settings-section"><h2>能力开关</h2><p className="settings-description">根据服务端配置自动发现的功能开关。</p><div className="capability-list">{capabilities.map(([key, value]) => <div className="capability-row" key={key}><div><strong>{CAPABILITY_LABELS[key] ?? key.replace(/_enabled$/, '')}</strong><span>{key}</span></div><span className={`capability-status ${value ? 'on' : 'off'}`}>{value ? '已启用' : '已关闭'}</span></div>)}</div></div>}
           {!loading && !error && config !== null && section === 'tools' && <div className="settings-section"><h2>工具</h2><p className="settings-description">当前注册并可供 Agent 使用的工具。</p><div className="tool-summary"><strong>{toolCount}</strong><span>个工具已启用</span></div><div className="tool-list">{tools.length > 0 ? tools.map(tool => <span className="tool-chip" key={tool}>{tool}</span>) : <span className="muted">服务端未返回工具清单。</span>}</div><div className="settings-note">工具的实际可用性还会受到对应能力开关和当前会话权限影响。</div></div>}
-          {!loading && !error && config !== null && section === 'runtime' && <div className="settings-section"><ProviderManager store={store} providers={config.providers ?? []} onSaved={() => setReload(value => value + 1)} /><McpManager store={store} servers={config.mcp_servers ?? []} onSaved={() => setReload(value => value + 1)} /></div>}
+          {!loading && !error && config !== null && section === 'runtime' && <div className="settings-section"><ProviderManager store={store} providers={providers} onSaved={() => setReload(value => value + 1)} /><McpManager store={store} servers={mcpServers} onSaved={() => setReload(value => value + 1)} /></div>}
+          {section === 'skills' && <div className="settings-section"><SkillsManager store={store} /></div>}
         </section>
       </div>
     </main>
@@ -956,6 +1055,79 @@ function InteractionPanel({ store, sessionId, onError }: { store: WebStore; sess
   return <section className="interaction-panel" aria-label="Approval requests"><div className="interaction-head"><strong>Approval required</strong><span>{items.length} pending</span></div>{items.map(item => <article className="interaction-card" key={item.id}><div className="interaction-copy"><strong>{item.tool_name || 'Agent request'}</strong><p>{item.prompt}</p>{item.args && <pre>{item.args}</pre>}</div>{item.questions?.map(question => <div className="interaction-question" key={question.id ?? question.question}><span>{question.question}</span><div>{question.options?.map(option => <button type="button" key={option.label} disabled={busy !== null} onClick={() => void resolve(item, 'approved', option.label)}>{option.label}</button>)}</div></div>)}<div className="interaction-actions"><button type="button" disabled={busy !== null} onClick={() => void resolve(item, 'approved')}>Approve</button><button type="button" disabled={busy !== null} onClick={() => void resolve(item, 'rejected')}>Reject</button><button type="button" disabled={busy !== null} onClick={() => void resolve(item, 'canceled')}>Cancel</button></div></article>)}</section>
 }
 
+function formatTokenCount(value: number): string {
+  if (!Number.isFinite(value)) return '—'
+  if (value >= 1000000) return `${(value / 1000000).toFixed(1)}M`
+  if (value >= 1000) return `${(value / 1000).toFixed(1)}k`
+  return String(Math.round(value))
+}
+
+function goalField(goal: GoalView, lower: keyof GoalView, upper: keyof GoalView): unknown {
+  return goal[lower] ?? goal[upper]
+}
+
+function GoalBar({ store, sessionId, sessionState, onUpdated, onError }: { store: WebStore; sessionId: string | null; sessionState: SessionStateView | null; onUpdated: () => void; onError: (error: unknown) => void }) {
+  const [busy, setBusy] = useState(false)
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const goals = sessionState?.goals ?? []
+  const goal = goals.find(item => !['complete', 'done'].includes(String(goalField(item, 'status', 'Status') ?? '').toLowerCase())) ?? goals[0]
+  const objective = goal === undefined ? '' : String(goalField(goal, 'objective', 'Objective') ?? goalField(goal, 'title', 'Title') ?? '')
+  const status = goal === undefined ? '' : String(goalField(goal, 'status', 'Status') ?? 'active').toLowerCase()
+  const plans = goal === undefined ? [] : (goalField(goal, 'plans', 'Plans') as string[] | undefined) ?? []
+
+  const run = async (command: string): Promise<void> => {
+    if (sessionId === null || command.trim() === '') return
+    setBusy(true); setError(null)
+    try { await store.send(command); setEditing(false); onUpdated() }
+    catch (reason) { const message = reason instanceof Error ? reason.message : String(reason); setError(message); onError(reason) }
+    finally { setBusy(false) }
+  }
+
+  if (sessionId === null || sessionState === null || (!sessionState.plan_mode && goal === undefined)) return null
+  return <div className="goal-bar" aria-label="Goal and plan controls">
+    {sessionState.plan_mode && <button type="button" className="plan-chip" disabled={busy} onClick={() => void run('/plan off')} title="Turn off plan mode">Plan <span>×</span></button>}
+    {goal !== undefined && <>
+      <span className={`goal-phase ${status}`}>{status || 'active'}</span>
+      {editing ? <><input aria-label="Goal objective" value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void run(`/goal edit ${draft.trim()}`); if (event.key === 'Escape') setEditing(false) }} autoFocus /><button type="button" disabled={busy || draft.trim() === ''} onClick={() => void run(`/goal edit ${draft.trim()}`)}>Save</button><button type="button" disabled={busy} onClick={() => setEditing(false)}>Cancel</button></> : <><span className="goal-objective" title={objective}>{objective}</span><span className="goal-count">{plans.length} plan{plans.length === 1 ? '' : 's'}</span><button type="button" disabled={busy} onClick={() => { setDraft(objective); setEditing(true) }}>Edit</button>{status === 'paused' ? <button type="button" disabled={busy} onClick={() => void run('/goal resume')}>Resume</button> : <button type="button" disabled={busy} onClick={() => void run('/goal pause')}>Pause</button>}<button type="button" disabled={busy} onClick={() => void run('/goal clear')}>Clear</button></>}
+    </>}
+    {error !== null && <span className="goal-error" role="status" title={error}>Action failed</span>}
+  </div>
+}
+
+function SessionStatusBar({ store, sessionId, onError }: { store: WebStore; sessionId: string | null; onError: (error: unknown) => void }) {
+  const [context, setContext] = useState<ContextView | null>(null)
+  const [sessionState, setSessionState] = useState<SessionStateView | null>(null)
+  const [refreshKey, setRefreshKey] = useState(0)
+
+  useEffect(() => {
+    if (sessionId === null) { setContext(null); setSessionState(null); return }
+    const abort = new AbortController()
+    const refresh = async (): Promise<void> => {
+      const [contextResult, stateResult] = await Promise.allSettled([store.getContext(sessionId, abort.signal), store.getSessionState(sessionId, abort.signal)])
+      if (abort.signal.aborted) return
+      if (contextResult.status === 'fulfilled') setContext(contextResult.value)
+      else if (!(contextResult.reason instanceof ShutuApiError && contextResult.reason.status === 404)) onError(contextResult.reason)
+      if (stateResult.status === 'fulfilled') setSessionState(stateResult.value)
+      else if (!(stateResult.reason instanceof ShutuApiError && [404, 501].includes(stateResult.reason.status))) onError(stateResult.reason)
+    }
+    void refresh()
+    const timer = window.setInterval(() => { void refresh() }, 5000)
+    return () => { abort.abort(); window.clearInterval(timer) }
+  }, [onError, refreshKey, sessionId, store])
+
+  if (sessionId === null || (context === null && sessionState === null)) return null
+  const percent = Math.max(0, Math.min(100, context?.percent ?? 0))
+  const goals = (sessionState?.goals ?? []).length + (sessionState?.plans ?? []).length
+  const memories = (sessionState?.memories ?? []).length
+  return <div className="session-status-bar" aria-label="Session status">
+    <GoalBar store={store} sessionId={sessionId} sessionState={sessionState} onUpdated={() => setRefreshKey(value => value + 1)} onError={onError} />
+    {context !== null && <div className="context-meter" title={`${formatTokenCount(context.used_tokens)} / ${formatTokenCount(context.context_window)} tokens`}><span>Context</span><div className="context-meter-track"><div style={{ width: `${percent}%` }} /></div><small>{formatTokenCount(context.used_tokens)} / {formatTokenCount(context.context_window)} · {Math.round(percent)}%</small></div>}
+    {sessionState !== null && <div className="session-state-badges"><span className={`session-badge ${sessionState.plan_mode ? 'active' : ''}`}>{sessionState.plan_mode ? 'Plan mode' : 'Normal mode'}</span>{sessionState.plan_enabled !== undefined && <span className="session-badge">Plan {sessionState.plan_enabled ? 'on' : 'off'}</span>}{goals > 0 && <span className="session-badge">{goals} plan item{goals === 1 ? '' : 's'}</span>}{sessionState.memory_enabled && <span className="session-badge">Memory {memories}</span>}</div>}
+  </div>
+}
+
 function SessionControls({ store, sessionId, onError }: { store: WebStore; sessionId: string | null; onError: (error: unknown) => void }) {
   const [config, setConfig] = useState<ConfigView | null>(null)
   const [values, setValues] = useState({ provider: '', model: '', reasoning_effort: '', permission: '' })
@@ -1126,7 +1298,7 @@ export function App({ store }: { store: WebStore }) {
     catch (error) { setSendError(error instanceof Error ? error.message : String(error)) }
   }
 
-  const downloadExport = async (): Promise<void> => {
+  const downloadExport = useCallback(async (): Promise<void> => {
     if (state.selectedId === null) return
     setSendError(null)
     try {
@@ -1140,7 +1312,26 @@ export function App({ store }: { store: WebStore }) {
       link.remove()
       URL.revokeObjectURL(url)
     } catch (error) { setSendError(error instanceof Error ? error.message : String(error)) }
-  }
+  }, [state.selectedId, store])
+
+  const exportSeenSession = useRef<string | null>(null)
+  const exportSeenSeq = useRef(0)
+  useEffect(() => {
+    if (state.selectedId === null) {
+      exportSeenSession.current = null
+      exportSeenSeq.current = 0
+      return
+    }
+    if (exportSeenSession.current !== state.selectedId) {
+      exportSeenSession.current = state.selectedId
+      exportSeenSeq.current = state.events.at(-1)?.seq ?? 0
+      return
+    }
+    const latest = state.events.at(-1)
+    if (latest === undefined || latest.seq <= exportSeenSeq.current) return
+    exportSeenSeq.current = latest.seq
+    if (latest.type === 'web/command-result' && latest.command === 'export') void downloadExport()
+  }, [downloadExport, state.events, state.selectedId])
 
   const selectCommand = (command: CommandView): void => {
     setDraft(`/${command.name} `)
@@ -1253,6 +1444,7 @@ export function App({ store }: { store: WebStore }) {
       </header>
       <nav className="tabs" role="tablist"><button role="tab" aria-selected={tab === 'chat'} className={tab === 'chat' ? 'tab selected' : 'tab'} onClick={() => setTab('chat')}>Conversation</button><button role="tab" aria-selected={tab === 'trajectory'} className={tab === 'trajectory' ? 'tab selected' : 'tab'} onClick={() => setTab('trajectory')}>Trajectory <span>{state.events.length}</span></button><button role="tab" aria-selected={tab === 'running'} className={tab === 'running' ? 'tab selected' : 'tab'} onClick={() => setTab('running')}>运行中</button></nav>
       <SessionControls store={store} sessionId={state.selectedId} onError={reportError} />
+      <SessionStatusBar store={store} sessionId={state.selectedId} onError={reportError} />
       {search.trim() !== '' && <div className="search-status" role="status" aria-live="polite">{filtered.length} matching loaded events{state.hasOlder ? ' · scroll to load older history' : ''}</div>}
       {(state.error || sendError) && <div className="error-banner"><span>{state.error || sendError}</span><button onClick={() => { setSendError(null); void store.start() }}>Retry</button></div>}
       <InteractionPanel store={store} sessionId={state.selectedId} onError={reportError} />
