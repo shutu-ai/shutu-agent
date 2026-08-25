@@ -20,6 +20,7 @@ const EMPTY: WebState = {
 export class WebStore {
   private state: WebState = EMPTY
   private readonly listeners = new Set<() => void>()
+  private readonly knownSeqs = new Set<number>()
   private streamAbort: AbortController | null = null
   private generation = 0
 
@@ -53,10 +54,12 @@ export class WebStore {
     this.streamAbort?.abort()
     const abort = new AbortController()
     this.streamAbort = abort
+    this.knownSeqs.clear()
     this.patch({ selectedId: sessionId, events: [], hasOlder: false, loading: true, connected: false, error: null })
     try {
       const page = await this.api.loadEvents(sessionId, { limit: 100 }, abort.signal)
       if (generation !== this.generation) return
+      for (const event of page.events) this.knownSeqs.add(event.seq)
       this.patch({ events: page.events, hasOlder: page.has_more, loading: false })
       void this.streamLoop(sessionId, page.last_seq ?? page.events.at(-1)?.seq ?? 0, abort, generation)
     } catch (error) {
@@ -101,9 +104,9 @@ export class WebStore {
         await this.api.stream(sessionId, cursor, abort.signal, event => {
           if (event.seq <= cursor || generation !== this.generation) return
           cursor = event.seq
-          const current = this.state.events
-          if (current.some(item => item.seq === event.seq)) return
-          this.patch({ events: [...current, event], connected: true })
+          if (this.knownSeqs.has(event.seq)) return
+          this.knownSeqs.add(event.seq)
+          this.patch({ events: [...this.state.events, event], connected: true })
         })
       } catch (error) {
         if (abort.signal.aborted) return
