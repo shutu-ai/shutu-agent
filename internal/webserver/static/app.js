@@ -99,7 +99,9 @@ let lastReasoningSeq = 0;       // seq of the last rendered reasoning delta (ste
 let reasoningRenderFrame = 0;   // coalesces Think body/summary paints to one per frame
 let reasoningScrollFrame = 0;   // coalesces the follow-tail scroll while Think streams
 const pendingReasoningNodes = new Set();
+let assistantRenderFrame = 0;   // coalesces streamed assistant text paints
 let renderedSeqs = new Set();   // event seqs rendered in the current view (replay dedup)
+let renderedSeqHeap = [];       // min-heap for bounded dedup eviction
 let feedbackBySeq = new Map();  // assistant event seq -> positive | negative
 let runningNode = null;         // "Deep diving..." element (turn-level, dsh TurnStatus)
 let runningStart = 0;           // wall clock of the running turn's start (elapsed anchor)
@@ -195,14 +197,50 @@ let webCommands = DEFAULT_WEB_COMMANDS.slice();
 // noteRendered records one rendered event seq. A Set — not a watermark — so a
 // gap event (dropped by the SSE hub) stays "not rendered" even when later
 // events advanced past it, and the post-turn reconcile can still repair it.
+// The heap keeps the same lowest-seq eviction policy without sorting the whole
+// set for every event once a long session exceeds the bound.
 const MAX_RENDERED_SEQS = 4000;
+function heapBefore(a, b) { return Number(a) < Number(b); }
+function heapPush(value) {
+  renderedSeqHeap.push(value);
+  let i = renderedSeqHeap.length - 1;
+  while (i > 0) {
+    const parent = Math.floor((i - 1) / 2);
+    if (!heapBefore(renderedSeqHeap[i], renderedSeqHeap[parent])) break;
+    [renderedSeqHeap[i], renderedSeqHeap[parent]] = [renderedSeqHeap[parent], renderedSeqHeap[i]];
+    i = parent;
+  }
+}
+function heapPop() {
+  if (!renderedSeqHeap.length) return undefined;
+  const root = renderedSeqHeap[0];
+  const last = renderedSeqHeap.pop();
+  if (renderedSeqHeap.length && last !== undefined) {
+    renderedSeqHeap[0] = last;
+    let i = 0;
+    for (;;) {
+      const left = i * 2 + 1, right = left + 1;
+      let smallest = i;
+      if (left < renderedSeqHeap.length && heapBefore(renderedSeqHeap[left], renderedSeqHeap[smallest])) smallest = left;
+      if (right < renderedSeqHeap.length && heapBefore(renderedSeqHeap[right], renderedSeqHeap[smallest])) smallest = right;
+      if (smallest === i) break;
+      [renderedSeqHeap[i], renderedSeqHeap[smallest]] = [renderedSeqHeap[smallest], renderedSeqHeap[i]];
+      i = smallest;
+    }
+  }
+  return root;
+}
+function resetRenderedSeqs() {
+  renderedSeqs.clear();
+  renderedSeqHeap = [];
+}
 function noteRendered(seq) {
-  if (seq == null) return;
+  if (seq == null || renderedSeqs.has(seq)) return;
   renderedSeqs.add(seq);
-  if (renderedSeqs.size > MAX_RENDERED_SEQS) {
-    const oldest = [...renderedSeqs].sort((a, b) => a - b);
-    const cut = oldest.length - MAX_RENDERED_SEQS;
-    for (let i = 0; i < cut; i++) renderedSeqs.delete(oldest[i]);
+  heapPush(seq);
+  while (renderedSeqs.size > MAX_RENDERED_SEQS) {
+    const oldest = heapPop();
+    if (oldest !== undefined) renderedSeqs.delete(oldest);
   }
 }
 
@@ -1202,19 +1240,44 @@ function addAssistant(text, timeIso, seq) {
   return node.querySelector(".markdown");
 }
 
-// appendAssistantStreaming: mutate the live assistant bubble with chunk text.
+// appendAssistantStreaming follows dsh's frame-based streaming presentation:
+// collect chunks as plain text and append one text node per visual frame. This
+// avoids one DOM mutation + forced scroll per provider chunk, and never needs
+// HTML escaping because text nodes are not parsed as markup.
+function flushAssistantStreaming() {
+  if (assistantRenderFrame) cancelAnimationFrame(assistantRenderFrame);
+  assistantRenderFrame = 0;
+  const state = streamState;
+  if (!state || !state.pendingChunks || !state.pendingChunks.length) return;
+  state.node.append(document.createTextNode(state.pendingChunks.join("")));
+  state.pendingChunks.length = 0;
+  scrollToBottom(true);
+}
+function scheduleAssistantStreaming() {
+  if (assistantRenderFrame) return;
+  assistantRenderFrame = requestAnimationFrame(() => {
+    assistantRenderFrame = 0;
+    const state = streamState;
+    if (!state || !state.pendingChunks || !state.pendingChunks.length) return;
+    state.node.append(document.createTextNode(state.pendingChunks.join("")));
+    state.pendingChunks.length = 0;
+    scrollToBottom(true);
+  });
+}
+
 function appendAssistantStreaming(chunk, seq) {
   let md = streamState && streamState.node;
   if (!md) {
     // The running indicator stays: it is turn-level (dsh TurnStatus) and only
     // goes away when the turn settles (sendMessage's finally).
     const node = addAssistant("", null, seq);
-    streamState = { node };
+    streamState = { node, pendingChunks: [] };
   }
-  streamState.node.append(esc(chunk));
-  scrollToBottom(true);
+  streamState.pendingChunks.push(String(chunk || ""));
+  scheduleAssistantStreaming();
 }
 function finishAssistant(text, timeIso, seq) {
+  flushAssistantStreaming();
   if (streamState && streamState.node) {
     if (text) {
       // replace accumulated DOM text with the final rendered markdown
@@ -3892,11 +3955,21 @@ function openSession(id) {
   removeRunning();
   streamActive = false;
   turnRunning = false;
-  renderedSeqs = new Set(); // per-session rendered-event dedup
+  resetRenderedSeqs(); // per-session rendered-event dedup
   feedbackBySeq = new Map();
   resetCompactionRows();
   syncSendButton();
   messagesEl.querySelector(".messages-inner")?.remove();
+  if (reasoningRenderFrame) cancelAnimationFrame(reasoningRenderFrame);
+  if (reasoningScrollFrame) cancelAnimationFrame(reasoningScrollFrame);
+  if (assistantRenderFrame) cancelAnimationFrame(assistantRenderFrame);
+  reasoningRenderFrame = 0;
+  reasoningScrollFrame = 0;
+  assistantRenderFrame = 0;
+  pendingReasoningNodes.clear();
+  currentReasoningNode = null;
+  reasoningLive = false;
+  lastReasoningSeq = 0;
   syncSessionTitle();
   toolMeta = {};
   queuedMessages = (queuedBySession.get(id) || []).slice();
@@ -3960,8 +4033,8 @@ async function loadEvents(id) {
     if (!sessionEmpty) heroEl.classList.add("hidden");
     // The SSE stream (re)connect replays the same stored events; everything
     // rendered here is deduped from the stream by rendered seq.
-    renderedSeqs = new Set();
-    for (const ev of evs) if (ev.seq != null) renderedSeqs.add(ev.seq);
+    resetRenderedSeqs();
+    for (const ev of evs) if (ev.seq != null) noteRendered(ev.seq);
     refreshContextMeter();
     scrollToBottom(true);
   } catch (e) { if (e.message !== "unauthorized") console.error(e); }
