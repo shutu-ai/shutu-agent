@@ -55,7 +55,7 @@ export class WebStore {
     const abort = new AbortController()
     this.streamAbort = abort
     this.knownSeqs.clear()
-    this.patch({ selectedId: sessionId, events: [], hasOlder: false, loading: true, connected: false, error: null })
+    this.patch({ selectedId: sessionId, events: [], hasOlder: false, loading: true, loadingOlder: false, sending: false, connected: false, error: null })
     try {
       const page = await this.api.loadEvents(sessionId, { limit: 100 }, abort.signal)
       if (generation !== this.generation) return
@@ -71,13 +71,17 @@ export class WebStore {
   async loadOlder(): Promise<void> {
     const { selectedId, events, hasOlder, loadingOlder } = this.state
     if (selectedId === null || !hasOlder || loadingOlder || events.length === 0) return
+    const generation = this.generation
+    const sessionId = selectedId
     this.patch({ loadingOlder: true })
     try {
-      const page = await this.api.loadEvents(selectedId, { beforeSeq: events[0].seq, limit: 100 })
-      const known = new Set(events.map(event => event.seq))
+      const page = await this.api.loadEvents(sessionId, { beforeSeq: events[0].seq, limit: 100 })
+      if (generation !== this.generation || sessionId !== this.state.selectedId) return
+      const known = new Set(this.state.events.map(event => event.seq))
       const older = page.events.filter(event => !known.has(event.seq))
-      this.patch({ events: [...older, ...events], hasOlder: page.has_more, loadingOlder: false })
+      this.patch({ events: [...older, ...this.state.events], hasOlder: page.has_more, loadingOlder: false })
     } catch (error) {
+      if (generation !== this.generation || sessionId !== this.state.selectedId) return
       this.patch({ loadingOlder: false, error: error instanceof Error ? error.message : String(error) })
     }
   }
