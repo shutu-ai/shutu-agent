@@ -67,6 +67,26 @@ func (r *turnReader) Next() (llm.StreamEvent, error) {
 	return ev, nil
 }
 
+// disconnectLLM holds the model request open so the web turn test can cancel
+// the originating HTTP context while the agent is still running.
+type disconnectLLM struct {
+	started chan context.Context
+	release chan struct{}
+}
+
+func (l *disconnectLLM) Stream(ctx context.Context, _ llm.ChatRequest) (llm.StreamReader, error) {
+	l.started <- ctx
+	select {
+	case <-l.release:
+		return &turnReader{events: []llm.StreamEvent{
+			{Kind: llm.StreamTextDelta, Text: "completed"},
+			{Kind: llm.StreamFinish, FinishReason: "stop"},
+		}}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 // makeTurnApp builds a minimal app able to run a real loop turn: only the
 // fields newLoop touches (cfg.Model, llm, log, reg, prompt) are set; all the
 // optional seams stay nil so preStepInjectors contributes nothing.
@@ -121,6 +141,44 @@ func TestWebMessageRunsTurn(t *testing.T) {
 		if !hasEvent(a.log, typ) {
 			t.Fatalf("log missing %s after webMessage", typ)
 		}
+	}
+}
+
+// TestWebMessageSurvivesRequestDisconnect verifies the dsh lifecycle boundary:
+// losing the browser/request connection does not cancel an active agent turn;
+// only the explicit stop endpoint cancels its turn context.
+func TestWebMessageSurvivesRequestDisconnect(t *testing.T) {
+	model := &disconnectLLM{started: make(chan context.Context, 1), release: make(chan struct{})}
+	a := makeTurnApp()
+	a.llm = model
+	a.baseCtx = context.Background()
+	a.currentID = "s-a"
+
+	requestCtx, disconnect := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- a.webMessage(requestCtx, "s-a", "continue", nil) }()
+
+	var turnCtx context.Context
+	select {
+	case turnCtx = <-model.started:
+	case <-time.After(time.Second):
+		t.Fatal("web turn did not reach the model")
+	}
+	disconnect()
+	select {
+	case <-turnCtx.Done():
+		t.Fatalf("turn context cancelled when request disconnected: %v", turnCtx.Err())
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(model.release)
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("webMessage after request disconnect: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("web turn did not settle")
 	}
 }
 

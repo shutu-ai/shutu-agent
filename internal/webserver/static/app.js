@@ -96,6 +96,9 @@ let streamState = null;         // {seq, node} for the assistant bubble being bu
 let reasoningLive = false;      // thinking deltas of the current step already streamed
 let currentReasoningNode = null; // the live Think row being accumulated
 let lastReasoningSeq = 0;       // seq of the last rendered reasoning delta (step boundary)
+let reasoningRenderFrame = 0;   // coalesces Think body/summary paints to one per frame
+let reasoningScrollFrame = 0;   // coalesces the follow-tail scroll while Think streams
+const pendingReasoningNodes = new Set();
 let renderedSeqs = new Set();   // event seqs rendered in the current view (replay dedup)
 let feedbackBySeq = new Map();  // assistant event seq -> positive | negative
 let runningNode = null;         // "Deep diving..." element (turn-level, dsh TurnStatus)
@@ -735,6 +738,42 @@ function toolSummary(name, variant, raw) {
   return s === "" ? (name || "Tool call") : s;
 }
 
+// dsh ReasoningRow throttles non-essential visual alignment while the model is
+// streaming. Keep the same contract in the Web renderer: collect deltas in
+// cheap chunks and paint the body/summary at most once per animation frame.
+// Reading body.textContent and writing it for every delta turns a long Think
+// stream into O(n²) string/layout work and can take the browser tab down.
+function flushReasoningNode(node) {
+  const text = (node._reasoningParts || []).join("");
+  node._reasoningText = text;
+  const body = node.querySelector(".dsh-think-body");
+  const summary = node.querySelector(".dsh-summary");
+  if (body && body.textContent !== text) body.textContent = text;
+  if (summary) summary.textContent = latestLine(text);
+}
+function flushReasoningRender() {
+  if (reasoningRenderFrame) cancelAnimationFrame(reasoningRenderFrame);
+  reasoningRenderFrame = 0;
+  for (const node of pendingReasoningNodes) flushReasoningNode(node);
+  pendingReasoningNodes.clear();
+}
+function scheduleReasoningRender(node) {
+  pendingReasoningNodes.add(node);
+  if (reasoningRenderFrame) return;
+  reasoningRenderFrame = requestAnimationFrame(() => {
+    reasoningRenderFrame = 0;
+    for (const pending of pendingReasoningNodes) flushReasoningNode(pending);
+    pendingReasoningNodes.clear();
+  });
+}
+function scheduleReasoningScroll() {
+  if (reasoningScrollFrame) return;
+  reasoningScrollFrame = requestAnimationFrame(() => {
+    reasoningScrollFrame = 0;
+    scrollToBottom(true);
+  });
+}
+
 // addReasoning renders (or appends to) the in-place Think disclosure row
 // (dsh ReasoningRow): while reasoning streams, the collapsed summary follows
 // the LATEST line with the running sweep; once the step settles it shows the
@@ -761,7 +800,11 @@ function addReasoning(reasoningText, timeIso, evSeq) {
       </div>
       <div class="dsh-think-body"></div>`;
     const row = node.querySelector(".dsh-row");
-    const toggle = () => { node.classList.toggle("open"); scrollToBottom(); };
+    const toggle = () => {
+      flushReasoningRender();
+      node.classList.toggle("open");
+      scrollToBottom();
+    };
     row.addEventListener("click", toggle);
     row.addEventListener("keydown", (e) => {
       if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); }
@@ -770,11 +813,11 @@ function addReasoning(reasoningText, timeIso, evSeq) {
     currentReasoningNode = node;
   }
   if (evSeq != null) lastReasoningSeq = evSeq;
-  const body = node.querySelector(".dsh-think-body");
-  body.textContent = (body.textContent || "") + reasoningText;
-  node.querySelector(".dsh-summary").textContent = latestLine(body.textContent);
+  if (!node._reasoningParts) node._reasoningParts = [];
+  node._reasoningParts.push(String(reasoningText || ""));
+  scheduleReasoningRender(node);
   node.dataset.state = "running";
-  scrollToBottom(true);
+  scheduleReasoningScroll();
 }
 
 // settleReasoning flips every open Think row to its settled look: the
@@ -782,6 +825,7 @@ function addReasoning(reasoningText, timeIso, evSeq) {
 // It settles ALL running rows so a cancelled or failed step can never leave a
 // row sweeping forever.
 function settleReasoning() {
+  flushReasoningRender();
   const inner = msgInner();
   const rows = inner.querySelectorAll(":scope > .msg.reasoning[data-state='running']");
   for (const node of rows) {
@@ -789,7 +833,7 @@ function settleReasoning() {
     const body = node.querySelector(".dsh-think-body");
     const summary = node.querySelector(".dsh-summary");
     if (summary) {
-      summary.textContent = body ? firstLine(body.textContent) : "";
+      summary.textContent = firstLine(node._reasoningText || (body ? body.textContent : ""));
       summary.removeAttribute("data-follow-end");
     }
   }

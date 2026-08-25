@@ -498,9 +498,19 @@ func (a *app) webMessage(ctx context.Context, sessionID, text string, images []l
 		}
 	}
 	// A cancellable turn context so POST /api/sessions/{id}/stop can abort this
-	// turn (dsh 停止按钮) without touching the request context (which the
-	// handler returns, cancelling it, after the turn completes).
-	turnCtx, cancel := context.WithCancel(ctx)
+	// turn (dsh 停止按钮). The turn must not inherit the HTTP request context:
+	// dsh keeps the agent turn alive when the chat tab disconnects or crashes,
+	// and the explicit stop endpoint is the cancellation boundary. Keep the
+	// process context so application shutdown still cancels active work, and
+	// re-apply the Web approval marker because the request context is detached.
+	turnBase := a.baseCtx
+	if turnBase == nil {
+		// Tests and embedders may not install the process context. WithoutCancel
+		// preserves context values while dropping the request's cancellation.
+		turnBase = context.WithoutCancel(ctx)
+	}
+	turnBase = withWebApprovalContext(turnBase)
+	turnCtx, cancel := context.WithCancel(turnBase)
 	a.setTurnCancel(cancel)
 	defer func() { a.clearTurnCancel(); cancel() }()
 	if err := a.runTurn(turnCtx, text, false); err != nil {
@@ -508,21 +518,21 @@ func (a *app) webMessage(ctx context.Context, sessionID, text string, images []l
 	}
 	// Keep Web and REPL turn completion identical: persist long-term memories
 	// before title/goal continuation runs.
-	a.spillAutoSpill(ctx)
+	a.spillAutoSpill(turnCtx)
 	// session-title alignment (dsh): after the first eligible message, the
 	// deterministic fallback is stored and the asynchronous model title is
 	// scheduled. This runs after the turn, outside turnMu, so it never delays
 	// the answer.
-	a.ensureSessionTitle(ctx, sessionID)
+	a.ensureSessionTitle(turnCtx, sessionID)
 	// Goal driver idle/followup: the outer web turn has settled, so each
 	// continuation round can acquire the shared turn lock independently.
-	if err := a.runIdleGoal(ctx, false); err != nil {
+	if err := a.runIdleGoal(turnCtx, false); err != nil {
 		return err
 	}
 	// dsh-session-status: keep this session out of the finished-but-unviewed
 	// reminder while the user is on it (the turn above bumped updated_at past
 	// the previous view, so this restores last_viewed_at >= updated_at).
-	a.markSessionViewed(ctx, sessionID)
+	a.markSessionViewed(turnCtx, sessionID)
 	return nil
 }
 
