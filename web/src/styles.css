@@ -60,8 +60,9 @@ h1 { max-width: 52vw; margin: 0; overflow: hidden; color: #f1f5fa; font-size: 20
 .dsh-conversation-header { display: flex; align-items: center; gap: 12px; margin: 0 0 12px; border: 1px solid #243244; border-radius: 10px; padding: 9px 12px; color: #7f8da3; background: #0f1823; font-size: 11px; }
 .dsh-conversation-header strong { color: #d6e1ed; font-size: 12px; }
 .conversation-running { margin-left: auto; color: #a9e8c1; }
-.dsh-conversation-list { display: grid; gap: 10px; }
-.conversation-node { content-visibility: auto; contain-intrinsic-size: 132px; }
+.dsh-conversation-canvas { position: relative; min-height: 100%; }
+.conversation-virtual-row { position: absolute; top: 0; right: 0; left: 0; height: 164px; padding-bottom: 10px; }
+.conversation-node { content-visibility: auto; contain-intrinsic-size: 154px; }
 .conversation-node-head { display: flex; gap: 8px; padding: 0 8px 4px; color: #6f8095; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; }
 .conversation-node-head span:last-child { margin-left: auto; color: #536277; font-variant-numeric: tabular-nums; }
 .conversation-node.user .event-line { background: #6bb6e8; }

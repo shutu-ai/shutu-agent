@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { EventDetails, EventView } from './api'
 import { projectDshConversation, type DshConversationNode, type DshConversationSnapshot } from './dsh-conversation'
 import { projectDshTrajectory, type DshTimelineMode } from './dsh-trajectory'
@@ -6,6 +6,7 @@ import { WebStore } from './store'
 import './styles.css'
 
 const ROW_HEIGHT = 132
+const CONVERSATION_ROW_HEIGHT = 164
 
 function eventLabel(event: EventView): string {
   if (event.tool_name) return event.tool_name
@@ -68,16 +69,28 @@ function EventCard({ event }: { event: EventView }) {
   )
 }
 
-function DshTimeline({ events }: { events: readonly EventView[] }) {
+function DshTimeline({ events, onSelectSeq }: {
+  events: readonly EventView[]
+  onSelectSeq: (seq: number) => void
+}) {
   const [mode, setMode] = useState<DshTimelineMode>('sequence')
   const [selected, setSelected] = useState<number | null>(null)
-  const { timeline } = useMemo(() => projectDshTrajectory(events, mode), [events, mode])
+  const projection = useMemo(() => projectDshTrajectory(events, mode), [events, mode])
+  const { timeline } = projection
+  const sourceSeqByIndex = useMemo(() => new Map(
+    projection.turns.flatMap(turn => turn.groups.flatMap(group =>
+      group.cells.map(cell => [cell.index, cell.sourceSeq] as const))),
+  ), [projection.turns])
   if (timeline === null) return null
   const span = Math.max(1, timeline.end - timeline.start)
   return <section className="dsh-timeline" aria-label="Trajectory timeline">
     <div className="timeline-head"><div><strong>Timeline</strong><span>{timeline.spans.length} records</span></div><select aria-label="Timeline mode" value={mode} onChange={event => { setMode(event.target.value as DshTimelineMode); setSelected(null) }}><option value="sequence">Sequence</option><option value="duration">Duration</option><option value="time">Recorded time</option><option value="actual">Actual time</option></select></div>
     <div className="timeline-track">
-      {timeline.spans.map(item => <button key={`${item.index}-${item.start}`} className={`timeline-span lane-${item.lane} ${item.isError ? 'error' : ''} ${selected === item.index ? 'selected' : ''}`} style={{ left: `${((item.start - timeline.start) / span) * 100}%`, width: `${Math.max(1.2, ((item.end - item.start) / span) * 100)}%` }} title={item.label || item.kind} aria-label={`${item.kind} ${item.label || item.index}`} onClick={() => setSelected(item.index)} />)}
+      {timeline.spans.map(item => <button key={`${item.index}-${item.start}`} className={`timeline-span lane-${item.lane} ${item.isError ? 'error' : ''} ${selected === item.index ? 'selected' : ''}`} style={{ left: `${((item.start - timeline.start) / span) * 100}%`, width: `${Math.max(1.2, ((item.end - item.start) / span) * 100)}%` }} title={item.label || item.kind} aria-label={`${item.kind} ${item.label || item.index}`} onClick={() => {
+        setSelected(item.index)
+        const seq = sourceSeqByIndex.get(item.index)
+        if (seq !== undefined) onSelectSeq(seq)
+      }} />)}
     </div>
     <div className="timeline-legend"><span><i className="lane-dot lane-0" />Model</span><span><i className="lane-dot lane-1" />Assistant</span><span><i className="lane-dot lane-2" />Tools</span>{selected !== null && <span className="timeline-selected">Record #{selected}</span>}</div>
   </section>
@@ -103,16 +116,46 @@ function DshConversation({ events, sessionId, onReachTop, loadingOlder }: {
 }) {
   const snapshot = useMemo(() => projectDshConversation(events, sessionId), [events, sessionId])
   const eventBySeq = useMemo(() => new Map(events.map(event => [event.seq, event])), [events])
-  return <div className="dsh-conversation-scroll" onScroll={event => {
-    if (event.currentTarget.scrollTop < 100) onReachTop()
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const previousLength = useRef(snapshot.nodes.length)
+  const previousFirstSeq = useRef(snapshot.nodes[0]?.seq)
+  const [scrollTop, setScrollTop] = useState(0)
+  const [viewportHeight, setViewportHeight] = useState(640)
+  const overscan = 6
+  const start = Math.max(0, Math.floor(scrollTop / CONVERSATION_ROW_HEIGHT) - overscan)
+  const end = Math.min(snapshot.nodes.length, Math.ceil((scrollTop + viewportHeight) / CONVERSATION_ROW_HEIGHT) + overscan)
+  const visible = snapshot.nodes.slice(start, end)
+
+  useEffect(() => {
+    const onResize = () => setViewportHeight(Math.max(320, window.innerHeight - 230))
+    onResize()
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+
+  useLayoutEffect(() => {
+    const prepended = snapshot.nodes.length > previousLength.current && snapshot.nodes[0]?.seq !== previousFirstSeq.current
+    if (prepended && scrollRef.current !== null) {
+      const nextTop = scrollRef.current.scrollTop + (snapshot.nodes.length - previousLength.current) * CONVERSATION_ROW_HEIGHT
+      scrollRef.current.scrollTop = nextTop
+      setScrollTop(nextTop)
+    }
+    previousLength.current = snapshot.nodes.length
+    previousFirstSeq.current = snapshot.nodes[0]?.seq
+  }, [snapshot.nodes])
+
+  return <div ref={scrollRef} className="dsh-conversation-scroll" onScroll={event => {
+    const top = event.currentTarget.scrollTop
+    setScrollTop(top)
+    if (top < 100) onReachTop()
   }}>
     <DshConversationHeader snapshot={snapshot} />
     {loadingOlder && <div className="history-loading">Loading earlier events…</div>}
-    <div className="dsh-conversation-list">
-      {snapshot.nodes.map(node => {
+    <div className="dsh-conversation-canvas" style={{ height: snapshot.nodes.length * CONVERSATION_ROW_HEIGHT }}>
+      {visible.map((node, index) => {
         const raw = eventBySeq.get(node.seq)
         if (raw === undefined) return null
-        return <section className={`conversation-node ${node.kind}`} key={`${node.kind}:${node.seq}`}>
+        return <section className={`conversation-node conversation-virtual-row ${node.kind}`} key={`${node.kind}:${node.seq}`} style={{ transform: `translateY(${(start + index) * CONVERSATION_ROW_HEIGHT}px)` }}>
           <div className="conversation-node-head"><span>{conversationNodeLabel(node)}</span><span>#{node.seq}</span></div>
           <EventCard event={raw} />
         </section>
@@ -131,11 +174,15 @@ function DshConversationHeader({ snapshot }: { snapshot: DshConversationSnapshot
   </div>
 }
 
-function VirtualEvents({ events, onReachTop, loadingOlder }: {
+function VirtualEvents({ events, onReachTop, loadingOlder, focusSeq }: {
   events: readonly EventView[]
   onReachTop: () => void
   loadingOlder: boolean
+  focusSeq: number | null
 }) {
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const previousLength = useRef(events.length)
+  const previousFirstSeq = useRef(events[0]?.seq)
   const [scrollTop, setScrollTop] = useState(0)
   const [viewportHeight, setViewportHeight] = useState(640)
   const overscan = 8
@@ -150,7 +197,27 @@ function VirtualEvents({ events, onReachTop, loadingOlder }: {
     return () => window.removeEventListener('resize', onResize)
   }, [])
 
-  return <div className="event-scroll" onScroll={event => {
+  useEffect(() => {
+    if (focusSeq === null) return
+    const index = events.findIndex(event => event.seq === focusSeq)
+    if (index < 0 || scrollRef.current === null) return
+    const nextTop = Math.max(0, index * ROW_HEIGHT - viewportHeight / 3)
+    scrollRef.current.scrollTo({ top: nextTop, behavior: 'smooth' })
+    setScrollTop(nextTop)
+  }, [events, focusSeq, viewportHeight])
+
+  useLayoutEffect(() => {
+    const prepended = events.length > previousLength.current && events[0]?.seq !== previousFirstSeq.current
+    if (prepended && scrollRef.current !== null) {
+      const nextTop = scrollRef.current.scrollTop + (events.length - previousLength.current) * ROW_HEIGHT
+      scrollRef.current.scrollTop = nextTop
+      setScrollTop(nextTop)
+    }
+    previousLength.current = events.length
+    previousFirstSeq.current = events[0]?.seq
+  }, [events])
+
+  return <div ref={scrollRef} className="event-scroll" onScroll={event => {
     const top = event.currentTarget.scrollTop
     setScrollTop(top)
     if (top < 100) onReachTop()
@@ -176,6 +243,7 @@ export function App({ store }: { store: WebStore }) {
   const [draft, setDraft] = useState('')
   const [search, setSearch] = useState('')
   const [sendError, setSendError] = useState<string | null>(null)
+  const [focusedSeq, setFocusedSeq] = useState<number | null>(null)
   const [token, setToken] = useState(() => store.getToken())
   const selected = state.sessions.find(session => session.id === state.selectedId)
   const filtered = useMemo(() => {
@@ -236,7 +304,7 @@ export function App({ store }: { store: WebStore }) {
       <nav className="tabs" role="tablist"><button role="tab" aria-selected={tab === 'chat'} className={tab === 'chat' ? 'tab selected' : 'tab'} onClick={() => setTab('chat')}>Conversation</button><button role="tab" aria-selected={tab === 'trajectory'} className={tab === 'trajectory' ? 'tab selected' : 'tab'} onClick={() => setTab('trajectory')}>Trajectory <span>{state.events.length}</span></button></nav>
       {(state.error || sendError) && <div className="error-banner"><span>{state.error || sendError}</span><button onClick={() => { setSendError(null); void store.start() }}>Retry</button></div>}
       <section className="content-panel">
-        {state.authRequired ? <form className="auth-card" onSubmit={event => { event.preventDefault(); void authenticate() }}><strong>Authentication required</strong><span>Enter the bearer token configured for the Shutu web server.</span><input aria-label="Bearer token" type="password" autoComplete="current-password" value={token} onChange={event => setToken(event.target.value)} placeholder="Bearer token" /><button type="submit" disabled={token.trim() === ''}>Connect</button></form> : state.loading ? <div className="empty"><div className="spinner" />Loading session…</div> : state.selectedId === null ? <div className="empty"><strong>Start a new conversation</strong><span>Select a session or send a message from the agent.</span></div> : filtered.length === 0 ? <div className="empty"><strong>{search ? 'No matching events' : 'No events yet'}</strong><span>{search ? 'Try a different search term.' : 'Events will appear here as the session runs.'}</span></div> : tab === 'trajectory' ? <><DshTimeline events={filtered} /><VirtualEvents events={filtered} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} /></> : <DshConversation events={filtered} sessionId={state.selectedId} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} />}
+        {state.authRequired ? <form className="auth-card" onSubmit={event => { event.preventDefault(); void authenticate() }}><strong>Authentication required</strong><span>Enter the bearer token configured for the Shutu web server.</span><input aria-label="Bearer token" type="password" autoComplete="current-password" value={token} onChange={event => setToken(event.target.value)} placeholder="Bearer token" /><button type="submit" disabled={token.trim() === ''}>Connect</button></form> : state.loading ? <div className="empty"><div className="spinner" />Loading session…</div> : state.selectedId === null ? <div className="empty"><strong>Start a new conversation</strong><span>Select a session or send a message from the agent.</span></div> : filtered.length === 0 ? <div className="empty"><strong>{search ? 'No matching events' : 'No events yet'}</strong><span>{search ? 'Try a different search term.' : 'Events will appear here as the session runs.'}</span></div> : tab === 'trajectory' ? <><DshTimeline events={filtered} onSelectSeq={setFocusedSeq} /><VirtualEvents events={filtered} focusSeq={focusedSeq} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} /></> : <DshConversation events={filtered} sessionId={state.selectedId} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} />}
       </section>
       <form className="composer" onSubmit={event => { event.preventDefault(); if (state.sending) void stopRun(); else void submit() }}><textarea value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); if (!state.sending) void submit() } }} placeholder={state.sending ? 'Agent is running…' : 'Send a message…'} rows={2} /><button type="submit" disabled={state.selectedId === null || (!state.sending && draft.trim() === '')}>{state.sending ? 'Stop' : 'Send'} <span>{state.sending ? '■' : '↵'}</span></button></form>
     </main>
