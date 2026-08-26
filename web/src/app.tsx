@@ -922,6 +922,12 @@ function conversationNodeLabel(node: DshConversationNode): string {
   }
 }
 
+function HistoryBoundary({ hasOlder, loading, error, onRetry }: { hasOlder: boolean; loading: boolean; error: string | null; onRetry: () => void }) {
+  if (loading) return <div className="history-boundary loading" role="status" aria-live="polite">Loading earlier history…</div>
+  if (error !== null) return <div className="history-boundary error" role="alert"><span>Unable to load earlier history: {error}</span><button type="button" onClick={onRetry}>Retry</button></div>
+  return <div className="history-boundary" role="status" aria-live="polite">{hasOlder ? 'Scroll to load earlier history' : 'Start of history'}</div>
+}
+
 function DshConversation({ events, sessionId, store, feedbackBySeq, producedBySeq, onFeedback, onCopy, onRetry, onFork, onOpenFile, onReachTop, loadingOlder }: {
   events: readonly EventView[]
   sessionId: string
@@ -936,6 +942,7 @@ function DshConversation({ events, sessionId, store, feedbackBySeq, producedBySe
   onReachTop: () => void
   loadingOlder: boolean
 }) {
+  const webState = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
   const snapshot = useMemo(() => projectDshConversation(events, sessionId), [events, sessionId])
   const fallbackProducedBySeq = useMemo(() => deriveProducedFiles(events), [events])
   const visibleProducedBySeq = producedBySeq ?? fallbackProducedBySeq
@@ -962,7 +969,7 @@ function DshConversation({ events, sessionId, store, feedbackBySeq, producedBySe
     if (top < 100) onReachTop()
   }}>
     <DshConversationHeader snapshot={snapshot} />
-    {loadingOlder && <div className="history-loading">Loading earlier events…</div>}
+    <HistoryBoundary hasOlder={webState.hasOlder} loading={loadingOlder} error={webState.historyError} onRetry={() => void store.loadOlder()} />
     <div className="dsh-conversation-canvas" style={{ height: offsets[offsets.length - 1] ?? 0 }}>
       {visible.map((node, index) => {
         const raw = eventBySeq.get(node.seq)
@@ -1005,6 +1012,7 @@ function VirtualEvents({ events, store, sessionId, feedbackBySeq, producedBySeq,
   timelineFocusSeqs: ReadonlySet<number>
   onSelectSeq: (seq: number) => void
 }) {
+  const webState = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
   const scrollRef = useRef<HTMLDivElement>(null)
   const [collapsed, setCollapsed] = useState(false)
   const [collapsedAssistants, setCollapsedAssistants] = useState<ReadonlySet<number>>(new Set())
@@ -1061,7 +1069,7 @@ function VirtualEvents({ events, store, sessionId, feedbackBySeq, producedBySeq,
     if (top < 100) onReachTop()
   }}>
     <div className="trajectory-toolbar"><button type="button" className="text-button" onClick={() => setCollapsed(value => !value)} aria-label={collapsed ? 'Expand turns' : 'Collapse turns'}>{collapsed ? 'Expand turns' : 'Collapse turns'}</button><button type="button" className="text-button" onClick={toggleAllAssistantCalls} disabled={assistantToolCallSeqs.size === 0} aria-label={allAssistantCallsCollapsed ? 'Expand tool calls' : 'Collapse tool calls'}>{allAssistantCallsCollapsed ? 'Expand calls' : 'Collapse calls'}</button><span>{collapsed ? `${displayEvents.length} compact records` : `${displayEvents.length} records`}</span></div>
-    {loadingOlder && <div className="history-loading">Loading earlier events…</div>}
+    <HistoryBoundary hasOlder={webState.hasOlder} loading={loadingOlder} error={webState.historyError} onRetry={() => void store.loadOlder()} />
     <div className="virtual-canvas" style={{ height: offsets[offsets.length - 1] ?? 0 }}>
       {visible.map((event, index) => {
         const key = String(event.seq)
