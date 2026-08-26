@@ -13,6 +13,7 @@ data/
 # 构建产物
 bin/
 dist/
+release/
 pa.exe
 
 # 日志
