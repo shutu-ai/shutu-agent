@@ -893,6 +893,7 @@ function DshTimeline({ events, onSelectSeq, onSelectSeqs }: {
   const [mode, setMode] = useState<DshTimelineMode>('sequence')
   const [selected, setSelected] = useState<number | null>(null)
   const [selectedRange, setSelectedRange] = useState<{ start: number; end: number } | null>(null)
+  const [dragAnchor, setDragAnchor] = useState<number | null>(null)
   const projection = useMemo(() => projectDshTrajectory(events, mode), [events, mode])
   const { timeline } = projection
   const sourceSeqByIndex = useMemo(() => new Map(
@@ -901,22 +902,31 @@ function DshTimeline({ events, onSelectSeq, onSelectSeqs }: {
   ), [projection.turns])
   if (timeline === null) return null
   const span = Math.max(1, timeline.end - timeline.start)
+  const selectRange = (index: number, extend: boolean): void => {
+    const anchor = dragAnchor ?? selectedRange?.start ?? index
+    const nextRange = extend
+      ? { start: Math.min(anchor, index), end: Math.max(anchor, index) }
+      : { start: index, end: index }
+    setSelected(index)
+    setSelectedRange(nextRange)
+    const seqs = timeline.spans.filter(spanItem => spanItem.index >= nextRange.start && spanItem.index <= nextRange.end).map(spanItem => sourceSeqByIndex.get(spanItem.index)).filter((seq): seq is number => seq !== undefined)
+    const seq = sourceSeqByIndex.get(index)
+    if (seq !== undefined) onSelectSeq(seq)
+    onSelectSeqs?.(seqs)
+  }
+  const clearSelection = (): void => {
+    setSelected(null)
+    setSelectedRange(null)
+    setDragAnchor(null)
+    onSelectSeqs?.([])
+  }
   return <section className="dsh-timeline" aria-label="Trajectory timeline">
-    <div className="timeline-head"><div><strong>Timeline</strong><span>{timeline.spans.length} records</span></div><select aria-label="Timeline mode" value={mode} onChange={event => { setMode(event.target.value as DshTimelineMode); setSelected(null); setSelectedRange(null); onSelectSeqs?.([]) }}><option value="sequence">Sequence</option><option value="duration">Duration</option><option value="time">Recorded time</option><option value="actual">Actual time</option></select></div>
+    <div className="timeline-head"><div><strong>Timeline</strong><span>{timeline.spans.length} records</span></div><div className="timeline-controls"><select aria-label="Timeline mode" value={mode} onChange={event => { setMode(event.target.value as DshTimelineMode); clearSelection() }}><option value="sequence">Sequence</option><option value="duration">Duration</option><option value="time">Recorded time</option><option value="actual">Actual time</option></select>{selectedRange !== null && <button type="button" className="text-button" onClick={clearSelection}>Clear selection</button>}</div></div>
     <div className="timeline-track">
-      {timeline.spans.map(item => <button key={`${item.index}-${item.start}`} className={`timeline-span lane-${item.lane} ${item.isError ? 'error' : ''} ${selectedRange !== null && item.index >= selectedRange.start && item.index <= selectedRange.end ? 'selected' : ''}`} style={{ left: `${((item.start - timeline.start) / span) * 100}%`, width: `${Math.max(1.2, ((item.end - item.start) / span) * 100)}%` }} title={item.label || item.kind} aria-label={`${item.kind} ${item.label || item.index}`} onClick={click => {
-        const nextRange = click.shiftKey && selectedRange !== null
-          ? { start: Math.min(selectedRange.start, item.index), end: Math.max(selectedRange.end, item.index) }
-          : { start: item.index, end: item.index }
-        setSelected(item.index)
-        setSelectedRange(nextRange)
-        const seq = sourceSeqByIndex.get(item.index)
-        if (seq !== undefined) onSelectSeq(seq)
-        const seqs = timeline.spans.filter(spanItem => spanItem.index >= nextRange.start && spanItem.index <= nextRange.end).map(spanItem => sourceSeqByIndex.get(spanItem.index)).filter((seq): seq is number => seq !== undefined)
-        onSelectSeqs?.(seqs)
-      }} />)}
+      {timeline.turnBoundaries.map(boundary => <div className="timeline-boundary" key={`${boundary.turn}-${boundary.time}`} style={{ left: `${((boundary.time - timeline.start) / span) * 100}%` }}><span>Turn {boundary.turn}</span></div>)}
+      {timeline.spans.map(item => <button key={`${item.index}-${item.start}`} className={`timeline-span lane-${item.lane} ${item.isError ? 'error' : ''} ${selectedRange !== null && item.index >= selectedRange.start && item.index <= selectedRange.end ? 'selected' : ''}`} style={{ left: `${((item.start - timeline.start) / span) * 100}%`, width: `${Math.max(1.2, ((item.end - item.start) / span) * 100)}%` }} title={item.label || item.kind} aria-label={`${item.kind} ${item.label || item.index}`} onPointerDown={pointer => { setDragAnchor(item.index); selectRange(item.index, pointer.shiftKey) }} onPointerEnter={() => { if (dragAnchor !== null) selectRange(item.index, true) }} onPointerUp={() => setDragAnchor(null)} onPointerCancel={() => setDragAnchor(null)} onClick={click => selectRange(item.index, click.shiftKey)} />)}
     </div>
-    <div className="timeline-legend"><span><i className="lane-dot lane-0" />Model</span><span><i className="lane-dot lane-1" />Assistant</span><span><i className="lane-dot lane-2" />Tools</span>{selected !== null && <span className="timeline-selected">{selectedRange?.start === selectedRange?.end ? `Record #${selected}` : `Records #${selectedRange?.start}–${selectedRange?.end}`}</span>}</div>
+    <div className="timeline-axis"><span>{timeline.start}</span><span>{timeline.end}</span></div><div className="timeline-legend"><span><i className="lane-dot lane-0" />Model</span><span><i className="lane-dot lane-1" />Assistant</span><span><i className="lane-dot lane-2" />Tools</span>{selected !== null && <span className="timeline-selected">{selectedRange?.start === selectedRange?.end ? `Record #${selected}` : `Records #${selectedRange?.start}–${selectedRange?.end}`}</span>}</div>
   </section>
 }
 

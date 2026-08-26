@@ -95,7 +95,10 @@ h1 { max-width: 52vw; margin: 0; overflow: hidden; color: #f1f5fa; font-size: 20
 .timeline-head div { display: flex; align-items: baseline; gap: 8px; }
 .timeline-head strong { color: #d6e1ed; font-size: 12px; }
 .timeline-head select { border: 1px solid #2a384a; border-radius: 5px; padding: 3px 6px; color: #aebdcd; background: #14202d; font-size: 10px; }
-.timeline-track { position: relative; height: 22px; overflow: hidden; border-radius: 5px; background: repeating-linear-gradient(90deg, #162330 0, #162330 calc(20% - 1px), #253547 20%); }
+.timeline-controls { display: flex !important; align-items: center; gap: 8px; }
+.timeline-track { position: relative; height: 22px; overflow: visible; border-radius: 5px; background: repeating-linear-gradient(90deg, #162330 0, #162330 calc(20% - 1px), #253547 20%); }
+.timeline-boundary { position: absolute; z-index: 0; top: -4px; bottom: -4px; width: 1px; background: #62758a99; pointer-events: none; }
+.timeline-boundary span { position: absolute; top: -14px; left: 3px; white-space: nowrap; color: #64758a; font-size: 9px; }
 .timeline-span { position: absolute; top: 4px; height: 14px; min-width: 3px; border: 0; border-radius: 3px; opacity: .88; }
 .timeline-span:hover, .timeline-span.selected { z-index: 1; outline: 2px solid #e7f8ed; opacity: 1; }
 .timeline-span.lane-0, .lane-dot.lane-0 { background: #7596b8; }
@@ -103,6 +106,7 @@ h1 { max-width: 52vw; margin: 0; overflow: hidden; color: #f1f5fa; font-size: 20
 .timeline-span.lane-2, .lane-dot.lane-2 { background: #e6b26e; }
 .timeline-span.error { background: #ef7d71; }
 .timeline-legend { margin-top: 7px; }
+.timeline-axis { display: flex; justify-content: space-between; margin-top: 5px; color: #53657a; font-size: 9px; }
 .timeline-legend span { display: inline-flex; align-items: center; gap: 4px; }
 .lane-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; }
 .timeline-selected { margin-left: auto; color: #a9e8c1; }
