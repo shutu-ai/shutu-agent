@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { EventView } from './api'
-import { collapseDshAssistantToolCalls, collapseDshTrajectoryTurns, projectDshTrajectory, projectDshTrajectoryRecords, type DshTrajectoryEvent } from './dsh-trajectory'
+import { collapseDshAssistantToolCalls, collapseDshTrajectoryTurns, projectDshTrajectory, projectDshTrajectoryRecords, summarizeDshTimeline, type DshTrajectoryEvent } from './dsh-trajectory'
 
 const event = (seq: number, type: string, summary: string, details?: Record<string, unknown>): EventView => ({
   seq, type, version: 1, time: `2026-08-25T00:00:0${seq}Z`, summary, ...(details ? { details } : {}),
@@ -81,6 +81,17 @@ describe('DSH trajectory adapter', () => {
     expect(records[0]?.kind).toBe('unknown')
     expect(records[0]?.startedAt).toBeNull()
     expect(records[0]?.text).toBe('opaque')
+  })
+
+  it('summarizes duration, idle gaps, missing and reversed timestamps', () => {
+    const metrics = summarizeDshTimeline([
+      { ...event(1, 'assistant/message', 'one', { duration_ms: 25 }), time: '2026-08-25T00:00:02Z' },
+      { ...event(2, 'tool/result', 'two'), time: '2026-08-25T00:00:01Z' },
+      { ...event(3, 'assistant/message', 'three'), time: 'bad-time' },
+      { ...event(4, 'assistant/message', 'four'), time: '2026-08-25T00:00:10Z' },
+    ])
+
+    expect(metrics).toMatchObject({ durationMs: 25, idleMs: 9000, timestampedEvents: 3, missingTimestamps: 1, reversedTimestamps: true })
   })
 
   it('merges uncommitted assistant chunks into one stable live record', () => {

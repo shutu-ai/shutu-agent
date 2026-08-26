@@ -9,6 +9,14 @@ export interface DshTrajectoryProjection {
   timeline: DshTimelineModel | null
 }
 
+export interface DshTimelineMetrics {
+  readonly durationMs: number
+  readonly idleMs: number
+  readonly timestampedEvents: number
+  readonly missingTimestamps: number
+  readonly reversedTimestamps: boolean
+}
+
 export type DshTrajectoryRecordKind =
   | 'turn'
   | 'step'
@@ -62,6 +70,34 @@ export interface DshTrajectoryEvent extends EventView {
   collapsedToolCount?: number
   collapsedToolNames?: readonly string[]
   streaming?: boolean
+}
+
+/** Summarize timing facts independently of display mode and input ordering. */
+export function summarizeDshTimeline(events: readonly EventView[]): DshTimelineMetrics {
+  let durationMs = 0
+  let missingTimestamps = 0
+  let previousTimestamp: number | null = null
+  let reversedTimestamps = false
+  const timestamps: number[] = []
+  for (const event of events) {
+    const duration = event.details?.duration_ms ?? event.details?.durationMs
+    if (typeof duration === 'number' && Number.isFinite(duration)) durationMs += Math.max(0, duration)
+    const timestamp = Date.parse(event.time)
+    if (!Number.isFinite(timestamp)) {
+      missingTimestamps += 1
+      continue
+    }
+    if (previousTimestamp !== null && timestamp < previousTimestamp) reversedTimestamps = true
+    previousTimestamp = timestamp
+    timestamps.push(timestamp)
+  }
+  timestamps.sort((left, right) => left - right)
+  let idleMs = 0
+  for (let index = 1; index < timestamps.length; index += 1) {
+    const gap = timestamps[index]! - timestamps[index - 1]!
+    if (gap > 0) idleMs += gap
+  }
+  return { durationMs, idleMs, timestampedEvents: timestamps.length, missingTimestamps, reversedTimestamps }
 }
 
 function isStructuralEvent(event: EventView): boolean {

@@ -125,7 +125,7 @@ async function runDesktop(browser) {
   await page.getByRole('button', { name: 'Expand turns' }).waitFor()
   const after = await page.locator('.virtual-row').count()
   assert.ok(after < before, `turn collapse did not reduce mounted rows: ${before} -> ${after}`)
-  const search = page.getByRole('textbox', { name: 'Search trajectory' })
+  const search = page.getByRole('textbox', { name: 'Search trajectory records' })
   await search.fill('matched file 19')
   assert.equal(await page.locator('.virtual-row').count(), 1, 'structured event details were not searchable')
   assert.equal(await page.locator('.timeline-span').count(), 14, 'search should not truncate the full trajectory timeline')

@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useDeferredValue, useEffect, us
 import type { AttachmentView, CommandView, ConfigView, ContextView, DirectoryListing, EventDetails, EventView, FeedbackView, GoalView, ImageView, InteractionView, JobView, MCPServerView, PlanView, ProviderModelView, ProviderView, QueueItem, RunningSnapshot, SessionSearchHit, SessionStateView, SessionSummary, SettingsView, SkillView, SkillsView, SubagentView, TodoView, WorkspaceView } from './api'
 import { ShutuApiError } from './api'
 import { projectDshConversation, type DshConversationNode, type DshConversationSnapshot } from './dsh-conversation'
-import { collapseDshAssistantToolCalls, collapseDshTrajectoryTurns, projectDshTrajectory, projectDshTrajectoryRecords, type DshTimelineMode, type DshTrajectoryEvent, type DshTrajectoryRecord } from './dsh-trajectory'
+import { collapseDshAssistantToolCalls, collapseDshTrajectoryTurns, projectDshTrajectory, projectDshTrajectoryRecords, summarizeDshTimeline, type DshTimelineMode, type DshTrajectoryEvent, type DshTrajectoryRecord } from './dsh-trajectory'
 import { deriveProducedFiles } from './produced-files'
 import { WebStore } from './store'
 import { TrajectorySearchIndex } from './trajectory-search'
@@ -15,12 +15,14 @@ const TrajectorySearchContext = createContext('')
 interface TrajectoryToolbarState {
   mode: DshTimelineMode
   searchQuery: string
+  selectedSeq: number | null
   onModeChange: (mode: DshTimelineMode) => void
   onSearchQueryChange: (query: string) => void
   onReset: () => void
+  onClearSelection: () => void
 }
 const TrajectoryToolbarContext = createContext<TrajectoryToolbarState>({
-  mode: 'sequence', searchQuery: '', onModeChange: () => undefined, onSearchQueryChange: () => undefined, onReset: () => undefined,
+  mode: 'sequence', searchQuery: '', selectedSeq: null, onModeChange: () => undefined, onSearchQueryChange: () => undefined, onReset: () => undefined, onClearSelection: () => undefined,
 })
 
 function useMeasuredVirtualRows(keys: readonly string[], estimate: number, scrollRef: { current: HTMLDivElement | null }) {
@@ -100,6 +102,19 @@ function formatTime(value: string): string {
   return Number.isNaN(date.valueOf()) ? value : date.toLocaleString(undefined, {
     month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit',
   })
+}
+
+function formatDurationMs(value: number): string {
+  if (!Number.isFinite(value) || value < 0) return '—'
+  if (value < 1000) return `${Math.round(value)} ms`
+  if (value < 60_000) return `${(value / 1000).toFixed(1)} s`
+  return `${Math.floor(value / 60_000)}m ${Math.round((value % 60_000) / 1000)}s`
+}
+
+function formatTimelineAxis(value: number, mode: DshTimelineMode): string {
+  if (mode === 'sequence') return `#${Math.round(value)}`
+  if (mode === 'time' || mode === 'actual') return Number.isFinite(value) ? new Date(value).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—'
+  return formatDurationMs(value)
 }
 
 function relativeTime(value: string, now = Date.now()): string {
@@ -981,23 +996,39 @@ function TrajectoryInspector({ event, record, records, onClose, onRetryRequest, 
   </aside>
 }
 
-function DshTimeline({ events, mode, onSelectSeq, onSelectSeqs }: {
+function DshTimeline({ events, mode, selectedSeq, onSelectSeq, onSelectSeqs }: {
   events: readonly EventView[]
   mode?: DshTimelineMode
+  selectedSeq?: number | null
   onSelectSeq: (seq: number) => void
   onSelectSeqs?: (seqs: readonly number[]) => void
 }) {
   const toolbar = useContext(TrajectoryToolbarContext)
   const effectiveMode = mode ?? toolbar.mode
+  const effectiveSelectedSeq = selectedSeq === undefined ? toolbar.selectedSeq : selectedSeq
   const [selected, setSelected] = useState<number | null>(null)
   const [selectedRange, setSelectedRange] = useState<{ start: number; end: number } | null>(null)
   const [dragAnchor, setDragAnchor] = useState<number | null>(null)
   const projection = useMemo(() => projectDshTrajectory(events, effectiveMode), [effectiveMode, events])
-  const { timeline } = projection
+  const { timeline: derivedTimeline } = projection
+  const timeline = derivedTimeline ?? projectDshTrajectory(events, 'sequence').timeline
+  const displayMode = derivedTimeline === null ? 'sequence' : effectiveMode
+  const metrics = useMemo(() => summarizeDshTimeline(events), [events])
   const sourceSeqByIndex = useMemo(() => new Map(
     projection.turns.flatMap(turn => turn.groups.flatMap(group =>
       group.cells.map(cell => [cell.index, cell.sourceSeq] as const))),
   ), [projection.turns])
+  useEffect(() => {
+    if (effectiveSelectedSeq === null || effectiveSelectedSeq === undefined) {
+      setSelected(null)
+      setSelectedRange(null)
+      return
+    }
+    const index = [...sourceSeqByIndex.entries()].find(([, seq]) => seq === effectiveSelectedSeq)?.[0]
+    if (index === undefined) return
+    setSelected(index)
+    setSelectedRange({ start: index, end: index })
+  }, [effectiveSelectedSeq, sourceSeqByIndex])
   if (timeline === null) return null
   const span = Math.max(1, timeline.end - timeline.start)
   const selectRange = (index: number, extend: boolean): void => {
@@ -1017,14 +1048,15 @@ function DshTimeline({ events, mode, onSelectSeq, onSelectSeqs }: {
     setSelectedRange(null)
     setDragAnchor(null)
     onSelectSeqs?.([])
+    toolbar.onClearSelection()
   }
   return <section className="dsh-timeline" aria-label="Trajectory timeline">
-    <div className="timeline-head"><div><strong>Timeline</strong><span>{timeline.spans.length} records</span></div><div className="timeline-controls">{selectedRange !== null && <button type="button" className="text-button" onClick={clearSelection}>Clear selection</button>}</div></div>
+    <div className="timeline-head"><div><strong>Timeline</strong><span>{timeline.spans.length} records</span><span className="timeline-metrics">duration {formatDurationMs(metrics.durationMs)} · idle {formatDurationMs(metrics.idleMs)}</span></div><div className="timeline-controls">{selectedRange !== null && <button type="button" className="text-button" onClick={clearSelection}>Clear selection</button>}</div></div>
     <div className="timeline-track">
       {timeline.turnBoundaries.map(boundary => <div className="timeline-boundary" key={`${boundary.turn}-${boundary.time}`} style={{ left: `${((boundary.time - timeline.start) / span) * 100}%` }}><span>Turn {boundary.turn}</span></div>)}
-      {timeline.spans.map(item => <button key={`${item.index}-${item.start}`} className={`timeline-span lane-${item.lane} ${item.isError ? 'error' : ''} ${selectedRange !== null && item.index >= selectedRange.start && item.index <= selectedRange.end ? 'selected' : ''}`} style={{ left: `${((item.start - timeline.start) / span) * 100}%`, width: `${Math.max(1.2, ((item.end - item.start) / span) * 100)}%` }} title={item.label || item.kind} aria-label={`${item.kind} ${item.label || item.index}`} onPointerDown={pointer => { setDragAnchor(item.index); selectRange(item.index, pointer.shiftKey) }} onPointerEnter={() => { if (dragAnchor !== null) selectRange(item.index, true) }} onPointerUp={() => setDragAnchor(null)} onPointerCancel={() => setDragAnchor(null)} onClick={click => selectRange(item.index, click.shiftKey)} />)}
+      {timeline.spans.map(item => <button key={`${item.index}-${item.start}`} className={`timeline-span lane-${item.lane} ${item.isError ? 'error' : ''} ${selectedRange !== null && item.index >= selectedRange.start && item.index <= selectedRange.end ? 'selected' : ''}`} style={{ left: `${((item.start - timeline.start) / span) * 100}%`, width: `${Math.max(1.2, ((item.end - item.start) / span) * 100)}%` }} title={item.label || item.kind} aria-label={`${item.kind} ${item.label || item.index}`} onPointerDown={pointer => { setDragAnchor(item.index); selectRange(item.index, pointer.shiftKey) }} onPointerEnter={() => { if (dragAnchor !== null) selectRange(item.index, true) }} onPointerUp={() => setDragAnchor(null)} onPointerCancel={() => setDragAnchor(null)} onKeyDown={keyboardEvent => { if (keyboardEvent.key === 'Escape') { keyboardEvent.preventDefault(); clearSelection() } else if (keyboardEvent.key === 'ArrowLeft' || keyboardEvent.key === 'ArrowRight') { keyboardEvent.preventDefault(); const offset = keyboardEvent.key === 'ArrowLeft' ? -1 : 1; const next = Math.max(1, Math.min(timeline.spans.length, item.index + offset)); selectRange(next, keyboardEvent.shiftKey) } }} onClick={click => selectRange(item.index, click.shiftKey)} />)}
     </div>
-    <div className="timeline-axis"><span>{timeline.start}</span><span>{timeline.end}</span></div><div className="timeline-legend"><span><i className="lane-dot lane-0" />Model</span><span><i className="lane-dot lane-1" />Assistant</span><span><i className="lane-dot lane-2" />Tools</span>{selected !== null && <span className="timeline-selected">{selectedRange?.start === selectedRange?.end ? `Record #${selected}` : `Records #${selectedRange?.start}–${selectedRange?.end}`}</span>}</div>
+    <div className="timeline-axis"><span>{formatTimelineAxis(timeline.start, displayMode)}</span><span>{formatTimelineAxis(timeline.end, displayMode)}</span></div><div className="timeline-legend"><span><i className="lane-dot lane-0" />Model</span><span><i className="lane-dot lane-1" />Assistant</span><span><i className="lane-dot lane-2" />Tools</span>{metrics.missingTimestamps > 0 && <span className="timeline-warning" title="Some events have invalid timestamps">{metrics.missingTimestamps} missing timestamps</span>}{metrics.reversedTimestamps && <span className="timeline-warning" title="Input timestamps were normalized for timeline metrics">reversed time normalized</span>}{selected !== null && <span className="timeline-selected">{selectedRange?.start === selectedRange?.end ? `Record #${selected}` : `Records #${selectedRange?.start}–${selectedRange?.end}`}</span>}</div>
   </section>
 }
 
@@ -1610,13 +1642,16 @@ export function App({ store }: { store: WebStore }) {
   const cancelTrajectoryRequest = useCallback((): void => {
     void store.stop().catch(reportError)
   }, [reportError, store])
-  const resetTrajectoryToolbar = useCallback((): void => {
-    setSearch('')
-    setTrajectoryMode('sequence')
+  const clearTrajectorySelection = useCallback((): void => {
     setFocusedSeq(null)
     setTrajectorySelectedSeq(null)
     setTrajectoryFocusSeqs(new Set())
   }, [])
+  const resetTrajectoryToolbar = useCallback((): void => {
+    setSearch('')
+    setTrajectoryMode('sequence')
+    clearTrajectorySelection()
+  }, [clearTrajectorySelection])
   const producedBySeq = useMemo(() => deriveProducedFiles(state.events), [state.events])
   const searchIndex = useMemo(() => new TrajectorySearchIndex(state.events), [state.events])
   const searchMatches = useMemo(() => searchIndex.search(search), [search, searchIndex])
@@ -1874,7 +1909,7 @@ export function App({ store }: { store: WebStore }) {
 
   return <div className="shell">
     <SessionBrowser sessions={state.sessions} workspaces={state.workspaces} selectedId={state.selectedId} store={store} onError={error => setSendError(error instanceof Error ? error.message : String(error))} onSettings={() => setSettingsRoute(true)} />
-    <TrajectorySearchContext.Provider value={deferredSearch}><TrajectoryToolbarContext.Provider value={{ mode: trajectoryMode, searchQuery: search, onModeChange: setTrajectoryMode, onSearchQueryChange: setSearch, onReset: resetTrajectoryToolbar }}><main className="main-panel">
+    <TrajectorySearchContext.Provider value={deferredSearch}><TrajectoryToolbarContext.Provider value={{ mode: trajectoryMode, searchQuery: search, selectedSeq: trajectorySelectedSeq, onModeChange: setTrajectoryMode, onSearchQueryChange: setSearch, onReset: resetTrajectoryToolbar, onClearSelection: clearTrajectorySelection }}><main className="main-panel">
       <header className="topbar">
         <button type="button" className="export-toggle" onClick={() => void downloadExport()} disabled={state.selectedId === null}>Export</button>
         <div><h1>{selected?.title || (state.selectedId ? state.selectedId : 'Conversation')}</h1><div className="status-line"><span className={state.connected ? 'status-dot online' : 'status-dot'} />{state.connected ? 'Live' : 'Reconnecting'}</div></div>
