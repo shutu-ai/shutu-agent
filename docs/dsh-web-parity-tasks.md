@@ -52,6 +52,8 @@
 - [ ] P36-5.2：完成发送、重试、取消、队列、steer、审批、问题、计划和目标操作。
 - [x] P36-5.2a：补齐 DSH `goals/*` Remote 命名空间到 Shutu goal 引擎的参数解包与操作映射，覆盖 create/edit/pause/resume/complete/clear。
 - [x] P36-5.2b：接入 DSH `approval/requested`/`question/requested` mux 下行、稳定 rpcId 重放和 `POST /api/respond`，回答结果回写同一 interact 引擎并广播 resolved。
+- [x] P36-5.2c：在 native mux 订阅基线下发 DSH `session/queue` 快照，并将队列消息转换为 user content/source/placement 结构。
+- [x] P36-5.2d：在 native mux 订阅基线下发已有后台任务的 DSH `session/jobs` 快照，统一 camelCase 字段与毫秒时间戳。
 - [ ] P36-5.3：完成 Tool 折叠、请求详情、Trajectory、搜索、历史分页和滚动定位。
 - [ ] P36-5.4：完成子代理、后台任务、技能、文件引用、附件、模型、权限、Provider 和设置。
 - [x] P36-5.4a：原生 Remote 接入 `fileReferences/list` 与 `sessionReferenceResolver/candidates`，返回受会话 CWD 限制的文件候选和 canonical `dsh-session:` 引用。

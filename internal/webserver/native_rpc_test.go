@@ -148,6 +148,42 @@ func TestNativePendingInteractionFrameUsesDSHQuestionShape(t *testing.T) {
 	}
 }
 
+func TestNativeQueueAndJobsFramesUseDSHShapes(t *testing.T) {
+	queue := nativeQueueFrame("s1", []QueueItem{
+		{ID: "q-1", Text: "queued prompt", Placement: "queued"},
+		{ID: "q-2", Text: "steered prompt", Placement: "steering"},
+		{ID: "", Text: "discarded"},
+	})
+	if queue["type"] != "session/queue" || queue["sessionId"] != "s1" {
+		t.Fatalf("queue frame metadata = %#v", queue)
+	}
+	items, ok := queue["items"].([]map[string]any)
+	if !ok || len(items) != 2 {
+		t.Fatalf("queue frame items = %#v", queue["items"])
+	}
+	message, ok := items[0]["message"].(map[string]any)
+	if !ok || message["role"] != "user" || message["id"] != "q-1" {
+		t.Fatalf("queue message = %#v", items[0]["message"])
+	}
+	source := message["source"].(map[string]any)
+	if source["kind"] != "user" || source["rpcId"] != "q-1" {
+		t.Fatalf("queue source = %#v", source)
+	}
+
+	started := time.UnixMilli(1234).UTC()
+	finished := time.UnixMilli(5678).UTC()
+	jobs := nativeJobViews([]map[string]any{{
+		"id": "job-1", "kind": "bash", "label": "build", "status": "running",
+		"started_at": started, "finished_at": &finished, "detail": "done",
+	}})
+	if len(jobs) != 1 || jobs[0]["startedAt"] != int64(1234) || jobs[0]["finishedAt"] != int64(5678) {
+		t.Fatalf("native jobs = %#v", jobs)
+	}
+	if _, snake := jobs[0]["started_at"]; snake {
+		t.Fatalf("native jobs retained snake_case timestamp: %#v", jobs[0])
+	}
+}
+
 type nativeCommandTestManager struct {
 	list    []NativeCommand
 	execute func(context.Context, string, string, []llm.ImageRef) (NativeCommandExecution, bool, error)
@@ -1741,6 +1777,15 @@ func TestNativeLLMCatalogUsesSanitizedConfig(t *testing.T) {
 func TestNativeMuxWebSocketSendsSubscriptionBaseline(t *testing.T) {
 	srv, st := newTestServer(t, "tok")
 	seedSession(t, st, "native-ws", nil)
+	srv.SetQueueManager(func(context.Context, string) ([]QueueItem, error) {
+		return []QueueItem{{ID: "q-1", Text: "queued prompt", Placement: "queued"}}, nil
+	}, nil, nil)
+	srv.SetJobsProvider(func(context.Context, string) ([]map[string]any, error) {
+		return []map[string]any{{
+			"id": "job-1", "kind": "bash", "label": "build", "status": "running",
+			"started_at": time.UnixMilli(1234).UTC(),
+		}}, nil
+	})
 	var emit func(session.Event)
 	registered := make(chan struct{})
 	srv.SetEventSource(func(_ string, callback func(session.Event)) func() {
@@ -1789,6 +1834,40 @@ func TestNativeMuxWebSocketSendsSubscriptionBaseline(t *testing.T) {
 	}
 	if envelope.Payload.Type != "session/subscribed" || envelope.Payload.SessionID != "native-ws" || envelope.Payload.LastSeq != -1 {
 		t.Fatalf("subscription frame = %s", frame)
+	}
+	queueFrame, err := readNativeTextFrame(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var queueEnvelope struct {
+		Payload struct {
+			Type      string           `json:"type"`
+			SessionID string           `json:"sessionId"`
+			Items     []map[string]any `json:"items"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal(queueFrame, &queueEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	if queueEnvelope.Payload.Type != "session/queue" || queueEnvelope.Payload.SessionID != "native-ws" || len(queueEnvelope.Payload.Items) != 1 {
+		t.Fatalf("queue baseline frame = %s", queueFrame)
+	}
+	jobFrame, err := readNativeTextFrame(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var jobEnvelope struct {
+		Payload struct {
+			Type      string           `json:"type"`
+			SessionID string           `json:"sessionId"`
+			Jobs      []map[string]any `json:"jobs"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal(jobFrame, &jobEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	if jobEnvelope.Payload.Type != "session/jobs" || jobEnvelope.Payload.SessionID != "native-ws" || len(jobEnvelope.Payload.Jobs) != 1 || jobEnvelope.Payload.Jobs[0]["startedAt"] != float64(1234) {
+		t.Fatalf("jobs baseline frame = %s", jobFrame)
 	}
 	select {
 	case <-registered:

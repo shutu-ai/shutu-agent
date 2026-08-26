@@ -3676,6 +3676,18 @@ func (s *Server) handleNativeMuxWebSocket(w http.ResponseWriter, r *http.Request
 				}
 			}
 		}
+		if s.queueListFn != nil {
+			if items, listErr := s.queueListFn(ctx, meta.ID); listErr == nil {
+				_ = writeWithID("session/queue", nativeQueueFrame(meta.ID, items), nativeRPCID())
+			}
+		}
+		if s.jobsFn != nil {
+			if jobs, listErr := s.jobsFn(ctx, meta.ID); listErr == nil && len(jobs) > 0 {
+				_ = writeWithID("session/jobs", map[string]any{
+					"type": "session/jobs", "sessionId": meta.ID, "jobs": nativeJobViews(jobs),
+				}, nativeRPCID())
+			}
+		}
 		unsubs = append(unsubs, s.evSrc(meta.ID, func(ev session.Event) {
 			projectionMu.Lock()
 			projected := projection.project(meta.ID, ev)
@@ -3967,6 +3979,74 @@ func nativePendingInteractionFrame(sessionID string, item interact.Request) (str
 		payload["reason"] = item.Prompt
 	}
 	return "approval/requested", payload, item.ID, "approval", true
+}
+
+// nativeQueueFrame converts Shutu's process-local queue items to DSH's
+// message-shaped session/queue projection. QueueItem intentionally stays small
+// for the legacy REST surface; the native adapter supplies the DSH source and
+// content blocks here instead of leaking that shape into the generic server.
+func nativeQueueFrame(sessionID string, items []QueueItem) map[string]any {
+	view := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		if strings.TrimSpace(item.ID) == "" {
+			continue
+		}
+		placement := item.Placement
+		switch placement {
+		case "queued", "steering", "context":
+		default:
+			placement = "queued"
+		}
+		view = append(view, map[string]any{
+			"id":        item.ID,
+			"placement": placement,
+			"message": map[string]any{
+				"id":      item.ID,
+				"role":    "user",
+				"content": []map[string]any{{"type": "text", "text": item.Text}},
+				"source":  map[string]any{"kind": "user", "rpcId": item.ID},
+			},
+		})
+	}
+	return map[string]any{"type": "session/queue", "sessionId": sessionID, "items": view}
+}
+
+// nativeJobViews converts the existing sanitized job view to DSH's camelCase
+// and millisecond timestamp contract. The generic jobs provider is also used
+// by the legacy REST API, so the conversion belongs only at this wire edge.
+func nativeJobViews(jobs []map[string]any) []map[string]any {
+	view := make([]map[string]any, 0, len(jobs))
+	for _, job := range jobs {
+		item := make(map[string]any, len(job))
+		for key, value := range job {
+			switch key {
+			case "started_at":
+				item["startedAt"] = nativeJobTimestamp(value)
+			case "finished_at":
+				item["finishedAt"] = nativeJobTimestamp(value)
+			case "startedAt", "finishedAt":
+				item[key] = nativeJobTimestamp(value)
+			default:
+				item[key] = value
+			}
+		}
+		view = append(view, item)
+	}
+	return view
+}
+
+func nativeJobTimestamp(value any) any {
+	switch timestamp := value.(type) {
+	case time.Time:
+		return timestamp.UnixMilli()
+	case *time.Time:
+		if timestamp == nil {
+			return nil
+		}
+		return timestamp.UnixMilli()
+	default:
+		return value
+	}
 }
 
 func nativeInteractionFrame(sessionID string, ev session.Event) (string, any, string, string, bool) {
