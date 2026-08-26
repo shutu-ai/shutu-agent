@@ -96,6 +96,25 @@ func seedSession(t *testing.T, st *store.SQLiteStore, id string, events []sessio
 	}
 }
 
+func TestSessionExportHeadMatchesDownloadHeadersWithoutBody(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	seedSession(t, st, "export-head", []session.Event{{
+		Seq: 1, Type: session.EventUserMessage, At: time.UnixMilli(1000), Version: session.EventVersion,
+		Data: json.RawMessage(`{"text":"hello"}`),
+	}})
+	rec := doReq(t, srv.Handler(), http.MethodHead, "/api/session.export?sessionId=export-head", "tok")
+	if rec.Code != http.StatusOK || rec.Body.Len() != 0 {
+		t.Fatalf("HEAD export = %d body=%d", rec.Code, rec.Body.Len())
+	}
+	if rec.Header().Get("Content-Type") != "application/zip" || rec.Header().Get("Content-Disposition") == "" || rec.Header().Get("Content-Length") == "" {
+		t.Fatalf("HEAD export headers = %#v", rec.Header())
+	}
+	get := doReq(t, srv.Handler(), http.MethodGet, "/api/session.export?sessionId=export-head", "tok")
+	if get.Code != http.StatusOK || get.Body.Len() == 0 || get.Header().Get("Content-Length") != rec.Header().Get("Content-Length") {
+		t.Fatalf("GET export = %d body=%d headers=%#v", get.Code, get.Body.Len(), get.Header())
+	}
+}
+
 func TestNewValidation(t *testing.T) {
 	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "t.db"))
 	if err != nil {

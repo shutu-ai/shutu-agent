@@ -385,6 +385,7 @@ func New(st store.Store, token, addr string) (*Server, error) {
 	// dsh /export compatibility: the browser downloads the current Session log
 	// as a ZIP and keeps the command outside model history.
 	mux.Handle("GET /api/session.export", s.requireAuth(http.HandlerFunc(s.handleSessionExport)))
+	mux.Handle("HEAD /api/session.export", s.requireAuth(http.HandlerFunc(s.handleSessionExport)))
 	mux.Handle("GET /api/sessions/{id}/feedback", s.requireAuth(http.HandlerFunc(s.handleFeedbackList)))
 	mux.Handle("PUT /api/sessions/{id}/feedback/{seq}", s.requireAuth(http.HandlerFunc(s.handleFeedbackPut)))
 	mux.Handle("DELETE /api/sessions/{id}/feedback/{seq}", s.requireAuth(http.HandlerFunc(s.handleFeedbackDelete)))
@@ -1626,7 +1627,11 @@ func (s *Server) handleSessionExport(w http.ResponseWriter, r *http.Request) {
 	}, id) + ".zip"
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+	w.Header().Set("Content-Length", strconv.Itoa(buf.Len()))
 	w.WriteHeader(http.StatusOK)
+	if r.Method == http.MethodHead {
+		return
+	}
 	_, _ = w.Write(buf.Bytes())
 }
 
