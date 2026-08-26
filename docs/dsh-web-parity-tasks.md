@@ -155,6 +155,7 @@
 - [x] 实现 DSH client connection 所需的 RPC 请求/响应和错误协议；新增 `client-request` / `server-response` envelope、`rpcId` 回显和结构化错误。
 - [x] 接入核心会话/工作区方法：`host.describe`、`session.list/search/create/history/rename/prompt/cancel`、`workspace.list`。
 - [x] 实现 `/api/events.mux`、`/api/events.host` 的 downlink-only WebSocket 升级和 session subscription/event frame。
+- [x] native bundle 自带 `client-modules` bootstrap，并在入口安装最小 `__ModuleLoader__` / `__DSH_BOOT__` graph。
 - [ ] 实现会话、工作区、设置、模型、权限、文件、附件、命令、技能、队列、审批和导出接口。
 - [ ] 补齐 host downlink 事件、连接状态、断线重连、续传，以及剩余设置/模型/权限/文件/附件/命令/技能/队列/审批/导出接口。
 - [x] 已建立 Go handler、核心契约测试和 WebSocket subscription baseline 测试；replay fixture 与完整协议覆盖留待后续补齐。

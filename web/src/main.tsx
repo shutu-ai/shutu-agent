@@ -2,13 +2,14 @@ import { createRoot } from 'react-dom/client'
 import { Context } from '@deepseek-ai/cordis'
 import { ShutuApi } from './api'
 import { App } from './app'
-import { isDshNativeBuild, mountDshNativeApp } from './dsh-native-entry'
+import { installDshNativeBoot, isDshNativeBuild, mountDshNativeApp } from './dsh-native-entry'
 import { WebStore } from './store'
 
 const root = document.getElementById('root')
 if (root === null) throw new Error('shutu web: missing #root')
 
 if (isDshNativeBuild()) {
+  installDshNativeBoot()
   void mountDshNativeApp(root).catch((error: unknown) => {
     const message = error instanceof Error ? error.message : String(error)
     root.replaceChildren(Object.assign(document.createElement('pre'), { textContent: message }))
