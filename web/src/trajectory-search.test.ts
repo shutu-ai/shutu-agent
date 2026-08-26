@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { EventView } from './api'
-import { eventSearchText, filterEventSearch, matchesEventSearch } from './trajectory-search'
+import { eventSearchText, filterEventSearch, matchesEventSearch, TrajectorySearchIndex } from './trajectory-search'
 
 const baseEvent = (seq: number, extra: Partial<EventView> = {}): EventView => ({
   seq, type: 'tool/result', version: 1, time: '2026-08-26T10:00:00Z', summary: 'completed', ...extra,
@@ -23,5 +23,14 @@ describe('trajectory search projection', () => {
     const events = [baseEvent(1, { summary: 'alpha' }), baseEvent(2, { summary: 'beta' })]
     expect(filterEventSearch(events, 'BETA').map(event => event.seq)).toEqual([2])
     expect(filterEventSearch(events, '')).toBe(events)
+  })
+
+  it('returns matching fields and a bounded result snippet', () => {
+    const event = baseEvent(3, { summary: 'prefix '.repeat(20) + 'needle' })
+    const result = new TrajectorySearchIndex([event]).search('needle')[0]
+    expect(result?.event).toBe(event)
+    expect(result?.fields).toContain('summary')
+    expect(result?.snippet).toContain('needle')
+    expect(result?.snippet.length).toBeLessThan(140)
   })
 })

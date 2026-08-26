@@ -89,6 +89,8 @@ h1 { max-width: 52vw; margin: 0; overflow: hidden; color: #f1f5fa; font-size: 20
 .tab.selected { border-bottom-color: #9de9bd; color: #e8f7ee; }
 .tab span { margin-left: 5px; color: #718096; font-size: 11px; }
 .search-status { padding: 7px 38px 0; color: #748197; font-size: 11px; }
+.search-status mark { border-radius: 2px; padding: 0 2px; color: #102019; background: #9de9bd; }
+.search-match-preview { color: #64758a; }
 .dsh-timeline { margin: 0 9px 13px 18px; border: 1px solid #243244; border-radius: 10px; padding: 10px 12px 8px; background: #0f1823; }
 .timeline-head, .timeline-legend { display: flex; align-items: center; gap: 12px; color: #78879b; font-size: 10px; }
 .timeline-head { justify-content: space-between; margin-bottom: 9px; }
