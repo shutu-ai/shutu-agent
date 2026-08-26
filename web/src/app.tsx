@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent } from 'react'
-import type { AttachmentView, CommandView, ConfigView, ContextView, DirectoryListing, EventDetails, EventView, FeedbackView, GoalView, ImageView, InteractionView, JobView, MCPServerView, ProviderModelView, ProviderView, QueueItem, RunningSnapshot, SessionSearchHit, SessionStateView, SessionSummary, SettingsView, SkillView, SkillsView, SubagentView, WorkspaceView } from './api'
+import type { AttachmentView, CommandView, ConfigView, ContextView, DirectoryListing, EventDetails, EventView, FeedbackView, GoalView, ImageView, InteractionView, JobView, MCPServerView, PlanView, ProviderModelView, ProviderView, QueueItem, RunningSnapshot, SessionSearchHit, SessionStateView, SessionSummary, SettingsView, SkillView, SkillsView, SubagentView, TodoView, WorkspaceView } from './api'
 import { ShutuApiError } from './api'
 import { projectDshConversation, type DshConversationNode, type DshConversationSnapshot } from './dsh-conversation'
 import { projectDshTrajectory, type DshTimelineMode } from './dsh-trajectory'
@@ -615,12 +615,16 @@ function parentFilePath(path: string): string {
   return parts.join('/')
 }
 
-function FilesPanel({ store, sessionId, onClose, onReference }: {
+function FilesPanel({ store, sessionId, onClose, onReference, openPath }: {
   store: WebStore
   sessionId: string
   onClose: () => void
   onReference: (path: string) => void
+  openPath?: string | null
 }) {
+  // The openPath prop is intentionally read by the effect below rather than
+  // changing the listing directory: a produced file can be outside the
+  // currently browsed folder, while its preview remains a useful destination.
   const [path, setPath] = useState('')
   const [query, setQuery] = useState('')
   const [listing, setListing] = useState<Awaited<ReturnType<WebStore['listFiles']>> | null>(null)
@@ -648,6 +652,19 @@ function FilesPanel({ store, sessionId, onClose, onReference }: {
     try { setPreview(await store.previewFile(sessionId, filePath)) }
     catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)) }
   }
+
+  useEffect(() => {
+    if (!openPath) return
+    const abort = new AbortController()
+    setPreview(null)
+    setError(null)
+    void store.previewFile(sessionId, openPath, undefined, undefined, abort.signal).then(value => {
+      if (!abort.signal.aborted) setPreview(value)
+    }).catch(reason => {
+      if (!abort.signal.aborted) setError(reason instanceof Error ? reason.message : String(reason))
+    })
+    return () => abort.abort()
+  }, [openPath, sessionId, store])
 
   return <section className="files-panel" aria-label="Workspace files">
     <div className="files-panel-head"><div><span className="eyebrow">WORKSPACE FILES</span><h2>Files</h2><p>{listing?.root || 'Session workspace'}</p></div><button type="button" className="settings-close" onClick={onClose} aria-label="Close files">×</button></div>
@@ -696,6 +713,22 @@ function ProducedFiles({ paths, onOpenFile }: { paths: readonly string[]; onOpen
   return <div className="produced-files" aria-label="Produced files"><span>Produced</span><div>{visible.map(path => <button type="button" key={path} title={path} onClick={() => onOpenFile?.(path)}>{basename(path)}</button>)}{paths.length > visible.length && <small>+{paths.length - visible.length} more</small>}</div></div>
 }
 
+function RichText({ text }: { text: string }) {
+  const blocks = text.split(/(```[^\n]*\n[\s\S]*?```)/g).filter(Boolean)
+  return <div className="rich-text">{blocks.map((block, index) => {
+    if (block.startsWith('```')) {
+      const firstLineEnd = block.indexOf('\n')
+      const language = firstLineEnd > 0 ? block.slice(3, firstLineEnd).trim() : ''
+      const content = block.slice(firstLineEnd + 1, block.endsWith('```') ? -3 : undefined)
+      return <pre className="rich-code" data-language={language || undefined} key={`${index}:${language}`}><code>{content}</code></pre>
+    }
+    return block.split(/\n{2,}/).map((paragraph, paragraphIndex) => {
+      const lines = paragraph.split('\n')
+      return <p key={`${index}:${paragraphIndex}`}>{lines.map((line, lineIndex) => <span key={`${lineIndex}:${line}`}>{line}{lineIndex < lines.length - 1 && <br />}</span>)}</p>
+    })
+  })}</div>
+}
+
 function EventCard({ event, store, sessionId, feedback, producedPaths = [], onFeedback, onCopy, onRetry, onFork, onOpenFile }: { event: EventView; store: WebStore; sessionId: string; feedback?: FeedbackView; producedPaths?: readonly string[]; onFeedback: (seq: number, rating: 'positive' | 'negative') => void; onCopy?: (text: string) => void; onRetry?: (text: string) => void; onFork?: () => void; onOpenFile?: (path: string) => void }) {
   const [expanded, setExpanded] = useState(false)
   const text = event.tool_output || event.reasoning || event.summary || event.compaction_summary || 'No content'
@@ -716,7 +749,7 @@ function EventCard({ event, store, sessionId, feedback, producedPaths = [], onFe
       </div>
       <div className="event-content">
         {event.call_id && <span className="call-id">call {event.call_id}</span>}
-        <div className="event-text">{text}</div>
+        <RichText text={text} />
         {event.type === 'assistant/message' && <div className="event-actions message-actions" aria-label="Message actions"><button type="button" onClick={() => onCopy ? onCopy(text) : void navigator.clipboard?.writeText(text)}>Copy</button><button type="button" onClick={() => onRetry ? onRetry(text) : void store.send(text)}>Retry</button><button type="button" onClick={() => onFork ? onFork() : void store.forkSession(sessionId)}>Fork</button></div>}
         {event.images && event.images.length > 0 && <EventImages store={store} sessionId={sessionId} images={event.images} />}
         {event.type === 'assistant/message' && <ProducedFiles paths={producedPaths} onOpenFile={onOpenFile} />}
@@ -1083,6 +1116,45 @@ function goalField(goal: GoalView, lower: keyof GoalView, upper: keyof GoalView)
   return goal[lower] ?? goal[upper]
 }
 
+function planField(item: PlanView | TodoView, lower: string, upper: string): unknown {
+  const value = item as Record<string, unknown>
+  return value[lower] ?? value[upper]
+}
+
+function planStatus(status: unknown): string {
+  return String(status ?? 'pending').toLowerCase()
+}
+
+function PlanDetails({ goal, plans }: { goal?: GoalView; plans: readonly PlanView[] }) {
+  if (plans.length === 0) return null
+  const rawGoalPlanIds = goal === undefined ? undefined : goalField(goal, 'plans', 'Plans')
+  const goalPlanIds = new Set(Array.isArray(rawGoalPlanIds) ? rawGoalPlanIds.map(String) : [])
+  const visible = goalPlanIds.size === 0 ? plans : plans.filter(plan => goalPlanIds.has(String(planField(plan, 'id', 'ID'))))
+  if (visible.length === 0) return null
+  return <details className="plan-details" open>
+    <summary>Plan details <span>{visible.length}</span></summary>
+    <div className="plan-tree">
+      {visible.map((plan, planIndex) => {
+        const planId = String(planField(plan, 'id', 'ID') ?? `plan-${planIndex + 1}`)
+        const title = String(planField(plan, 'title', 'Title') ?? planId)
+        const status = planStatus(planField(plan, 'status', 'Status'))
+        const rawSteps = planField(plan, 'steps', 'Steps')
+        const steps = Array.isArray(rawSteps) ? rawSteps as TodoView[] : []
+        return <article className="plan-card" key={planId}>
+          <div className="plan-card-head"><span className={`plan-status ${status}`}>{status}</span><strong title={title}>{title}</strong><small>{steps.length} step{steps.length === 1 ? '' : 's'}</small></div>
+          {steps.length > 0 && <ol className="plan-step-list">{steps.map((step, stepIndex) => {
+            const stepId = String(planField(step, 'id', 'ID') ?? `${planId}-${stepIndex + 1}`)
+            const stepTitle = String(planField(step, 'title', 'Title') ?? stepId)
+            const stepStatus = planStatus(planField(step, 'status', 'Status'))
+            const details = planField(step, 'details', 'Details')
+            return <li className={`plan-step ${stepStatus}`} key={stepId}><span className="plan-step-marker" aria-hidden="true">{stepStatus === 'done' ? '✓' : stepIndex + 1}</span><div><strong title={stepTitle}>{stepTitle}</strong>{typeof details === 'string' && details !== '' && <small>{details}</small>}</div><span className="plan-step-status">{stepStatus}</span></li>
+          })}</ol>}
+        </article>
+      })}
+    </div>
+  </details>
+}
+
 function GoalBar({ store, sessionId, sessionState, onUpdated, onError }: { store: WebStore; sessionId: string | null; sessionState: SessionStateView | null; onUpdated: () => void; onError: (error: unknown) => void }) {
   const [busy, setBusy] = useState(false)
   const [editing, setEditing] = useState(false)
@@ -1093,6 +1165,7 @@ function GoalBar({ store, sessionId, sessionState, onUpdated, onError }: { store
   const objective = goal === undefined ? '' : String(goalField(goal, 'objective', 'Objective') ?? goalField(goal, 'title', 'Title') ?? '')
   const status = goal === undefined ? '' : String(goalField(goal, 'status', 'Status') ?? 'active').toLowerCase()
   const plans = goal === undefined ? [] : (goalField(goal, 'plans', 'Plans') as string[] | undefined) ?? []
+  const planRecords = sessionState?.plans ?? []
 
   const run = async (command: string): Promise<void> => {
     if (sessionId === null || command.trim() === '') return
@@ -1109,6 +1182,7 @@ function GoalBar({ store, sessionId, sessionState, onUpdated, onError }: { store
       <span className={`goal-phase ${status}`}>{status || 'active'}</span>
       {editing ? <><input aria-label="Goal objective" value={draft} onChange={event => setDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void run(`/goal edit ${draft.trim()}`); if (event.key === 'Escape') setEditing(false) }} autoFocus /><button type="button" disabled={busy || draft.trim() === ''} onClick={() => void run(`/goal edit ${draft.trim()}`)}>Save</button><button type="button" disabled={busy} onClick={() => setEditing(false)}>Cancel</button></> : <><span className="goal-objective" title={objective}>{objective}</span><span className="goal-count">{plans.length} plan{plans.length === 1 ? '' : 's'}</span><button type="button" disabled={busy} onClick={() => { setDraft(objective); setEditing(true) }}>Edit</button>{status === 'paused' ? <button type="button" disabled={busy} onClick={() => void run('/goal resume')}>Resume</button> : <button type="button" disabled={busy} onClick={() => void run('/goal pause')}>Pause</button>}<button type="button" disabled={busy} onClick={() => void run('/goal clear')}>Clear</button></>}
     </>}
+    <PlanDetails goal={goal} plans={planRecords} />
     {error !== null && <span className="goal-error" role="status" title={error}>Action failed</span>}
   </div>
 }
@@ -1190,6 +1264,7 @@ export function App({ store }: { store: WebStore }) {
   const [sendError, setSendError] = useState<string | null>(null)
   const [focusedSeq, setFocusedSeq] = useState<number | null>(null)
   const [filesOpen, setFilesOpen] = useState(false)
+  const [fileOpenPath, setFileOpenPath] = useState<string | null>(null)
   const [token, setToken] = useState(() => store.getToken())
   const [settingsOpen, setSettingsOpen] = useState(() => typeof window !== 'undefined' && window.location.hash === '#/settings')
   const [feedbackBySeq, setFeedbackBySeq] = useState<Record<number, FeedbackView>>({})
@@ -1206,6 +1281,11 @@ export function App({ store }: { store: WebStore }) {
   const referenceFile = useCallback((path: string): void => {
     setDraft(previous => `${previous}${previous.trim() === '' ? '' : ' '}@${path}`)
     setFilesOpen(false)
+    setFileOpenPath(null)
+  }, [])
+  const openFilePreview = useCallback((path: string): void => {
+    setFileOpenPath(path)
+    setFilesOpen(true)
   }, [])
   const selected = state.sessions.find(session => session.id === state.selectedId)
   const producedBySeq = useMemo(() => deriveProducedFiles(state.events), [state.events])
@@ -1462,7 +1542,7 @@ export function App({ store }: { store: WebStore }) {
       <header className="topbar">
         <button type="button" className="export-toggle" onClick={() => void downloadExport()} disabled={state.selectedId === null}>Export</button>
         <div><h1>{selected?.title || (state.selectedId ? state.selectedId : 'Conversation')}</h1><div className="status-line"><span className={state.connected ? 'status-dot online' : 'status-dot'} />{state.connected ? 'Live' : 'Reconnecting'}</div></div>
-        <div className="topbar-actions"><button type="button" className="files-toggle" onClick={() => setFilesOpen(value => !value)} disabled={state.selectedId === null} aria-pressed={filesOpen}>Files</button><label className="search-box"><span>⌕</span><input aria-label="Search trajectory" placeholder="Search events" value={search} onChange={event => setSearch(event.target.value)} />{search && <button type="button" onClick={() => setSearch('')} aria-label="Clear search">×</button>}</label></div>
+        <div className="topbar-actions"><button type="button" className="files-toggle" onClick={() => { setFileOpenPath(null); setFilesOpen(value => !value) }} disabled={state.selectedId === null} aria-pressed={filesOpen}>Files</button><label className="search-box"><span>⌕</span><input aria-label="Search trajectory" placeholder="Search events" value={search} onChange={event => setSearch(event.target.value)} />{search && <button type="button" onClick={() => setSearch('')} aria-label="Clear search">×</button>}</label></div>
       </header>
       <nav className="tabs" role="tablist"><button role="tab" aria-selected={tab === 'chat'} className={tab === 'chat' ? 'tab selected' : 'tab'} onClick={() => setTab('chat')}>Conversation</button><button role="tab" aria-selected={tab === 'trajectory'} className={tab === 'trajectory' ? 'tab selected' : 'tab'} onClick={() => setTab('trajectory')}>Trajectory <span>{state.events.length}</span></button><button role="tab" aria-selected={tab === 'running'} className={tab === 'running' ? 'tab selected' : 'tab'} onClick={() => setTab('running')}>运行中</button></nav>
       <SessionControls store={store} sessionId={state.selectedId} onError={reportError} />
@@ -1472,7 +1552,7 @@ export function App({ store }: { store: WebStore }) {
       <InteractionPanel store={store} sessionId={state.selectedId} onError={reportError} />
       <QueuePanel store={store} sessionId={state.selectedId} active={state.sending} onError={reportError} />
       <section className="content-panel">
-        {filesOpen && state.selectedId !== null ? <FilesPanel store={store} sessionId={state.selectedId} onClose={() => setFilesOpen(false)} onReference={referenceFile} /> : state.authRequired ? <form className="auth-card" onSubmit={event => { event.preventDefault(); void authenticate() }}><strong>Authentication required</strong><span>Enter the bearer token configured for the Shutu web server.</span><input aria-label="Bearer token" type="password" autoComplete="current-password" value={token} onChange={event => setToken(event.target.value)} placeholder="Bearer token" /><button type="submit" disabled={token.trim() === ''}>Connect</button></form> : state.loading ? <div className="empty"><div className="spinner" />Loading session…</div> : tab === 'running' ? <RunningPanel store={store} sessionId={state.selectedId} /> : state.selectedId === null ? <div className="empty"><strong>Start a new conversation</strong><span>Select a session or send a message from the agent.</span></div> : filtered.length === 0 ? <div className="empty"><strong>{search ? 'No matching events' : 'No events yet'}</strong><span>{search ? 'Try a different search term.' : 'Events will appear here as the session runs.'}</span></div> : tab === 'trajectory' ? <><DshTimeline events={filtered} onSelectSeq={setFocusedSeq} /><VirtualEvents events={filtered} store={store} sessionId={state.selectedId} feedbackBySeq={feedbackBySeq} producedBySeq={producedBySeq} onFeedback={submitFeedback} onOpenFile={referenceFile} focusSeq={focusedSeq} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} /></> : <DshConversation events={filtered} sessionId={state.selectedId} store={store} feedbackBySeq={feedbackBySeq} producedBySeq={producedBySeq} onFeedback={submitFeedback} onOpenFile={referenceFile} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} />}
+        {filesOpen && state.selectedId !== null ? <FilesPanel store={store} sessionId={state.selectedId} openPath={fileOpenPath} onClose={() => { setFilesOpen(false); setFileOpenPath(null) }} onReference={referenceFile} /> : state.authRequired ? <form className="auth-card" onSubmit={event => { event.preventDefault(); void authenticate() }}><strong>Authentication required</strong><span>Enter the bearer token configured for the Shutu web server.</span><input aria-label="Bearer token" type="password" autoComplete="current-password" value={token} onChange={event => setToken(event.target.value)} placeholder="Bearer token" /><button type="submit" disabled={token.trim() === ''}>Connect</button></form> : state.loading ? <div className="empty"><div className="spinner" />Loading session…</div> : tab === 'running' ? <RunningPanel store={store} sessionId={state.selectedId} /> : state.selectedId === null ? <div className="empty"><strong>Start a new conversation</strong><span>Select a session or send a message from the agent.</span></div> : filtered.length === 0 ? <div className="empty"><strong>{search ? 'No matching events' : 'No events yet'}</strong><span>{search ? 'Try a different search term.' : 'Events will appear here as the session runs.'}</span></div> : tab === 'trajectory' ? <><DshTimeline events={filtered} onSelectSeq={setFocusedSeq} /><VirtualEvents events={filtered} store={store} sessionId={state.selectedId} feedbackBySeq={feedbackBySeq} producedBySeq={producedBySeq} onFeedback={submitFeedback} onOpenFile={openFilePreview} focusSeq={focusedSeq} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} /></> : <DshConversation events={filtered} sessionId={state.selectedId} store={store} feedbackBySeq={feedbackBySeq} producedBySeq={producedBySeq} onFeedback={submitFeedback} onOpenFile={openFilePreview} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} />}
       </section>
       <form className="composer" onSubmit={event => { event.preventDefault(); if (state.sending && draft.trim() === '' && pendingImages.length === 0) void stopRun(); else void submit() }}><CommandMenu commands={commands} query={commandQuery ?? ''} activeIndex={commandIndex} onSelect={selectCommand} />{pendingImages.length > 0 && <div className="attachment-preview-list">{pendingImages.map(item => <div className="attachment-preview" key={item.ref.id}><img src={item.previewUrl} alt="待发送图片" /><button type="button" onClick={() => removePendingImage(item.ref.id)} aria-label="移除附件">×</button></div>)}</div>}<div className="composer-row"><label className="attach-button" aria-label="添加图片"><input type="file" accept="image/*" multiple disabled={state.selectedId === null || state.sending || uploading} onChange={event => { void attachFiles(event.currentTarget.files); event.currentTarget.value = '' }} />📎</label><textarea value={draft} onChange={event => handleDraftChange(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder={uploading ? '正在上传图片…' : state.sending ? 'Agent is running…' : 'Send a message…'} rows={2} /><button type="submit" disabled={state.selectedId === null || uploading || (!state.sending && draft.trim() === '' && pendingImages.length === 0)}>{state.sending ? (draft.trim() ? 'Queue' : 'Stop') : 'Send'} <span>{state.sending ? '■' : '↵'}</span></button></div></form>
     </main>

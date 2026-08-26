@@ -140,6 +140,13 @@ h1 { max-width: 52vw; margin: 0; overflow: hidden; color: #f1f5fa; font-size: 20
 .event-content { position: relative; margin-top: 8px; }
 .event-text { max-width: 920px; overflow: hidden; color: #bac6d5; white-space: pre-wrap; text-overflow: ellipsis; }
 .event-card:not(.expanded) .event-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+.rich-text { max-width: 920px; overflow: hidden; color: #bac6d5; }
+.event-card:not(.expanded) .rich-text { display: -webkit-box; max-height: 4.5em; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+.rich-text p { margin: 0 0 7px; white-space: pre-wrap; }
+.rich-text p:last-child { margin-bottom: 0; }
+.rich-code { max-height: 260px; margin: 7px 0; overflow: auto; border: 1px solid #26394c; border-radius: 6px; padding: 8px 10px; color: #c6e5d2; background: #0b111a; white-space: pre; }
+.rich-code::before { display: block; margin-bottom: 4px; color: #71879b; content: attr(data-language); font: 10px/1.2 ui-sans-serif, system-ui, sans-serif; text-transform: uppercase; }
+.rich-code[data-language=""]::before { display: none; }
 .text-button { margin-top: 6px; border: 0; padding: 0; color: #9de9bd; background: transparent; font-size: 11px; }
 .token-chip { display: inline-block; margin-top: 8px; border: 1px solid #34584b; border-radius: 5px; padding: 2px 6px; color: #a9e8c1; background: #142b27; font-size: 10px; }
 .code-block, .detail-item { margin-top: 8px; border-radius: 6px; padding: 7px 9px; background: #0b111a; }
@@ -323,7 +330,7 @@ body[data-theme="light"] .queue-actions button, body[data-theme="light"] .intera
 body[data-theme="light"] .session-controls label { color: #6d8295; }
 body[data-theme="light"] .session-controls select { border-color: #b8cbd9; color: #365a73; background: #edf4f8; }
 .session-status-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 8px 38px 0; color: #8298ad; font-size: 11px; }
-.goal-bar { display: flex; min-width: 0; flex: 1 1 100%; align-items: center; gap: 6px; border: 1px solid #304b5d; border-radius: 7px; padding: 5px 7px; background: #111f2b; }
+.goal-bar { display: flex; min-width: 0; flex: 1 1 100%; flex-wrap: wrap; align-items: center; gap: 6px; border: 1px solid #304b5d; border-radius: 7px; padding: 5px 7px; background: #111f2b; }
 .plan-chip, .goal-bar button { border: 1px solid #3b5c70; border-radius: 5px; padding: 4px 7px; color: #b9d9e8; background: #172c3c; cursor: pointer; font-size: 10px; }
 .plan-chip { border-color: #568b72; color: #a9e8c1; background: #17352e; }
 .plan-chip span { margin-left: 3px; color: #6f9b8a; }
@@ -335,11 +342,37 @@ body[data-theme="light"] .session-controls select { border-color: #b8cbd9; color
 .goal-bar input { min-width: 120px; flex: 1; border: 1px solid #3b5c70; border-radius: 5px; padding: 4px 6px; color: #dce8f2; background: #152535; font-size: 11px; }
 .goal-bar button:disabled { cursor: not-allowed; opacity: .45; }
 .goal-error { color: #ffb2a8; font-size: 10px; }
+.plan-details { min-width: 100%; margin-top: 7px; border-top: 1px solid #243b4a; padding-top: 6px; }
+.plan-details summary { color: #9fc8b1; cursor: pointer; font-size: 10px; user-select: none; }
+.plan-details summary span { margin-left: 4px; color: #71879b; }
+.plan-tree { display: grid; gap: 6px; margin-top: 6px; }
+.plan-card { border: 1px solid #263f4d; border-radius: 6px; padding: 6px 8px; background: #0f1c26; }
+.plan-card-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.plan-card-head strong { min-width: 0; flex: 1; overflow: hidden; color: #d5e5ef; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.plan-card-head small { color: #71879b; font-size: 10px; white-space: nowrap; }
+.plan-status, .plan-step-status { border-radius: 999px; padding: 2px 5px; color: #d9bd7f; background: #3a2d1e; font-size: 9px; text-transform: capitalize; white-space: nowrap; }
+.plan-status.done, .plan-step-status.done { color: #a9e8c1; background: #17352d; }
+.plan-status.blocked, .plan-step-status.blocked { color: #ffb2a8; background: #43272c; }
+.plan-step-list { display: grid; gap: 4px; margin: 6px 0 0; padding: 0; list-style: none; }
+.plan-step { display: flex; align-items: start; gap: 6px; min-width: 0; color: #aebfcd; font-size: 10px; }
+.plan-step-marker { display: grid; width: 15px; height: 15px; flex: 0 0 15px; place-items: center; border: 1px solid #375063; border-radius: 50%; color: #89a4b9; font-size: 9px; }
+.plan-step.done .plan-step-marker { border-color: #5a9b79; color: #a9e8c1; background: #17352d; }
+.plan-step > div { display: grid; min-width: 0; flex: 1; gap: 2px; }
+.plan-step strong { overflow: hidden; color: inherit; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.plan-step small { overflow: hidden; color: #71879b; text-overflow: ellipsis; white-space: nowrap; }
+.plan-step-status { align-self: center; color: #8ea1af; background: #1c2935; }
 body[data-theme="light"] .goal-bar { border-color: #c4d6e1; background: #f1f7fa; }
 body[data-theme="light"] .plan-chip, body[data-theme="light"] .goal-bar button { border-color: #b8cbd9; color: #365a73; background: #edf4f8; }
 body[data-theme="light"] .plan-chip { border-color: #8fc8ac; color: #2d7052; background: #e3f3ed; }
 body[data-theme="light"] .goal-objective { color: #29455d; }
 body[data-theme="light"] .goal-bar input { border-color: #b8cbd9; color: #365a73; background: #edf4f8; }
+body[data-theme="light"] .rich-text { color: #394d62; }
+body[data-theme="light"] .rich-code { border-color: #d4e0e8; color: #315d49; background: #f5f8fb; }
+body[data-theme="light"] .plan-details { border-color: #d8e3ea; }
+body[data-theme="light"] .plan-details summary { color: #2d7052; }
+body[data-theme="light"] .plan-card { border-color: #d4e0e8; background: #f8fbfd; }
+body[data-theme="light"] .plan-card-head strong { color: #29455d; }
+body[data-theme="light"] .plan-step { color: #486177; }
 .context-meter { display: grid; grid-template-columns: auto minmax(110px, 180px) auto; align-items: center; gap: 7px; }
 .context-meter > span { color: #b7c8d7; }
 .context-meter-track { height: 6px; overflow: hidden; border-radius: 999px; background: #203142; }

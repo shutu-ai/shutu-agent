@@ -132,6 +132,36 @@ export interface ContextView {
   percent: number
 }
 
+export interface TodoView {
+  id?: string
+  ID?: string
+  title?: string
+  Title?: string
+  status?: string
+  Status?: string
+  details?: string
+  Details?: string
+  acceptance?: string[]
+  Acceptance?: string[]
+  completedAt?: string
+  CompletedAt?: string
+}
+
+export interface PlanView {
+  id?: string
+  ID?: string
+  title?: string
+  Title?: string
+  goalId?: string
+  GoalID?: string
+  status?: string
+  Status?: string
+  steps?: TodoView[]
+  Steps?: TodoView[]
+  createdAt?: string
+  CreatedAt?: string
+}
+
 export interface GoalView {
   id?: string
   ID?: string
@@ -158,7 +188,7 @@ export interface SessionStateView {
   plan_mode?: boolean
   plan_enabled?: boolean
   goals?: GoalView[]
-  plans?: unknown[]
+  plans?: PlanView[]
   memory_enabled?: boolean
   memories?: unknown[]
 }
