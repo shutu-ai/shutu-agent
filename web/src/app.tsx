@@ -3,6 +3,7 @@ import type { AttachmentView, CommandView, ConfigView, ContextView, DirectoryLis
 import { ShutuApiError } from './api'
 import { projectDshConversation, type DshConversationNode, type DshConversationSnapshot } from './dsh-conversation'
 import { projectDshTrajectory, type DshTimelineMode } from './dsh-trajectory'
+import { deriveProducedFiles } from './produced-files'
 import { WebStore } from './store'
 import './styles.css'
 
@@ -684,7 +685,18 @@ function EventImages({ store, sessionId, images }: { store: WebStore; sessionId:
   return <div className="event-images">{images.map(image => urls[image.id] ? <img key={image.id} src={urls[image.id]} alt="消息附件" /> : <span className="event-image-loading" key={image.id}>图片加载中…</span>)}</div>
 }
 
-function EventCard({ event, store, sessionId, feedback, onFeedback, onCopy, onRetry, onFork }: { event: EventView; store: WebStore; sessionId: string; feedback?: FeedbackView; onFeedback: (seq: number, rating: 'positive' | 'negative') => void; onCopy?: (text: string) => void; onRetry?: (text: string) => void; onFork?: () => void }) {
+function basename(path: string): string {
+  const parts = path.split(/[\\/]/)
+  return parts.at(-1) || path
+}
+
+function ProducedFiles({ paths, onOpenFile }: { paths: readonly string[]; onOpenFile?: (path: string) => void }) {
+  if (paths.length === 0) return null
+  const visible = paths.slice(0, 6)
+  return <div className="produced-files" aria-label="Produced files"><span>Produced</span><div>{visible.map(path => <button type="button" key={path} title={path} onClick={() => onOpenFile?.(path)}>{basename(path)}</button>)}{paths.length > visible.length && <small>+{paths.length - visible.length} more</small>}</div></div>
+}
+
+function EventCard({ event, store, sessionId, feedback, producedPaths = [], onFeedback, onCopy, onRetry, onFork, onOpenFile }: { event: EventView; store: WebStore; sessionId: string; feedback?: FeedbackView; producedPaths?: readonly string[]; onFeedback: (seq: number, rating: 'positive' | 'negative') => void; onCopy?: (text: string) => void; onRetry?: (text: string) => void; onFork?: () => void; onOpenFile?: (path: string) => void }) {
   const [expanded, setExpanded] = useState(false)
   const text = event.tool_output || event.reasoning || event.summary || event.compaction_summary || 'No content'
   const entries = detailEntries(event.details)
@@ -707,6 +719,7 @@ function EventCard({ event, store, sessionId, feedback, onFeedback, onCopy, onRe
         <div className="event-text">{text}</div>
         {event.type === 'assistant/message' && <div className="event-actions message-actions" aria-label="Message actions"><button type="button" onClick={() => onCopy ? onCopy(text) : void navigator.clipboard?.writeText(text)}>Copy</button><button type="button" onClick={() => onRetry ? onRetry(text) : void store.send(text)}>Retry</button><button type="button" onClick={() => onFork ? onFork() : void store.forkSession(sessionId)}>Fork</button></div>}
         {event.images && event.images.length > 0 && <EventImages store={store} sessionId={sessionId} images={event.images} />}
+        {event.type === 'assistant/message' && <ProducedFiles paths={producedPaths} onOpenFile={onOpenFile} />}
         {event.tool_args && <div className="code-block"><span>Input</span><pre>{event.tool_args}</pre></div>}
         {tokenUsage !== undefined && <span className="token-chip">Tokens {detailText(tokenUsage)}</span>}
         {hasExtra && <button className="text-button" onClick={() => setExpanded(value => !value)}>{expanded ? 'Collapse details' : 'Expand details'}</button>}
@@ -758,15 +771,17 @@ function conversationNodeLabel(node: DshConversationNode): string {
   }
 }
 
-function DshConversation({ events, sessionId, store, feedbackBySeq, onFeedback, onCopy, onRetry, onFork, onReachTop, loadingOlder }: {
+function DshConversation({ events, sessionId, store, feedbackBySeq, producedBySeq, onFeedback, onCopy, onRetry, onFork, onOpenFile, onReachTop, loadingOlder }: {
   events: readonly EventView[]
   sessionId: string
   store: WebStore
   feedbackBySeq: Readonly<Record<number, FeedbackView>>
+  producedBySeq: ReadonlyMap<number, readonly string[]>
   onFeedback: (seq: number, rating: 'positive' | 'negative') => void
   onCopy?: (text: string) => void
   onRetry?: (text: string) => void
   onFork?: () => void
+  onOpenFile?: (path: string) => void
   onReachTop: () => void
   loadingOlder: boolean
 }) {
@@ -813,7 +828,7 @@ function DshConversation({ events, sessionId, store, feedbackBySeq, onFeedback, 
         if (raw === undefined) return null
         return <section className={`conversation-node conversation-virtual-row ${node.kind}`} key={`${node.kind}:${node.seq}`} style={{ transform: `translateY(${(start + index) * CONVERSATION_ROW_HEIGHT}px)` }}>
           <div className="conversation-node-head"><span>{conversationNodeLabel(node)}</span><span>#{node.seq}</span></div>
-          <EventCard event={raw} store={store} sessionId={sessionId} feedback={feedbackBySeq[raw.seq]} onFeedback={onFeedback} onCopy={onCopy} onRetry={onRetry} onFork={onFork} />
+          <EventCard event={raw} store={store} sessionId={sessionId} feedback={feedbackBySeq[raw.seq]} producedPaths={producedBySeq.get(raw.seq)} onFeedback={onFeedback} onCopy={onCopy} onRetry={onRetry} onFork={onFork} onOpenFile={onOpenFile} />
         </section>
       })}
     </div>
@@ -830,15 +845,17 @@ function DshConversationHeader({ snapshot }: { snapshot: DshConversationSnapshot
   </div>
 }
 
-function VirtualEvents({ events, store, sessionId, feedbackBySeq, onFeedback, onCopy, onRetry, onFork, onReachTop, loadingOlder, focusSeq }: {
+function VirtualEvents({ events, store, sessionId, feedbackBySeq, producedBySeq, onFeedback, onCopy, onRetry, onFork, onOpenFile, onReachTop, loadingOlder, focusSeq }: {
   events: readonly EventView[]
   store: WebStore
   sessionId: string
   feedbackBySeq: Readonly<Record<number, FeedbackView>>
+  producedBySeq: ReadonlyMap<number, readonly string[]>
   onFeedback: (seq: number, rating: 'positive' | 'negative') => void
   onCopy?: (text: string) => void
   onRetry?: (text: string) => void
   onFork?: () => void
+  onOpenFile?: (path: string) => void
   onReachTop: () => void
   loadingOlder: boolean
   focusSeq: number | null
@@ -888,7 +905,7 @@ function VirtualEvents({ events, store, sessionId, feedbackBySeq, onFeedback, on
     {loadingOlder && <div className="history-loading">Loading earlier events…</div>}
     <div className="virtual-canvas" style={{ height: events.length * ROW_HEIGHT }}>
       {visible.map((event, index) => <div className="virtual-row" key={event.seq} style={{ transform: `translateY(${(start + index) * ROW_HEIGHT}px)` }}>
-        <EventCard event={event} store={store} sessionId={sessionId} feedback={feedbackBySeq[event.seq]} onFeedback={onFeedback} onCopy={onCopy} onRetry={onRetry} onFork={onFork} />
+        <EventCard event={event} store={store} sessionId={sessionId} feedback={feedbackBySeq[event.seq]} producedPaths={producedBySeq.get(event.seq)} onFeedback={onFeedback} onCopy={onCopy} onRetry={onRetry} onFork={onFork} onOpenFile={onOpenFile} />
       </div>)}
     </div>
   </div>
@@ -1186,7 +1203,12 @@ export function App({ store }: { store: WebStore }) {
     } catch { return 'dark' }
   })
   const reportError = useCallback((error: unknown): void => { setSendError(error instanceof Error ? error.message : String(error)) }, [])
+  const referenceFile = useCallback((path: string): void => {
+    setDraft(previous => `${previous}${previous.trim() === '' ? '' : ' '}@${path}`)
+    setFilesOpen(false)
+  }, [])
   const selected = state.sessions.find(session => session.id === state.selectedId)
+  const producedBySeq = useMemo(() => deriveProducedFiles(state.events), [state.events])
   const filtered = useMemo(() => {
     const query = search.trim().toLocaleLowerCase()
     return state.events.filter(event => {
@@ -1450,7 +1472,7 @@ export function App({ store }: { store: WebStore }) {
       <InteractionPanel store={store} sessionId={state.selectedId} onError={reportError} />
       <QueuePanel store={store} sessionId={state.selectedId} active={state.sending} onError={reportError} />
       <section className="content-panel">
-        {filesOpen && state.selectedId !== null ? <FilesPanel store={store} sessionId={state.selectedId} onClose={() => setFilesOpen(false)} onReference={path => { setDraft(previous => `${previous}${previous.trim() === '' ? '' : ' '}@${path}`); setFilesOpen(false) }} /> : state.authRequired ? <form className="auth-card" onSubmit={event => { event.preventDefault(); void authenticate() }}><strong>Authentication required</strong><span>Enter the bearer token configured for the Shutu web server.</span><input aria-label="Bearer token" type="password" autoComplete="current-password" value={token} onChange={event => setToken(event.target.value)} placeholder="Bearer token" /><button type="submit" disabled={token.trim() === ''}>Connect</button></form> : state.loading ? <div className="empty"><div className="spinner" />Loading session…</div> : tab === 'running' ? <RunningPanel store={store} sessionId={state.selectedId} /> : state.selectedId === null ? <div className="empty"><strong>Start a new conversation</strong><span>Select a session or send a message from the agent.</span></div> : filtered.length === 0 ? <div className="empty"><strong>{search ? 'No matching events' : 'No events yet'}</strong><span>{search ? 'Try a different search term.' : 'Events will appear here as the session runs.'}</span></div> : tab === 'trajectory' ? <><DshTimeline events={filtered} onSelectSeq={setFocusedSeq} /><VirtualEvents events={filtered} store={store} sessionId={state.selectedId} feedbackBySeq={feedbackBySeq} onFeedback={submitFeedback} focusSeq={focusedSeq} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} /></> : <DshConversation events={filtered} sessionId={state.selectedId} store={store} feedbackBySeq={feedbackBySeq} onFeedback={submitFeedback} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} />}
+        {filesOpen && state.selectedId !== null ? <FilesPanel store={store} sessionId={state.selectedId} onClose={() => setFilesOpen(false)} onReference={referenceFile} /> : state.authRequired ? <form className="auth-card" onSubmit={event => { event.preventDefault(); void authenticate() }}><strong>Authentication required</strong><span>Enter the bearer token configured for the Shutu web server.</span><input aria-label="Bearer token" type="password" autoComplete="current-password" value={token} onChange={event => setToken(event.target.value)} placeholder="Bearer token" /><button type="submit" disabled={token.trim() === ''}>Connect</button></form> : state.loading ? <div className="empty"><div className="spinner" />Loading session…</div> : tab === 'running' ? <RunningPanel store={store} sessionId={state.selectedId} /> : state.selectedId === null ? <div className="empty"><strong>Start a new conversation</strong><span>Select a session or send a message from the agent.</span></div> : filtered.length === 0 ? <div className="empty"><strong>{search ? 'No matching events' : 'No events yet'}</strong><span>{search ? 'Try a different search term.' : 'Events will appear here as the session runs.'}</span></div> : tab === 'trajectory' ? <><DshTimeline events={filtered} onSelectSeq={setFocusedSeq} /><VirtualEvents events={filtered} store={store} sessionId={state.selectedId} feedbackBySeq={feedbackBySeq} producedBySeq={producedBySeq} onFeedback={submitFeedback} onOpenFile={referenceFile} focusSeq={focusedSeq} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} /></> : <DshConversation events={filtered} sessionId={state.selectedId} store={store} feedbackBySeq={feedbackBySeq} producedBySeq={producedBySeq} onFeedback={submitFeedback} onOpenFile={referenceFile} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} />}
       </section>
       <form className="composer" onSubmit={event => { event.preventDefault(); if (state.sending && draft.trim() === '' && pendingImages.length === 0) void stopRun(); else void submit() }}><CommandMenu commands={commands} query={commandQuery ?? ''} activeIndex={commandIndex} onSelect={selectCommand} />{pendingImages.length > 0 && <div className="attachment-preview-list">{pendingImages.map(item => <div className="attachment-preview" key={item.ref.id}><img src={item.previewUrl} alt="待发送图片" /><button type="button" onClick={() => removePendingImage(item.ref.id)} aria-label="移除附件">×</button></div>)}</div>}<div className="composer-row"><label className="attach-button" aria-label="添加图片"><input type="file" accept="image/*" multiple disabled={state.selectedId === null || state.sending || uploading} onChange={event => { void attachFiles(event.currentTarget.files); event.currentTarget.value = '' }} />📎</label><textarea value={draft} onChange={event => handleDraftChange(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder={uploading ? '正在上传图片…' : state.sending ? 'Agent is running…' : 'Send a message…'} rows={2} /><button type="submit" disabled={state.selectedId === null || uploading || (!state.sending && draft.trim() === '' && pendingImages.length === 0)}>{state.sending ? (draft.trim() ? 'Queue' : 'Stop') : 'Send'} <span>{state.sending ? '■' : '↵'}</span></button></div></form>
     </main>
