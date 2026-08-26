@@ -43,6 +43,7 @@
 - [x] P36-2.2b：接入 `subagent.prompt/interrupt`，校验 parent/child lineage 与 continuable mode，并连接 live child inbox/cancel seam。
 - [x] P36-2.2c：host downlink 增加新建/移除 session、workspace 增删改序、归档变化和 agent-error 实时 reconciliation；断线重连重新发送完整基线。
 - [ ] P36-3.1：补齐全部 projection key，并完成生产数据规模验收。
+- [x] P36-3.1a：对齐 DSH 当前声明的 sessionStats/title/todos/plan/goal/tokenUsage/contextPressure/contextBreakdown/permissions/subagent/subagentTiming/sessionListMetadata 初始值与 baseline 传输。
 - [ ] P36-4.1：接入 layout、theme、brand、sidebar、workspace 和 conversation 插件。
 - [ ] P36-4.2：接入 tool、trajectory、composer、command、input trigger、reference 和 skill 插件。
 - [ ] P36-4.3：接入 subagent、jobs、model、permission、plan、goal、settings、attachment 和 question 插件。

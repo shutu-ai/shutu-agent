@@ -40,6 +40,13 @@ func newNativeProjectionCursor() *nativeProjectionCursor {
 	values := make(map[string]any)
 	stats := &nativeProjectionSessionStats{}
 	values["sessionStats"] = nativeSessionStatsValue(stats)
+	values["tokenUsage"] = map[string]any{
+		"uncachedInputTokens": int64(0), "outputTokens": int64(0),
+		"cacheReadTokens": int64(0), "cacheWriteTokens": int64(0),
+	}
+	values["contextPressure"] = map[string]any{}
+	values["goal"] = nil
+	values["plan"] = map[string]any{"active": false, "pending": false}
 	return &nativeProjectionCursor{
 		turn: -1, values: values, changed: make(map[string]any), stats: *stats,
 		list: nativeProjectionSessionListMetadata{blank: true},
