@@ -22,7 +22,7 @@ const events = [
   { seq: 2, type: 'user/message', version: 1, time: '2026-08-26T10:00:01Z', summary: 'inspect repository' },
   { seq: 3, type: 'step/start', version: 1, time: '2026-08-26T10:00:02Z', summary: 'step start' },
   { seq: 4, type: 'assistant/chunk', version: 1, time: '2026-08-26T10:00:03Z', summary: 'stream delta' },
-  { seq: 5, type: 'tool/result', version: 1, time: '2026-08-26T10:00:04Z', summary: 'files listed', tool_name: 'glob', tool_output: 'src/app.tsx' },
+  { seq: 5, type: 'tool/result', version: 1, time: '2026-08-26T10:00:04Z', summary: 'files listed', tool_name: 'glob', tool_output: 'src/app.tsx', details: { output: Array.from({ length: 20 }, (_, index) => `matched file ${index + 1}: src/components/example-${index + 1}.tsx`).join('\n') } },
   { seq: 6, type: 'assistant/reasoning', version: 1, time: '2026-08-26T10:00:05Z', summary: 'reasoning' },
   { seq: 7, type: 'assistant/message', version: 1, time: '2026-08-26T10:00:06Z', summary: 'Repository inspected' },
   { seq: 8, type: 'step/end', version: 1, time: '2026-08-26T10:00:07Z', summary: 'step end' },
@@ -34,6 +34,22 @@ const events = [
 
 function json(route, value) {
   return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(value) })
+}
+
+async function assertVisibleRowsDoNotOverlap(page) {
+  let minimumGap = Number.NEGATIVE_INFINITY
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    minimumGap = await page.locator('.virtual-row').evaluateAll(elements => {
+      const boxes = elements.map(element => {
+        const rect = element.getBoundingClientRect()
+        return { top: rect.top, bottom: rect.bottom }
+      }).sort((left, right) => left.top - right.top)
+      return boxes.slice(1).reduce((gap, box, index) => Math.min(gap, box.top - boxes[index].bottom), Number.POSITIVE_INFINITY)
+    })
+    if (minimumGap >= -1) return
+    await page.waitForTimeout(50)
+  }
+  assert.ok(minimumGap >= -1, `dynamic virtual rows overlap by ${Math.abs(minimumGap)}px`)
 }
 
 async function installApiMock(page) {
@@ -83,6 +99,9 @@ async function runDesktop(browser) {
   const collapse = page.getByRole('button', { name: 'Collapse turns' })
   await collapse.waitFor()
   const before = await page.locator('.virtual-row').count()
+  const toolRow = page.locator('.virtual-row').filter({ hasText: 'src/app.tsx' })
+  await toolRow.getByRole('button', { name: 'Expand details' }).click()
+  await assertVisibleRowsDoNotOverlap(page)
   await collapse.click()
   await page.getByRole('button', { name: 'Expand turns' }).waitFor()
   const after = await page.locator('.virtual-row').count()

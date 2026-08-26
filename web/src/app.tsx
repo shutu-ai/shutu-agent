@@ -5,10 +5,72 @@ import { projectDshConversation, type DshConversationNode, type DshConversationS
 import { collapseDshTrajectoryTurns, projectDshTrajectory, type DshTimelineMode } from './dsh-trajectory'
 import { deriveProducedFiles } from './produced-files'
 import { WebStore } from './store'
+import { buildVirtualOffsets, virtualRange } from './virtual-list'
 import './styles.css'
 
-const ROW_HEIGHT = 132
-const CONVERSATION_ROW_HEIGHT = 164
+const ROW_HEIGHT_ESTIMATE = 132
+const CONVERSATION_ROW_HEIGHT_ESTIMATE = 164
+
+function useMeasuredVirtualRows(keys: readonly string[], estimate: number, scrollRef: { current: HTMLDivElement | null }) {
+  const heights = useRef(new Map<string, number>())
+  const elements = useRef(new Map<string, HTMLElement>())
+  const observer = useRef<ResizeObserver | null>(null)
+  const previousLayout = useRef<{ keys: readonly string[]; offsets: readonly number[] } | null>(null)
+  const [revision, setRevision] = useState(0)
+
+  useEffect(() => {
+    if (typeof ResizeObserver === 'undefined') return
+    const nextObserver = new ResizeObserver(entries => {
+      let changed = false
+      for (const entry of entries) {
+        const key = entry.target.getAttribute('data-virtual-row-key')
+        if (key === null) continue
+        const height = Math.max(1, Math.ceil(entry.target.getBoundingClientRect().height))
+        if (heights.current.get(key) !== height) {
+          heights.current.set(key, height)
+          changed = true
+        }
+      }
+      if (changed) setRevision(value => value + 1)
+    })
+    observer.current = nextObserver
+    elements.current.forEach(element => nextObserver.observe(element))
+    return () => {
+      nextObserver.disconnect()
+      observer.current = null
+    }
+  }, [])
+
+  const measureRow = useCallback((key: string, element: HTMLElement | null) => {
+    const previous = elements.current.get(key)
+    if (previous !== undefined && previous !== element) observer.current?.unobserve(previous)
+    if (element === null) {
+      elements.current.delete(key)
+      return
+    }
+    elements.current.set(key, element)
+    observer.current?.observe(element)
+  }, [])
+
+  const offsets = useMemo(() => buildVirtualOffsets(keys, heights.current, estimate), [estimate, keys, revision])
+
+  useLayoutEffect(() => {
+    const previous = previousLayout.current
+    const host = scrollRef.current
+    if (previous !== null && host !== null && previous.keys.length > 0) {
+      const previousIndex = Math.min(previous.keys.length - 1, virtualRange(previous.offsets, host.scrollTop, 1, 0).start)
+      const anchorKey = previous.keys[previousIndex]
+      const nextIndex = anchorKey === undefined ? -1 : keys.indexOf(anchorKey)
+      if (nextIndex >= 0) {
+        const delta = (offsets[nextIndex] ?? 0) - (previous.offsets[previousIndex] ?? 0)
+        if (delta !== 0) host.scrollTop = Math.max(0, host.scrollTop + delta)
+      }
+    }
+    previousLayout.current = { keys, offsets }
+  }, [keys, offsets, scrollRef])
+
+  return { offsets, measureRow }
+}
 
 function eventLabel(event: EventView): string {
   if (event.tool_name) return event.tool_name
@@ -821,13 +883,12 @@ function DshConversation({ events, sessionId, store, feedbackBySeq, producedBySe
   const snapshot = useMemo(() => projectDshConversation(events, sessionId), [events, sessionId])
   const eventBySeq = useMemo(() => new Map(events.map(event => [event.seq, event])), [events])
   const scrollRef = useRef<HTMLDivElement>(null)
-  const previousLength = useRef(snapshot.nodes.length)
-  const previousFirstSeq = useRef(snapshot.nodes[0]?.seq)
   const [scrollTop, setScrollTop] = useState(0)
   const [viewportHeight, setViewportHeight] = useState(640)
   const overscan = 6
-  const start = Math.max(0, Math.floor(scrollTop / CONVERSATION_ROW_HEIGHT) - overscan)
-  const end = Math.min(snapshot.nodes.length, Math.ceil((scrollTop + viewportHeight) / CONVERSATION_ROW_HEIGHT) + overscan)
+  const rowKeys = useMemo(() => snapshot.nodes.map(node => `${node.kind}:${node.seq}`), [snapshot.nodes])
+  const { offsets, measureRow } = useMeasuredVirtualRows(rowKeys, CONVERSATION_ROW_HEIGHT_ESTIMATE, scrollRef)
+  const { start, end } = virtualRange(offsets, scrollTop, viewportHeight, overscan)
   const visible = snapshot.nodes.slice(start, end)
 
   useEffect(() => {
@@ -837,17 +898,6 @@ function DshConversation({ events, sessionId, store, feedbackBySeq, producedBySe
     return () => window.removeEventListener('resize', onResize)
   }, [])
 
-  useLayoutEffect(() => {
-    const prepended = snapshot.nodes.length > previousLength.current && snapshot.nodes[0]?.seq !== previousFirstSeq.current
-    if (prepended && scrollRef.current !== null) {
-      const nextTop = scrollRef.current.scrollTop + (snapshot.nodes.length - previousLength.current) * CONVERSATION_ROW_HEIGHT
-      scrollRef.current.scrollTop = nextTop
-      setScrollTop(nextTop)
-    }
-    previousLength.current = snapshot.nodes.length
-    previousFirstSeq.current = snapshot.nodes[0]?.seq
-  }, [snapshot.nodes])
-
   return <div ref={scrollRef} className="dsh-conversation-scroll" onScroll={event => {
     const top = event.currentTarget.scrollTop
     setScrollTop(top)
@@ -855,11 +905,12 @@ function DshConversation({ events, sessionId, store, feedbackBySeq, producedBySe
   }}>
     <DshConversationHeader snapshot={snapshot} />
     {loadingOlder && <div className="history-loading">Loading earlier events…</div>}
-    <div className="dsh-conversation-canvas" style={{ height: snapshot.nodes.length * CONVERSATION_ROW_HEIGHT }}>
+    <div className="dsh-conversation-canvas" style={{ height: offsets[offsets.length - 1] ?? 0 }}>
       {visible.map((node, index) => {
         const raw = eventBySeq.get(node.seq)
         if (raw === undefined) return null
-        return <section className={`conversation-node conversation-virtual-row ${node.kind}`} key={`${node.kind}:${node.seq}`} style={{ transform: `translateY(${(start + index) * CONVERSATION_ROW_HEIGHT}px)` }}>
+        const key = `${node.kind}:${node.seq}`
+        return <section className={`conversation-node conversation-virtual-row ${node.kind}`} data-virtual-row-key={key} key={key} ref={element => measureRow(key, element)} style={{ transform: `translateY(${offsets[start + index] ?? 0}px)` }}>
           <div className="conversation-node-head"><span>{conversationNodeLabel(node)}</span><span>#{node.seq}</span></div>
           <EventCard event={raw} store={store} sessionId={sessionId} feedback={feedbackBySeq[raw.seq]} producedPaths={producedBySeq.get(raw.seq)} onFeedback={onFeedback} onCopy={onCopy} onRetry={onRetry} onFork={onFork} onOpenFile={onOpenFile} />
         </section>
@@ -896,13 +947,12 @@ function VirtualEvents({ events, store, sessionId, feedbackBySeq, producedBySeq,
   const scrollRef = useRef<HTMLDivElement>(null)
   const [collapsed, setCollapsed] = useState(false)
   const displayEvents = useMemo(() => collapsed ? collapseDshTrajectoryTurns(events) : events, [collapsed, events])
-  const previousLength = useRef(displayEvents.length)
-  const previousFirstSeq = useRef(displayEvents[0]?.seq)
   const [scrollTop, setScrollTop] = useState(0)
   const [viewportHeight, setViewportHeight] = useState(640)
   const overscan = 8
-  const start = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - overscan)
-  const end = Math.min(displayEvents.length, Math.ceil((scrollTop + viewportHeight) / ROW_HEIGHT) + overscan)
+  const rowKeys = useMemo(() => displayEvents.map(event => String(event.seq)), [displayEvents])
+  const { offsets, measureRow } = useMeasuredVirtualRows(rowKeys, ROW_HEIGHT_ESTIMATE, scrollRef)
+  const { start, end } = virtualRange(offsets, scrollTop, viewportHeight, overscan)
   const visible = displayEvents.slice(start, end)
 
   useEffect(() => {
@@ -917,21 +967,10 @@ function VirtualEvents({ events, store, sessionId, feedbackBySeq, producedBySeq,
     const exactIndex = displayEvents.findIndex(event => event.seq === focusSeq)
     const index = exactIndex >= 0 ? exactIndex : displayEvents.findIndex(event => event.seq > focusSeq)
     if (index < 0 || scrollRef.current === null) return
-    const nextTop = Math.max(0, index * ROW_HEIGHT - viewportHeight / 3)
+    const nextTop = Math.max(0, (offsets[index] ?? 0) - viewportHeight / 3)
     scrollRef.current.scrollTo({ top: nextTop, behavior: 'smooth' })
     setScrollTop(nextTop)
-  }, [displayEvents, focusSeq, viewportHeight])
-
-  useLayoutEffect(() => {
-    const prepended = displayEvents.length > previousLength.current && displayEvents[0]?.seq !== previousFirstSeq.current
-    if (prepended && scrollRef.current !== null) {
-      const nextTop = scrollRef.current.scrollTop + (displayEvents.length - previousLength.current) * ROW_HEIGHT
-      scrollRef.current.scrollTop = nextTop
-      setScrollTop(nextTop)
-    }
-    previousLength.current = displayEvents.length
-    previousFirstSeq.current = displayEvents[0]?.seq
-  }, [displayEvents])
+  }, [displayEvents, focusSeq, offsets, viewportHeight])
 
   return <div ref={scrollRef} className="event-scroll" onScroll={event => {
     const top = event.currentTarget.scrollTop
@@ -940,10 +979,13 @@ function VirtualEvents({ events, store, sessionId, feedbackBySeq, producedBySeq,
   }}>
     <div className="trajectory-toolbar"><button type="button" className="text-button" onClick={() => setCollapsed(value => !value)} aria-label={collapsed ? 'Expand turns' : 'Collapse turns'}>{collapsed ? 'Expand turns' : 'Collapse turns'}</button><span>{collapsed ? `${displayEvents.length} compact records` : `${displayEvents.length} records`}</span></div>
     {loadingOlder && <div className="history-loading">Loading earlier events…</div>}
-    <div className="virtual-canvas" style={{ height: displayEvents.length * ROW_HEIGHT }}>
-      {visible.map((event, index) => <div className="virtual-row" key={event.seq} style={{ transform: `translateY(${(start + index) * ROW_HEIGHT}px)` }}>
+    <div className="virtual-canvas" style={{ height: offsets[offsets.length - 1] ?? 0 }}>
+      {visible.map((event, index) => {
+        const key = String(event.seq)
+        return <div className="virtual-row" data-virtual-row-key={key} key={key} ref={element => measureRow(key, element)} style={{ transform: `translateY(${offsets[start + index] ?? 0}px)` }}>
         <EventCard event={event} store={store} sessionId={sessionId} feedback={feedbackBySeq[event.seq]} producedPaths={producedBySeq.get(event.seq)} onFeedback={onFeedback} onCopy={onCopy} onRetry={onRetry} onFork={onFork} onOpenFile={onOpenFile} />
-      </div>)}
+      </div>
+      })}
     </div>
   </div>
 }
