@@ -6,71 +6,69 @@ import { fileURLToPath } from 'node:url'
 
 const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const dshRoot = resolve(process.env.SHUTU_DSH_ROOT ?? resolve(webRoot, '../../deepseek-harness'))
-const { chromium } = createRequire(import.meta.url)(resolve(dshRoot, 'apps/web/node_modules/playwright'))
-const baseUrl = process.env.SHUTU_REAL_TASK_URL ?? 'http://127.0.0.1:18099'
+const playwrightRoot = resolve(dshRoot, 'apps/web/node_modules/playwright')
+const { chromium } = createRequire(import.meta.url)(playwrightRoot)
+const baseUrl = (process.env.SHUTU_REAL_TASK_URL ?? 'http://127.0.0.1:18099').replace(/\/$/, '')
 const sessionId = process.argv[2]
 const durationSeconds = Number(process.argv[3] ?? process.env.SHUTU_REAL_TASK_SECONDS ?? 900)
 const skipSelection = process.env.SHUTU_REAL_TASK_SKIP_SELECTION === '1'
 
-if (!existsSync(resolve(dshRoot, 'apps/web/node_modules/playwright'))) {
-  throw new Error(`Playwright is unavailable under ${dshRoot}`)
-}
+if (!existsSync(playwrightRoot)) throw new Error(`Playwright is unavailable under ${dshRoot}`)
 if (!sessionId) throw new Error('usage: node scripts/real-task-performance.mjs <session-id> [duration-seconds]')
 if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) throw new Error('duration must be positive')
 
+let rpcSequence = 0
+async function nativeRPC(method, payload = {}) {
+  const rpcId = `real-perf-${++rpcSequence}`
+  const response = await fetch(`${baseUrl}/api/${method}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ type: 'client-request', rpcId, method, payload }),
+  })
+  if (!response.ok) throw new Error(`${method} returned HTTP ${response.status}`)
+  const envelope = await response.json()
+  assert.equal(envelope.type, 'server-response')
+  assert.equal(envelope.rpcId, rpcId)
+  if (!envelope.result?.ok) throw new Error(`${method} failed: ${envelope.result?.error?.message ?? 'unknown error'}`)
+  return envelope.result.value
+}
+
 async function sessionSummary() {
-  const response = await fetch(`${baseUrl}/api/sessions`)
-  if (!response.ok) throw new Error(`session list returned HTTP ${response.status}`)
-  const sessions = await response.json()
-  const summary = sessions.find(entry => entry.id === sessionId)
-  if (!summary) throw new Error(`session ${sessionId} is absent from the session list`)
+  const value = await nativeRPC('session.list')
+  const summary = value.items?.find(entry => entry.sessionId === sessionId)
+  if (!summary) throw new Error(`session ${sessionId} is absent from native session.list`)
   return summary
 }
 
-async function selectSession(page, summary) {
-  const rows = page.locator('.session-row')
-  const count = await rows.count()
-  for (let index = 0; index < count; index += 1) {
-    const row = rows.nth(index)
-    const text = await row.innerText()
-    if (summary.title && text.includes(summary.title)) {
-      await row.locator('button.session').click()
-      return
-    }
-  }
-
-  // A collapsed/filtered sidebar may hide the row; title search is more useful
-  // than searching by ID because the UI renders title and event count, not IDs.
-  await page.getByRole('button', { name: 'Search sessions' }).click()
-  const search = page.getByRole('textbox', { name: 'Search sessions' })
-  await search.fill(summary.title ?? sessionId)
-  const remoteResult = page.locator('.remote-search-hit').first()
-  try {
-    await remoteResult.waitFor({ state: 'visible', timeout: 10_000 })
-    await remoteResult.click()
-    return
-  } catch {
-    // Fall through to the clear diagnostic below.
-  }
-  throw new Error(`session ${sessionId} was not selectable from the session list`)
+async function sessionSearchTerm(summary) {
+  if (summary.title?.trim()) return summary.title.trim()
+  // Avoid loading a multi-million-character history just to find a search
+  // label. Real long-task sessions use this stable task keyword; callers may
+  // override it when benchmarking another task.
+  return process.env.SHUTU_REAL_TASK_SEARCH ?? '超级玛丽'
 }
 
-async function eventTail() {
-  const response = await fetch(`${baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/events?limit=1`)
-  if (!response.ok) throw new Error(`event tail returned HTTP ${response.status}`)
-  const page = await response.json()
-  const last = page.events?.at(-1)
-  return { count: last?.seq ?? 0, type: last?.type ?? null, time: last?.time ?? null }
+async function selectSession(page, summary) {
+  const term = await sessionSearchTerm(summary)
+  if (!term) throw new Error(`session ${sessionId} has no searchable title or user message`)
+  await page.getByRole('button', { name: /Search sessions|搜索会话/ }).click()
+  const search = page.getByPlaceholder(/Search sessions\.\.\.|搜索会话…/)
+  await search.fill(term)
+  const hitText = page.getByText(term.slice(0, Math.min(term.length, 32)), { exact: false }).last()
+  await hitText.waitFor({ state: 'visible', timeout: 15_000 })
+  const hit = hitText.locator('xpath=ancestor::button[@role="treeitem"]')
+  // The DSH command palette keeps a pointer-blocking backdrop over the
+  // result list while keyboard focus remains in the search field. Dispatching
+  // the semantic treeitem click mirrors the keyboard/selection path without
+  // depending on backdrop geometry in headless Chromium.
+  await hit.dispatchEvent('click')
 }
 
 async function installBrowserMetrics(page) {
   await page.evaluate(() => {
     window.__shutuRealMetrics = { frames: 0, longTasks: 0, longTaskMs: 0 }
     const metrics = window.__shutuRealMetrics
-    const frame = () => {
-      metrics.frames += 1
-      requestAnimationFrame(frame)
-    }
+    const frame = () => { metrics.frames += 1; requestAnimationFrame(frame) }
     requestAnimationFrame(frame)
     if ('PerformanceObserver' in window) {
       try {
@@ -82,7 +80,7 @@ async function installBrowserMetrics(page) {
         })
         observer.observe({ type: 'longtask', buffered: true })
       } catch {
-        // Long-task entries are optional in some Chromium modes.
+        // Long-task entries are optional in headless Chromium.
       }
     }
   })
@@ -94,15 +92,26 @@ async function sampleBrowser(page) {
     const frames = metrics.frames
     metrics.frames = 0
     const heap = performance.memory?.usedJSHeapSize
+    const scrollables = [...document.querySelectorAll('*')]
+      .filter(element => element.scrollHeight > element.clientHeight + 4 && element.clientHeight > 100)
+    const largest = scrollables.sort((a, b) => b.scrollHeight - a.scrollHeight)[0]
     return {
       frames,
       heapMiB: typeof heap === 'number' ? Math.round(heap / 1024 / 1024) : null,
       longTasks: metrics.longTasks,
       longTaskMs: Math.round(metrics.longTaskMs),
-      mountedRows: document.querySelectorAll('.virtual-row').length,
+      scrollHeight: document.querySelector('[data-trajectory-scroll]')?.scrollHeight ?? largest?.scrollHeight ?? 0,
       domNodes: document.getElementsByTagName('*').length,
+      trajectoryRows: document.querySelectorAll('[data-trajectory-scroll] tr[data-trajectory-row-key]').length,
+      trajectoryRowCount: document.querySelector('[data-trajectory-scroll] table')?.getAttribute('aria-rowcount') ?? null,
     }
   })
+}
+
+async function nativeTail() {
+  const value = await nativeRPC('session.list')
+  const item = value.items?.find(entry => entry.sessionId === sessionId)
+  return { count: item?.projections?.asOfSeq ?? 0, type: null, time: null }
 }
 
 const browser = await chromium.launch({ headless: true, args: ['--enable-precise-memory-info'] })
@@ -112,43 +121,36 @@ page.on('console', message => { if (message.type() === 'error') consoleErrors.pu
 page.on('pageerror', error => consoleErrors.push(error.message))
 try {
   await page.goto(`${baseUrl}/`, { waitUntil: 'domcontentloaded', timeout: 60_000 })
-  await page.getByRole('tab', { name: /Trajectory/ }).waitFor({ timeout: 60_000 })
-  if (!skipSelection) await selectSession(page, await sessionSummary())
-  await page.getByRole('tab', { name: /Trajectory/ }).click()
-  try {
-    await page.locator('.event-scroll').waitFor({ state: 'visible', timeout: 60_000 })
-  } catch (error) {
-    const diagnostic = await page.locator('body').innerText().catch(() => '')
-    const htmlLength = await page.locator('body').innerHTML().then(value => value.length).catch(() => -1)
-    throw new Error(`event panel did not mount: url=${page.url()} html=${htmlLength} console=${consoleErrors.join(' | ')} body=${diagnostic.slice(0, 2_000)}`, { cause: error })
-  }
+  const summary = await sessionSummary()
+  const tabs = page.getByRole('tab', { name: /Trajectory|轨迹/ })
+  if (!skipSelection || await tabs.count() === 0) await selectSession(page, summary)
+  await tabs.waitFor({ timeout: 60_000 })
+  await page.getByRole('tab', { name: /Trajectory|轨迹/ }).click()
+  await page.locator('[data-trajectory-scroll]').waitFor({ timeout: 60_000 })
+  await page.locator('[data-trajectory-scroll] table[data-scroll-ready="true"]').waitFor({ timeout: 60_000 })
   await installBrowserMetrics(page)
-  process.stderr.write(`observer-ready session=${sessionId}\n`)
+  process.stderr.write(`observer-ready native session=${sessionId}\n`)
 
   const samples = []
   const startedAt = Date.now()
   while (Date.now() - startedAt < durationSeconds * 1000) {
     await new Promise(resolvePromise => setTimeout(resolvePromise, 1_000))
-    const [browserSample, tail] = await Promise.all([sampleBrowser(page), eventTail()])
-    const sample = { elapsedSeconds: Math.round((Date.now() - startedAt) / 100) / 10, ...tail, ...browserSample }
-    samples.push(sample)
+    const [browserSample, tail] = await Promise.all([sampleBrowser(page), nativeTail()])
+    samples.push({ elapsedSeconds: Math.round((Date.now() - startedAt) / 100) / 10, ...tail, ...browserSample })
   }
-
   assert.ok(samples.length > 0)
   const fps = samples.map(sample => sample.frames)
   const heaps = samples.flatMap(sample => sample.heapMiB === null ? [] : [sample.heapMiB])
-  const result = {
+  console.log(JSON.stringify({
     url: baseUrl,
+    transport: 'native-rpc+downlink-websocket',
     sessionId,
     durationSeconds: samples.at(-1)?.elapsedSeconds ?? 0,
     samples: samples.length,
-    firstEventCount: samples[0]?.count ?? 0,
-    lastEventCount: samples.at(-1)?.count ?? 0,
-    lastEventType: samples.at(-1)?.type ?? null,
+    firstEventSeq: samples[0]?.count ?? 0,
+    lastEventSeq: samples.at(-1)?.count ?? 0,
     minFps: fps.length > 0 ? Math.min(...fps) : null,
     avgFps: fps.length > 0 ? Math.round(fps.reduce((sum, value) => sum + value, 0) / fps.length * 10) / 10 : null,
-    minMountedRows: Math.min(...samples.map(sample => sample.mountedRows)),
-    maxMountedRows: Math.max(...samples.map(sample => sample.mountedRows)),
     maxDomNodes: Math.max(...samples.map(sample => sample.domNodes)),
     heapStartMiB: heaps[0] ?? null,
     heapMaxMiB: heaps.length > 0 ? Math.max(...heaps) : null,
@@ -156,8 +158,7 @@ try {
     longTaskMs: samples.at(-1)?.longTaskMs ?? 0,
     consoleErrors,
     samplesDetail: samples,
-  }
-  console.log(JSON.stringify(result))
+  }))
 } finally {
   await page.close()
   await browser.close()
