@@ -396,6 +396,32 @@ func TestNativeFileReferencesListUsesSessionCWDAndRemoteArguments(t *testing.T) 
 	}
 }
 
+func TestNativeSessionReferenceCandidatesReturnCanonicalMentions(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	seedSession(t, st, "current-session", nil)
+	seedSession(t, st, "release-session", nil)
+	if err := st.SetSessionTitle(context.Background(), "release-session", "Release notes", session.TitleSourceUser); err != nil {
+		t.Fatal(err)
+	}
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/sessionReferenceResolver/candidates", "tok", `{"type":"client-request","rpcId":"session-ref","method":"sessionReferenceResolver/candidates","payload":{"args":[{"id":"current-session"},"release",{}]}}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK {
+		t.Fatalf("session reference response = %+v", response)
+	}
+	var values []struct {
+		SessionID string `json:"sessionId"`
+		Label     string `json:"label"`
+		Mention   string `json:"mention"`
+	}
+	encoded, _ := json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &values); err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 1 || values[0].SessionID != "release-session" || values[0].Label != "Release notes" || !strings.HasPrefix(values[0].Mention, "@[Release notes](dsh-session:") {
+		t.Fatalf("session reference values = %+v", values)
+	}
+}
+
 func TestNativeHistoryReturnsDSHProjectionBaseline(t *testing.T) {
 	srv, st := newTestServer(t, "tok")
 	seedSession(t, st, "native-projections", []session.Event{

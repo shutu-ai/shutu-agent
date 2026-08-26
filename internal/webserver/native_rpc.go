@@ -423,6 +423,7 @@ func (s *Server) registerNativeRoutes(mux *http.ServeMux) {
 		"commands/list", "commands/execute",
 		"messageFeedback/list", "messageFeedback/put", "messageFeedback/delete",
 		"fileReferences/list",
+		"sessionReferenceResolver/candidates",
 		"session.list", "session.search", "session.create",
 		"session.history", "session.rename", "session.prompt", "session.cancel", "session.attachment",
 		"session.models", "session.selectModel", "session.fork", "session.updateQueue",
@@ -612,6 +613,63 @@ func (s *Server) nativeFileReferencesList(r *http.Request, raw json.RawMessage) 
 		right, _ := values[j]["path"].(string)
 		return strings.ToLower(left) < strings.ToLower(right)
 	})
+	return nativeRPCSuccess(values)
+}
+
+func nativeSessionReferenceMention(sessionID, label string) string {
+	encoded, _ := json.Marshal(sessionID)
+	uri := base64.RawURLEncoding.EncodeToString(encoded)
+	label = strings.NewReplacer("\\", "\\\\", "]", "\\]").Replace(label)
+	return fmt.Sprintf("@[%s](dsh-session:%s)", label, uri)
+}
+
+func (s *Server) nativeSessionReferenceCandidates(r *http.Request, raw json.RawMessage) nativeRPCResult {
+	args, err := nativeRemoteArguments(raw)
+	if err != nil || len(args) < 2 {
+		return nativeRPCFailure("bad-request", "session reference request requires agent and query", nil)
+	}
+	var agent struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(args[0], &agent); err != nil {
+		return nativeRPCFailure("bad-request", "session reference agent is invalid", nil)
+	}
+	var query string
+	if err := json.Unmarshal(args[1], &query); err != nil {
+		return nativeRPCFailure("bad-request", "session reference query is invalid", nil)
+	}
+	metas, err := s.store.ListSessions(r.Context())
+	if err != nil {
+		return nativeRPCFailure("session-reference-failed", err.Error(), nil)
+	}
+	needle := strings.ToLower(strings.TrimSpace(query))
+	values := make([]map[string]any, 0, 20)
+	for _, meta := range metas {
+		if meta.ID == strings.TrimSpace(agent.ID) {
+			continue
+		}
+		label := strings.TrimSpace(meta.Title)
+		if label == "" {
+			label = meta.ID
+		}
+		searchable := strings.ToLower(strings.Join([]string{meta.ID, label, meta.CWD}, "\n"))
+		if needle != "" && !strings.Contains(searchable, needle) {
+			continue
+		}
+		item := map[string]any{
+			"sessionId": meta.ID,
+			"label":     label,
+			"createdAt": meta.CreatedAt.UnixMilli(),
+			"mention":   nativeSessionReferenceMention(meta.ID, label),
+		}
+		if meta.CWD != "" {
+			item["cwd"] = meta.CWD
+		}
+		values = append(values, item)
+		if len(values) >= 20 {
+			break
+		}
+	}
 	return nativeRPCSuccess(values)
 }
 
@@ -1053,6 +1111,8 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 		return s.nativeMessageFeedbackDelete(r, raw)
 	case "fileReferences/list":
 		return s.nativeFileReferencesList(r, raw)
+	case "sessionReferenceResolver/candidates":
+		return s.nativeSessionReferenceCandidates(r, raw)
 	case "session.list":
 		return s.nativeSessionList(r)
 	case "session.search":
