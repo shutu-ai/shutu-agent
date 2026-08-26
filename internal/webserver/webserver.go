@@ -85,12 +85,13 @@ type Server struct {
 	// nativeQueueUpdateFn accepts the DSH action vocabulary. The legacy queue
 	// callback above intentionally remains text/action-only for the REST API;
 	// this seam carries the native edit payload without weakening that API.
-	nativeQueueUpdateFn       func(ctx context.Context, sessionID, itemID, action, text string) error
-	nativeSubagentPromptFn    func(ctx context.Context, childSessionID, text string) error
-	nativeSubagentInterruptFn func(childSessionID, reason string) error
-	nativeGoalMutationFn      func(ctx context.Context, mutation NativeGoalMutation) (NativeGoalMutationResult, error)
-	nativeCredentialSetFn     func(ctx context.Context, ref, value string) error
-	nativeCredentialUnsetFn   func(ctx context.Context, ref string) error
+	nativeQueueUpdateFn          func(ctx context.Context, sessionID, itemID, action, text string) error
+	nativeSubagentPromptFn       func(ctx context.Context, childSessionID, text string) error
+	nativeSubagentInterruptFn    func(childSessionID, reason string) error
+	nativeGoalMutationFn         func(ctx context.Context, mutation NativeGoalMutation) (NativeGoalMutationResult, error)
+	nativeCredentialSetFn        func(ctx context.Context, ref, value string) error
+	nativeCredentialUnsetFn      func(ctx context.Context, ref string) error
+	nativeSettingsOpenDocumentFn func(ctx context.Context) error
 
 	// statusFn is the dsh-session-status alignment: it computes the live state
 	// (warning/ongoing/done/idle + labels + running-subagent count) for one
@@ -575,6 +576,13 @@ func (s *Server) SetNativeCredentialManager(
 ) {
 	s.nativeCredentialSetFn = set
 	s.nativeCredentialUnsetFn = unset
+}
+
+// SetNativeSettingsDocumentOpener wires DSH settings.openDocument. The
+// composition root owns the configured document path; the browser never sends
+// a path, so this callback cannot be used to open an arbitrary host file.
+func (s *Server) SetNativeSettingsDocumentOpener(fn func(context.Context) error) {
+	s.nativeSettingsOpenDocumentFn = fn
 }
 
 // SetSessionManager wires the session new/resume API (POST /api/sessions and

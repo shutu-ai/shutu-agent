@@ -213,6 +213,7 @@ func main() {
 
 	app := &app{
 		cfg:        cfg,
+		configPath: filepath.Clean(*configPath),
 		store:      st,
 		reg:        reg,
 		prompt:     promptBuilder,
@@ -584,10 +585,11 @@ func resolveFrontendDist(configPath, distDir string) string {
 
 // app holds the REPL's mutable session state.
 type app struct {
-	cfg    config.Config
-	store  store.Store
-	reg    *tools.Registry
-	prompt *prompt.Builder
+	cfg        config.Config
+	configPath string
+	store      store.Store
+	reg        *tools.Registry
+	prompt     *prompt.Builder
 	// basePolicy is the startup Execute policy (global mode + permission
 	// preset). Per-session permission tiers swap a derived policy around a turn
 	// (turnMu serializes turns) and restore basePolicy afterwards.

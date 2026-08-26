@@ -1237,6 +1237,33 @@ func TestNativeRPCRejectsMethodMismatchAndAuth(t *testing.T) {
 	}
 }
 
+func TestNativeSettingsOpenDocument(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+	called := false
+	srv.SetNativeSettingsDocumentOpener(func(context.Context) error {
+		called = true
+		return nil
+	})
+	body := `{"type":"client-request","rpcId":"settings-open","method":"settings.openDocument","payload":{}}`
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/settings.openDocument", "tok", body)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK || !called {
+		t.Fatalf("settings.openDocument response=%+v called=%v", response, called)
+	}
+	var value map[string]any
+	encoded, _ := json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &value); err != nil || value["opened"] != true {
+		t.Fatalf("settings.openDocument value=%+v", response.Result.Value)
+	}
+
+	srv2, _ := newTestServer(t, "tok")
+	rec = doReqBody(t, srv2.Handler(), "POST", "/api/settings.openDocument", "tok", body)
+	response = nativeResponse(t, rec.Body.Bytes())
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "not-supported" {
+		t.Fatalf("unwired settings.openDocument response=%+v", response)
+	}
+}
+
 func TestNativeSettingsDescribeAndMutate(t *testing.T) {
 	srv, _ := newTestServer(t, "tok")
 

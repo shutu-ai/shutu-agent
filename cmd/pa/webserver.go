@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -207,6 +208,13 @@ func (a *app) registerWebServer() error {
 		}
 	})
 	srv.SetNativeCredentialManager(a.nativeCredentialSet, a.nativeCredentialUnset)
+	srv.SetNativeSettingsDocumentOpener(func(ctx context.Context) error {
+		path, err := filepath.Abs(a.configPath)
+		if err != nil {
+			return err
+		}
+		return webserver.OpenNativePath(ctx, path)
+	})
 	// M11-pi-ai (模型探测, dsh discovery 对齐): wire the 获取可用模型 API so the
 	// 增加自定义提供方 / 编辑卡 can fill the multi-model list from the endpoint.
 	srv.SetProviderDiscover(func(ctx context.Context, req webserver.ProviderDiscover) ([]webserver.ProviderModel, error) {

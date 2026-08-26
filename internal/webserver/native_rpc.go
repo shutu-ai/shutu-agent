@@ -337,7 +337,7 @@ func (s *Server) registerNativeRoutes(mux *http.ServeMux) {
 		"workspace.list", "workspace.create", "workspace.rename", "workspace.delete",
 		"workspace.insertBefore", "workspace.insertSessionBefore", "workspace.archiveSession",
 		"agentPreset.list", "agentPreset.select", "settings.describe",
-		"settings.mutate", "settings.update", "settings.replace", "credentials.describe", "credentials.set", "credentials.unset", "dynamicCordisRunner/syncInspectManifest",
+		"settings.openDocument", "settings.mutate", "settings.update", "settings.replace", "credentials.describe", "credentials.set", "credentials.unset", "dynamicCordisRunner/syncInspectManifest",
 		"host.openPath",
 		"dynamicCordisRunner/inventory", "llm.providers", "llm.models", "llm.discoverModels", "skill.list",
 		"subagent.list", "subagent.history", "subagent.prompt", "subagent.interrupt",
@@ -878,6 +878,8 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 		return s.nativeAgentPresetSelect(r, raw)
 	case "settings.describe":
 		return s.nativeSettingsDescribe()
+	case "settings.openDocument":
+		return s.nativeSettingsOpenDocument(r, raw)
 	case "settings.mutate":
 		return s.nativeSettingsMutate(raw)
 	case "settings.update":
@@ -1055,6 +1057,20 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 	}
 }
 
+func (s *Server) nativeSettingsOpenDocument(r *http.Request, raw json.RawMessage) nativeRPCResult {
+	var req map[string]any
+	if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
+		return failure
+	}
+	if s.nativeSettingsOpenDocumentFn == nil {
+		return nativeRPCFailure("not-supported", "settings document opener not wired", nil)
+	}
+	if err := s.nativeSettingsOpenDocumentFn(r.Context()); err != nil {
+		return nativeRPCFailure("open-settings-failed", err.Error(), nil)
+	}
+	return nativeRPCSuccess(map[string]any{"opened": true})
+}
+
 func nativeHomeDirectory() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -1184,21 +1200,37 @@ func (s *Server) nativeHostOpenPath(r *http.Request, rawPath string) nativeRPCRe
 	if _, err := os.Stat(path); err != nil {
 		return nativeRPCFailure("directory-unreadable", fmt.Sprintf("cannot open %q: %v", path, err), map[string]any{"path": path})
 	}
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "windows":
-		cmd = exec.CommandContext(r.Context(), "explorer.exe", path)
-	case "darwin":
-		cmd = exec.CommandContext(r.Context(), "open", path)
-	default:
-		cmd = exec.CommandContext(r.Context(), "xdg-open", path)
-	}
-	if err := cmd.Start(); err != nil {
+	if err := OpenNativePath(r.Context(), path); err != nil {
 		return nativeRPCFailure("open-path-failed", fmt.Sprintf("cannot open %q: %v", path, err), map[string]any{"path": path})
 	}
 	// The desktop opener owns the child process. Waiting here would turn a
 	// successful hand-off into a long-running RPC and would block the native UI.
 	return nativeRPCSuccess(map[string]any{"opened": true})
+}
+
+// OpenNativePath hands an existing file or directory to the platform opener.
+// It is exported for composition-root callbacks such as settings.openDocument;
+// callers must resolve any user-facing identifier to a concrete path before
+// invoking it.
+func OpenNativePath(ctx context.Context, path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" || !filepath.IsAbs(path) || (runtime.GOOS == "windows" && filepath.VolumeName(path) == "") {
+		return fmt.Errorf("%q is not a fully qualified path", path)
+	}
+	path = filepath.Clean(path)
+	if _, err := os.Stat(path); err != nil {
+		return err
+	}
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.CommandContext(ctx, "explorer.exe", path)
+	case "darwin":
+		cmd = exec.CommandContext(ctx, "open", path)
+	default:
+		cmd = exec.CommandContext(ctx, "xdg-open", path)
+	}
+	return cmd.Start()
 }
 
 func nativeCredentialRefValid(ref string) bool {
