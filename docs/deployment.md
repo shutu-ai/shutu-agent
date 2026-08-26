@@ -37,7 +37,7 @@ node scripts/deployment-smoke.mjs
 
 1. 将交付目录复制到目标主机。
 2. 设置 `DEEPSEEK_API_KEY` 环境变量；API key 不写入配置文件或交付包。
-3. 必须编辑 `config.yaml` 中的 `web_server.token` 设置随机 bearer token；再按需调整 `web_server.addr`、`data_dir` 和工具开关。空 token 会拒绝启动，以避免裸奔。
+3. 生产环境建议编辑 `config.yaml` 中的 `web_server.token` 设置随机 bearer token；再按需调整 `web_server.addr`、`data_dir` 和工具开关。空 token 表示本机开放模式，配置 token 后才启用 bearer 认证。
 4. 启动 Web 门户：
 
 ```powershell
@@ -50,7 +50,7 @@ bin\shutu-agent.exe --web-only --config config.yaml
 Invoke-WebRequest http://127.0.0.1:18099/api/health
 ```
 
-配置了 `web_server.token` 时，健康检查需要携带 `Authorization: Bearer <token>`。
+配置了 `web_server.token` 时，健康检查需要携带 `Authorization: Bearer <token>`；未配置 token 时为本机开放模式。
 
 ## 升级与回滚
 

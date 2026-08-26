@@ -490,8 +490,8 @@ workflow:
   sync_timeout_ms: 5000
 
 # Web 门户 (M10a, ADR 2026-08-20-m10-web-portal.md; 统一 webServer: dsh 式会话/
-# 监听. token 必填且只在此配置出现明文, 进程内只存 SHA-256 摘要; 空 token 且
-# enabled 时启动报错 (fail-closed 防裸奔). addr 默认本机 (个人门户不默认暴露).
+# 监听. token 可选且只在此配置出现明文, 进程内只存 SHA-256 摘要; 空 token
+# 表示本机开放模式，配置 token 后启用 bearer 认证. addr 默认本机 (个人门户不默认暴露).
 web_server:
   enabled: true
   addr: 127.0.0.1:18099
