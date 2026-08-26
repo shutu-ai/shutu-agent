@@ -517,6 +517,13 @@ func TestMarkSessionViewedAndLastViewedAt(t *testing.T) {
 	}
 }
 
+func TestGetSessionMetaNotFound(t *testing.T) {
+	st := openSQLite(t)
+	if _, err := st.GetSessionMeta(context.Background(), "missing-meta"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetSessionMeta(missing) err = %v, want ErrNotFound", err)
+	}
+}
+
 // TestSessionConfig verifies the per-session override read/write surface
 // (Phase 2 按会话切换; dsh ModelSelection 对齐): default zeros,
 // SetSessionConfig stores the full override set (mode/provider/model/effort/

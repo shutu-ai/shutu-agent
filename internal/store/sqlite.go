@@ -712,7 +712,8 @@ func (s *SQLiteStore) GetSessionMeta(ctx context.Context, sessionID string) (Ses
 	if err := s.db.QueryRowContext(ctx, `
 		SELECT s.id, s.created_at, s.updated_at, s.title, s.title_source, s.workspace_id, s.cwd, s.archived_at, s.sort, s.flat_sort, s.last_viewed_at, COUNT(e.seq)
 		FROM sessions s LEFT JOIN events e ON e.session_id = s.id
-		WHERE s.id = ?`, sessionID).Scan(
+		WHERE s.id = ?
+		GROUP BY s.id, s.created_at, s.updated_at, s.title, s.title_source, s.workspace_id, s.cwd, s.archived_at, s.sort, s.flat_sort, s.last_viewed_at`, sessionID).Scan(
 		&m.ID, &created, &updated, &title, &titleSource, &workspaceID, &cwd, &archived, &m.Sort, &m.FlatSort, &lastViewed, &count,
 	); err != nil {
 		if err == sql.ErrNoRows {

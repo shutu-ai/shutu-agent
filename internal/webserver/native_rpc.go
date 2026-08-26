@@ -228,6 +228,13 @@ type nativeSessionIDRequest struct {
 	SessionID string `json:"sessionId"`
 }
 
+type nativeSessionSelectModelRequest struct {
+	SessionID       string `json:"sessionId"`
+	Provider        string `json:"provider"`
+	Model           string `json:"model"`
+	ReasoningEffort string `json:"reasoningEffort"`
+}
+
 type nativeSessionSearchRequest struct {
 	Query string `json:"query"`
 }
@@ -275,7 +282,7 @@ func (s *Server) registerNativeRoutes(mux *http.ServeMux) {
 		"host.describe", "host.listDirectory", "host.createDirectory", "host.pickDirectory",
 		"session.list", "session.search", "session.create",
 		"session.history", "session.rename", "session.prompt", "session.cancel", "session.attachment",
-		"session.models",
+		"session.models", "session.selectModel",
 		"workspace.list", "agentPreset.list", "agentPreset.select", "settings.describe",
 		"settings.mutate", "credentials.describe", "dynamicCordisRunner/syncInspectManifest",
 		"dynamicCordisRunner/inventory", "llm.providers", "llm.models",
@@ -726,6 +733,8 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 		return s.nativeSessionAttachment(r, raw)
 	case "session.models":
 		return s.nativeSessionModels(r, raw)
+	case "session.selectModel":
+		return s.nativeSessionSelectModel(r, raw)
 	case "session.cancel":
 		var req nativeSessionIDRequest
 		if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
@@ -1110,14 +1119,66 @@ func (s *Server) nativeSessionModels(r *http.Request, raw json.RawMessage) nativ
 		return nativeRPCFailure("internal", "model catalog has invalid shape", nil)
 	}
 	provider, model := "", ""
+	effort := ""
 	if s.cfgFn != nil {
 		view := s.cfgFn()
 		provider = nativeString(view["provider"])
 		model = nativeString(view["model"])
 	}
-	value["current"] = map[string]any{"provider": provider, "model": model}
+	if configs, ok := s.store.(store.SessionConfigStore); ok {
+		if config, configErr := configs.GetSessionConfig(r.Context(), req.SessionID); configErr == nil {
+			if config.Provider != "" {
+				provider = config.Provider
+			}
+			if config.Model != "" {
+				model = config.Model
+			}
+			effort = config.ReasoningEffort
+		}
+	}
+	current := map[string]any{"provider": provider, "model": model}
+	if effort != "" {
+		current["reasoningEffort"] = effort
+	}
+	value["current"] = current
 	value["routable"] = provider != "" && model != ""
 	return nativeRPCSuccess(value)
+}
+
+func (s *Server) nativeSessionSelectModel(r *http.Request, raw json.RawMessage) nativeRPCResult {
+	var req nativeSessionSelectModelRequest
+	if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
+		return failure
+	}
+	req.SessionID = strings.TrimSpace(req.SessionID)
+	req.Provider = strings.TrimSpace(req.Provider)
+	req.Model = strings.TrimSpace(req.Model)
+	req.ReasoningEffort = strings.TrimSpace(req.ReasoningEffort)
+	if req.SessionID == "" || req.Provider == "" || req.Model == "" {
+		return nativeRPCFailure("bad-request", "sessionId, provider and model are required", nil)
+	}
+	if _, err := s.store.GetSessionMeta(r.Context(), req.SessionID); err != nil {
+		return nativeStoreFailure(err)
+	}
+	configs, ok := s.store.(store.SessionConfigStore)
+	if !ok {
+		return nativeRPCFailure("not-supported", "session configuration store is not wired", nil)
+	}
+	config, err := configs.GetSessionConfig(r.Context(), req.SessionID)
+	if err != nil {
+		return nativeStoreFailure(err)
+	}
+	config.Provider = req.Provider
+	config.Model = req.Model
+	config.ReasoningEffort = req.ReasoningEffort
+	if err := configs.UpdateSessionConfig(r.Context(), req.SessionID, config.Provider, config.Model, config.ReasoningEffort, config.Permission); err != nil {
+		return nativeRPCFailure("model-select-failed", err.Error(), nil)
+	}
+	selected := map[string]any{"provider": req.Provider, "model": req.Model}
+	if req.ReasoningEffort != "" {
+		selected["reasoningEffort"] = req.ReasoningEffort
+	}
+	return nativeRPCSuccess(map[string]any{"selected": selected})
 }
 
 func (s *Server) nativeSessionAttachment(r *http.Request, raw json.RawMessage) nativeRPCResult {

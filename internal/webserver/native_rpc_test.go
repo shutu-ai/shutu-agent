@@ -613,6 +613,81 @@ func TestNativeAgentPresetsListSelectAndLock(t *testing.T) {
 	}
 }
 
+func TestNativeSessionSelectModelPersistsAndProjectsSelection(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	srv.SetConfigProvider(func() map[string]any {
+		return map[string]any{"provider": "deepseek-official", "model": "deepseek-chat"}
+	})
+	if err := st.CreateSession(context.Background(), "select-model", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	call := func(id, method string, payload any) nativeRPCResponse {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{
+			"type": "client-request", "rpcId": id, "method": method, "payload": payload,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := doReqBody(t, srv.Handler(), "POST", "/api/"+method, "tok", string(body))
+		return nativeResponse(t, rec.Body.Bytes())
+	}
+
+	response := call("select-model", "session.selectModel", map[string]any{
+		"sessionId": "select-model", "provider": "openai", "model": "gpt-4o", "reasoningEffort": "high",
+	})
+	if !response.Result.OK {
+		t.Fatalf("session.selectModel response = %+v", response)
+	}
+	var selected struct {
+		Selected map[string]any `json:"selected"`
+	}
+	encoded, _ := json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &selected); err != nil {
+		t.Fatal(err)
+	}
+	if selected.Selected["provider"] != "openai" || selected.Selected["model"] != "gpt-4o" || selected.Selected["reasoningEffort"] != "high" {
+		t.Fatalf("selected model = %#v", selected.Selected)
+	}
+	config, err := st.GetSessionConfig(context.Background(), "select-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Provider != "openai" || config.Model != "gpt-4o" || config.ReasoningEffort != "high" {
+		t.Fatalf("persisted model config = %+v", config)
+	}
+
+	response = call("models-after-select", "session.models", map[string]any{"sessionId": "select-model"})
+	if !response.Result.OK {
+		t.Fatalf("session.models response = %+v", response)
+	}
+	var models struct {
+		Current map[string]any `json:"current"`
+	}
+	encoded, _ = json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &models); err != nil {
+		t.Fatal(err)
+	}
+	if models.Current["provider"] != "openai" || models.Current["model"] != "gpt-4o" || models.Current["reasoningEffort"] != "high" {
+		t.Fatalf("projected model selection = %#v", models.Current)
+	}
+
+	response = call("select-missing", "session.selectModel", map[string]any{
+		"sessionId": "missing", "provider": "openai", "model": "gpt-4o",
+	})
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "not-found" {
+		code, message := "", ""
+		if response.Result.Error != nil {
+			code, message = response.Result.Error.Code, response.Result.Error.Message
+		}
+		t.Fatalf("missing session response = %+v (%s: %s)", response, code, message)
+	}
+	response = call("select-invalid", "session.selectModel", map[string]any{"sessionId": "select-model", "provider": "openai"})
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "bad-request" {
+		t.Fatalf("invalid selection response = %+v", response)
+	}
+}
+
 func TestNativeSessionCreatePersistsAgentPreset(t *testing.T) {
 	srv, st := newTestServer(t, "tok")
 	srv.SetSessionManager(func(ctx context.Context, action, requestedID string) (string, error) {
