@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -1777,9 +1778,14 @@ func TestNativeLLMCatalogUsesSanitizedConfig(t *testing.T) {
 func TestNativeMuxWebSocketSendsSubscriptionBaseline(t *testing.T) {
 	srv, st := newTestServer(t, "tok")
 	seedSession(t, st, "native-ws", nil)
+	queueItems := []QueueItem{{ID: "q-1", Text: "queued prompt", Placement: "queued"}}
 	srv.SetQueueManager(func(context.Context, string) ([]QueueItem, error) {
-		return []QueueItem{{ID: "q-1", Text: "queued prompt", Placement: "queued"}}, nil
-	}, nil, nil)
+		return queueItems, nil
+	}, func(_ context.Context, _ string, text string) (QueueItem, error) {
+		item := QueueItem{ID: "q-2", Text: text, Placement: "queued"}
+		queueItems = append(queueItems, item)
+		return item, nil
+	}, nil)
 	srv.SetJobsProvider(func(context.Context, string) ([]map[string]any, error) {
 		return []map[string]any{{
 			"id": "job-1", "kind": "bash", "label": "build", "status": "running",
@@ -1874,10 +1880,54 @@ func TestNativeMuxWebSocketSendsSubscriptionBaseline(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("mux did not register an event callback")
 	}
-	emit(session.Event{Seq: 1, Type: session.EventPlanMode, At: time.UnixMilli(2001), Version: session.EventVersion, Data: json.RawMessage(`{"active":true}`)})
-	eventFrame, err := readNativeTextFrame(reader)
+	queueRequest, err := http.NewRequest(http.MethodPost, httpServer.URL+"/api/sessions/native-ws/queue", strings.NewReader(`{"text":"second prompt"}`))
 	if err != nil {
 		t.Fatal(err)
+	}
+	queueRequest.Header.Set("Authorization", "Bearer tok")
+	queueRequest.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(queueRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Body != nil {
+		_ = response.Body.Close()
+	}
+	if response.StatusCode != http.StatusAccepted {
+		t.Fatalf("queue enqueue status = %d", response.StatusCode)
+	}
+	queueUpdateFrame, err := readNativeTextFrame(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var queueUpdateEnvelope struct {
+		Payload struct {
+			Type  string           `json:"type"`
+			Items []map[string]any `json:"items"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal(queueUpdateFrame, &queueUpdateEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	if queueUpdateEnvelope.Payload.Type != "session/queue" || len(queueUpdateEnvelope.Payload.Items) != 2 {
+		t.Fatalf("queue update frame = %s", queueUpdateFrame)
+	}
+	emit(session.Event{Seq: 1, Type: session.EventPlanMode, At: time.UnixMilli(2001), Version: session.EventVersion, Data: json.RawMessage(`{"active":true}`)})
+	var eventFrame []byte
+	for {
+		eventFrame, err = readNativeTextFrame(reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var methodEnvelope struct {
+			Method string `json:"method"`
+		}
+		if err := json.Unmarshal(eventFrame, &methodEnvelope); err != nil {
+			t.Fatal(err)
+		}
+		if methodEnvelope.Method == "session/event" {
+			break
+		}
 	}
 	projectionFrame, err := readNativeTextFrame(reader)
 	if err != nil {

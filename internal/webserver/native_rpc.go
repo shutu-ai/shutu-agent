@@ -3168,6 +3168,7 @@ func (s *Server) nativeSessionUpdateQueue(r *http.Request, raw json.RawMessage) 
 		if err := s.nativeQueueUpdateFn(r.Context(), req.SessionID, req.ItemID, req.Action.Kind, text); err != nil {
 			return nativeRPCFailure("queue-update-failed", err.Error(), nil)
 		}
+		s.notifyNativeMux(req.SessionID)
 		return nativeRPCSuccess(map[string]any{"accepted": true})
 	}
 	if s.queueUpdateFn == nil {
@@ -3180,6 +3181,7 @@ func (s *Server) nativeSessionUpdateQueue(r *http.Request, raw json.RawMessage) 
 	if err := s.queueUpdateFn(r.Context(), req.SessionID, req.ItemID, legacyAction); err != nil {
 		return nativeRPCFailure("queue-update-failed", err.Error(), nil)
 	}
+	s.notifyNativeMux(req.SessionID)
 	return nativeRPCSuccess(map[string]any{"accepted": true})
 }
 
@@ -3233,6 +3235,7 @@ func (s *Server) nativeSessionPrompt(r *http.Request, raw json.RawMessage) nativ
 		if _, err := s.queueEnqueueFn(r.Context(), req.SessionID, text); err != nil {
 			return nativeRPCFailure("prompt-failed", err.Error(), nil)
 		}
+		s.notifyNativeMux(req.SessionID)
 		return nativeRPCSuccess(map[string]any{"accepted": true})
 	}
 	if s.msgFn == nil {
@@ -3688,6 +3691,22 @@ func (s *Server) handleNativeMuxWebSocket(w http.ResponseWriter, r *http.Request
 				}, nativeRPCID())
 			}
 		}
+		emitSnapshots := func() {
+			if s.queueListFn != nil {
+				if items, listErr := s.queueListFn(ctx, meta.ID); listErr == nil {
+					_ = writeWithID("session/queue", nativeQueueFrame(meta.ID, items), nativeRPCID())
+				}
+			}
+			if s.jobsFn != nil {
+				if jobs, listErr := s.jobsFn(ctx, meta.ID); listErr == nil {
+					_ = writeWithID("session/jobs", map[string]any{
+						"type": "session/jobs", "sessionId": meta.ID, "jobs": nativeJobViews(jobs),
+					}, nativeRPCID())
+				}
+			}
+		}
+		removeSnapshotSubscription := s.subscribeNativeMux(meta.ID, emitSnapshots)
+		defer removeSnapshotSubscription()
 		unsubs = append(unsubs, s.evSrc(meta.ID, func(ev session.Event) {
 			projectionMu.Lock()
 			projected := projection.project(meta.ID, ev)
@@ -3698,6 +3717,7 @@ func (s *Server) handleNativeMuxWebSocket(w http.ResponseWriter, r *http.Request
 				_ = write(nativeProjectionFrame{Type: "session/projection", SessionID: meta.ID, Key: key, Value: value, Seq: ev.Seq})
 			}
 			emitInteraction(meta.ID, ev)
+			emitSnapshots()
 		}))
 	}
 	go drainNativeWebSocket(reader, cancel)

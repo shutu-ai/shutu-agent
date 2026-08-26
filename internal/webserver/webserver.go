@@ -82,6 +82,12 @@ type Server struct {
 	queueListFn    func(ctx context.Context, sessionID string) ([]QueueItem, error)
 	queueEnqueueFn func(ctx context.Context, sessionID, text string) (QueueItem, error)
 	queueUpdateFn  func(ctx context.Context, sessionID, itemID, action string) error
+	// nativeMuxSubscribers receives authoritative queue/job refreshes for one
+	// subscribed session. The map is transport-only; providers remain owned by
+	// the composition root.
+	nativeMuxMu           sync.Mutex
+	nativeMuxSubscribers  map[string]map[uint64]func()
+	nativeMuxSubscriberID uint64
 	// nativeQueueUpdateFn accepts the DSH action vocabulary. The legacy queue
 	// callback above intentionally remains text/action-only for the REST API;
 	// this seam carries the native edit payload without weakening that API.
@@ -525,6 +531,50 @@ func (s *Server) SetQueueManager(
 	s.queueListFn = list
 	s.queueEnqueueFn = enqueue
 	s.queueUpdateFn = update
+}
+
+// subscribeNativeMux registers a refresh callback for one native session
+// stream. It is intentionally private: native mux owns the DSH frame shape and
+// only the webserver needs to coordinate queue/job snapshots with mutations.
+func (s *Server) subscribeNativeMux(sessionID string, refresh func()) func() {
+	s.nativeMuxMu.Lock()
+	if s.nativeMuxSubscribers == nil {
+		s.nativeMuxSubscribers = make(map[string]map[uint64]func())
+	}
+	s.nativeMuxSubscriberID++
+	id := s.nativeMuxSubscriberID
+	if s.nativeMuxSubscribers[sessionID] == nil {
+		s.nativeMuxSubscribers[sessionID] = make(map[uint64]func())
+	}
+	s.nativeMuxSubscribers[sessionID][id] = refresh
+	s.nativeMuxMu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.nativeMuxMu.Lock()
+			defer s.nativeMuxMu.Unlock()
+			listeners := s.nativeMuxSubscribers[sessionID]
+			delete(listeners, id)
+			if len(listeners) == 0 {
+				delete(s.nativeMuxSubscribers, sessionID)
+			}
+		})
+	}
+}
+
+// notifyNativeMux asks every native subscriber for the latest authoritative
+// control-plane snapshots after a queue mutation.
+func (s *Server) notifyNativeMux(sessionID string) {
+	s.nativeMuxMu.Lock()
+	listeners := make([]func(), 0, len(s.nativeMuxSubscribers[sessionID]))
+	for _, refresh := range s.nativeMuxSubscribers[sessionID] {
+		listeners = append(listeners, refresh)
+	}
+	s.nativeMuxMu.Unlock()
+	for _, refresh := range listeners {
+		refresh()
+	}
 }
 
 // SetNativeQueueUpdater wires DSH session.updateQueue. text is populated only
@@ -2828,6 +2878,7 @@ func (s *Server) handleQueueEnqueue(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
+	s.notifyNativeMux(r.PathValue("id"))
 	writeJSON(w, http.StatusAccepted, item)
 }
 
@@ -2855,6 +2906,7 @@ func (s *Server) handleQueueUpdate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
 	}
+	s.notifyNativeMux(r.PathValue("id"))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
