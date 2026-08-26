@@ -862,12 +862,14 @@ function TrajectoryInspector({ event, onClose }: { event: DshTrajectoryEvent; on
   </aside>
 }
 
-function DshTimeline({ events, onSelectSeq }: {
+function DshTimeline({ events, onSelectSeq, onSelectSeqs }: {
   events: readonly EventView[]
   onSelectSeq: (seq: number) => void
+  onSelectSeqs?: (seqs: readonly number[]) => void
 }) {
   const [mode, setMode] = useState<DshTimelineMode>('sequence')
   const [selected, setSelected] = useState<number | null>(null)
+  const [selectedRange, setSelectedRange] = useState<{ start: number; end: number } | null>(null)
   const projection = useMemo(() => projectDshTrajectory(events, mode), [events, mode])
   const { timeline } = projection
   const sourceSeqByIndex = useMemo(() => new Map(
@@ -877,15 +879,21 @@ function DshTimeline({ events, onSelectSeq }: {
   if (timeline === null) return null
   const span = Math.max(1, timeline.end - timeline.start)
   return <section className="dsh-timeline" aria-label="Trajectory timeline">
-    <div className="timeline-head"><div><strong>Timeline</strong><span>{timeline.spans.length} records</span></div><select aria-label="Timeline mode" value={mode} onChange={event => { setMode(event.target.value as DshTimelineMode); setSelected(null) }}><option value="sequence">Sequence</option><option value="duration">Duration</option><option value="time">Recorded time</option><option value="actual">Actual time</option></select></div>
+    <div className="timeline-head"><div><strong>Timeline</strong><span>{timeline.spans.length} records</span></div><select aria-label="Timeline mode" value={mode} onChange={event => { setMode(event.target.value as DshTimelineMode); setSelected(null); setSelectedRange(null); onSelectSeqs?.([]) }}><option value="sequence">Sequence</option><option value="duration">Duration</option><option value="time">Recorded time</option><option value="actual">Actual time</option></select></div>
     <div className="timeline-track">
-      {timeline.spans.map(item => <button key={`${item.index}-${item.start}`} className={`timeline-span lane-${item.lane} ${item.isError ? 'error' : ''} ${selected === item.index ? 'selected' : ''}`} style={{ left: `${((item.start - timeline.start) / span) * 100}%`, width: `${Math.max(1.2, ((item.end - item.start) / span) * 100)}%` }} title={item.label || item.kind} aria-label={`${item.kind} ${item.label || item.index}`} onClick={() => {
+      {timeline.spans.map(item => <button key={`${item.index}-${item.start}`} className={`timeline-span lane-${item.lane} ${item.isError ? 'error' : ''} ${selectedRange !== null && item.index >= selectedRange.start && item.index <= selectedRange.end ? 'selected' : ''}`} style={{ left: `${((item.start - timeline.start) / span) * 100}%`, width: `${Math.max(1.2, ((item.end - item.start) / span) * 100)}%` }} title={item.label || item.kind} aria-label={`${item.kind} ${item.label || item.index}`} onClick={click => {
+        const nextRange = click.shiftKey && selectedRange !== null
+          ? { start: Math.min(selectedRange.start, item.index), end: Math.max(selectedRange.end, item.index) }
+          : { start: item.index, end: item.index }
         setSelected(item.index)
+        setSelectedRange(nextRange)
         const seq = sourceSeqByIndex.get(item.index)
         if (seq !== undefined) onSelectSeq(seq)
+        const seqs = timeline.spans.filter(spanItem => spanItem.index >= nextRange.start && spanItem.index <= nextRange.end).map(spanItem => sourceSeqByIndex.get(spanItem.index)).filter((seq): seq is number => seq !== undefined)
+        onSelectSeqs?.(seqs)
       }} />)}
     </div>
-    <div className="timeline-legend"><span><i className="lane-dot lane-0" />Model</span><span><i className="lane-dot lane-1" />Assistant</span><span><i className="lane-dot lane-2" />Tools</span>{selected !== null && <span className="timeline-selected">Record #{selected}</span>}</div>
+    <div className="timeline-legend"><span><i className="lane-dot lane-0" />Model</span><span><i className="lane-dot lane-1" />Assistant</span><span><i className="lane-dot lane-2" />Tools</span>{selected !== null && <span className="timeline-selected">{selectedRange?.start === selectedRange?.end ? `Record #${selected}` : `Records #${selectedRange?.start}–${selectedRange?.end}`}</span>}</div>
   </section>
 }
 
@@ -964,7 +972,7 @@ function DshConversationHeader({ snapshot }: { snapshot: DshConversationSnapshot
   </div>
 }
 
-function VirtualEvents({ events, store, sessionId, feedbackBySeq, producedBySeq, onFeedback, onCopy, onRetry, onFork, onOpenFile, onReachTop, loadingOlder, focusSeq, selectedSeq, onSelectSeq }: {
+function VirtualEvents({ events, store, sessionId, feedbackBySeq, producedBySeq, onFeedback, onCopy, onRetry, onFork, onOpenFile, onReachTop, loadingOlder, focusSeq, selectedSeq, timelineFocusSeqs, onSelectSeq }: {
   events: readonly EventView[]
   store: WebStore
   sessionId: string
@@ -979,6 +987,7 @@ function VirtualEvents({ events, store, sessionId, feedbackBySeq, producedBySeq,
   loadingOlder: boolean
   focusSeq: number | null
   selectedSeq: number | null
+  timelineFocusSeqs: ReadonlySet<number>
   onSelectSeq: (seq: number) => void
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -1042,7 +1051,7 @@ function VirtualEvents({ events, store, sessionId, feedbackBySeq, producedBySeq,
       {visible.map((event, index) => {
         const key = String(event.seq)
         const hasToolCalls = event.type === 'assistant/message' && assistantToolCallSeqs.has(event.seq)
-        return <div className={`virtual-row ${selectedSeq === event.seq ? 'selected' : ''}`} data-virtual-row-key={key} key={key} ref={element => measureRow(key, element)} onClick={() => onSelectSeq(event.seq)} style={{ transform: `translateY(${offsets[start + index] ?? 0}px)` }}>
+        return <div className={`virtual-row ${selectedSeq === event.seq ? 'selected' : ''} ${timelineFocusSeqs.has(event.seq) ? 'timeline-focused' : ''}`} data-virtual-row-key={key} key={key} ref={element => measureRow(key, element)} onClick={() => onSelectSeq(event.seq)} style={{ transform: `translateY(${offsets[start + index] ?? 0}px)` }}>
         <EventCard event={event} store={store} sessionId={sessionId} feedback={feedbackBySeq[event.seq]} producedPaths={producedBySeq.get(event.seq)} onFeedback={onFeedback} onCopy={onCopy} onRetry={onRetry} onFork={onFork} onOpenFile={onOpenFile} onInspect={() => onSelectSeq(event.seq)} toolCallsAction={hasToolCalls ? { label: collapsedAssistants.has(event.seq) ? 'Expand tool calls' : 'Collapse tool calls', onClick: () => setCollapsedAssistants(current => { const next = new Set(current); if (next.has(event.seq)) next.delete(event.seq); else next.add(event.seq); return next }) } : undefined} />
       </div>
       })}
@@ -1370,6 +1379,7 @@ export function App({ store }: { store: WebStore }) {
   const [sendError, setSendError] = useState<string | null>(null)
   const [focusedSeq, setFocusedSeq] = useState<number | null>(null)
   const [trajectorySelectedSeq, setTrajectorySelectedSeq] = useState<number | null>(null)
+  const [trajectoryFocusSeqs, setTrajectoryFocusSeqs] = useState<ReadonlySet<number>>(new Set())
   const [filesOpen, setFilesOpen] = useState(false)
   const [fileOpenPath, setFileOpenPath] = useState<string | null>(null)
   const [token, setToken] = useState(() => store.getToken())
@@ -1398,6 +1408,14 @@ export function App({ store }: { store: WebStore }) {
   const selectedTrajectoryEvent = useMemo(() => trajectorySelectedSeq === null
     ? null
     : state.events.find(event => event.seq === trajectorySelectedSeq) ?? null, [state.events, trajectorySelectedSeq])
+  const selectTrajectorySeq = useCallback((seq: number): void => {
+    setFocusedSeq(seq)
+    setTrajectorySelectedSeq(seq)
+    setTrajectoryFocusSeqs(new Set([seq]))
+  }, [])
+  const selectTrajectorySeqs = useCallback((seqs: readonly number[]): void => {
+    setTrajectoryFocusSeqs(new Set(seqs))
+  }, [])
   const producedBySeq = useMemo(() => deriveProducedFiles(state.events), [state.events])
   const filtered = useMemo(() => {
     const query = search.trim().toLocaleLowerCase()
@@ -1416,6 +1434,7 @@ export function App({ store }: { store: WebStore }) {
   useEffect(() => {
     setFocusedSeq(null)
     setTrajectorySelectedSeq(null)
+    setTrajectoryFocusSeqs(new Set())
   }, [state.selectedId])
 
   useEffect(() => {
@@ -1666,7 +1685,7 @@ export function App({ store }: { store: WebStore }) {
       <InteractionPanel store={store} sessionId={state.selectedId} onError={reportError} />
       <QueuePanel store={store} sessionId={state.selectedId} active={state.sending} onError={reportError} />
        <section className="content-panel">
-        {filesOpen && state.selectedId !== null ? <FilesPanel store={store} sessionId={state.selectedId} openPath={fileOpenPath} onClose={() => { setFilesOpen(false); setFileOpenPath(null) }} onReference={referenceFile} /> : state.authRequired ? <form className="auth-card" onSubmit={event => { event.preventDefault(); void authenticate() }}><strong>Authentication required</strong><span>Enter the bearer token configured for the Shutu web server.</span><input aria-label="Bearer token" type="password" autoComplete="current-password" value={token} onChange={event => setToken(event.target.value)} placeholder="Bearer token" /><button type="submit" disabled={token.trim() === ''}>Connect</button></form> : state.loading ? <div className="empty"><div className="spinner" />Loading session…</div> : tab === 'running' ? <RunningPanel store={store} sessionId={state.selectedId} /> : state.selectedId === null ? <div className="empty"><strong>Start a new conversation</strong><span>Select a session or send a message from the agent.</span></div> : filtered.length === 0 ? <div className="empty"><strong>{search ? 'No matching events' : 'No events yet'}</strong><span>{search ? 'Try a different search term.' : 'Events will appear here as the session runs.'}</span></div> : tab === 'trajectory' ? <div className="trajectory-layout"><div className="trajectory-main"><DshTimeline events={filtered} onSelectSeq={seq => { setFocusedSeq(seq); setTrajectorySelectedSeq(seq) }} /><VirtualEvents events={filtered} store={store} sessionId={state.selectedId} feedbackBySeq={feedbackBySeq} producedBySeq={producedBySeq} onFeedback={submitFeedback} onOpenFile={openFilePreview} focusSeq={focusedSeq} selectedSeq={trajectorySelectedSeq} onSelectSeq={seq => setTrajectorySelectedSeq(seq)} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} /></div>{selectedTrajectoryEvent !== null && <TrajectoryInspector event={selectedTrajectoryEvent} onClose={() => setTrajectorySelectedSeq(null)} />}</div> : <DshConversation events={filtered} sessionId={state.selectedId} store={store} feedbackBySeq={feedbackBySeq} producedBySeq={producedBySeq} onFeedback={submitFeedback} onOpenFile={openFilePreview} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} />}
+        {filesOpen && state.selectedId !== null ? <FilesPanel store={store} sessionId={state.selectedId} openPath={fileOpenPath} onClose={() => { setFilesOpen(false); setFileOpenPath(null) }} onReference={referenceFile} /> : state.authRequired ? <form className="auth-card" onSubmit={event => { event.preventDefault(); void authenticate() }}><strong>Authentication required</strong><span>Enter the bearer token configured for the Shutu web server.</span><input aria-label="Bearer token" type="password" autoComplete="current-password" value={token} onChange={event => setToken(event.target.value)} placeholder="Bearer token" /><button type="submit" disabled={token.trim() === ''}>Connect</button></form> : state.loading ? <div className="empty"><div className="spinner" />Loading session…</div> : tab === 'running' ? <RunningPanel store={store} sessionId={state.selectedId} /> : state.selectedId === null ? <div className="empty"><strong>Start a new conversation</strong><span>Select a session or send a message from the agent.</span></div> : filtered.length === 0 ? <div className="empty"><strong>{search ? 'No matching events' : 'No events yet'}</strong><span>{search ? 'Try a different search term.' : 'Events will appear here as the session runs.'}</span></div> : tab === 'trajectory' ? <div className="trajectory-layout"><div className="trajectory-main"><DshTimeline events={filtered} onSelectSeq={selectTrajectorySeq} onSelectSeqs={selectTrajectorySeqs} /><VirtualEvents events={filtered} store={store} sessionId={state.selectedId} feedbackBySeq={feedbackBySeq} producedBySeq={producedBySeq} onFeedback={submitFeedback} onOpenFile={openFilePreview} focusSeq={focusedSeq} selectedSeq={trajectorySelectedSeq} timelineFocusSeqs={trajectoryFocusSeqs} onSelectSeq={selectTrajectorySeq} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} /></div>{selectedTrajectoryEvent !== null && <TrajectoryInspector event={selectedTrajectoryEvent} onClose={() => setTrajectorySelectedSeq(null)} />}</div> : <DshConversation events={filtered} sessionId={state.selectedId} store={store} feedbackBySeq={feedbackBySeq} producedBySeq={producedBySeq} onFeedback={submitFeedback} onOpenFile={openFilePreview} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} />}
       </section>
       <form className="composer" onSubmit={event => { event.preventDefault(); if (state.sending && draft.trim() === '' && pendingImages.length === 0) void stopRun(); else void submit() }}><CommandMenu commands={commands} query={commandQuery ?? ''} activeIndex={commandIndex} onSelect={selectCommand} />{pendingImages.length > 0 && <div className="attachment-preview-list">{pendingImages.map(item => <div className="attachment-preview" key={item.ref.id}><img src={item.previewUrl} alt="待发送图片" /><button type="button" onClick={() => removePendingImage(item.ref.id)} aria-label="移除附件">×</button></div>)}</div>}<div className="composer-row"><label className="attach-button" aria-label="添加图片"><input type="file" accept="image/*" multiple disabled={state.selectedId === null || state.sending || uploading} onChange={event => { void attachFiles(event.currentTarget.files); event.currentTarget.value = '' }} />📎</label><textarea value={draft} onChange={event => handleDraftChange(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder={uploading ? '正在上传图片…' : state.sending ? 'Agent is running…' : 'Send a message…'} rows={2} /><button type="submit" disabled={state.selectedId === null || uploading || (!state.sending && draft.trim() === '' && pendingImages.length === 0)}>{state.sending ? (draft.trim() ? 'Queue' : 'Stop') : 'Send'} <span>{state.sending ? '■' : '↵'}</span></button></div></form>
     </main>

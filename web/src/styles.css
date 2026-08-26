@@ -159,6 +159,7 @@ h1 { max-width: 52vw; margin: 0; overflow: hidden; color: #f1f5fa; font-size: 20
 pre { margin: 3px 0 0; overflow: auto; color: #b9c8da; font: 11px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; }
 .details-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 7px; margin-top: 8px; }
 .virtual-row.selected .event-card { border-color: #70a68c; box-shadow: 0 0 0 1px #70a68c33; }
+.virtual-row.timeline-focused:not(.selected) .event-card { border-color: #7596b8; box-shadow: 0 0 0 1px #7596b833; }
 .history-loading { position: sticky; z-index: 2; top: 0; width: max-content; margin: 0 auto 5px; border: 1px solid #34584b; border-radius: 12px; padding: 3px 9px; color: #a9e8c1; background: #142b27; font-size: 11px; }
 .trajectory-inspector { display: flex; min-width: 0; min-height: 0; flex-direction: column; overflow: hidden; border: 1px solid #243244; border-radius: 11px; background: #0f1823; }
 .inspector-head { display: flex; align-items: start; justify-content: space-between; gap: 10px; border-bottom: 1px solid #243244; padding: 12px 13px 9px; }
