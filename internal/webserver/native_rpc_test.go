@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -182,6 +183,29 @@ func TestNativeQueueAndJobsFramesUseDSHShapes(t *testing.T) {
 	}
 	if _, snake := jobs[0]["started_at"]; snake {
 		t.Fatalf("native jobs retained snake_case timestamp: %#v", jobs[0])
+	}
+}
+
+func TestNativeSessionCancelIsIdempotentWhenNoTurnIsRunning(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	seedSession(t, st, "cancel-idempotent", nil)
+	srv.SetTurnStopper(func(string) error { return errors.New("no turn running") })
+	rec := doReqBody(t, srv.Handler(), http.MethodPost, "/api/session.cancel", "tok", `{
+		"type":"client-request","rpcId":"cancel-1","method":"session.cancel",
+		"payload":{"sessionId":"cancel-idempotent"}
+	}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if rec.Code != http.StatusOK || !response.Result.OK || response.Result.Value == nil {
+		t.Fatalf("idempotent cancel = %d %+v", rec.Code, response)
+	}
+
+	rec = doReqBody(t, srv.Handler(), http.MethodPost, "/api/session.cancel", "tok", `{
+		"type":"client-request","rpcId":"cancel-2","method":"session.cancel",
+		"payload":{"sessionId":"missing-session"}
+	}`)
+	response = nativeResponse(t, rec.Body.Bytes())
+	if response.Result.OK || response.Result.Error.Code != "session-not-found" {
+		t.Fatalf("missing cancel = %s", rec.Body.String())
 	}
 }
 

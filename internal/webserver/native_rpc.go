@@ -1285,10 +1285,20 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 		if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
 			return failure
 		}
+		req.SessionID = strings.TrimSpace(req.SessionID)
+		if req.SessionID == "" {
+			return nativeRPCFailure("bad-request", "sessionId is required", nil)
+		}
+		if _, err := s.store.LoadSession(r.Context(), req.SessionID); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return nativeRPCFailure("session-not-found", "session not found", map[string]any{"sessionId": req.SessionID})
+			}
+			return nativeStoreFailure(err)
+		}
 		if s.stopFn == nil {
 			return nativeRPCFailure("not-supported", "turn stopper not wired", nil)
 		}
-		if err := s.stopFn(req.SessionID); err != nil {
+		if err := s.stopFn(req.SessionID); err != nil && !strings.Contains(err.Error(), "no turn running") {
 			return nativeRPCFailure("cancel-failed", err.Error(), nil)
 		}
 		return nativeRPCSuccess(map[string]any{"accepted": true})
