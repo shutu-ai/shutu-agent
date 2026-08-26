@@ -25,6 +25,15 @@ const TrajectoryToolbarContext = createContext<TrajectoryToolbarState>({
   mode: 'sequence', searchQuery: '', selectedSeq: null, onModeChange: () => undefined, onSearchQueryChange: () => undefined, onReset: () => undefined, onClearSelection: () => undefined,
 })
 
+function useDebouncedValue<T>(value: T, delayMs: number): T {
+  const [debounced, setDebounced] = useState(value)
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebounced(value), delayMs)
+    return () => window.clearTimeout(timer)
+  }, [delayMs, value])
+  return debounced
+}
+
 function useMeasuredVirtualRows(keys: readonly string[], estimate: number, scrollRef: { current: HTMLDivElement | null }) {
   const heights = useRef(new Map<string, number>())
   const elements = useRef(new Map<string, HTMLElement>())
@@ -820,9 +829,10 @@ function ProducedFiles({ paths, onOpenFile }: { paths: readonly string[]; onOpen
 function HighlightedText({ text, query }: { text: string; query: string }) {
   const needle = query.trim()
   if (needle === '') return <>{text}</>
-  const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const parts = text.split(new RegExp(`(${escaped})`, 'ig'))
-  return <>{parts.map((part, index) => part.toLocaleLowerCase() === needle.toLocaleLowerCase() ? <mark key={`${index}:${part}`}>{part}</mark> : <span key={`${index}:${part}`}>{part}</span>)}</>
+  const terms = needle.split(/\s+/).filter(Boolean)
+  const escaped = terms.map(term => term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+  const parts = text.split(new RegExp(`(${escaped.join('|')})`, 'ig'))
+  return <>{parts.map((part, index) => terms.some(term => part.toLocaleLowerCase() === term.toLocaleLowerCase()) ? <mark key={`${index}:${part}`}>{part}</mark> : <span key={`${index}:${part}`}>{part}</span>)}</>
 }
 
 function RichText({ text, query = '' }: { text: string; query?: string }) {
@@ -1589,7 +1599,6 @@ export function App({ store }: { store: WebStore }) {
   const [commands, setCommands] = useState<CommandView[]>(DEFAULT_COMMANDS)
   const [commandIndex, setCommandIndex] = useState(-1)
   const [search, setSearch] = useState('')
-  const deferredSearch = useDeferredValue(search)
   const [sendError, setSendError] = useState<string | null>(null)
   const [focusedSeq, setFocusedSeq] = useState<number | null>(null)
   const [trajectorySelectedSeq, setTrajectorySelectedSeq] = useState<number | null>(null)
@@ -1653,8 +1662,16 @@ export function App({ store }: { store: WebStore }) {
     clearTrajectorySelection()
   }, [clearTrajectorySelection])
   const producedBySeq = useMemo(() => deriveProducedFiles(state.events), [state.events])
-  const searchIndex = useMemo(() => new TrajectorySearchIndex(state.events), [state.events])
-  const searchMatches = useMemo(() => searchIndex.search(search), [search, searchIndex])
+  const searchIndexRef = useRef<TrajectorySearchIndex | null>(null)
+  const searchIndex = useMemo(() => {
+    const index = searchIndexRef.current ?? new TrajectorySearchIndex([])
+    searchIndexRef.current = index
+    index.update(state.events)
+    return index
+  }, [state.events])
+  const debouncedSearch = useDebouncedValue(search, 120)
+  const deferredSearch = useDeferredValue(debouncedSearch)
+  const searchMatches = useMemo(() => searchIndex.search(debouncedSearch), [debouncedSearch, searchIndex, state.events])
   const firstSearchMatch = searchMatches[0]
   const filtered = useMemo(() => {
     const searched = searchMatches.map(match => match.event)

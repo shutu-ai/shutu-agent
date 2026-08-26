@@ -39,20 +39,45 @@ function snippet(value: string, query: string): string {
 }
 
 export class TrajectorySearchIndex {
-  private readonly entries: readonly { event: EventView; fields: readonly (readonly [string, string])[] }[]
+  private readonly entries = new Map<string, { event: EventView; fields: readonly (readonly [string, string])[] }>()
+  private events: readonly EventView[] = []
 
   constructor(events: readonly EventView[]) {
-    this.entries = events.map(event => ({ event, fields: searchableFields(event) }))
+    this.update(events)
+  }
+
+  /** Incrementally synchronize event entries while retaining unchanged fields. */
+  update(events: readonly EventView[]): boolean {
+    if (events === this.events || (events.length === this.events.length && events.every((event, index) => event === this.events[index]))) return false
+    const seen = new Set<string>()
+    for (const event of events) {
+      const key = `${event.seq}:v${event.version}`
+      const previous = this.entries.get(key)
+      if (previous === undefined || previous.event !== event) {
+        this.entries.set(key, { event, fields: searchableFields(event) })
+      }
+      seen.add(key)
+    }
+    for (const key of this.entries.keys()) {
+      if (!seen.has(key)) this.entries.delete(key)
+    }
+    this.events = events
+    return true
   }
 
   search(query: string): readonly EventSearchMatch[] {
     const needle = query.trim().toLocaleLowerCase()
-    if (needle === '') return this.entries.map(entry => ({ event: entry.event, fields: [], snippet: '' }))
-    return this.entries.flatMap(entry => {
-      const matches = entry.fields.filter(([, value]) => value.toLocaleLowerCase().includes(needle))
-      if (matches.length === 0) return []
+    if (needle === '') return this.events.map(event => ({ event, fields: [], snippet: '' }))
+    const terms = needle.split(/\s+/).filter(Boolean)
+    return this.events.flatMap(event => {
+      const entry = this.entries.get(`${event.seq}:v${event.version}`)
+      if (entry === undefined) return []
+      const matches = entry.fields.filter(([, value]) => terms.some(term => value.toLocaleLowerCase().includes(term)))
+      const matchesEveryTerm = terms.every(term => entry.fields.some(([, value]) => value.toLocaleLowerCase().includes(term)))
+      if (matches.length === 0 || !matchesEveryTerm) return []
       const match = matches[0]!
-      return [{ event: entry.event, fields: matches.map(([name]) => name), snippet: snippet(match[1], needle) }]
+      const snippetTerm = terms.find(term => match[1].toLocaleLowerCase().includes(term)) ?? terms[0]!
+      return [{ event, fields: matches.map(([name]) => name), snippet: snippet(match[1], snippetTerm) }]
     })
   }
 }

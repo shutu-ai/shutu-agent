@@ -33,4 +33,15 @@ describe('trajectory search projection', () => {
     expect(result?.snippet).toContain('needle')
     expect(result?.snippet.length).toBeLessThan(140)
   })
+
+  it('updates incrementally and requires every query term', () => {
+    const first = baseEvent(1, { summary: 'alpha output' })
+    const second = baseEvent(2, { summary: 'beta output' })
+    const index = new TrajectorySearchIndex([first])
+    expect(index.search('alpha output').map(match => match.event.seq)).toEqual([1])
+    expect(index.update([first, second])).toBe(true)
+    expect(index.search('beta output').map(match => match.event.seq)).toEqual([2])
+    expect(index.search('alpha missing')).toEqual([])
+    expect(index.update([first, second])).toBe(false)
+  })
 })
