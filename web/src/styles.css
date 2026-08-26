@@ -5,9 +5,13 @@
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
+button:focus-visible, [role="tab"]:focus-visible, [role="listitem"]:focus-visible { outline: 2px solid #9de9bd; outline-offset: 2px; }
+input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid #9de9bd !important; outline-offset: 2px; }
+.skip-link { position: fixed; z-index: 20; top: 8px; left: 8px; transform: translateY(-160%); border-radius: 6px; padding: 8px 10px; color: #09131c; background: #9de9bd; font-size: 12px; }
+.skip-link:focus-visible { transform: translateY(0); }
 body { margin: 0; min-width: 960px; background: #0b1018; }
 button, input, textarea { font: inherit; }
-button { cursor: pointer; }
+button { cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
 .shell { display: flex; height: 100vh; min-height: 100vh; background: radial-gradient(circle at 70% -10%, #1a293c 0, transparent 40%), #0b1018; }
 .sidebar { display: flex; width: 264px; min-height: 0; flex: 0 0 264px; flex-direction: column; border-right: 1px solid #202b3a; background: rgba(11, 16, 24, .8); padding: 14px 12px 10px; }
 .brand-row { display: flex; align-items: center; gap: 7px; min-height: 38px; margin-bottom: 10px; }
@@ -225,6 +229,9 @@ pre { margin: 3px 0 0; overflow: auto; color: #b9c8da; font: 11px/1.45 ui-monosp
 .auth-card button:disabled { opacity: .45; }
 .spinner { width: 20px; height: 20px; border: 2px solid #2d4050; border-top-color: #9de9bd; border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}
 .composer { display: flex; gap: 10px; margin: 8px 38px 26px; border: 1px solid #2a384a; border-radius: 12px; padding: 9px; background: #111a26; }
 .composer textarea { flex: 1; resize: none; border: 0; outline: 0; padding: 5px; color: #e7edf5; background: transparent; }
 .composer button { align-self: end; border: 0; border-radius: 8px; padding: 8px 14px; color: #09131c; background: #9de9bd; font-weight: 700; }

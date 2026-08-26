@@ -41,13 +41,14 @@ function json(route, value) {
 async function assertVisibleRowsDoNotOverlap(page) {
   let minimumGap = Number.NEGATIVE_INFINITY
   for (let attempt = 0; attempt < 10; attempt += 1) {
-    minimumGap = await page.locator('.virtual-row').evaluateAll(elements => {
+    const measurement = await page.locator('.virtual-row').evaluateAll(elements => {
       const boxes = elements.map(element => {
         const rect = element.getBoundingClientRect()
         return { top: rect.top, bottom: rect.bottom }
       }).sort((left, right) => left.top - right.top)
-      return boxes.slice(1).reduce((gap, box, index) => Math.min(gap, box.top - boxes[index].bottom), Number.POSITIVE_INFINITY)
+      return { gap: boxes.slice(1).reduce((gap, box, index) => Math.min(gap, box.top - boxes[index].bottom), Number.POSITIVE_INFINITY), boxes }
     })
+    minimumGap = measurement.gap
     if (minimumGap >= -1) return
     await page.waitForTimeout(50)
   }
@@ -98,6 +99,10 @@ async function runDesktop(browser) {
   assert.equal(await page.title(), 'Shutu DSH Web')
   assert.match(await page.locator('body').innerText(), /P18 smoke fixture/)
   await page.getByRole('tab', { name: /Trajectory/ }).click()
+  await page.getByRole('tab', { name: /Trajectory/ }).press('ArrowLeft')
+  assert.equal(await page.getByRole('tab', { name: 'Conversation' }).getAttribute('aria-selected'), 'true')
+  await page.getByRole('tab', { name: 'Conversation' }).press('ArrowRight')
+  assert.equal(await page.getByRole('tab', { name: /Trajectory/ }).getAttribute('aria-selected'), 'true')
   const collapse = page.getByRole('button', { name: 'Collapse turns' })
   await collapse.waitFor()
   const timelineSpans = page.locator('.timeline-span')
@@ -133,6 +138,11 @@ async function runDesktop(browser) {
   await search.fill('glob')
   await page.waitForTimeout(180)
   assert.ok(await page.getByText('src/app.tsx', { exact: true }).count() > 0, 'trajectory search result is not visible')
+  await search.fill('')
+  await page.getByRole('tab', { name: 'Conversation' }).click()
+  await page.getByRole('button', { name: 'Inspect event #7' }).click()
+  assert.equal(await page.getByRole('tab', { name: 'Trajectory' }).getAttribute('aria-selected'), 'true', 'conversation inspect did not locate trajectory')
+  await page.getByRole('button', { name: 'Close event details' }).click()
   assert.deepEqual(issues, [])
   await page.screenshot({ path: resolve(process.env.TEMP ?? process.env.TMP ?? '.', 'shutu-p18-desktop.png') })
   await page.close()
