@@ -103,6 +103,16 @@ function relativeTime(value: string, now = Date.now()): string {
   return `${Math.floor(seconds / 31536000)}y`
 }
 
+function readStoredBoolean(key: string, fallback = false): boolean {
+  if (typeof localStorage === 'undefined') return fallback
+  try { return localStorage.getItem(key) === 'true' } catch { return fallback }
+}
+
+function writeStoredValue(key: string, value: string): void {
+  if (typeof localStorage === 'undefined') return
+  try { localStorage.setItem(key, value) } catch { /* optional view preference */ }
+}
+
 function sessionTitle(session: SessionSummary): string {
   return session.blank ? 'New session' : session.title || session.id
 }
@@ -1014,8 +1024,17 @@ function VirtualEvents({ events, store, sessionId, feedbackBySeq, producedBySeq,
 }) {
   const webState = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
   const scrollRef = useRef<HTMLDivElement>(null)
-  const [collapsed, setCollapsed] = useState(false)
-  const [collapsedAssistants, setCollapsedAssistants] = useState<ReadonlySet<number>>(new Set())
+  const turnsCollapsedKey = `shutu.web.trajectory.${sessionId}.turns-collapsed`
+  const callsCollapsedKey = `shutu.web.trajectory.${sessionId}.calls-collapsed`
+  const [collapsed, setCollapsed] = useState(() => readStoredBoolean(turnsCollapsedKey))
+  const [collapsedAssistants, setCollapsedAssistants] = useState<ReadonlySet<number>>(() => {
+    if (typeof localStorage === 'undefined') return new Set()
+    try {
+      const raw = localStorage.getItem(callsCollapsedKey)
+      const values = raw === null ? [] : JSON.parse(raw) as unknown
+      return new Set(Array.isArray(values) ? values.filter((value): value is number => typeof value === 'number') : [])
+    } catch { return new Set() }
+  })
   const assistantToolCallSeqs = useMemo(() => {
     const seqs = new Set<number>()
     for (let index = 0; index < events.length; index += 1) {
@@ -1024,6 +1043,26 @@ function VirtualEvents({ events, store, sessionId, feedbackBySeq, producedBySeq,
     }
     return seqs
   }, [events])
+  useEffect(() => {
+    setCollapsed(readStoredBoolean(turnsCollapsedKey))
+    setCollapsedAssistants(() => {
+      if (typeof localStorage === 'undefined') return new Set()
+      try {
+        const raw = localStorage.getItem(callsCollapsedKey)
+        const values = raw === null ? [] : JSON.parse(raw) as unknown
+        return new Set(Array.isArray(values) ? values.filter((value): value is number => typeof value === 'number') : [])
+      } catch { return new Set() }
+    })
+  }, [callsCollapsedKey, turnsCollapsedKey])
+
+  useEffect(() => {
+    writeStoredValue(turnsCollapsedKey, String(collapsed))
+  }, [collapsed, turnsCollapsedKey])
+
+  useEffect(() => {
+    writeStoredValue(callsCollapsedKey, JSON.stringify([...collapsedAssistants]))
+  }, [callsCollapsedKey, collapsedAssistants])
+
   useEffect(() => {
     setCollapsedAssistants(current => {
       const next = new Set([...current].filter(seq => assistantToolCallSeqs.has(seq)))
@@ -1068,7 +1107,7 @@ function VirtualEvents({ events, store, sessionId, feedbackBySeq, producedBySeq,
     setScrollTop(top)
     if (top < 100) onReachTop()
   }}>
-    <div className="trajectory-toolbar"><button type="button" className="text-button" onClick={() => setCollapsed(value => !value)} aria-label={collapsed ? 'Expand turns' : 'Collapse turns'}>{collapsed ? 'Expand turns' : 'Collapse turns'}</button><button type="button" className="text-button" onClick={toggleAllAssistantCalls} disabled={assistantToolCallSeqs.size === 0} aria-label={allAssistantCallsCollapsed ? 'Expand tool calls' : 'Collapse tool calls'}>{allAssistantCallsCollapsed ? 'Expand calls' : 'Collapse calls'}</button><span>{collapsed ? `${displayEvents.length} compact records` : `${displayEvents.length} records`}</span></div>
+    <div className="trajectory-toolbar"><button type="button" className="text-button" onClick={() => setCollapsed(value => !value)} aria-label={collapsed ? 'Expand turns' : 'Collapse turns'}>{collapsed ? 'Expand turns' : 'Collapse turns'}</button><button type="button" className="text-button" onClick={toggleAllAssistantCalls} disabled={assistantToolCallSeqs.size === 0} aria-label={allAssistantCallsCollapsed ? 'Expand tool calls' : 'Collapse tool calls'}>{allAssistantCallsCollapsed ? 'Expand calls' : 'Collapse calls'}</button><button type="button" className="text-button" onClick={() => { setCollapsed(false); setCollapsedAssistants(new Set()) }} aria-label="Reset trajectory view">Reset view</button><span aria-live="polite">{collapsed ? `${displayEvents.length} compact records` : `${displayEvents.length} records`}</span></div>
     <HistoryBoundary hasOlder={webState.hasOlder} loading={loadingOlder} error={webState.historyError} onRetry={() => void store.loadOlder()} />
     <div className="virtual-canvas" style={{ height: offsets[offsets.length - 1] ?? 0 }}>
       {visible.map((event, index) => {

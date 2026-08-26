@@ -106,7 +106,7 @@ h1 { max-width: 52vw; margin: 0; overflow: hidden; color: #f1f5fa; font-size: 20
 .timeline-legend span { display: inline-flex; align-items: center; gap: 4px; }
 .lane-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; }
 .timeline-selected { margin-left: auto; color: #a9e8c1; }
-.trajectory-toolbar { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-height: 24px; color: #718096; font-size: 10px; }
+.trajectory-toolbar { position: sticky; z-index: 3; top: 0; display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-height: 24px; border-bottom: 1px solid rgba(67, 83, 103, .45); color: #718096; background: rgba(12, 19, 29, .94); font-size: 10px; backdrop-filter: blur(8px); }
 .error-banner { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 14px 38px 0; border: 1px solid #6d3c3c; border-radius: 8px; padding: 9px 12px; color: #ffb2a8; background: #291b22; }
 .error-banner button { border: 1px solid #91504a; border-radius: 5px; padding: 3px 10px; color: #ffd4cc; background: transparent; }
 .content-panel { display: flex; min-height: 0; flex-direction: column; overflow: hidden; padding: 18px 38px 8px; }
