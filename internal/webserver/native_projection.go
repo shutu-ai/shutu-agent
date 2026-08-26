@@ -16,23 +16,24 @@ import (
 )
 
 type nativeProjectionCursor struct {
-	turn      int
-	step      int
-	provider  string
-	model     string
-	requestID string
-	surface   []uint64
-	values    map[string]any
-	changed   map[string]any
-	usage     nativeProjectionTokenUsage
-	usageSeen bool
-	todos     []map[string]any
-	todosSeen bool
-	stats     nativeProjectionSessionStats
-	goal      map[string]any
-	subagent  nativeProjectionSubagentState
-	context   nativeProjectionContextBreakdown
-	list      nativeProjectionSessionListMetadata
+	turn              int
+	step              int
+	provider          string
+	model             string
+	requestID         string
+	surface           []uint64
+	surfaceGeneration int
+	values            map[string]any
+	changed           map[string]any
+	usage             nativeProjectionTokenUsage
+	usageSeen         bool
+	todos             []map[string]any
+	todosSeen         bool
+	stats             nativeProjectionSessionStats
+	goal              map[string]any
+	subagent          nativeProjectionSubagentState
+	context           nativeProjectionContextBreakdown
+	list              nativeProjectionSessionListMetadata
 }
 
 func newNativeProjectionCursor() *nativeProjectionCursor {
@@ -1510,7 +1511,19 @@ func (c *nativeProjectionCursor) projectSurface(seq uint64, data map[string]any)
 	next = append(next, seq)
 	next = append(next, c.surface[last+1:]...)
 	c.surface = next
+	c.surfaceGeneration++
 	return map[string]any{"op": "replace", "start": shadowed[0], "end": shadowed[len(shadowed)-1]}, shadowed
+}
+
+func (c *nativeProjectionCursor) surfaceSnapshot() map[string]any {
+	nodes := make([]any, 0, len(c.surface))
+	for _, seq := range c.surface {
+		nodes = append(nodes, seq)
+	}
+	return map[string]any{
+		"nodes":             nodes,
+		"replaceGeneration": c.surfaceGeneration,
+	}
 }
 
 func nativeDSHEventType(typ string) bool {

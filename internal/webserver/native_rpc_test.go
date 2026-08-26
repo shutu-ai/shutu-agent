@@ -228,6 +228,41 @@ func TestNativeHistoryReturnsGoalAndPermissionProjection(t *testing.T) {
 	}
 }
 
+func TestNativeHistoryReturnsDSHHeaderLineageAndSurfaceSnapshot(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	seedSession(t, st, "native-lineage", []session.Event{
+		{Seq: 1, Type: session.EventSubagentStart, At: time.UnixMilli(1001), Version: session.EventVersion, Data: json.RawMessage(`{"id":"child","provider":"spawn","parentSession":"root","label":"research","depth":2}`)},
+		{Seq: 2, Type: session.EventTurnStart, At: time.UnixMilli(1002), Version: session.EventVersion, Data: json.RawMessage(`{"turn":1}`)},
+		{Seq: 3, Type: session.EventUserMessage, At: time.UnixMilli(1003), Version: session.EventVersion, Data: json.RawMessage(`{"text":"question"}`)},
+		{Seq: 4, Type: session.EventAssistantMessage, At: time.UnixMilli(1004), Version: session.EventVersion, Data: json.RawMessage(`{"text":"answer"}`)},
+		{Seq: 5, Type: session.EventAssistantMessage, At: time.UnixMilli(1005), Version: session.EventVersion, Data: json.RawMessage(`{"text":"summary","surfaceOp":{"op":"replace","start":3,"end":4}}`)},
+	})
+
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/session.history", "tok", `{"type":"client-request","rpcId":"lineage","method":"session.history","payload":{"sessionId":"native-lineage"}}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK {
+		t.Fatalf("session.history response = %+v", response)
+	}
+	var history struct {
+		Header  nativeSessionHeader `json:"header"`
+		Surface map[string]any      `json:"surface"`
+	}
+	encoded, _ := json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &history); err != nil {
+		t.Fatal(err)
+	}
+	if history.Header.ParentSessionID != "root" || history.Header.Origin != "subagent" || history.Header.DelegationDepth != 2 {
+		t.Fatalf("session header lineage = %+v", history.Header)
+	}
+	if history.Surface["replaceGeneration"] != float64(1) {
+		t.Fatalf("surface generation = %#v", history.Surface)
+	}
+	nodes, ok := history.Surface["nodes"].([]any)
+	if !ok || len(nodes) != 1 || nodes[0] != float64(5) {
+		t.Fatalf("surface nodes = %#v", history.Surface["nodes"])
+	}
+}
+
 func TestNativeProjectionFoldsSessionStatsFromLifecycleEvents(t *testing.T) {
 	events := []session.Event{
 		{Seq: 1, Type: session.EventTurnStart, At: time.UnixMilli(900), Version: session.EventVersion, Data: json.RawMessage(`{"turn":1}`)},

@@ -143,6 +143,23 @@ type nativeSessionListItem struct {
 	Projections     *nativeProjectionBlock `json:"projections,omitempty"`
 }
 
+func nativeSessionLineage(events []session.Event) (parentSession, origin string, depth int) {
+	for _, ev := range events {
+		if ev.Type != session.EventSubagentStart {
+			continue
+		}
+		data := nativeJSONObject(ev.Data)
+		parentSession = nativeEventString(data, "parentSession", "parent_session")
+		origin = "subagent"
+		depth = nativeEventInt(data, "depth", 0)
+		if depth < 0 {
+			depth = 0
+		}
+		break
+	}
+	return parentSession, origin, depth
+}
+
 // nativeSessionHeader is the DSH session-header projection. The SQLite
 // session metadata currently owns cwd/createdAt; optional lineage and preset
 // fields remain omitted until their durable source is available.
@@ -839,6 +856,12 @@ func (s *Server) nativeSessionList(r *http.Request) nativeRPCResult {
 			}
 			metadata := cursor.list
 			item.Blank = metadata.blank
+			item.ParentSessionID, item.Origin, _ = nativeSessionLineage(events)
+			if configs, ok := s.store.(store.SessionConfigStore); ok {
+				if config, configErr := configs.GetSessionConfig(r.Context(), m.ID); configErr == nil {
+					item.AgentPreset = config.AgentPreset
+				}
+			}
 			item.UpdatedAt = m.CreatedAt.UnixMilli()
 			if metadata.lastPromptAt != nil && *metadata.lastPromptAt > item.UpdatedAt {
 				item.UpdatedAt = *metadata.lastPromptAt
@@ -917,6 +940,7 @@ func (s *Server) nativeSessionHistory(r *http.Request, raw json.RawMessage) nati
 		CreatedAt: meta.CreatedAt.UnixMilli(),
 		CWD:       meta.CWD,
 	}
+	header.ParentSessionID, header.Origin, header.DelegationDepth = nativeSessionLineage(events)
 	permission := ""
 	if configs, ok := s.store.(store.SessionConfigStore); ok {
 		if config, configErr := configs.GetSessionConfig(r.Context(), req.SessionID); configErr == nil {
@@ -924,7 +948,12 @@ func (s *Server) nativeSessionHistory(r *http.Request, raw json.RawMessage) nati
 			permission = config.Permission
 		}
 	}
-	value := map[string]any{"header": header, "events": entries, "hasMore": start > 0}
+	value := map[string]any{
+		"header":  header,
+		"events":  entries,
+		"hasMore": start > 0,
+		"surface": projection.surfaceSnapshot(),
+	}
 	if req.BeforeSeq == nil || *req.BeforeSeq == 0 {
 		lastSeq := int64(-1)
 		if len(events) > 0 {
