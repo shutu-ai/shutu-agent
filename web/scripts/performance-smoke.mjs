@@ -21,18 +21,29 @@ if (!Number.isInteger(eventCount) || eventCount < 100) throw new Error('SHUTU_PE
 
 function makeEvents() {
   const events = []
-  const text = '持续流式输出 '.repeat(24)
+  const longText = '持续流式输出 '.repeat(24)
+  const streamText = 'stream delta '.repeat(8)
+  const toolText = 'tool result line '.repeat(8)
   let seq = 0
   for (let turn = 1; events.length < eventCount; turn += 1) {
     const time = 1787746887000 + turn * 1000
+    const readCallId = `read-${turn}`
+    const searchCallId = `search-${turn}`
+    const readArguments = JSON.stringify({ path: `src/file-${turn}.tsx`, query: `level ${turn}` })
+    const searchArguments = JSON.stringify({ query: `Super Mario level ${turn}`, limit: 20 })
+    const code = '\n\n```tsx\nconst level_' + turn + ' = createLevel({ width: 320, height: 180 })\nrender(level_' + turn + ')\n```'
     events.push(
       { seq: ++seq, type: 'turn/start', time, data: { turn } },
-      { seq: ++seq, type: 'user/message', time, data: { id: `user-${turn}`, role: 'user', content: [{ type: 'text', text: `task ${turn} ${text}` }], source: { kind: 'user' } }, surfaceOp: 'append' },
+      { seq: ++seq, type: 'user/message', time, data: { id: `user-${turn}`, role: 'user', content: [{ type: 'text', text: `task ${turn}: build the next platform section` }], source: { kind: 'user' } }, surfaceOp: 'append' },
       { seq: ++seq, type: 'step/start', time, data: { turn, step: 1 } },
-      { seq: ++seq, type: 'assistant/chunk', time, data: { turn, step: 1, chunk: { type: 'text-delta', index: 0, text: `stream ${turn} ${text}` } } },
-      { seq: ++seq, type: 'tool/call', time, data: { turn, step: 1, callId: `call-${turn}`, name: 'read', arguments: JSON.stringify({ path: `src/file-${turn}.tsx`, query: text }) } },
-      { seq: ++seq, type: 'tool/result', time, data: { turn, step: 1, message: { id: `tool-${turn}`, role: 'user', content: [{ type: 'tool-result', toolCallId: `call-${turn}`, content: [{ type: 'text', text }], isError: false }], source: { kind: 'tool', callId: `call-${turn}` } } }, surfaceOp: 'append' },
-      { seq: ++seq, type: 'assistant/message', time, data: { turn, step: 1, message: { id: `assistant-${turn}`, role: 'assistant', content: [{ type: 'text', text: `done ${turn} ${text}` }], source: { kind: 'model', provider: 'test', model: 'perf' } }, usage: { inputTokens: 1200, outputTokens: 180 } }, surfaceOp: 'append' },
+      { seq: ++seq, type: 'assistant/chunk', time, data: { turn, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: `reasoning ${turn} ` } } },
+      { seq: ++seq, type: 'assistant/chunk', time, data: { turn, step: 1, chunk: { type: 'text-delta', index: 0, text: `stream ${turn} ${streamText}` } } },
+      { seq: ++seq, type: 'assistant/message', time, data: { turn, step: 1, message: { id: `assistant-tools-${turn}`, role: 'assistant', content: [{ type: 'reasoning', text: `reasoning ${turn}` }, { type: 'tool-call', id: readCallId, name: 'read', arguments: readArguments }, { type: 'tool-call', id: searchCallId, name: 'search', arguments: searchArguments }], source: { kind: 'model', provider: 'test', model: 'perf' } }, usage: { inputTokens: 1200, outputTokens: 260, reasoningTokens: 40 } }, surfaceOp: 'append' },
+      { seq: ++seq, type: 'tool/call', time, data: { turn, step: 1, callId: readCallId, name: 'read', arguments: readArguments } },
+      { seq: ++seq, type: 'tool/result', time, data: { turn, step: 1, message: { id: `tool-read-${turn}`, role: 'user', content: [{ type: 'tool-result', toolCallId: readCallId, content: [{ type: 'text', text: toolText }], isError: false }], source: { kind: 'tool', callId: readCallId } } }, surfaceOp: 'append' },
+      { seq: ++seq, type: 'tool/call', time, data: { turn, step: 1, callId: searchCallId, name: 'search', arguments: searchArguments } },
+      { seq: ++seq, type: 'tool/result', time, data: { turn, step: 1, message: { id: `tool-search-${turn}`, role: 'user', content: [{ type: 'tool-result', toolCallId: searchCallId, content: [{ type: 'text', text: `result ${turn} ${toolText}` }], isError: false }], source: { kind: 'tool', callId: searchCallId } } }, surfaceOp: 'append' },
+      { seq: ++seq, type: 'assistant/message', time, data: { turn, step: 1, message: { id: `assistant-${turn}`, role: 'assistant', content: [{ type: 'text', text: `done ${turn} ${longText}${code}` }], source: { kind: 'model', provider: 'test', model: 'perf' } }, usage: { inputTokens: 1200, outputTokens: 260, reasoningTokens: 40 } }, surfaceOp: 'append' },
       { seq: ++seq, type: 'step/end', time, data: { turn, step: 1 } },
       { seq: ++seq, type: 'turn/end', time, data: { turn, reason: { kind: 'completed' } } },
     )
