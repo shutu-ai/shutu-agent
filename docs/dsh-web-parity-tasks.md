@@ -50,9 +50,13 @@
 - [x] P36-4.4：移除 Shutu 自定义主布局、颜色 token、组件层级和页面导航最终渲染路径。
 - [ ] P36-5.1：完成新建、切换、归档、删除、Fork 会话和 Workspace 管理。
 - [ ] P36-5.2：完成发送、重试、取消、队列、steer、审批、问题、计划和目标操作。
+- [x] P36-5.2a：补齐 DSH `goals/*` Remote 命名空间到 Shutu goal 引擎的参数解包与操作映射，覆盖 create/edit/pause/resume/complete/clear。
 - [ ] P36-5.3：完成 Tool 折叠、请求详情、Trajectory、搜索、历史分页和滚动定位。
 - [ ] P36-5.4：完成子代理、后台任务、技能、文件引用、附件、模型、权限、Provider 和设置。
+- [x] P36-5.4a：原生 Remote 接入 `fileReferences/list` 与 `sessionReferenceResolver/candidates`，返回受会话 CWD 限制的文件候选和 canonical `dsh-session:` 引用。
+- [x] P36-5.4b：原生 Remote 接入 `pluginInventory/list`，返回与 native manifest 对齐的插件条目和生命周期状态。
 - [ ] P36-5.5：完成 export、feedback、错误恢复、重连和 session 状态提示。
+- [x] P36-5.5a：原生 Remote 接入 `messageFeedback/list|put|delete` 的 messageId/version CAS；斜杠命令支持图片附件。
 - [ ] P36-6.1：建立桌面/移动端、深色/浅色、空数据/加载/错误状态截图基线。
 - [ ] P36-6.2：对比布局尺寸、字体、间距、颜色、边框、滚动条、焦点和弹层行为。
 - [ ] P36-6.3：验证 Tab、快捷键、Escape、读屏语义、ARIA、焦点恢复和触控目标。
