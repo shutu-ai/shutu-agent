@@ -1611,6 +1611,68 @@ func TestNativeSubagentListProjectsParentScopedCatalog(t *testing.T) {
 	}
 }
 
+func TestNativeSubagentHistoryEnforcesParentLineageAndReusesProjection(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	seedSession(t, st, "parent-history", nil)
+	seedSession(t, st, "child-history", []session.Event{
+		{Seq: 1, Type: session.EventSubagentStart, At: time.UnixMilli(1001), Version: session.EventVersion, Data: json.RawMessage(`{"parentSession":"parent-history","depth":1}`)},
+		{Seq: 2, Type: session.EventTurnStart, At: time.UnixMilli(1002), Version: session.EventVersion, Data: json.RawMessage(`{}`)},
+		{Seq: 3, Type: session.EventUserMessage, At: time.UnixMilli(1003), Version: session.EventVersion, Data: json.RawMessage(`{"text":"child request"}`)},
+		{Seq: 4, Type: session.EventTurnEnd, At: time.UnixMilli(1004), Version: session.EventVersion, Data: json.RawMessage(`{}`)},
+	})
+	call := func(id string, payload map[string]any) nativeRPCResponse {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{"type": "client-request", "rpcId": id, "method": "subagent.history", "payload": payload})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := doReqBody(t, srv.Handler(), "POST", "/api/subagent.history", "tok", string(body))
+		return nativeResponse(t, rec.Body.Bytes())
+	}
+
+	response := call("subagent-history", map[string]any{
+		"parentSessionId": "parent-history", "childSessionId": "child-history", "mode": "continuable", "maxMessages": 1,
+	})
+	if !response.Result.OK {
+		t.Fatalf("subagent.history response = %+v", response)
+	}
+	var value struct {
+		Header struct {
+			ID              string `json:"id"`
+			ParentSessionID string `json:"parentSession"`
+			Origin          string `json:"origin"`
+		} `json:"header"`
+		Events      []nativeHistoryEntry  `json:"events"`
+		Projections nativeProjectionBlock `json:"projections"`
+	}
+	encoded, _ := json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &value); err != nil {
+		t.Fatal(err)
+	}
+	if value.Header.ID != "child-history" || value.Header.ParentSessionID != "parent-history" || value.Header.Origin != "subagent" || len(value.Events) == 0 {
+		t.Fatalf("subagent history value = %+v", value)
+	}
+	if value.Projections.AsOfSeq != 4 {
+		t.Fatalf("subagent history projection watermark = %d", value.Projections.AsOfSeq)
+	}
+	if _, ok := value.Projections.Values["contextBreakdown"]; !ok {
+		t.Fatalf("subagent history projections = %#v", value.Projections.Values)
+	}
+
+	response = call("subagent-history-unauthorized", map[string]any{
+		"parentSessionId": "other-parent", "childSessionId": "child-history", "mode": "one-shot",
+	})
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "subagent-unauthorized" {
+		t.Fatalf("unauthorized history response = %+v", response)
+	}
+	response = call("subagent-history-missing", map[string]any{
+		"parentSessionId": "parent-history", "childSessionId": "missing", "mode": "one-shot",
+	})
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "subagent-not-found" {
+		t.Fatalf("missing history response = %+v", response)
+	}
+}
+
 func readNativeTextFrame(reader *bufio.Reader) ([]byte, error) {
 	first, err := reader.ReadByte()
 	if err != nil {

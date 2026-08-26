@@ -249,6 +249,14 @@ type nativeSessionUpdateQueueRequest struct {
 	} `json:"action"`
 }
 
+type nativeSubagentHistoryRequest struct {
+	ParentSessionID string  `json:"parentSessionId"`
+	ChildSessionID  string  `json:"childSessionId"`
+	Mode            string  `json:"mode"`
+	BeforeSeq       *uint64 `json:"beforeSeq"`
+	MaxMessages     int     `json:"maxMessages"`
+}
+
 type nativeSessionSearchRequest struct {
 	Query string `json:"query"`
 }
@@ -305,7 +313,7 @@ func (s *Server) registerNativeRoutes(mux *http.ServeMux) {
 		"agentPreset.list", "agentPreset.select", "settings.describe",
 		"settings.mutate", "settings.update", "settings.replace", "credentials.describe", "dynamicCordisRunner/syncInspectManifest",
 		"dynamicCordisRunner/inventory", "llm.providers", "llm.models", "llm.discoverModels", "skill.list",
-		"subagent.list",
+		"subagent.list", "subagent.history",
 	} {
 		mux.Handle("POST /api/"+method, s.requireAuth(http.HandlerFunc(s.handleNativeRPC)))
 	}
@@ -935,6 +943,8 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 		return s.nativeSkillList(r, raw)
 	case "subagent.list":
 		return s.nativeSubagentList(r, raw)
+	case "subagent.history":
+		return s.nativeSubagentHistory(r, raw)
 	case "dynamicCordisRunner/syncInspectManifest":
 		return nativeRPCSuccess(nil)
 	case "dynamicCordisRunner/inventory":
@@ -1285,6 +1295,43 @@ func (s *Server) nativeSubagentList(r *http.Request, raw json.RawMessage) native
 		return nativeString(entries[left]["id"]) < nativeString(entries[right]["id"])
 	})
 	return nativeRPCSuccess(map[string]any{"entries": entries, "parentAvailable": true})
+}
+
+func (s *Server) nativeSubagentHistory(r *http.Request, raw json.RawMessage) nativeRPCResult {
+	var req nativeSubagentHistoryRequest
+	if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
+		return failure
+	}
+	req.ParentSessionID = strings.TrimSpace(req.ParentSessionID)
+	req.ChildSessionID = strings.TrimSpace(req.ChildSessionID)
+	req.Mode = strings.TrimSpace(req.Mode)
+	if req.ParentSessionID == "" || req.ChildSessionID == "" || req.Mode == "" {
+		return nativeRPCFailure("bad-request", "parentSessionId, childSessionId, and mode are required", nil)
+	}
+	if req.Mode != "one-shot" && req.Mode != "continuable" {
+		return nativeRPCFailure("bad-request", "mode must be one-shot or continuable", nil)
+	}
+	events, err := s.store.LoadSession(r.Context(), req.ChildSessionID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nativeRPCFailure("subagent-not-found", "subagent session not found", map[string]any{"childSessionId": req.ChildSessionID})
+		}
+		return nativeRPCFailure("internal", err.Error(), nil)
+	}
+	parent, _, _ := nativeSessionLineage(events)
+	if parent != req.ParentSessionID {
+		return nativeRPCFailure("subagent-unauthorized", "subagent does not belong to the requested parent", map[string]any{
+			"parentSessionId": req.ParentSessionID,
+			"childSessionId":  req.ChildSessionID,
+		})
+	}
+	childRaw, err := json.Marshal(nativeHistoryRequest{
+		SessionID: req.ChildSessionID, BeforeSeq: req.BeforeSeq, MaxMessages: req.MaxMessages,
+	})
+	if err != nil {
+		return nativeRPCFailure("internal", err.Error(), nil)
+	}
+	return s.nativeSessionHistory(r, childRaw)
 }
 
 func (s *Server) nativeAgentPresetList() nativeRPCResult {

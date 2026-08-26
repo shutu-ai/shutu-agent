@@ -23,6 +23,7 @@
 - [x] P36-2：接入 `settings.update/replace` 与 `llm.discoverModels` 原生方法；设置更新/替换共享 CAS revision 和脱敏视图，模型探测复用既有 Provider 探测器且不回传 API key。
 - [x] P36-2：接入 `skill.list` 原生方法；按 DSH 只返回 user-invocable 技能，统一转换描述、whenToUse、modelInvocable 字段并按名称稳定排序。
 - [x] P36-2：接入 `subagent.list` 原生方法；校验父会话存在，投影 child 的 mode/activity/label/hasChildren，并为运行时子代理摘要保留 continuable 标志。
+- [x] P36-2：接入 `subagent.history` 原生方法；校验 parent/child lineage 与 mode，复用 session history 的消息边界分页、surface 和 projection baseline。
 - [ ] P36-3：完整 projection baseline（所有已挂载 projection key）与生产数据规模验收仍待后续任务补齐。
 
 状态基线：P0–P23 已完成。P24–P35 已完成首轮实现；P36-1–P36-8 为“DSH 原生 UI 接入/视觉替换”新目标。未勾选项表示仍需补齐或在真实环境验收，不将未验证内容标记为完成。
