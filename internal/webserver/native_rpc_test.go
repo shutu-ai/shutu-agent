@@ -31,6 +31,75 @@ func nativeResponse(t *testing.T, recBody []byte) nativeRPCResponse {
 	return response
 }
 
+func TestNativeCommandsUseDSHDescriptorsAndGeneratedArgumentShape(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+	var gotSession, gotLine string
+	srv.SetNativeCommandManager(nativeCommandTestManager{
+		list: []NativeCommand{{Name: "help", Description: "show help", InputHint: "optional topic"}},
+		execute: func(_ context.Context, sessionID, line string, _ []llm.ImageRef) (NativeCommandExecution, bool, error) {
+			gotSession, gotLine = sessionID, line
+			return NativeCommandExecution{CommandID: "cmd-1", Result: NativeCommandResult{Kind: "success", Text: "ok"}}, true, nil
+		},
+	})
+	call := func(t *testing.T, method, payload string) nativeRPCResponse {
+		t.Helper()
+		rec := doReqBody(t, srv.Handler(), "POST", "/api/"+method, "tok", fmt.Sprintf(`{"type":"client-request","rpcId":"%s","method":"%s","payload":%s}`, method, method, payload))
+		return nativeResponse(t, rec.Body.Bytes())
+	}
+	list := call(t, "commands/list", `{"args":{"agentId":"s1"}}`)
+	if !list.Result.OK {
+		t.Fatalf("commands/list response = %+v", list)
+	}
+	items, ok := list.Result.Value.([]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("commands/list value = %#v", list.Result.Value)
+	}
+	item, ok := items[0].(map[string]any)
+	if !ok || item["name"] != "help" || item["description"] != "show help" {
+		t.Fatalf("commands/list item = %#v", items[0])
+	}
+	response := call(t, "commands/execute", `{"args":{"agentId":"s1","line":"/help"}}`)
+	if !response.Result.OK {
+		t.Fatalf("commands/execute response = %+v", response)
+	} else if gotSession != "s1" || gotLine != "/help" {
+		t.Fatalf("commands/execute callback=(%q,%q)", gotSession, gotLine)
+	}
+	execution, ok := response.Result.Value.(map[string]any)
+	if !ok || execution["commandId"] != "cmd-1" {
+		t.Fatalf("commands/execute value = %#v", response.Result.Value)
+	}
+}
+
+func TestNativeCommandsAcceptCompactArrayArgumentsAndOmitUnknownValue(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+	srv.SetNativeCommandManager(nativeCommandTestManager{
+		execute: func(_ context.Context, sessionID, line string, _ []llm.ImageRef) (NativeCommandExecution, bool, error) {
+			if sessionID != "s1" || line != "/status" {
+				t.Fatalf("compact command args=(%q,%q)", sessionID, line)
+			}
+			return NativeCommandExecution{}, false, nil
+		},
+	})
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/commands/execute", "tok", `{"type":"client-request","rpcId":"array","method":"commands/execute","payload":{"args":["s1","/status",[]]}}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK || response.Result.Value != nil {
+		t.Fatalf("unknown command response = %+v", response)
+	}
+}
+
+type nativeCommandTestManager struct {
+	list    []NativeCommand
+	execute func(context.Context, string, string, []llm.ImageRef) (NativeCommandExecution, bool, error)
+}
+
+func (m nativeCommandTestManager) List(context.Context, string) ([]NativeCommand, error) {
+	return m.list, nil
+}
+
+func (m nativeCommandTestManager) Execute(ctx context.Context, sessionID, line string, images []llm.ImageRef) (NativeCommandExecution, bool, error) {
+	return m.execute(ctx, sessionID, line, images)
+}
+
 func TestNativeGoalMutationsUseDSHShapesAndForwardOptionalFields(t *testing.T) {
 	srv, _ := newTestServer(t, "tok")
 	var calls []NativeGoalMutation

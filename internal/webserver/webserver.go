@@ -93,6 +93,7 @@ type Server struct {
 	nativeCredentialUnsetFn      func(ctx context.Context, ref string) error
 	nativeSettingsOpenDocumentFn func(ctx context.Context) error
 	nativeAgentPresetManager     NativeAgentPresetManager
+	nativeCommandManager         NativeCommandManager
 
 	// statusFn is the dsh-session-status alignment: it computes the live state
 	// (warning/ongoing/done/idle + labels + running-subagent count) for one
@@ -602,6 +603,42 @@ type NativeAgentPresetManager interface {
 	Copy(context.Context, string, string, string) (string, error)
 	OpenDocument(context.Context, string) (NativeAgentPresetDocument, error)
 	Remove(context.Context, string) error
+}
+
+// NativeCommand describes one host-side slash command in the DSH command
+// directory. The command name never includes the leading slash.
+type NativeCommand struct {
+	Name        string
+	Description string
+	InputHint   string
+	Images      bool
+}
+
+// NativeCommandResult is the settled result rendered by DSH's command flow.
+// Kind is either "success" or "error"; successful results may omit Text.
+type NativeCommandResult struct {
+	Kind           string
+	Text           string
+	SourceEventSeq *uint64
+}
+
+// NativeCommandExecution pairs a command result with the lifecycle id used
+// by the native command flow.
+type NativeCommandExecution struct {
+	CommandID string
+	Result    NativeCommandResult
+}
+
+// NativeCommandManager wires DSH command discovery and execution to the
+// composition root. The webserver owns only the transport contract.
+type NativeCommandManager interface {
+	List(context.Context, string) ([]NativeCommand, error)
+	Execute(context.Context, string, string, []llm.ImageRef) (NativeCommandExecution, bool, error)
+}
+
+// SetNativeCommandManager wires DSH commands/list and commands/execute.
+func (s *Server) SetNativeCommandManager(manager NativeCommandManager) {
+	s.nativeCommandManager = manager
 }
 
 // SetNativeGoalManager wires DSH's goal.create/edit/pause/resume/complete/clear

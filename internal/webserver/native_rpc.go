@@ -229,6 +229,76 @@ type nativeSessionIDRequest struct {
 	SessionID string `json:"sessionId"`
 }
 
+type nativeCommandRequest struct {
+	SessionID string
+	Line      string
+	Images    []llm.ImageRef
+}
+
+// nativeCommandRequestFromPayload accepts the generated DSH connection shape
+// ({args:{agentId,...}}) as well as the compact array form used by older DSH
+// browser bundles ({args:[sessionId,line,images]}). Keeping this normalization
+// at the wire boundary lets the command manager remain transport-neutral.
+func nativeCommandRequestFromPayload(raw json.RawMessage) (nativeCommandRequest, error) {
+	var direct struct {
+		SessionID string          `json:"sessionId"`
+		AgentID   string          `json:"agentId"`
+		Line      string          `json:"line"`
+		Images    []llm.ImageRef  `json:"images"`
+		Args      json.RawMessage `json:"args"`
+	}
+	if err := json.Unmarshal(raw, &direct); err != nil {
+		return nativeCommandRequest{}, fmt.Errorf("payload is invalid JSON: %w", err)
+	}
+	sessionID := strings.TrimSpace(direct.SessionID)
+	if sessionID == "" {
+		sessionID = strings.TrimSpace(direct.AgentID)
+	}
+	if len(direct.Args) > 0 && string(direct.Args) != "null" {
+		if direct.Args[0] == '{' {
+			var args struct {
+				SessionID string         `json:"sessionId"`
+				AgentID   string         `json:"agentId"`
+				Line      string         `json:"line"`
+				Images    []llm.ImageRef `json:"images"`
+			}
+			if err := json.Unmarshal(direct.Args, &args); err != nil {
+				return nativeCommandRequest{}, fmt.Errorf("command args are invalid: %w", err)
+			}
+			if sessionID == "" {
+				sessionID = strings.TrimSpace(args.SessionID)
+				if sessionID == "" {
+					sessionID = strings.TrimSpace(args.AgentID)
+				}
+			}
+			if direct.Line == "" {
+				direct.Line = args.Line
+			}
+			if len(direct.Images) == 0 {
+				direct.Images = args.Images
+			}
+		} else if direct.Args[0] == '[' {
+			var args []json.RawMessage
+			if err := json.Unmarshal(direct.Args, &args); err != nil {
+				return nativeCommandRequest{}, fmt.Errorf("command args are invalid: %w", err)
+			}
+			if len(args) > 0 && sessionID == "" {
+				_ = json.Unmarshal(args[0], &sessionID)
+			}
+			if len(args) > 1 && direct.Line == "" {
+				_ = json.Unmarshal(args[1], &direct.Line)
+			}
+			if len(args) > 2 && len(direct.Images) == 0 {
+				_ = json.Unmarshal(args[2], &direct.Images)
+			}
+		}
+	}
+	if sessionID == "" {
+		return nativeCommandRequest{}, errors.New("agentId or sessionId is required")
+	}
+	return nativeCommandRequest{SessionID: sessionID, Line: direct.Line, Images: direct.Images}, nil
+}
+
 type nativeSessionSelectModelRequest struct {
 	SessionID       string `json:"sessionId"`
 	Provider        string `json:"provider"`
@@ -332,6 +402,7 @@ type nativeSubscribedFrame struct {
 func (s *Server) registerNativeRoutes(mux *http.ServeMux) {
 	for _, method := range []string{
 		"host.describe", "host.listDirectory", "host.createDirectory", "host.pickDirectory",
+		"commands/list", "commands/execute",
 		"session.list", "session.search", "session.create",
 		"session.history", "session.rename", "session.prompt", "session.cancel", "session.attachment",
 		"session.models", "session.selectModel", "session.fork", "session.updateQueue",
@@ -763,6 +834,62 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 		return s.nativeHostOpenPath(r, req.Path)
 	case "host.pickDirectory":
 		return s.nativeHostPickDirectory(r)
+	case "commands/list":
+		if s.nativeCommandManager == nil {
+			return nativeRPCFailure("not-supported", "command manager not wired", nil)
+		}
+		req, err := nativeCommandRequestFromPayload(raw)
+		if err != nil {
+			return nativeRPCFailure("bad-request", err.Error(), nil)
+		}
+		commands, err := s.nativeCommandManager.List(r.Context(), req.SessionID)
+		if err != nil {
+			return nativeRPCFailure("command-list-failed", err.Error(), nil)
+		}
+		items := make([]map[string]any, 0, len(commands))
+		for _, command := range commands {
+			name := strings.TrimSpace(command.Name)
+			description := strings.TrimSpace(command.Description)
+			if name == "" || description == "" {
+				continue
+			}
+			item := map[string]any{"name": name, "description": description}
+			if hint := strings.TrimSpace(command.InputHint); hint != "" {
+				input := map[string]any{"hint": hint}
+				if command.Images {
+					input["images"] = true
+				}
+				item["input"] = input
+			}
+			items = append(items, item)
+		}
+		return nativeRPCSuccess(items)
+	case "commands/execute":
+		if s.nativeCommandManager == nil {
+			return nativeRPCFailure("not-supported", "command manager not wired", nil)
+		}
+		req, err := nativeCommandRequestFromPayload(raw)
+		if err != nil {
+			return nativeRPCFailure("bad-request", err.Error(), nil)
+		}
+		execution, matched, err := s.nativeCommandManager.Execute(r.Context(), req.SessionID, req.Line, req.Images)
+		if err != nil {
+			return nativeRPCFailure("command-execute-failed", err.Error(), nil)
+		}
+		if !matched {
+			return nativeRPCSuccess(nil)
+		}
+		result := map[string]any{"kind": execution.Result.Kind}
+		if execution.Result.Text != "" {
+			result["text"] = execution.Result.Text
+		}
+		if execution.Result.SourceEventSeq != nil {
+			result["sourceEventSeq"] = *execution.Result.SourceEventSeq
+		}
+		return nativeRPCSuccess(map[string]any{
+			"commandId": execution.CommandID,
+			"result":    result,
+		})
 	case "session.list":
 		return s.nativeSessionList(r)
 	case "session.search":

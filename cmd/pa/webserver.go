@@ -135,6 +135,7 @@ func (a *app) registerWebServer() error {
 	srv.SetMessageHandler(func(ctx context.Context, sessionID, text string, images []llm.ImageRef) error {
 		return a.webMessage(ctx, sessionID, text, images)
 	})
+	srv.SetNativeCommandManager(a.nativeCommandManager())
 	srv.SetQueueManager(a.webQueueList, a.webQueueEnqueue, a.webQueueUpdate)
 	srv.SetNativeQueueUpdater(func(ctx context.Context, sessionID, itemID, action, text string) error {
 		if action == "edit" {
@@ -292,6 +293,69 @@ func (a *app) registerWebServer() error {
 		}
 	}()
 	return nil
+}
+
+type nativeCommandManager struct {
+	app *app
+}
+
+func (a *app) nativeCommandManager() webserver.NativeCommandManager {
+	return nativeCommandManager{app: a}
+}
+
+func (m nativeCommandManager) List(_ context.Context, _ string) ([]webserver.NativeCommand, error) {
+	commands := m.app.webCommandCatalog()
+	out := make([]webserver.NativeCommand, 0, len(commands))
+	for _, command := range commands {
+		name := strings.TrimSpace(command["name"])
+		hint := strings.TrimSpace(command["hint"])
+		if name == "" || hint == "" {
+			continue
+		}
+		description := hint
+		if strings.HasPrefix(description, "Skill: ") {
+			description = strings.TrimSpace(strings.TrimPrefix(description, "Skill: "))
+		}
+		out = append(out, webserver.NativeCommand{
+			Name: name, Description: description, InputHint: hint,
+		})
+	}
+	return out, nil
+}
+
+func (m nativeCommandManager) Execute(ctx context.Context, sessionID, line string, images []llm.ImageRef) (webserver.NativeCommandExecution, bool, error) {
+	line = strings.TrimSpace(line)
+	if line == "" || !strings.HasPrefix(line, "/") {
+		return webserver.NativeCommandExecution{}, false, nil
+	}
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return webserver.NativeCommandExecution{}, false, nil
+	}
+	name := strings.TrimPrefix(fields[0], "/")
+	known := false
+	for _, command := range m.app.webCommandCatalog() {
+		if command["name"] == name {
+			known = true
+			break
+		}
+	}
+	if !known {
+		return webserver.NativeCommandExecution{}, false, nil
+	}
+	if len(images) > 0 {
+		return webserver.NativeCommandExecution{
+			CommandID: fmt.Sprintf("shutu-cmd-%d", time.Now().UnixNano()),
+			Result:    webserver.NativeCommandResult{Kind: "error", Text: "native command image attachments are not supported yet"},
+		}, true, nil
+	}
+	if err := m.app.webMessage(ctx, sessionID, line, nil); err != nil {
+		return webserver.NativeCommandExecution{}, true, err
+	}
+	return webserver.NativeCommandExecution{
+		CommandID: fmt.Sprintf("shutu-cmd-%d", time.Now().UnixNano()),
+		Result:    webserver.NativeCommandResult{Kind: "success"},
+	}, true, nil
 }
 
 // webSessionState reconstructs the durable state projection for an arbitrary
