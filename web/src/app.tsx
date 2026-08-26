@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, use
 import type { AttachmentView, CommandView, ConfigView, ContextView, DirectoryListing, EventDetails, EventView, FeedbackView, GoalView, ImageView, InteractionView, JobView, MCPServerView, PlanView, ProviderModelView, ProviderView, QueueItem, RunningSnapshot, SessionSearchHit, SessionStateView, SessionSummary, SettingsView, SkillView, SkillsView, SubagentView, TodoView, WorkspaceView } from './api'
 import { ShutuApiError } from './api'
 import { projectDshConversation, type DshConversationNode, type DshConversationSnapshot } from './dsh-conversation'
-import { collapseDshAssistantToolCalls, collapseDshTrajectoryTurns, projectDshTrajectory, type DshTimelineMode, type DshTrajectoryEvent } from './dsh-trajectory'
+import { collapseDshAssistantToolCalls, collapseDshTrajectoryTurns, projectDshTrajectory, projectDshTrajectoryRecords, type DshTimelineMode, type DshTrajectoryEvent, type DshTrajectoryRecord } from './dsh-trajectory'
 import { deriveProducedFiles } from './produced-files'
 import { WebStore } from './store'
 import { filterEventSearch } from './trajectory-search'
@@ -833,7 +833,16 @@ function EventCard({ event, store, sessionId, feedback, producedPaths = [], onFe
 
 type InspectorTab = 'overview' | 'input' | 'output' | 'raw' | 'timing'
 
-function TrajectoryInspector({ event, onClose }: { event: DshTrajectoryEvent; onClose: () => void }) {
+function inspectorPayload(event: EventView, keys: readonly string[]): string | null {
+  for (const key of keys) {
+    const value = event.details?.[key]
+    if (value === undefined || value === null || value === '') continue
+    return typeof value === 'string' ? value : detailText(value)
+  }
+  return null
+}
+
+function TrajectoryInspector({ event, record, onClose }: { event: DshTrajectoryEvent; record?: DshTrajectoryRecord; onClose: () => void }) {
   const [tab, setTab] = useState<InspectorTab>('overview')
   useEffect(() => setTab('overview'), [event.seq])
   const usage = event.details?.usage
@@ -841,12 +850,15 @@ function TrajectoryInspector({ event, onClose }: { event: DshTrajectoryEvent; on
     ? Object.entries(usage).filter(([, value]) => value !== undefined && value !== null)
     : []
   const detailEntriesForDisplay = detailEntries(event.details).filter(([key]) => key !== 'usage')
-  const status = event.type.includes('error') || event.type.includes('failed') || event.compaction_error
+  const status = record?.status === 'failed' || event.type.includes('error') || event.type.includes('failed') || event.compaction_error
     ? 'Failed'
-    : event.details?.status === 'running' || event.type.endsWith('/start')
+    : record?.status === 'running' || event.details?.status === 'running' || event.type.endsWith('/start') || event.type === 'llm/request_start'
       ? 'Running'
       : 'Completed'
   const output = event.tool_output ?? event.reasoning ?? event.compaction_summary ?? event.summary
+  const input = event.tool_args ?? inspectorPayload(event, ['input', 'messages', 'request', 'options'])
+  const error = typeof event.details?.error === 'string' ? event.details.error : event.compaction_error
+  const normalizedUsage = record?.usage
   return <aside className="trajectory-inspector" aria-label="Trajectory event details">
     <div className="inspector-head"><div><span className="eyebrow">EVENT INSPECTOR</span><strong>#{event.seq} {eventLabel(event)}</strong></div><button type="button" className="inspector-close" onClick={onClose} aria-label="Close event details">×</button></div>
     <div className="inspector-summary"><span className={`inspector-status ${status === 'Failed' ? 'danger' : status === 'Running' ? 'running' : 'done'}`}>{status}</span><time>{formatTime(event.time)}</time></div>
@@ -854,11 +866,11 @@ function TrajectoryInspector({ event, onClose }: { event: DshTrajectoryEvent; on
       {(['overview', 'input', 'output', 'raw', 'timing'] as const).map(item => <button type="button" role="tab" key={item} aria-selected={tab === item} className={tab === item ? 'selected' : ''} onClick={() => setTab(item)}>{item === 'overview' ? 'Overview' : item === 'input' ? 'Input' : item === 'output' ? 'Output' : item === 'raw' ? 'Raw event' : 'Timing'}</button>)}
     </nav>
     <div className="inspector-body" role="tabpanel">
-      {tab === 'overview' && <div className="inspector-overview"><p className="inspector-summary-text">{event.summary || 'No summary recorded.'}</p><dl className="inspector-meta"><div><dt>Type</dt><dd>{event.type}</dd></div>{event.tool_name && <div><dt>Tool</dt><dd>{event.tool_name}</dd></div>}{event.call_id && <div><dt>Call ID</dt><dd>{event.call_id}</dd></div>}{event.version > 1 && <div><dt>Version</dt><dd>v{event.version}</dd></div>}</dl>{usageEntries.length > 0 && <section className="inspector-section"><h3>Token usage</h3><dl className="inspector-meta">{usageEntries.map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{detailText(value)}</dd></div>)}</dl></section>}{detailEntriesForDisplay.length > 0 && <section className="inspector-section"><h3>Request details</h3><dl className="inspector-meta">{detailEntriesForDisplay.map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{value}</dd></div>)}</dl></section>}</div>}
-      {tab === 'input' && <pre className="inspector-code">{event.tool_args || 'No request input recorded.'}</pre>}
+      {tab === 'overview' && <div className="inspector-overview"><p className="inspector-summary-text">{event.summary || 'No summary recorded.'}</p><dl className="inspector-meta"><div><dt>Type</dt><dd>{event.type}</dd></div>{record && <><div><dt>Record ID</dt><dd>{record.id}</dd></div><div><dt>Kind</dt><dd>{record.kind}</dd></div>{record.turn !== null && <div><dt>Turn</dt><dd>{record.turn}</dd></div>}{record.requestId && <div><dt>Request ID</dt><dd>{record.requestId}</dd></div>}{record.parentId && <div><dt>Parent</dt><dd>{record.parentId}</dd></div>}<div><dt>Children</dt><dd>{record.childIds.length}</dd></div></>}{event.tool_name && <div><dt>Tool</dt><dd>{event.tool_name}</dd></div>}{event.call_id && <div><dt>Call ID</dt><dd>{event.call_id}</dd></div>}{event.version > 1 && <div><dt>Version</dt><dd>v{event.version}</dd></div>}</dl>{error && <section className="inspector-section"><h3>Error</h3><pre className="inspector-code">{error}</pre></section>}{(usageEntries.length > 0 || normalizedUsage !== undefined) && <section className="inspector-section"><h3>Token usage</h3><dl className="inspector-meta">{normalizedUsage ? Object.entries(normalizedUsage).map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{detailText(value)}</dd></div>) : usageEntries.map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{detailText(value)}</dd></div>)}</dl></section>}{detailEntriesForDisplay.length > 0 && <section className="inspector-section"><h3>Request details</h3><dl className="inspector-meta">{detailEntriesForDisplay.map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{value}</dd></div>)}</dl></section>}</div>}
+      {tab === 'input' && <pre className="inspector-code">{input || 'No request input recorded.'}</pre>}
       {tab === 'output' && <pre className="inspector-code">{output || 'No output recorded.'}</pre>}
       {tab === 'raw' && <pre className="inspector-code">{detailText(event)}</pre>}
-      {tab === 'timing' && <dl className="inspector-meta"><div><dt>Recorded at</dt><dd>{event.time}</dd></div>{event.details?.duration_ms !== undefined && <div><dt>Duration</dt><dd>{detailText(event.details.duration_ms)} ms</dd></div>}{event.details?.durationMs !== undefined && <div><dt>Duration</dt><dd>{detailText(event.details.durationMs)} ms</dd></div>}{event.details?.attempt !== undefined && <div><dt>Attempt</dt><dd>{detailText(event.details.attempt)}</dd></div>}{event.details?.maxRetries !== undefined && <div><dt>Max retries</dt><dd>{detailText(event.details.maxRetries)}</dd></div>}</dl>}
+      {tab === 'timing' && <dl className="inspector-meta"><div><dt>Recorded at</dt><dd>{event.time}</dd></div>{record?.startedAt !== null && record?.startedAt !== undefined && <div><dt>Started at</dt><dd>{new Date(record.startedAt).toISOString()}</dd></div>}{event.details?.duration_ms !== undefined && <div><dt>Duration</dt><dd>{detailText(event.details.duration_ms)} ms</dd></div>}{event.details?.durationMs !== undefined && <div><dt>Duration</dt><dd>{detailText(event.details.durationMs)} ms</dd></div>}{event.details?.attempt !== undefined && <div><dt>Attempt</dt><dd>{detailText(event.details.attempt)}</dd></div>}{event.details?.attempts !== undefined && <div><dt>Attempts</dt><dd>{detailText(event.details.attempts)}</dd></div>}{event.details?.max_retries !== undefined && <div><dt>Max retries</dt><dd>{detailText(event.details.max_retries)}</dd></div>}{event.details?.maxRetries !== undefined && <div><dt>Max retries</dt><dd>{detailText(event.details.maxRetries)}</dd></div>}</dl>}
     </div>
   </aside>
 }
@@ -915,7 +927,7 @@ function DshConversation({ events, sessionId, store, feedbackBySeq, producedBySe
   sessionId: string
   store: WebStore
   feedbackBySeq: Readonly<Record<number, FeedbackView>>
-  producedBySeq: ReadonlyMap<number, readonly string[]>
+  producedBySeq?: ReadonlyMap<number, readonly string[]>
   onFeedback: (seq: number, rating: 'positive' | 'negative') => void
   onCopy?: (text: string) => void
   onRetry?: (text: string) => void
@@ -925,6 +937,8 @@ function DshConversation({ events, sessionId, store, feedbackBySeq, producedBySe
   loadingOlder: boolean
 }) {
   const snapshot = useMemo(() => projectDshConversation(events, sessionId), [events, sessionId])
+  const fallbackProducedBySeq = useMemo(() => deriveProducedFiles(events), [events])
+  const visibleProducedBySeq = producedBySeq ?? fallbackProducedBySeq
   const eventBySeq = useMemo(() => new Map(events.map(event => [event.seq, event])), [events])
   const scrollRef = useRef<HTMLDivElement>(null)
   const [scrollTop, setScrollTop] = useState(0)
@@ -956,7 +970,7 @@ function DshConversation({ events, sessionId, store, feedbackBySeq, producedBySe
         const key = `${node.kind}:${node.seq}`
         return <section className={`conversation-node conversation-virtual-row ${node.kind}`} data-virtual-row-key={key} key={key} ref={element => measureRow(key, element)} style={{ transform: `translateY(${offsets[start + index] ?? 0}px)` }}>
           <div className="conversation-node-head"><span>{conversationNodeLabel(node)}</span><span>#{node.seq}</span></div>
-          <EventCard event={raw} store={store} sessionId={sessionId} feedback={feedbackBySeq[raw.seq]} producedPaths={producedBySeq.get(raw.seq)} onFeedback={onFeedback} onCopy={onCopy} onRetry={onRetry} onFork={onFork} onOpenFile={onOpenFile} />
+          <EventCard event={raw} store={store} sessionId={sessionId} feedback={feedbackBySeq[raw.seq]} producedPaths={visibleProducedBySeq.get(raw.seq)} onFeedback={onFeedback} onCopy={onCopy} onRetry={onRetry} onFork={onFork} onOpenFile={onOpenFile} />
         </section>
       })}
     </div>
@@ -1406,9 +1420,13 @@ export function App({ store }: { store: WebStore }) {
     setFilesOpen(true)
   }, [])
   const selected = state.sessions.find(session => session.id === state.selectedId)
+  const trajectoryRecords = useMemo(() => projectDshTrajectoryRecords(state.events), [state.events])
   const selectedTrajectoryEvent = useMemo(() => trajectorySelectedSeq === null
     ? null
     : state.events.find(event => event.seq === trajectorySelectedSeq) ?? null, [state.events, trajectorySelectedSeq])
+  const selectedTrajectoryRecord = useMemo(() => trajectorySelectedSeq === null
+    ? undefined
+    : trajectoryRecords.find(record => record.seq === trajectorySelectedSeq), [trajectoryRecords, trajectorySelectedSeq])
   const selectTrajectorySeq = useCallback((seq: number): void => {
     setFocusedSeq(seq)
     setTrajectorySelectedSeq(seq)
@@ -1682,7 +1700,7 @@ export function App({ store }: { store: WebStore }) {
       <InteractionPanel store={store} sessionId={state.selectedId} onError={reportError} />
       <QueuePanel store={store} sessionId={state.selectedId} active={state.sending} onError={reportError} />
        <section className="content-panel">
-        {filesOpen && state.selectedId !== null ? <FilesPanel store={store} sessionId={state.selectedId} openPath={fileOpenPath} onClose={() => { setFilesOpen(false); setFileOpenPath(null) }} onReference={referenceFile} /> : state.authRequired ? <form className="auth-card" onSubmit={event => { event.preventDefault(); void authenticate() }}><strong>Authentication required</strong><span>Enter the bearer token configured for the Shutu web server.</span><input aria-label="Bearer token" type="password" autoComplete="current-password" value={token} onChange={event => setToken(event.target.value)} placeholder="Bearer token" /><button type="submit" disabled={token.trim() === ''}>Connect</button></form> : state.loading ? <div className="empty"><div className="spinner" />Loading session…</div> : tab === 'running' ? <RunningPanel store={store} sessionId={state.selectedId} /> : state.selectedId === null ? <div className="empty"><strong>Start a new conversation</strong><span>Select a session or send a message from the agent.</span></div> : filtered.length === 0 ? <div className="empty"><strong>{search ? 'No matching events' : 'No events yet'}</strong><span>{search ? 'Try a different search term.' : 'Events will appear here as the session runs.'}</span></div> : tab === 'trajectory' ? <div className="trajectory-layout"><div className="trajectory-main"><DshTimeline events={trajectoryEvents} onSelectSeq={selectTrajectorySeq} onSelectSeqs={selectTrajectorySeqs} /><VirtualEvents events={filtered} store={store} sessionId={state.selectedId} feedbackBySeq={feedbackBySeq} producedBySeq={producedBySeq} onFeedback={submitFeedback} onOpenFile={openFilePreview} focusSeq={focusedSeq} selectedSeq={trajectorySelectedSeq} timelineFocusSeqs={trajectoryFocusSeqs} onSelectSeq={selectTrajectorySeq} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} /></div>{selectedTrajectoryEvent !== null && <TrajectoryInspector event={selectedTrajectoryEvent} onClose={() => setTrajectorySelectedSeq(null)} />}</div> : <DshConversation events={filtered} sessionId={state.selectedId} store={store} feedbackBySeq={feedbackBySeq} producedBySeq={producedBySeq} onFeedback={submitFeedback} onOpenFile={openFilePreview} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} />}
+        {filesOpen && state.selectedId !== null ? <FilesPanel store={store} sessionId={state.selectedId} openPath={fileOpenPath} onClose={() => { setFilesOpen(false); setFileOpenPath(null) }} onReference={referenceFile} /> : state.authRequired ? <form className="auth-card" onSubmit={event => { event.preventDefault(); void authenticate() }}><strong>Authentication required</strong><span>Enter the bearer token configured for the Shutu web server.</span><input aria-label="Bearer token" type="password" autoComplete="current-password" value={token} onChange={event => setToken(event.target.value)} placeholder="Bearer token" /><button type="submit" disabled={token.trim() === ''}>Connect</button></form> : state.loading ? <div className="empty"><div className="spinner" />Loading session…</div> : tab === 'running' ? <RunningPanel store={store} sessionId={state.selectedId} /> : state.selectedId === null ? <div className="empty"><strong>Start a new conversation</strong><span>Select a session or send a message from the agent.</span></div> : filtered.length === 0 ? <div className="empty"><strong>{search ? 'No matching events' : 'No events yet'}</strong><span>{search ? 'Try a different search term.' : 'Events will appear here as the session runs.'}</span></div> : tab === 'trajectory' ? <div className="trajectory-layout"><div className="trajectory-main"><DshTimeline events={trajectoryEvents} onSelectSeq={selectTrajectorySeq} onSelectSeqs={selectTrajectorySeqs} /><VirtualEvents events={filtered} store={store} sessionId={state.selectedId} feedbackBySeq={feedbackBySeq} producedBySeq={producedBySeq} onFeedback={submitFeedback} onOpenFile={openFilePreview} focusSeq={focusedSeq} selectedSeq={trajectorySelectedSeq} timelineFocusSeqs={trajectoryFocusSeqs} onSelectSeq={selectTrajectorySeq} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} /></div>{selectedTrajectoryEvent !== null && <TrajectoryInspector event={selectedTrajectoryEvent} record={selectedTrajectoryRecord} onClose={() => setTrajectorySelectedSeq(null)} />}</div> : <DshConversation events={filtered} sessionId={state.selectedId} store={store} feedbackBySeq={feedbackBySeq} onFeedback={submitFeedback} onOpenFile={openFilePreview} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} />}
       </section>
       <form className="composer" onSubmit={event => { event.preventDefault(); if (state.sending && draft.trim() === '' && pendingImages.length === 0) void stopRun(); else void submit() }}><CommandMenu commands={commands} query={commandQuery ?? ''} activeIndex={commandIndex} onSelect={selectCommand} />{pendingImages.length > 0 && <div className="attachment-preview-list">{pendingImages.map(item => <div className="attachment-preview" key={item.ref.id}><img src={item.previewUrl} alt="待发送图片" /><button type="button" onClick={() => removePendingImage(item.ref.id)} aria-label="移除附件">×</button></div>)}</div>}<div className="composer-row"><label className="attach-button" aria-label="添加图片"><input type="file" accept="image/*" multiple disabled={state.selectedId === null || state.sending || uploading} onChange={event => { void attachFiles(event.currentTarget.files); event.currentTarget.value = '' }} />📎</label><textarea value={draft} onChange={event => handleDraftChange(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder={uploading ? '正在上传图片…' : state.sending ? 'Agent is running…' : 'Send a message…'} rows={2} /><button type="submit" disabled={state.selectedId === null || uploading || (!state.sending && draft.trim() === '' && pendingImages.length === 0)}>{state.sending ? (draft.trim() ? 'Queue' : 'Stop') : 'Send'} <span>{state.sending ? '■' : '↵'}</span></button></div></form>
     </main>
