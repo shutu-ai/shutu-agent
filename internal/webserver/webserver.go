@@ -82,6 +82,10 @@ type Server struct {
 	queueListFn    func(ctx context.Context, sessionID string) ([]QueueItem, error)
 	queueEnqueueFn func(ctx context.Context, sessionID, text string) (QueueItem, error)
 	queueUpdateFn  func(ctx context.Context, sessionID, itemID, action string) error
+	// nativeQueueUpdateFn accepts the DSH action vocabulary. The legacy queue
+	// callback above intentionally remains text/action-only for the REST API;
+	// this seam carries the native edit payload without weakening that API.
+	nativeQueueUpdateFn func(ctx context.Context, sessionID, itemID, action, text string) error
 
 	// statusFn is the dsh-session-status alignment: it computes the live state
 	// (warning/ongoing/done/idle + labels + running-subagent count) for one
@@ -513,6 +517,12 @@ func (s *Server) SetQueueManager(
 	s.queueListFn = list
 	s.queueEnqueueFn = enqueue
 	s.queueUpdateFn = update
+}
+
+// SetNativeQueueUpdater wires DSH session.updateQueue. text is populated only
+// for the edit action; remove and steer receive an empty string.
+func (s *Server) SetNativeQueueUpdater(fn func(ctx context.Context, sessionID, itemID, action, text string) error) {
+	s.nativeQueueUpdateFn = fn
 }
 
 // SetSessionManager wires the session new/resume API (POST /api/sessions and

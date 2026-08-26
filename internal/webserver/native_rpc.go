@@ -240,6 +240,15 @@ type nativeSessionForkRequest struct {
 	AtSeq     *uint64 `json:"atSeq"`
 }
 
+type nativeSessionUpdateQueueRequest struct {
+	SessionID string `json:"sessionId"`
+	ItemID    string `json:"itemId"`
+	Action    struct {
+		Kind    string             `json:"kind"`
+		Content []nativePromptPart `json:"content"`
+	} `json:"action"`
+}
+
 type nativeSessionSearchRequest struct {
 	Query string `json:"query"`
 }
@@ -290,7 +299,7 @@ func (s *Server) registerNativeRoutes(mux *http.ServeMux) {
 		"host.describe", "host.listDirectory", "host.createDirectory", "host.pickDirectory",
 		"session.list", "session.search", "session.create",
 		"session.history", "session.rename", "session.prompt", "session.cancel", "session.attachment",
-		"session.models", "session.selectModel", "session.fork",
+		"session.models", "session.selectModel", "session.fork", "session.updateQueue",
 		"workspace.list", "workspace.create", "workspace.rename", "workspace.delete",
 		"workspace.insertBefore", "workspace.insertSessionBefore", "workspace.archiveSession",
 		"agentPreset.list", "agentPreset.select", "settings.describe",
@@ -747,6 +756,8 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 		return s.nativeSessionSelectModel(r, raw)
 	case "session.fork":
 		return s.nativeSessionFork(r, raw)
+	case "session.updateQueue":
+		return s.nativeSessionUpdateQueue(r, raw)
 	case "session.cancel":
 		var req nativeSessionIDRequest
 		if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
@@ -1684,6 +1695,55 @@ func nativeForkBoundary(events []session.Event, atSeq *uint64) int {
 		}
 	}
 	return lastCompleted
+}
+
+func (s *Server) nativeSessionUpdateQueue(r *http.Request, raw json.RawMessage) nativeRPCResult {
+	var req nativeSessionUpdateQueueRequest
+	if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
+		return failure
+	}
+	req.SessionID = strings.TrimSpace(req.SessionID)
+	req.ItemID = strings.TrimSpace(req.ItemID)
+	if req.SessionID == "" || req.ItemID == "" {
+		return nativeRPCFailure("bad-request", "sessionId and itemId are required", nil)
+	}
+	if req.Action.Kind != "edit" && req.Action.Kind != "remove" && req.Action.Kind != "steer" {
+		return nativeRPCFailure("bad-request", "action.kind must be edit, remove, or steer", nil)
+	}
+	text := ""
+	if req.Action.Kind == "edit" {
+		var builder strings.Builder
+		if len(req.Action.Content) == 0 {
+			return nativeRPCFailure("bad-request", "edit action requires text content", nil)
+		}
+		for _, part := range req.Action.Content {
+			if part.Type != "text" {
+				return nativeRPCFailure("not-supported", "queued message editing currently supports text content only", nil)
+			}
+			builder.WriteString(part.Text)
+		}
+		text = strings.TrimSpace(builder.String())
+		if text == "" {
+			return nativeRPCFailure("bad-request", "edit content must not be blank", nil)
+		}
+	}
+	if s.nativeQueueUpdateFn != nil {
+		if err := s.nativeQueueUpdateFn(r.Context(), req.SessionID, req.ItemID, req.Action.Kind, text); err != nil {
+			return nativeRPCFailure("queue-update-failed", err.Error(), nil)
+		}
+		return nativeRPCSuccess(map[string]any{"accepted": true})
+	}
+	if s.queueUpdateFn == nil {
+		return nativeRPCFailure("not-supported", "queue manager not wired", nil)
+	}
+	legacyAction := map[string]string{"remove": "delete", "steer": "steer"}[req.Action.Kind]
+	if legacyAction == "" {
+		return nativeRPCFailure("not-supported", "native queue edit handler not wired", nil)
+	}
+	if err := s.queueUpdateFn(r.Context(), req.SessionID, req.ItemID, legacyAction); err != nil {
+		return nativeRPCFailure("queue-update-failed", err.Error(), nil)
+	}
+	return nativeRPCSuccess(map[string]any{"accepted": true})
 }
 
 func (s *Server) nativeSessionPrompt(r *http.Request, raw json.RawMessage) nativeRPCResult {

@@ -1406,6 +1406,61 @@ func TestNativeSessionForkCopiesCompletedTurnPrefixAndMetadata(t *testing.T) {
 	}
 }
 
+func TestNativeSessionUpdateQueueUsesDSHActionUnion(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+	var gotAction, gotText, gotSession, gotItem string
+	srv.SetNativeQueueUpdater(func(_ context.Context, sessionID, itemID, action, text string) error {
+		gotSession, gotItem, gotAction, gotText = sessionID, itemID, action, text
+		return nil
+	})
+	call := func(id string, payload map[string]any) nativeRPCResponse {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{
+			"type": "client-request", "rpcId": id, "method": "session.updateQueue", "payload": payload,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := doReqBody(t, srv.Handler(), "POST", "/api/session.updateQueue", "tok", string(body))
+		return nativeResponse(t, rec.Body.Bytes())
+	}
+
+	response := call("queue-edit", map[string]any{
+		"sessionId": "session-1", "itemId": "message-1",
+		"action": map[string]any{"kind": "edit", "content": []any{map[string]any{"type": "text", "text": " revised "}}},
+	})
+	if !response.Result.OK || gotSession != "session-1" || gotItem != "message-1" || gotAction != "edit" || gotText != "revised" {
+		t.Fatalf("edit response=%+v callback=%s/%s/%s/%q", response, gotSession, gotItem, gotAction, gotText)
+	}
+
+	response = call("queue-remove", map[string]any{
+		"sessionId": "session-1", "itemId": "message-1", "action": map[string]any{"kind": "remove"},
+	})
+	if !response.Result.OK || gotAction != "remove" || gotText != "" {
+		t.Fatalf("remove response=%+v callback=%s/%q", response, gotAction, gotText)
+	}
+	response = call("queue-steer", map[string]any{
+		"sessionId": "session-1", "itemId": "message-1", "action": map[string]any{"kind": "steer"},
+	})
+	if !response.Result.OK || gotAction != "steer" || gotText != "" {
+		t.Fatalf("steer response=%+v callback=%s/%q", response, gotAction, gotText)
+	}
+
+	response = call("queue-image-edit", map[string]any{
+		"sessionId": "session-1", "itemId": "message-1",
+		"action": map[string]any{"kind": "edit", "content": []any{map[string]any{"type": "image"}}},
+	})
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "not-supported" {
+		t.Fatalf("image edit response = %+v", response)
+	}
+	response = call("queue-invalid", map[string]any{
+		"sessionId": "session-1", "itemId": "message-1", "action": map[string]any{"kind": "unknown"},
+	})
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "bad-request" {
+		t.Fatalf("invalid action response = %+v", response)
+	}
+}
+
 func readNativeTextFrame(reader *bufio.Reader) ([]byte, error) {
 	first, err := reader.ReadByte()
 	if err != nil {

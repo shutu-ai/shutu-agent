@@ -19,6 +19,7 @@
 - [x] P36-2：接入 `session.selectModel`，持久化会话级 provider/model/reasoning effort，并让 `session.models.current` 返回会话覆盖值。
 - [x] P36-2：接入完整 `workspace.*` 原生写操作：创建/幂等解析、重命名冲突、删除、工作区/会话排序及归档快照；`workspace.list` 返回标准时间字段和 `archivedSessionIds`。
 - [x] P36-2：接入 `session.fork` 原生方法：按已完成 turn 边界复制会话前缀，并继承标题、工作区、CWD 与会话配置；无可复制 turn、缺失会话和超出日志边界均返回结构化错误或回退到最近完成 turn。
+- [x] P36-2：接入 `session.updateQueue` 原生方法：对齐 DSH `edit/remove/steer` action union，文本编辑写回队列，删除和 steer 复用队列执行器，不支持的富文本块显式返回结构化错误。
 - [ ] P36-3：完整 projection baseline（所有已挂载 projection key）与生产数据规模验收仍待后续任务补齐。
 
 状态基线：P0–P23 已完成。P24–P35 已完成首轮实现；P36-1–P36-8 为“DSH 原生 UI 接入/视觉替换”新目标。未勾选项表示仍需补齐或在真实环境验收，不将未验证内容标记为完成。

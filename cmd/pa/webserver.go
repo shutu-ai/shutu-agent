@@ -135,6 +135,12 @@ func (a *app) registerWebServer() error {
 		return a.webMessage(ctx, sessionID, text, images)
 	})
 	srv.SetQueueManager(a.webQueueList, a.webQueueEnqueue, a.webQueueUpdate)
+	srv.SetNativeQueueUpdater(func(ctx context.Context, sessionID, itemID, action, text string) error {
+		if action == "edit" {
+			return a.webQueueEdit(ctx, sessionID, itemID, text)
+		}
+		return a.webQueueUpdate(ctx, sessionID, itemID, map[string]string{"remove": "delete", "steer": "steer"}[action])
+	})
 	srv.SetSessionManager(func(ctx context.Context, action, id string) (string, error) {
 		return a.webSessionManager(ctx, action, id)
 	})
@@ -403,6 +409,24 @@ func (a *app) webQueueUpdate(ctx context.Context, sessionID, itemID, action stri
 	}
 	a.drainWebQueue(sessionID)
 	return nil
+}
+
+func (a *app) webQueueEdit(_ context.Context, sessionID, itemID, text string) error {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return errors.New("text is required")
+	}
+	a.webQueueMu.Lock()
+	defer a.webQueueMu.Unlock()
+	queued := a.webQueue[sessionID]
+	for index := range queued {
+		if queued[index].ID == itemID {
+			queued[index].Text = text
+			a.webQueue[sessionID] = queued
+			return nil
+		}
+	}
+	return errors.New("queue item not found")
 }
 
 func (a *app) webTurnRunning(sessionID string) bool {
