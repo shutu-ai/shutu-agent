@@ -228,6 +228,14 @@ type nativeSessionEventFrame struct {
 	Event     nativeSessionEvent `json:"event"`
 }
 
+type nativeProjectionFrame struct {
+	Type      string `json:"type"`
+	SessionID string `json:"sessionId"`
+	Key       string `json:"key"`
+	Value     any    `json:"value"`
+	Seq       uint64 `json:"seq"`
+}
+
 type nativeSubscribedFrame struct {
 	Type      string `json:"type"`
 	SessionID string `json:"sessionId"`
@@ -872,7 +880,15 @@ func (s *Server) nativeSessionHistory(r *http.Request, raw json.RawMessage) nati
 			header.AgentPreset = config.AgentPreset
 		}
 	}
-	return nativeRPCSuccess(map[string]any{"header": header, "events": entries, "hasMore": start > 0})
+	value := map[string]any{"header": header, "events": entries, "hasMore": start > 0}
+	if req.BeforeSeq == nil || *req.BeforeSeq == 0 {
+		lastSeq := int64(-1)
+		if len(events) > 0 {
+			lastSeq = int64(events[len(events)-1].Seq)
+		}
+		value["projections"] = projection.projectionBlock(meta.Title, lastSeq)
+	}
+	return nativeRPCSuccess(value)
 }
 
 // nativeHistoryPageBounds mirrors DSH's message-boundary history contract.
@@ -1012,6 +1028,8 @@ func (s *Server) handleNativeMuxWebSocket(w http.ResponseWriter, r *http.Request
 			method = frame.Type
 		case nativeSessionEventFrame:
 			method = frame.Type
+		case nativeProjectionFrame:
+			method = frame.Type
 		}
 		body, err := json.Marshal(nativeEventEnvelope{
 			Type: nativeRPCTypeServerRequest, RPCID: nativeRPCID(), Method: method, Payload: payload,
@@ -1056,8 +1074,12 @@ func (s *Server) handleNativeMuxWebSocket(w http.ResponseWriter, r *http.Request
 		unsubs = append(unsubs, s.evSrc(meta.ID, func(ev session.Event) {
 			projectionMu.Lock()
 			projected := projection.project(meta.ID, ev)
+			changes := projection.projectionChanges()
 			projectionMu.Unlock()
 			_ = write(nativeSessionEventFrame{Type: "session/event", SessionID: meta.ID, Event: projected})
+			for key, value := range changes {
+				_ = write(nativeProjectionFrame{Type: "session/projection", SessionID: meta.ID, Key: key, Value: value, Seq: ev.Seq})
+			}
 		}))
 	}
 	go drainNativeWebSocket(reader, cancel)

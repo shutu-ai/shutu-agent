@@ -4,6 +4,7 @@
 
 - [x] P36-3：历史分页先按 DSH 的消息边界确定窗口，再对完整有序日志执行一次 native projection；跨页的 turn、step、surface replacement、compaction 与工具关联不会因页面截断而丢失上下文。
 - [x] P36-3：`session.history` 返回 DSH Session header（version、id、createdAt、cwd；可用时带 agentPreset），列表同步暴露持久化 title。
+- [x] P36-3：完成首批 DSH projection baseline：`asOfSeq`、`title`、`todos`、`plan`、`tokenUsage` 与 `contextPressure`；历史 tail 与 live mux 共用同一投影游标。
 - [ ] P36-3：完整 projection baseline（所有已挂载 projection key）与生产数据规模验收仍待后续任务补齐。
 
 状态基线：P0–P23 已完成。P24–P35 已完成首轮实现；P36-1–P36-8 为“DSH 原生 UI 接入/视觉替换”新目标。未勾选项表示仍需补齐或在真实环境验收，不将未验证内容标记为完成。

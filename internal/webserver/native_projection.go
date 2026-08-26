@@ -20,14 +20,22 @@ type nativeProjectionCursor struct {
 	model     string
 	requestID string
 	surface   []uint64
+	values    map[string]any
+	changed   map[string]any
+	usage     nativeProjectionTokenUsage
+	usageSeen bool
+	todos     []map[string]any
+	todosSeen bool
 }
 
 func newNativeProjectionCursor() *nativeProjectionCursor {
-	return &nativeProjectionCursor{turn: -1}
+	return &nativeProjectionCursor{turn: -1, values: make(map[string]any), changed: make(map[string]any)}
 }
 
 func (c *nativeProjectionCursor) project(sessionID string, ev session.Event) nativeSessionEvent {
 	data := nativeJSONObject(ev.Data)
+	c.changed = make(map[string]any)
+	c.foldProjection(ev, data)
 	projectedType := ev.Type
 	projectedData := data
 	ignorable := false
@@ -126,6 +134,233 @@ func (c *nativeProjectionCursor) project(sessionID string, ev session.Event) nat
 		result.SourceEventSeqs = sourceEventSeqs
 	}
 	return result
+}
+
+// nativeProjectionBlock is the DSH history-tail projection contract. The
+// values are deliberately derived from the same ordered source log as the
+// events, so a reconnect can atomically replace both the conversation page
+// and its UI state.
+type nativeProjectionBlock struct {
+	AsOfSeq int64          `json:"asOfSeq"`
+	Values  map[string]any `json:"values"`
+}
+
+type nativeProjectionTokenUsage struct {
+	UncachedInputTokens int64
+	OutputTokens        int64
+	CacheReadTokens     int64
+	CacheWriteTokens    int64
+}
+
+func (c *nativeProjectionCursor) foldProjection(ev session.Event, data map[string]any) {
+	switch ev.Type {
+	case "session/title":
+		c.setProjectionValue("title", nativeEventString(data, "title", "text"))
+	case "todo/write":
+		if todos, ok := nativeTodoItems(nativeEventValue(data, "items", "todos")); ok {
+			c.todos = todos
+			c.todosSeen = true
+			c.setProjectionValue("todos", nativeTodoValues(c.todos))
+		}
+	case session.EventPlanCreate:
+		if nativeEventString(data, "scope") == "todo" {
+			c.upsertTodo(data)
+		}
+	case session.EventPlanUpdate:
+		if nativeEventString(data, "scope") == "todo" {
+			c.upsertTodo(data)
+		}
+	case session.EventPlanStatus:
+		if nativeEventString(data, "scope") == "todo" {
+			c.updateTodoStatus(nativeEventString(data, "id"), nativeEventString(data, "status"))
+		}
+	case session.EventPlanDelete:
+		if nativeEventString(data, "scope") == "todo" {
+			c.deleteTodo(nativeEventString(data, "id"))
+		}
+	case session.EventPlanMode:
+		c.setProjectionValue("plan", map[string]any{
+			"active":  nativeEventBool(data, "active"),
+			"pending": nativeEventBool(data, "pending"),
+		})
+	case session.EventLLMRequestStart:
+		if contextWindow := nativeEventInt64(data, "contextWindow", "context_window"); contextWindow > 0 {
+			context := nativeProjectionMap(c.values["contextPressure"])
+			context["contextWindow"] = contextWindow
+			c.setProjectionValue("contextPressure", context)
+		}
+	case session.EventLLMRequestEnd:
+		if usage := nativeEventObject(data, "usage"); usage != nil {
+			c.addUsage(usage)
+		}
+	case session.EventAssistantMessage:
+		// Some providers only attach usage to assistant/message. It is a
+		// fallback; request_end remains authoritative when both are present.
+		if !c.usageSeen {
+			if usage := nativeEventObject(data, "usage"); usage != nil {
+				c.addUsage(usage)
+			}
+		}
+	}
+}
+
+func (c *nativeProjectionCursor) setProjectionValue(key string, value any) {
+	c.values[key] = value
+	c.changed[key] = value
+}
+
+func (c *nativeProjectionCursor) addUsage(usage map[string]any) {
+	input := nativeEventInt64(usage, "inputTokens", "input_tokens")
+	cached := nativeEventInt64(usage, "cachedInputTokens", "cached_input_tokens", "cacheReadTokens", "cache_read_tokens")
+	uncached := nativeEventInt64(usage, "uncachedInputTokens", "uncached_input_tokens")
+	if uncached == 0 && input > cached {
+		uncached = input - cached
+	}
+	c.usage.UncachedInputTokens += maxInt64(0, uncached)
+	c.usage.OutputTokens += maxInt64(0, nativeEventInt64(usage, "outputTokens", "output_tokens"))
+	c.usage.CacheReadTokens += maxInt64(0, cached)
+	c.usage.CacheWriteTokens += maxInt64(0, nativeEventInt64(usage, "cacheWriteTokens", "cache_write_tokens"))
+	c.usageSeen = true
+	c.setProjectionValue("tokenUsage", map[string]any{
+		"uncachedInputTokens": c.usage.UncachedInputTokens,
+		"outputTokens":        c.usage.OutputTokens,
+		"cacheReadTokens":     c.usage.CacheReadTokens,
+		"cacheWriteTokens":    c.usage.CacheWriteTokens,
+	})
+	context := nativeProjectionMap(c.values["contextPressure"])
+	if input > 0 {
+		context["pressureTokens"] = input
+	}
+	c.setProjectionValue("contextPressure", context)
+}
+
+func (c *nativeProjectionCursor) upsertTodo(data map[string]any) {
+	id := nativeEventString(data, "id")
+	content := nativeEventString(data, "content", "title", "objective", "text")
+	if detail := nativeEventObject(data, "detail"); detail != nil {
+		if content == "" {
+			content = nativeEventString(detail, "content", "title", "objective", "text")
+		}
+	}
+	if id == "" {
+		id = content
+	}
+	for index := range c.todos {
+		if nativeEventString(c.todos[index], "id") == id {
+			if content != "" {
+				c.todos[index]["content"] = content
+			}
+			c.todosSeen = true
+			c.setProjectionValue("todos", nativeTodoValues(c.todos))
+			return
+		}
+	}
+	c.todos = append(c.todos, map[string]any{
+		"id": id, "content": content, "status": nativeTodoStatus(nativeEventString(data, "status")),
+	})
+	c.todosSeen = true
+	c.setProjectionValue("todos", nativeTodoValues(c.todos))
+}
+
+func (c *nativeProjectionCursor) updateTodoStatus(id, status string) {
+	for index := range c.todos {
+		if nativeEventString(c.todos[index], "id") == id {
+			c.todos[index]["status"] = nativeTodoStatus(status)
+			c.setProjectionValue("todos", nativeTodoValues(c.todos))
+			return
+		}
+	}
+}
+
+func (c *nativeProjectionCursor) deleteTodo(id string) {
+	for index := range c.todos {
+		if nativeEventString(c.todos[index], "id") == id {
+			c.todos = append(c.todos[:index], c.todos[index+1:]...)
+			c.setProjectionValue("todos", nativeTodoValues(c.todos))
+			return
+		}
+	}
+}
+
+func (c *nativeProjectionCursor) projectionChanges() map[string]any {
+	changes := make(map[string]any, len(c.changed))
+	for key, value := range c.changed {
+		changes[key] = value
+	}
+	return changes
+}
+
+func (c *nativeProjectionCursor) projectionBlock(title string, lastSeq int64) nativeProjectionBlock {
+	values := make(map[string]any, len(c.values)+1)
+	for key, value := range c.values {
+		values[key] = value
+	}
+	if title == "" {
+		values["title"] = nil
+	} else {
+		values["title"] = title
+	}
+	if !c.todosSeen {
+		values["todos"] = nil
+	}
+	return nativeProjectionBlock{AsOfSeq: lastSeq, Values: values}
+}
+
+func nativeProjectionMap(value any) map[string]any {
+	if object, ok := value.(map[string]any); ok {
+		clone := make(map[string]any, len(object)+1)
+		for key, item := range object {
+			clone[key] = item
+		}
+		return clone
+	}
+	return make(map[string]any)
+}
+
+func nativeTodoItems(raw any) ([]map[string]any, bool) {
+	items, ok := raw.([]any)
+	if !ok {
+		return nil, false
+	}
+	result := make([]map[string]any, 0, len(items))
+	for index, item := range items {
+		object, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		id := nativeEventString(object, "id")
+		if id == "" {
+			id = fmt.Sprintf("todo:%d", index)
+		}
+		result = append(result, map[string]any{
+			"id":      id,
+			"content": nativeEventString(object, "content", "title", "objective", "text"),
+			"status":  nativeTodoStatus(nativeEventString(object, "status", "state")),
+		})
+	}
+	return result, true
+}
+
+func nativeTodoValues(items []map[string]any) []any {
+	result := make([]any, 0, len(items))
+	for _, item := range items {
+		result = append(result, map[string]any{
+			"content": nativeEventString(item, "content"),
+			"status":  nativeTodoStatus(nativeEventString(item, "status")),
+		})
+	}
+	return result
+}
+
+func nativeTodoStatus(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "completed", "complete", "done", "success":
+		return "completed"
+	case "in_progress", "in-progress", "active", "running":
+		return "in_progress"
+	default:
+		return "pending"
+	}
 }
 
 func nativeUserMessageData(sessionID string, seq uint64, data map[string]any) map[string]any {
@@ -390,16 +625,32 @@ func nativeEventString(object map[string]any, keys ...string) string {
 }
 
 func nativeEventNumber(object map[string]any, keys ...string) int {
+	return int(nativeEventInt64(object, keys...))
+}
+
+func nativeEventInt64(object map[string]any, keys ...string) int64 {
 	value := nativeEventValue(object, keys...)
 	switch number := value.(type) {
 	case float64:
-		return int(number)
+		return int64(number)
+	case json.Number:
+		parsed, _ := number.Int64()
+		return parsed
 	case int:
-		return number
+		return int64(number)
 	case int64:
-		return int(number)
+		return number
+	case uint64:
+		return int64(number)
 	}
 	return 0
+}
+
+func maxInt64(value, minimum int64) int64 {
+	if value < minimum {
+		return minimum
+	}
+	return value
 }
 
 func nativeEventInt(object map[string]any, key string, fallback int) int {

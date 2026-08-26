@@ -55,14 +55,18 @@ func TestNativeRPCSessionHistoryAndPrompt(t *testing.T) {
 	}
 	encoded, _ = json.Marshal(response.Result.Value)
 	var history struct {
-		Header nativeSessionHeader  `json:"header"`
-		Events []nativeHistoryEntry `json:"events"`
+		Header      nativeSessionHeader   `json:"header"`
+		Events      []nativeHistoryEntry  `json:"events"`
+		Projections nativeProjectionBlock `json:"projections"`
 	}
 	if err := json.Unmarshal(encoded, &history); err != nil {
 		t.Fatal(err)
 	}
 	if history.Header.Version != 0 || history.Header.ID != "native-session" || history.Header.CreatedAt == 0 || len(history.Events) != 1 || history.Events[0].Event.Time != 1234 || history.Events[0].Event.Type != session.EventUserMessage {
 		t.Fatalf("session.history events = %+v", history.Events)
+	}
+	if history.Projections.AsOfSeq != 0 {
+		t.Fatalf("history projection asOfSeq = %d, want 0", history.Projections.AsOfSeq)
 	}
 	var userData struct {
 		ID      string `json:"id"`
@@ -91,6 +95,72 @@ func TestNativeRPCSessionHistoryAndPrompt(t *testing.T) {
 	response = nativeResponse(t, rec.Body.Bytes())
 	if !response.Result.OK || gotSession != "native-session" || gotText != "send me" {
 		t.Fatalf("session.prompt response=%+v callback=(%q,%q)", response, gotSession, gotText)
+	}
+}
+
+func TestNativeHistoryReturnsDSHProjectionBaseline(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	seedSession(t, st, "native-projections", []session.Event{
+		{Seq: 1, Type: session.EventPlanCreate, At: time.UnixMilli(1001), Version: session.EventVersion, Data: json.RawMessage(`{"scope":"todo","id":"todo-1","title":"ship native UI"}`)},
+		{Seq: 2, Type: session.EventPlanStatus, At: time.UnixMilli(1002), Version: session.EventVersion, Data: json.RawMessage(`{"scope":"todo","id":"todo-1","status":"in-progress"}`)},
+		{Seq: 3, Type: session.EventPlanMode, At: time.UnixMilli(1003), Version: session.EventVersion, Data: json.RawMessage(`{"active":true,"pending":false}`)},
+		{Seq: 4, Type: session.EventLLMRequestStart, At: time.UnixMilli(1004), Version: session.EventVersion, Data: json.RawMessage(`{"provider":"deepseek","model":"reasoner","contextWindow":128000}`)},
+		{Seq: 5, Type: session.EventLLMRequestEnd, At: time.UnixMilli(1005), Version: session.EventVersion, Data: json.RawMessage(`{"usage":{"inputTokens":100,"outputTokens":20,"cachedInputTokens":40,"cacheWriteTokens":5}}`)},
+	})
+	if err := st.SetSessionTitle(context.Background(), "native-projections", "Native UI parity", session.TitleSourceUser); err != nil {
+		t.Fatalf("set title: %v", err)
+	}
+
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/session.history", "tok", `{"type":"client-request","rpcId":"projection-1","method":"session.history","payload":{"sessionId":"native-projections"}}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK {
+		t.Fatalf("session.history response = %+v", response)
+	}
+	var history struct {
+		Projections nativeProjectionBlock `json:"projections"`
+	}
+	encoded, _ := json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &history); err != nil {
+		t.Fatal(err)
+	}
+	if history.Projections.AsOfSeq != 5 {
+		t.Fatalf("projection asOfSeq = %d, want 5", history.Projections.AsOfSeq)
+	}
+	values := history.Projections.Values
+	if values["title"] != "Native UI parity" {
+		t.Fatalf("projection title = %#v", values["title"])
+	}
+	var todos []map[string]any
+	encoded, _ = json.Marshal(values["todos"])
+	if err := json.Unmarshal(encoded, &todos); err != nil {
+		t.Fatal(err)
+	}
+	if len(todos) != 1 || todos[0]["content"] != "ship native UI" || todos[0]["status"] != "in_progress" {
+		t.Fatalf("projection todos = %#v", todos)
+	}
+	var usage map[string]int64
+	encoded, _ = json.Marshal(values["tokenUsage"])
+	if err := json.Unmarshal(encoded, &usage); err != nil {
+		t.Fatal(err)
+	}
+	if usage["uncachedInputTokens"] != 60 || usage["outputTokens"] != 20 || usage["cacheReadTokens"] != 40 || usage["cacheWriteTokens"] != 5 {
+		t.Fatalf("projection token usage = %#v", usage)
+	}
+	var contextPressure map[string]int64
+	encoded, _ = json.Marshal(values["contextPressure"])
+	if err := json.Unmarshal(encoded, &contextPressure); err != nil {
+		t.Fatal(err)
+	}
+	if contextPressure["contextWindow"] != 128000 || contextPressure["pressureTokens"] != 100 {
+		t.Fatalf("projection context pressure = %#v", contextPressure)
+	}
+	var plan map[string]bool
+	encoded, _ = json.Marshal(values["plan"])
+	if err := json.Unmarshal(encoded, &plan); err != nil {
+		t.Fatal(err)
+	}
+	if !plan["active"] || plan["pending"] {
+		t.Fatalf("projection plan = %#v", plan)
 	}
 }
 
@@ -310,7 +380,13 @@ func TestNativeLLMCatalogUsesSanitizedConfig(t *testing.T) {
 func TestNativeMuxWebSocketSendsSubscriptionBaseline(t *testing.T) {
 	srv, st := newTestServer(t, "tok")
 	seedSession(t, st, "native-ws", nil)
-	srv.SetEventSource(func(_ string, _ func(session.Event)) func() { return func() {} })
+	var emit func(session.Event)
+	registered := make(chan struct{})
+	srv.SetEventSource(func(_ string, callback func(session.Event)) func() {
+		emit = callback
+		close(registered)
+		return func() {}
+	})
 	httpServer := httptest.NewServer(srv.Handler())
 	defer httpServer.Close()
 	address := strings.TrimPrefix(httpServer.URL, "http://")
@@ -352,6 +428,38 @@ func TestNativeMuxWebSocketSendsSubscriptionBaseline(t *testing.T) {
 	}
 	if envelope.Payload.Type != "session/subscribed" || envelope.Payload.SessionID != "native-ws" || envelope.Payload.LastSeq != -1 {
 		t.Fatalf("subscription frame = %s", frame)
+	}
+	select {
+	case <-registered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("mux did not register an event callback")
+	}
+	emit(session.Event{Seq: 1, Type: session.EventPlanMode, At: time.UnixMilli(2001), Version: session.EventVersion, Data: json.RawMessage(`{"active":true}`)})
+	eventFrame, err := readNativeTextFrame(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectionFrame, err := readNativeTextFrame(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var eventEnvelope struct {
+		Payload nativeSessionEventFrame `json:"payload"`
+	}
+	if err := json.Unmarshal(eventFrame, &eventEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	if eventEnvelope.Payload.Type != "session/event" || eventEnvelope.Payload.Event.Seq != 1 {
+		t.Fatalf("live event frame = %s", eventFrame)
+	}
+	var projectionEnvelope struct {
+		Payload nativeProjectionFrame `json:"payload"`
+	}
+	if err := json.Unmarshal(projectionFrame, &projectionEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	if projectionEnvelope.Payload.Type != "session/projection" || projectionEnvelope.Payload.Key != "plan" || projectionEnvelope.Payload.Seq != 1 {
+		t.Fatalf("live projection frame = %s", projectionFrame)
 	}
 }
 
