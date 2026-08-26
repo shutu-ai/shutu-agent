@@ -8,6 +8,31 @@ export interface DshTrajectoryProjection {
   timeline: DshTimelineModel | null
 }
 
+function isStructuralEvent(event: EventView): boolean {
+  return event.type === 'turn/start' || event.type === 'turn/end' ||
+    event.type === 'step/start' || event.type === 'step/end' ||
+    event.type === 'assistant/chunk' || event.type === 'assistant/reasoning' ||
+    event.type.startsWith('llm/')
+}
+
+/** Return the compact DSH trajectory view for a session. */
+export function collapseDshTrajectoryTurns(events: readonly EventView[]): readonly EventView[] {
+  const compacted: EventView[] = []
+  let turn: EventView[] = []
+  const flush = (): void => {
+    const surface = turn.filter(event => !isStructuralEvent(event))
+    if (surface.length > 0) compacted.push(...surface)
+    else if (turn.length > 0) compacted.push(turn[turn.length - 1])
+    turn = []
+  }
+  for (const event of events) {
+    if (event.type === 'user/message' && turn.some(item => item.type === 'user/message')) flush()
+    turn.push(event)
+  }
+  flush()
+  return compacted
+}
+
 function cellKind(event: EventView): string {
   if (event.type.startsWith('tool/')) return 'tool'
   if (event.type === 'user/message') return 'user'

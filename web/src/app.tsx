@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, use
 import type { AttachmentView, CommandView, ConfigView, ContextView, DirectoryListing, EventDetails, EventView, FeedbackView, GoalView, ImageView, InteractionView, JobView, MCPServerView, PlanView, ProviderModelView, ProviderView, QueueItem, RunningSnapshot, SessionSearchHit, SessionStateView, SessionSummary, SettingsView, SkillView, SkillsView, SubagentView, TodoView, WorkspaceView } from './api'
 import { ShutuApiError } from './api'
 import { projectDshConversation, type DshConversationNode, type DshConversationSnapshot } from './dsh-conversation'
-import { projectDshTrajectory, type DshTimelineMode } from './dsh-trajectory'
+import { collapseDshTrajectoryTurns, projectDshTrajectory, type DshTimelineMode } from './dsh-trajectory'
 import { deriveProducedFiles } from './produced-files'
 import { WebStore } from './store'
 import './styles.css'
@@ -894,14 +894,16 @@ function VirtualEvents({ events, store, sessionId, feedbackBySeq, producedBySeq,
   focusSeq: number | null
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
-  const previousLength = useRef(events.length)
-  const previousFirstSeq = useRef(events[0]?.seq)
+  const [collapsed, setCollapsed] = useState(false)
+  const displayEvents = useMemo(() => collapsed ? collapseDshTrajectoryTurns(events) : events, [collapsed, events])
+  const previousLength = useRef(displayEvents.length)
+  const previousFirstSeq = useRef(displayEvents[0]?.seq)
   const [scrollTop, setScrollTop] = useState(0)
   const [viewportHeight, setViewportHeight] = useState(640)
   const overscan = 8
   const start = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - overscan)
-  const end = Math.min(events.length, Math.ceil((scrollTop + viewportHeight) / ROW_HEIGHT) + overscan)
-  const visible = events.slice(start, end)
+  const end = Math.min(displayEvents.length, Math.ceil((scrollTop + viewportHeight) / ROW_HEIGHT) + overscan)
+  const visible = displayEvents.slice(start, end)
 
   useEffect(() => {
     const onResize = () => setViewportHeight(Math.max(320, window.innerHeight - 230))
@@ -912,31 +914,33 @@ function VirtualEvents({ events, store, sessionId, feedbackBySeq, producedBySeq,
 
   useEffect(() => {
     if (focusSeq === null) return
-    const index = events.findIndex(event => event.seq === focusSeq)
+    const exactIndex = displayEvents.findIndex(event => event.seq === focusSeq)
+    const index = exactIndex >= 0 ? exactIndex : displayEvents.findIndex(event => event.seq > focusSeq)
     if (index < 0 || scrollRef.current === null) return
     const nextTop = Math.max(0, index * ROW_HEIGHT - viewportHeight / 3)
     scrollRef.current.scrollTo({ top: nextTop, behavior: 'smooth' })
     setScrollTop(nextTop)
-  }, [events, focusSeq, viewportHeight])
+  }, [displayEvents, focusSeq, viewportHeight])
 
   useLayoutEffect(() => {
-    const prepended = events.length > previousLength.current && events[0]?.seq !== previousFirstSeq.current
+    const prepended = displayEvents.length > previousLength.current && displayEvents[0]?.seq !== previousFirstSeq.current
     if (prepended && scrollRef.current !== null) {
-      const nextTop = scrollRef.current.scrollTop + (events.length - previousLength.current) * ROW_HEIGHT
+      const nextTop = scrollRef.current.scrollTop + (displayEvents.length - previousLength.current) * ROW_HEIGHT
       scrollRef.current.scrollTop = nextTop
       setScrollTop(nextTop)
     }
-    previousLength.current = events.length
-    previousFirstSeq.current = events[0]?.seq
-  }, [events])
+    previousLength.current = displayEvents.length
+    previousFirstSeq.current = displayEvents[0]?.seq
+  }, [displayEvents])
 
   return <div ref={scrollRef} className="event-scroll" onScroll={event => {
     const top = event.currentTarget.scrollTop
     setScrollTop(top)
     if (top < 100) onReachTop()
   }}>
+    <div className="trajectory-toolbar"><button type="button" className="text-button" onClick={() => setCollapsed(value => !value)} aria-label={collapsed ? 'Expand turns' : 'Collapse turns'}>{collapsed ? 'Expand turns' : 'Collapse turns'}</button><span>{collapsed ? `${displayEvents.length} compact records` : `${displayEvents.length} records`}</span></div>
     {loadingOlder && <div className="history-loading">Loading earlier events…</div>}
-    <div className="virtual-canvas" style={{ height: events.length * ROW_HEIGHT }}>
+    <div className="virtual-canvas" style={{ height: displayEvents.length * ROW_HEIGHT }}>
       {visible.map((event, index) => <div className="virtual-row" key={event.seq} style={{ transform: `translateY(${(start + index) * ROW_HEIGHT}px)` }}>
         <EventCard event={event} store={store} sessionId={sessionId} feedback={feedbackBySeq[event.seq]} producedPaths={producedBySeq.get(event.seq)} onFeedback={onFeedback} onCopy={onCopy} onRetry={onRetry} onFork={onFork} onOpenFile={onOpenFile} />
       </div>)}
@@ -1298,7 +1302,6 @@ export function App({ store }: { store: WebStore }) {
         .toLocaleLowerCase().includes(query)
     })
   }, [search, state.events, tab])
-
   const commandQuery = draft.match(/^\/([^\s]*)$/)?.[1] ?? null
   const commandItems = useMemo(() => commandQuery === null ? [] : commands.filter(command => command.name.toLocaleLowerCase().includes(commandQuery.toLocaleLowerCase())).slice(0, 8), [commandQuery, commands])
 
