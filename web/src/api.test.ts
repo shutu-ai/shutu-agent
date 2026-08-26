@@ -2,6 +2,19 @@ import { describe, expect, it } from 'vitest'
 import { ShutuApi } from './api'
 
 describe('ShutuApi', () => {
+  it('turns common HTTP failures and malformed JSON into actionable API errors', async () => {
+    for (const [status, phrase] of [[401, 'Authentication required'], [404, 'not found'], [409, 'conflicts'], [429, 'Too many requests'], [503, 'unavailable']] as const) {
+      const api = new ShutuApi('https://shutu.test', '', async () => new Response(JSON.stringify({ error: { message: 'upstream detail' } }), { status }))
+      await expect(api.getConfig()).rejects.toMatchObject({ status, message: expect.stringContaining(phrase) })
+    }
+
+    const malformed = new ShutuApi('https://shutu.test', '', async () => new Response('{not-json}', { status: 200 }))
+    await expect(malformed.getConfig()).rejects.toMatchObject({ status: 200, message: 'Server returned malformed JSON' })
+
+    const malformedPage = new ShutuApi('https://shutu.test', '', async () => new Response(JSON.stringify({ events: [{ seq: 'bad' }], has_more: false }), { status: 200 }))
+    await expect(malformedPage.loadEvents('s1')).rejects.toMatchObject({ status: 200, message: 'Server returned a malformed event page' })
+  })
+
   it('loads the sanitized read-only config endpoint with bearer authentication', async () => {
     let requestURL = ''
     let requestHeaders: Headers | undefined

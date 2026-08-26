@@ -437,10 +437,45 @@ export class ShutuApiError extends Error {
   constructor(message: string, readonly status: number) { super(message) }
 }
 
+function httpFailureLabel(status: number): string {
+  if (status === 401 || status === 403) return 'Authentication required'
+  if (status === 404) return 'Requested resource was not found'
+  if (status === 409) return 'Request conflicts with the current session state'
+  if (status === 429) return 'Too many requests; please retry shortly'
+  if (status >= 500) return 'Server unavailable; please retry shortly'
+  return 'Request failed'
+}
+
+async function responseError(response: Response, operation: string): Promise<ShutuApiError> {
+  let detail = ''
+  try {
+    const raw = await response.text()
+    if (raw !== '') {
+      const parsed: unknown = JSON.parse(raw)
+      if (typeof parsed === 'object' && parsed !== null) {
+        const body = parsed as { error?: unknown; message?: unknown; detail?: unknown }
+        const candidate = body.error ?? body.message ?? body.detail
+        if (typeof candidate === 'string') detail = candidate.slice(0, 240)
+        else if (typeof candidate === 'object' && candidate !== null && typeof (candidate as { message?: unknown }).message === 'string') detail = ((candidate as { message: string }).message).slice(0, 240)
+      }
+    }
+  } catch {
+    // A proxy may return HTML or malformed JSON; the HTTP status remains useful.
+  }
+  const suffix = detail === '' ? '' : `: ${detail}`
+  return new ShutuApiError(`${operation}: ${httpFailureLabel(response.status)} (HTTP ${response.status})${suffix}`, response.status)
+}
+
 function isEventView(value: unknown): value is EventView {
   if (value === null || typeof value !== 'object') return false
   const event = value as Partial<EventView>
   return typeof event.seq === 'number' && Number.isFinite(event.seq) && typeof event.type === 'string' && typeof event.version === 'number' && typeof event.time === 'string'
+}
+
+function isEventPage(value: unknown): value is EventPage {
+  if (value === null || typeof value !== 'object') return false
+  const page = value as Partial<EventPage>
+  return Array.isArray(page.events) && page.events.every(isEventView) && typeof page.has_more === 'boolean'
 }
 
 export class ShutuApi implements WebApi {
@@ -470,15 +505,19 @@ export class ShutuApi implements WebApi {
     const headers = this.headers()
     new Headers(init.headers).forEach((value, key) => headers.set(key, value))
     const response = await this.fetcher(this.url(path), { ...init, headers })
-    if (!response.ok) throw new ShutuApiError(`Request failed: HTTP ${response.status}`, response.status)
-    return response.json() as Promise<T>
+    if (!response.ok) throw await responseError(response, 'Request failed')
+    try {
+      return await response.json() as T
+    } catch {
+      throw new ShutuApiError('Server returned malformed JSON', response.status)
+    }
   }
 
   private async blob(path: string, init: RequestInit = {}): Promise<Blob> {
     const headers = this.headers()
     new Headers(init.headers).forEach((value, key) => headers.set(key, value))
     const response = await this.fetcher(this.url(path), { ...init, headers })
-    if (!response.ok) throw new ShutuApiError(`Request failed: HTTP ${response.status}`, response.status)
+    if (!response.ok) throw await responseError(response, 'Request failed')
     return response.blob()
   }
 
@@ -717,7 +756,10 @@ export class ShutuApi implements WebApi {
     const query = new URLSearchParams({ limit: String(cursor.limit ?? 100) })
     if (cursor.beforeSeq !== undefined) query.set('before_seq', String(cursor.beforeSeq))
     if (cursor.afterSeq !== undefined) query.set('after_seq', String(cursor.afterSeq))
-    return this.json<EventPage>(`/api/sessions/${encodeURIComponent(sessionId)}/events?${query}`, { signal })
+    return this.json<unknown>(`/api/sessions/${encodeURIComponent(sessionId)}/events?${query}`, { signal }).then(value => {
+      if (!isEventPage(value)) throw new ShutuApiError('Server returned a malformed event page', 200)
+      return value
+    })
   }
 
   async sendMessage(sessionId: string, text: string, images: string[] = [], signal?: AbortSignal): Promise<void> {
@@ -737,7 +779,8 @@ export class ShutuApi implements WebApi {
     headers.set('Accept', 'text/event-stream')
     if (lastSeq > 0) headers.set('Last-Event-ID', String(lastSeq))
     const response = await this.fetcher(this.url(`/api/sessions/${encodeURIComponent(sessionId)}/events/stream`), { signal, headers })
-    if (!response.ok || response.body === null) throw new ShutuApiError(`Stream failed: HTTP ${response.status}`, response.status)
+    if (!response.ok) throw await responseError(response, 'Event stream failed')
+    if (response.body === null) throw new ShutuApiError('Event stream returned an empty response body', response.status)
 
     const reader = response.body.getReader()
     const decoder = new TextDecoder()

@@ -90,7 +90,7 @@ export class WebStore {
         this.patch({ selectedId: null, events: [], hasOlder: false, historyStartSeq: null, historyEndSeq: null, historyCursor: null, historyError: null, loading: false })
       }
       if (this.pollTimer === null) {
-        this.pollTimer = setInterval(() => { void this.refreshSessions() }, 30_000)
+        this.pollTimer = setInterval(() => { void this.refreshSessions().catch(error => this.reportBackgroundError(error)) }, 30_000)
         const timer = this.pollTimer as unknown as { unref?: () => void }
         timer.unref?.()
       }
@@ -104,6 +104,11 @@ export class WebStore {
     const sessions = sortSessions(rawSessions)
     this.patch({ sessions, workspaces })
     return sessions
+  }
+
+  private reportBackgroundError(error: unknown): void {
+    if (this.state.selectedId === null) return
+    this.patch({ error: error instanceof Error ? error.message : String(error), authRequired: isUnauthorized(error) })
   }
 
   async createSession(workspaceId = ''): Promise<void> {
@@ -398,6 +403,7 @@ export class WebStore {
 
   private async streamLoop(sessionId: string, initialSeq: number, abort: AbortController, generation: number): Promise<void> {
     let cursor = initialSeq
+    let retryDelay = 500
     while (!abort.signal.aborted && generation === this.generation) {
       try {
         this.patch({ connected: true })
@@ -408,16 +414,18 @@ export class WebStore {
           this.knownSeqs.add(event.seq)
           this.patch({ events: [...this.state.events, event], connected: true })
         })
+        retryDelay = 500
       } catch (error) {
         if (abort.signal.aborted) return
-        this.patch({ connected: false, error: error instanceof Error ? error.message : String(error) })
+        this.patch({ connected: false, error: error instanceof Error ? error.message : String(error), authRequired: isUnauthorized(error) })
       }
       if (abort.signal.aborted || generation !== this.generation) return
-      await new Promise(resolve => setTimeout(resolve, 500))
+      await new Promise(resolve => setTimeout(resolve, retryDelay))
+      retryDelay = Math.min(8_000, retryDelay * 2)
     }
   }
 }
 
 function isUnauthorized(error: unknown): boolean {
-  return error instanceof ShutuApiError && error.status === 401
+  return error instanceof ShutuApiError && (error.status === 401 || error.status === 403)
 }

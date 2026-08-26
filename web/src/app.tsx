@@ -1931,7 +1931,7 @@ export function App({ store }: { store: WebStore }) {
   const authenticate = async (): Promise<void> => {
     const value = token.trim()
     if (!value) return
-    localStorage.setItem('shutu.web.token', value)
+    try { localStorage.setItem('shutu.web.token', value) } catch { /* authentication still works when storage is unavailable */ }
     try { await store.authenticate(value) } catch (error) {
       setSendError(error instanceof Error ? error.message : String(error))
     }
