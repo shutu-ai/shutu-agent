@@ -13,6 +13,7 @@
 - [x] P36-3：补齐 Session header 的 subagent lineage（parent/origin/delegationDepth），并在 history tail 返回可恢复 replacement 状态的 `surface` snapshot。
 - [x] P36-3：保真传输 DSH content blocks；统一 Markdown/code text、reasoning、image attachment、tool-result 与未知扩展 block，assistant/tool history/live 使用同一归一化结构。
 - [x] P36-3：分页先完成全量 native projection，再按 append-origin message 与 `sourceEventSeqs` 计算 DSH message boundary；replacement 不消耗配额且不会切断消息组。
+- [x] P36-2：补齐标准 `session.attachment`（会话引用授权、Base64 数据与附件元数据）及 `session.models` 响应入口。
 - [ ] P36-3：完整 projection baseline（所有已挂载 projection key）与生产数据规模验收仍待后续任务补齐。
 
 状态基线：P0–P23 已完成。P24–P35 已完成首轮实现；P36-1–P36-8 为“DSH 原生 UI 接入/视觉替换”新目标。未勾选项表示仍需补齐或在真实环境验收，不将未验证内容标记为完成。
@@ -171,6 +172,7 @@
 - [x] 接入核心会话/工作区方法：`host.describe`、`session.list/search/create/history/rename/prompt/cancel`、`workspace.list`。
 - [x] 实现 `/api/events.mux`、`/api/events.host` 的 downlink-only WebSocket 升级和 session subscription/event frame。
 - [x] native bundle 自带 `client-modules` bootstrap，并在入口安装最小 `__ModuleLoader__` / `__DSH_BOOT__` graph。
+- [x] 实现 `session.attachment` 的会话引用校验、Base64 读取和 DSH `ImageAttachmentRef` 映射；实现 `session.models` 标准方法入口。
 - [ ] 实现会话、工作区、设置、模型、权限、文件、附件、命令、技能、队列、审批和导出接口。
 - [ ] 补齐 host downlink 事件、连接状态、断线重连、续传，以及剩余设置/模型/权限/文件/附件/命令/技能/队列/审批/导出接口。
 - [x] 已建立 Go handler、核心契约测试和 WebSocket subscription baseline 测试；replay fixture 与完整协议覆盖留待后续补齐。

@@ -3,6 +3,7 @@ package webserver
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -466,6 +467,76 @@ func TestNativeProjectionIncludesImageLimitsWhenAttachmentsEnabled(t *testing.T)
 	}
 	if _, ok := list.Items[0].Projections.Values["imageLimits"].(map[string]any); !ok {
 		t.Fatalf("session.list imageLimits = %#v", list.Items[0].Projections.Values["imageLimits"])
+	}
+}
+
+func TestNativeSessionAttachmentRequiresReferenceAndReturnsDSHData(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	att, err := attachment.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.SetAttachmentStore(att)
+	data := []byte("native-image")
+	ref, err := att.SaveImage("image/png", data, maxWebImageBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventData, err := json.Marshal(map[string]any{
+		"content": []any{map[string]any{
+			"type": "image", "attachment": map[string]any{"attachmentId": ref.ID, "mediaType": ref.MediaType, "bytes": len(data)},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedSession(t, st, "native-attachment", []session.Event{{
+		Seq: 1, Type: session.EventUserMessage, At: time.UnixMilli(1001), Version: session.EventVersion,
+		Data: eventData,
+	}})
+
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/session.attachment", "tok", `{"type":"client-request","rpcId":"attachment-1","method":"session.attachment","payload":{"sessionId":"native-attachment","attachmentId":"`+ref.ID+`"}}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK {
+		t.Fatalf("session.attachment response = %+v", response)
+	}
+	var value struct {
+		Attachment map[string]any `json:"attachment"`
+		Data       string         `json:"data"`
+	}
+	encoded, _ := json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &value); err != nil {
+		t.Fatal(err)
+	}
+	if value.Attachment["attachmentId"] != ref.ID || value.Attachment["mediaType"] != "image/png" || value.Attachment["width"] != float64(1) || value.Attachment["height"] != float64(1) {
+		t.Fatalf("attachment ref = %#v", value.Attachment)
+	}
+	if value.Data != base64.StdEncoding.EncodeToString(data) {
+		t.Fatalf("attachment data = %q", value.Data)
+	}
+
+	rec = doReqBody(t, srv.Handler(), "POST", "/api/session.attachment", "tok", `{"type":"client-request","rpcId":"attachment-2","method":"session.attachment","payload":{"sessionId":"native-attachment","attachmentId":"not-referenced"}}`)
+	response = nativeResponse(t, rec.Body.Bytes())
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "attachment-error" {
+		t.Fatalf("unreferenced attachment response = %+v", response)
+	}
+}
+
+func TestNativeSessionModelsUsesStandardSessionMethod(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	seedSession(t, st, "native-models", nil)
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/session.models", "tok", `{"type":"client-request","rpcId":"models-1","method":"session.models","payload":{"sessionId":"native-models"}}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK {
+		t.Fatalf("session.models response = %+v", response)
+	}
+	var value map[string]any
+	encoded, _ := json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &value); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := value["current"].(map[string]any); !ok || value["routable"] != false {
+		t.Fatalf("session.models value = %#v", value)
 	}
 }
 

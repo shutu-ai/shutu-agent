@@ -6,6 +6,7 @@ package webserver
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"encoding/base64"
@@ -13,6 +14,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"net"
 	"net/http"
@@ -263,7 +268,8 @@ type nativeSubscribedFrame struct {
 func (s *Server) registerNativeRoutes(mux *http.ServeMux) {
 	for _, method := range []string{
 		"host.describe", "session.list", "session.search", "session.create",
-		"session.history", "session.rename", "session.prompt", "session.cancel",
+		"session.history", "session.rename", "session.prompt", "session.cancel", "session.attachment",
+		"session.models",
 		"workspace.list", "agentPreset.list", "settings.describe",
 		"settings.mutate", "credentials.describe", "dynamicCordisRunner/syncInspectManifest",
 		"dynamicCordisRunner/inventory", "llm.providers", "llm.models",
@@ -691,6 +697,10 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 		return nativeRPCSuccess(map[string]any{"title": title, "seq": 0})
 	case "session.prompt":
 		return s.nativeSessionPrompt(r, raw)
+	case "session.attachment":
+		return s.nativeSessionAttachment(r, raw)
+	case "session.models":
+		return s.nativeSessionModels(r, raw)
 	case "session.cancel":
 		var req nativeSessionIDRequest
 		if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
@@ -779,46 +789,7 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 		}
 		return nativeRPCSuccess(map[string]any{"providers": entries})
 	case "llm.models":
-		providers := []map[string]any{}
-		if s.cfgFn != nil {
-			providers = nativeConfigProviderMaps(s.cfgFn()["providers"])
-		}
-		groups := make([]any, 0, len(providers))
-		for _, provider := range providers {
-			id := nativeString(provider["id"])
-			models := nativeProviderModels(provider)
-			if id == "" || len(models) == 0 {
-				continue
-			}
-			items := make([]any, 0, len(models))
-			for _, raw := range models {
-				model, ok := raw.(map[string]any)
-				if !ok {
-					continue
-				}
-				modelID := nativeString(model["id"])
-				if modelID == "" {
-					continue
-				}
-				entry := map[string]any{"id": modelID, "name": modelID}
-				if name := nativeString(model["name"]); name != "" {
-					entry["name"] = name
-				}
-				if reasoning := nativeProviderReasoning(provider, modelID); reasoning != nil {
-					entry["reasoning"] = reasoning
-				}
-				items = append(items, entry)
-			}
-			if len(items) == 0 {
-				continue
-			}
-			name := nativeString(provider["name"])
-			if name == "" {
-				name = id
-			}
-			groups = append(groups, map[string]any{"id": id, "name": name, "models": items})
-		}
-		return nativeRPCSuccess(map[string]any{"groups": groups, "failures": []any{}})
+		return s.nativeLLMModels()
 	case "dynamicCordisRunner/syncInspectManifest":
 		return nativeRPCSuccess(nil)
 	case "dynamicCordisRunner/inventory":
@@ -833,6 +804,196 @@ func nativeStoreFailure(err error) nativeRPCResult {
 		return nativeRPCFailure("not-found", "session not found", nil)
 	}
 	return nativeRPCFailure("internal", err.Error(), nil)
+}
+
+func (s *Server) nativeLLMModels() nativeRPCResult {
+	providers := []map[string]any{}
+	if s.cfgFn != nil {
+		providers = nativeConfigProviderMaps(s.cfgFn()["providers"])
+	}
+	groups := make([]any, 0, len(providers))
+	for _, provider := range providers {
+		id := nativeString(provider["id"])
+		models := nativeProviderModels(provider)
+		if id == "" || len(models) == 0 {
+			continue
+		}
+		items := make([]any, 0, len(models))
+		for _, raw := range models {
+			model, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			modelID := nativeString(model["id"])
+			if modelID == "" {
+				continue
+			}
+			entry := map[string]any{"id": modelID, "name": modelID}
+			if name := nativeString(model["name"]); name != "" {
+				entry["name"] = name
+			}
+			if reasoning := nativeProviderReasoning(provider, modelID); reasoning != nil {
+				entry["reasoning"] = reasoning
+			}
+			items = append(items, entry)
+		}
+		if len(items) == 0 {
+			continue
+		}
+		name := nativeString(provider["name"])
+		if name == "" {
+			name = id
+		}
+		groups = append(groups, map[string]any{"id": id, "name": name, "models": items})
+	}
+	return nativeRPCSuccess(map[string]any{"groups": groups, "failures": []any{}})
+}
+
+func (s *Server) nativeSessionModels(r *http.Request, raw json.RawMessage) nativeRPCResult {
+	var req nativeSessionIDRequest
+	if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
+		return failure
+	}
+	if strings.TrimSpace(req.SessionID) == "" {
+		return nativeRPCFailure("bad-request", "sessionId is required", nil)
+	}
+	if _, err := s.store.GetSessionMeta(r.Context(), req.SessionID); err != nil {
+		return nativeStoreFailure(err)
+	}
+	catalog := s.nativeLLMModels()
+	if !catalog.OK {
+		return catalog
+	}
+	value, ok := catalog.Value.(map[string]any)
+	if !ok {
+		return nativeRPCFailure("internal", "model catalog has invalid shape", nil)
+	}
+	provider, model := "", ""
+	if s.cfgFn != nil {
+		view := s.cfgFn()
+		provider = nativeString(view["provider"])
+		model = nativeString(view["model"])
+	}
+	value["current"] = map[string]any{"provider": provider, "model": model}
+	value["routable"] = provider != "" && model != ""
+	return nativeRPCSuccess(value)
+}
+
+func (s *Server) nativeSessionAttachment(r *http.Request, raw json.RawMessage) nativeRPCResult {
+	var req struct {
+		SessionID    string `json:"sessionId"`
+		AttachmentID string `json:"attachmentId"`
+	}
+	if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
+		return failure
+	}
+	if strings.TrimSpace(req.SessionID) == "" || strings.TrimSpace(req.AttachmentID) == "" {
+		return nativeRPCFailure("bad-request", "sessionId and attachmentId are required", nil)
+	}
+	if s.att == nil {
+		return nativeRPCFailure("not-supported", "attachment store not wired", nil)
+	}
+	events, err := s.store.LoadSession(r.Context(), req.SessionID)
+	if err != nil {
+		return nativeStoreFailure(err)
+	}
+	if !nativeSessionReferencesAttachment(events, req.AttachmentID) {
+		return nativeRPCFailure("attachment-error", "Image is not referenced by this session.", map[string]any{
+			"reason": "ATTACHMENT_NOT_REFERENCED",
+		})
+	}
+	ref, err := s.att.GetByID(req.AttachmentID)
+	if err != nil {
+		return nativeRPCFailure("attachment-error", "Unable to find image attachment.", map[string]any{
+			"reason": "ATTACHMENT_NOT_FOUND",
+		})
+	}
+	data, err := s.att.Read(ref)
+	if err != nil {
+		return nativeRPCFailure("attachment-error", "Unable to read image attachment.", map[string]any{
+			"reason": "ATTACHMENT_READ_FAILED",
+		})
+	}
+	return nativeRPCSuccess(map[string]any{
+		"attachment": nativeAttachmentRefValue(ref, data),
+		"data":       base64.StdEncoding.EncodeToString(data),
+	})
+}
+
+func nativeSessionReferencesAttachment(events []session.Event, attachmentID string) bool {
+	for _, event := range events {
+		if nativeValueReferencesAttachment(nativeJSONObject(event.Data), attachmentID) {
+			return true
+		}
+	}
+	return false
+}
+
+func nativeValueReferencesAttachment(value any, attachmentID string) bool {
+	switch typed := value.(type) {
+	case []any:
+		for _, item := range typed {
+			if nativeValueReferencesAttachment(item, attachmentID) {
+				return true
+			}
+		}
+	case map[string]any:
+		for key, item := range typed {
+			normalized := strings.ToLower(strings.ReplaceAll(key, "_", ""))
+			if normalized == "attachmentid" {
+				if nativeStringValue(item) == attachmentID {
+					return true
+				}
+			}
+			if normalized == "image" || normalized == "attachment" {
+				if object, ok := item.(map[string]any); ok && nativeAttachmentID(object) == attachmentID {
+					return true
+				}
+			}
+			if nativeValueReferencesAttachment(item, attachmentID) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func nativeAttachmentID(object map[string]any) string {
+	for _, key := range []string{"attachmentId", "attachment_id", "id", "ID"} {
+		if value := nativeEventString(object, key); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func nativeStringValue(value any) string {
+	if text, ok := value.(string); ok {
+		return text
+	}
+	return ""
+}
+
+func nativeAttachmentRefValue(ref llm.ImageRef, data []byte) map[string]any {
+	width, height := ref.Width, ref.Height
+	if width <= 0 || height <= 0 {
+		if config, _, err := image.DecodeConfig(bytes.NewReader(data)); err == nil {
+			width, height = config.Width, config.Height
+		}
+	}
+	if width <= 0 {
+		width = 1
+	}
+	if height <= 0 {
+		height = 1
+	}
+	return map[string]any{
+		"attachmentId": ref.ID,
+		"mediaType":    ref.MediaType,
+		"bytes":        len(data),
+		"width":        width,
+		"height":       height,
+	}
 }
 
 func (s *Server) nativeSessionList(r *http.Request) nativeRPCResult {
