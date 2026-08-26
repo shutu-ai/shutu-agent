@@ -235,6 +235,11 @@ type nativeSessionSelectModelRequest struct {
 	ReasoningEffort string `json:"reasoningEffort"`
 }
 
+type nativeSessionForkRequest struct {
+	SessionID string  `json:"sessionId"`
+	AtSeq     *uint64 `json:"atSeq"`
+}
+
 type nativeSessionSearchRequest struct {
 	Query string `json:"query"`
 }
@@ -285,7 +290,7 @@ func (s *Server) registerNativeRoutes(mux *http.ServeMux) {
 		"host.describe", "host.listDirectory", "host.createDirectory", "host.pickDirectory",
 		"session.list", "session.search", "session.create",
 		"session.history", "session.rename", "session.prompt", "session.cancel", "session.attachment",
-		"session.models", "session.selectModel",
+		"session.models", "session.selectModel", "session.fork",
 		"workspace.list", "workspace.create", "workspace.rename", "workspace.delete",
 		"workspace.insertBefore", "workspace.insertSessionBefore", "workspace.archiveSession",
 		"agentPreset.list", "agentPreset.select", "settings.describe",
@@ -740,6 +745,8 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 		return s.nativeSessionModels(r, raw)
 	case "session.selectModel":
 		return s.nativeSessionSelectModel(r, raw)
+	case "session.fork":
+		return s.nativeSessionFork(r, raw)
 	case "session.cancel":
 		var req nativeSessionIDRequest
 		if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
@@ -1585,6 +1592,98 @@ func (s *Server) nativeSessionCreate(r *http.Request, raw json.RawMessage) nativ
 		}
 	}
 	return nativeRPCSuccess(map[string]any{"sessionId": id})
+}
+
+// nativeSessionFork clones a completed-turn prefix into a new session. DSH's
+// fork anchor is a message sequence, not an arbitrary event cut: the first
+// turn/end at or after the anchor closes the copied prefix. A missing anchor
+// (or an anchor beyond the log) falls back to the latest completed turn, while
+// an empty/in-progress log is not forkable.
+func (s *Server) nativeSessionFork(r *http.Request, raw json.RawMessage) nativeRPCResult {
+	var req nativeSessionForkRequest
+	if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
+		return failure
+	}
+	req.SessionID = strings.TrimSpace(req.SessionID)
+	if req.SessionID == "" {
+		return nativeRPCFailure("bad-request", "sessionId is required", nil)
+	}
+	events, err := s.store.LoadSession(r.Context(), req.SessionID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nativeRPCFailure("session-not-found", "session not found", map[string]any{"sessionId": req.SessionID})
+		}
+		return nativeRPCFailure("internal", err.Error(), nil)
+	}
+	end := nativeForkBoundary(events, req.AtSeq)
+	if end < 0 {
+		return nativeRPCFailure("fork-unavailable", "session has no completed turn to fork", map[string]any{"sessionId": req.SessionID})
+	}
+	meta, err := s.store.GetSessionMeta(r.Context(), req.SessionID)
+	if err != nil {
+		return nativeStoreFailure(err)
+	}
+	forkID, err := newSessionID()
+	if err != nil {
+		return nativeRPCFailure("fork-failed", err.Error(), nil)
+	}
+	if err := s.store.CreateSession(r.Context(), forkID, time.Now().UTC()); err != nil {
+		return nativeRPCFailure("fork-failed", err.Error(), nil)
+	}
+	cleanup := func() {
+		_ = s.store.DeleteSession(context.Background(), forkID)
+	}
+	cloned := make([]session.Event, end+1)
+	for index, event := range events[:end+1] {
+		cloned[index] = event
+		cloned[index].Seq = uint64(index + 1)
+	}
+	if err := s.store.AppendEvents(r.Context(), forkID, cloned); err != nil {
+		cleanup()
+		return nativeRPCFailure("fork-failed", err.Error(), nil)
+	}
+	if meta.Title != "" {
+		if err := s.store.SetSessionTitle(r.Context(), forkID, meta.Title, meta.TitleSource); err != nil {
+			cleanup()
+			return nativeRPCFailure("fork-failed", err.Error(), nil)
+		}
+	}
+	if meta.WorkspaceID != "" {
+		if err := s.store.SetSessionWorkspace(r.Context(), forkID, meta.WorkspaceID); err != nil {
+			cleanup()
+			return nativeRPCFailure("fork-failed", err.Error(), nil)
+		}
+	}
+	if meta.CWD != "" {
+		if headers, ok := s.store.(store.SessionHeaderStore); ok {
+			if err := headers.SetSessionCWD(r.Context(), forkID, meta.CWD); err != nil {
+				cleanup()
+				return nativeRPCFailure("fork-failed", err.Error(), nil)
+			}
+		}
+	}
+	if configs, ok := s.store.(store.SessionConfigStore); ok {
+		if config, configErr := configs.GetSessionConfig(r.Context(), req.SessionID); configErr == nil {
+			if err := configs.SetSessionConfig(r.Context(), forkID, config); err != nil {
+				cleanup()
+				return nativeRPCFailure("fork-failed", err.Error(), nil)
+			}
+		}
+	}
+	return nativeRPCSuccess(map[string]any{"sessionId": forkID})
+}
+
+func nativeForkBoundary(events []session.Event, atSeq *uint64) int {
+	lastCompleted := -1
+	for index, event := range events {
+		if event.Type == session.EventTurnEnd {
+			lastCompleted = index
+			if atSeq != nil && event.Seq >= *atSeq {
+				return index
+			}
+		}
+	}
+	return lastCompleted
 }
 
 func (s *Server) nativeSessionPrompt(r *http.Request, raw json.RawMessage) nativeRPCResult {

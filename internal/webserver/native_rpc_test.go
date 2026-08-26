@@ -1305,6 +1305,107 @@ func TestNativeMuxWebSocketSendsSubscriptionBaseline(t *testing.T) {
 	}
 }
 
+func TestNativeSessionForkCopiesCompletedTurnPrefixAndMetadata(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	workspacePath := t.TempDir()
+	if err := st.CreateWorkspaceWithPath(context.Background(), "fork-workspace", "Fork workspace", workspacePath); err != nil {
+		t.Fatal(err)
+	}
+	events := []session.Event{
+		{Seq: 1, Type: session.EventTurnStart, At: time.UnixMilli(1001), Version: session.EventVersion, Data: json.RawMessage(`{}`)},
+		{Seq: 2, Type: session.EventUserMessage, At: time.UnixMilli(1002), Version: session.EventVersion, Data: json.RawMessage(`{"text":"first"}`)},
+		{Seq: 3, Type: session.EventTurnEnd, At: time.UnixMilli(1003), Version: session.EventVersion, Data: json.RawMessage(`{}`)},
+		{Seq: 4, Type: session.EventTurnStart, At: time.UnixMilli(1004), Version: session.EventVersion, Data: json.RawMessage(`{}`)},
+		{Seq: 5, Type: session.EventUserMessage, At: time.UnixMilli(1005), Version: session.EventVersion, Data: json.RawMessage(`{"text":"open"}`)},
+	}
+	seedSession(t, st, "fork-source", events)
+	ctx := context.Background()
+	if err := st.SetSessionTitle(ctx, "fork-source", "Fork title", session.TitleSourceUser); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetSessionWorkspace(ctx, "fork-source", "fork-workspace"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetSessionCWD(ctx, "fork-source", workspacePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetSessionConfig(ctx, "fork-source", store.SessionConfig{AgentPreset: "code", Provider: "openai", Model: "gpt-4o", Permission: "full"}); err != nil {
+		t.Fatal(err)
+	}
+
+	call := func(id string, payload map[string]any) nativeRPCResponse {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{
+			"type": "client-request", "rpcId": id, "method": "session.fork", "payload": payload,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := doReqBody(t, srv.Handler(), "POST", "/api/session.fork", "tok", string(body))
+		return nativeResponse(t, rec.Body.Bytes())
+	}
+
+	anchor := uint64(2)
+	response := call("fork-prefix", map[string]any{"sessionId": "fork-source", "atSeq": anchor})
+	if !response.Result.OK {
+		t.Fatalf("session.fork response = %+v", response)
+	}
+	var value struct {
+		SessionID string `json:"sessionId"`
+	}
+	encoded, _ := json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &value); err != nil {
+		t.Fatal(err)
+	}
+	if value.SessionID == "" || value.SessionID == "fork-source" {
+		t.Fatalf("fork session id = %q", value.SessionID)
+	}
+	cloned, err := st.LoadSession(ctx, value.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cloned) != 3 || cloned[0].Seq != 1 || cloned[2].Type != session.EventTurnEnd {
+		t.Fatalf("forked events = %+v", cloned)
+	}
+	meta, err := st.GetSessionMeta(ctx, value.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.Title != "Fork title" || meta.WorkspaceID != "fork-workspace" || meta.CWD != workspacePath {
+		t.Fatalf("forked metadata = %+v", meta)
+	}
+	config, err := st.GetSessionConfig(ctx, value.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.AgentPreset != "code" || config.Provider != "openai" || config.Model != "gpt-4o" || config.Permission != "full" {
+		t.Fatalf("forked config = %+v", config)
+	}
+
+	response = call("fork-latest-completed", map[string]any{"sessionId": "fork-source", "atSeq": 99})
+	if !response.Result.OK {
+		t.Fatalf("fallback fork response = %+v", response)
+	}
+	encoded, _ = json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &value); err != nil {
+		t.Fatal(err)
+	}
+	cloned, err = st.LoadSession(ctx, value.SessionID)
+	if err != nil || len(cloned) != 3 {
+		t.Fatalf("fallback forked events = %d, err=%v", len(cloned), err)
+	}
+
+	seedSession(t, st, "fork-empty", nil)
+	response = call("fork-empty", map[string]any{"sessionId": "fork-empty"})
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "fork-unavailable" {
+		t.Fatalf("empty fork response = %+v", response)
+	}
+	response = call("fork-missing", map[string]any{"sessionId": "missing"})
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "session-not-found" {
+		t.Fatalf("missing fork response = %+v", response)
+	}
+}
+
 func readNativeTextFrame(reader *bufio.Reader) ([]byte, error) {
 	first, err := reader.ReadByte()
 	if err != nil {
