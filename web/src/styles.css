@@ -110,6 +110,8 @@ h1 { max-width: 52vw; margin: 0; overflow: hidden; color: #f1f5fa; font-size: 20
 .error-banner { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 14px 38px 0; border: 1px solid #6d3c3c; border-radius: 8px; padding: 9px 12px; color: #ffb2a8; background: #291b22; }
 .error-banner button { border: 1px solid #91504a; border-radius: 5px; padding: 3px 10px; color: #ffd4cc; background: transparent; }
 .content-panel { display: flex; min-height: 0; flex-direction: column; overflow: hidden; padding: 18px 38px 8px; }
+.trajectory-layout { display: grid; min-height: 0; flex: 1; grid-template-columns: minmax(0, 1fr) 320px; gap: 12px; }
+.trajectory-main { display: flex; min-width: 0; min-height: 0; flex-direction: column; }
 .event-scroll { position: relative; min-height: 0; flex: 1; overflow: auto; padding: 0 9px 22px 18px; scrollbar-color: #334354 transparent; }
 .dsh-conversation-scroll { min-height: 0; flex: 1; overflow: auto; padding: 0 9px 22px 18px; scrollbar-color: #334354 transparent; }
 .dsh-conversation-header { display: flex; align-items: center; gap: 12px; margin: 0 0 12px; border: 1px solid #243244; border-radius: 10px; padding: 9px 12px; color: #7f8da3; background: #0f1823; font-size: 11px; }
@@ -137,6 +139,8 @@ h1 { max-width: 52vw; margin: 0; overflow: hidden; color: #f1f5fa; font-size: 20
 .seq { color: #536277; font-variant-numeric: tabular-nums; }
 .event-label { color: #d4deea; font-weight: 650; }
 .event-head time { margin-left: auto; color: #65748a; }
+.event-inspect { margin-left: auto; border: 1px solid #2b4352; border-radius: 5px; padding: 2px 6px; color: #91b3c5; background: transparent; font-size: 10px; }
+.event-inspect:hover { border-color: #70a68c; color: #b9f0cf; background: #142b27; }
 .version, .call-id { border-radius: 4px; padding: 1px 5px; color: #8fa0b8; background: #1b2838; font-size: 10px; }
 .event-content { position: relative; margin-top: 8px; }
 .event-text { max-width: 920px; overflow: hidden; color: #bac6d5; white-space: pre-wrap; text-overflow: ellipsis; }
@@ -154,7 +158,31 @@ h1 { max-width: 52vw; margin: 0; overflow: hidden; color: #f1f5fa; font-size: 20
 .code-block span, .detail-item > span { color: #77889e; font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
 pre { margin: 3px 0 0; overflow: auto; color: #b9c8da; font: 11px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; }
 .details-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 7px; margin-top: 8px; }
+.virtual-row.selected .event-card { border-color: #70a68c; box-shadow: 0 0 0 1px #70a68c33; }
 .history-loading { position: sticky; z-index: 2; top: 0; width: max-content; margin: 0 auto 5px; border: 1px solid #34584b; border-radius: 12px; padding: 3px 9px; color: #a9e8c1; background: #142b27; font-size: 11px; }
+.trajectory-inspector { display: flex; min-width: 0; min-height: 0; flex-direction: column; overflow: hidden; border: 1px solid #243244; border-radius: 11px; background: #0f1823; }
+.inspector-head { display: flex; align-items: start; justify-content: space-between; gap: 10px; border-bottom: 1px solid #243244; padding: 12px 13px 9px; }
+.inspector-head > div { display: grid; min-width: 0; gap: 3px; }
+.inspector-head strong { overflow: hidden; color: #dce7f2; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.inspector-close { border: 0; padding: 0 3px; color: #8091a5; background: transparent; font-size: 20px; line-height: 1; }
+.inspector-close:hover { color: #e7edf5; }
+.inspector-summary { display: flex; align-items: center; justify-content: space-between; padding: 9px 13px 7px; color: #718096; font-size: 10px; }
+.inspector-status { border-radius: 10px; padding: 2px 7px; color: #b9c7d5; background: #233244; }
+.inspector-status.done { color: #a9e8c1; background: #142b27; }
+.inspector-status.running { color: #f0c78e; background: #302619; }
+.inspector-status.danger { color: #ffb2a8; background: #3a2025; }
+.inspector-tabs { display: flex; gap: 2px; overflow-x: auto; border-bottom: 1px solid #243244; padding: 0 9px; scrollbar-width: none; }
+.inspector-tabs button { flex: 0 0 auto; border: 0; border-bottom: 2px solid transparent; padding: 8px 5px 7px; color: #718096; background: transparent; font-size: 10px; }
+.inspector-tabs button.selected { border-bottom-color: #9de9bd; color: #e4f6eb; }
+.inspector-body { min-height: 0; flex: 1; overflow: auto; padding: 12px 13px 16px; }
+.inspector-summary-text { margin: 0 0 12px; color: #c4d0dd; white-space: pre-wrap; }
+.inspector-meta { display: grid; gap: 8px; margin: 0; }
+.inspector-meta > div { display: grid; grid-template-columns: minmax(74px, .45fr) minmax(0, 1fr); gap: 8px; border-bottom: 1px solid #1d2b39; padding-bottom: 7px; }
+.inspector-meta dt { color: #71869b; font-size: 10px; }
+.inspector-meta dd { min-width: 0; margin: 0; overflow-wrap: anywhere; color: #cbd7e3; font: 11px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.inspector-section { margin-top: 16px; }
+.inspector-section h3 { margin: 0 0 8px; color: #a9e8c1; font-size: 11px; font-weight: 650; }
+.inspector-code { min-height: 100%; margin: 0; border: 1px solid #26394c; border-radius: 7px; padding: 10px; color: #c5d3e0; background: #0b111a; white-space: pre-wrap; overflow-wrap: anywhere; }
 .empty { display: grid; height: 100%; min-height: 260px; place-content: center; justify-items: center; gap: 8px; color: #7c8ba0; text-align: center; }
 .empty strong { color: #cdd8e5; font-size: 16px; }
 .auth-card { display: grid; width: min(420px, 100%); margin: auto; gap: 10px; border: 1px solid #2d4659; border-radius: 12px; padding: 22px; background: #111d2a; }
@@ -185,6 +213,8 @@ pre { margin: 3px 0 0; overflow: auto; color: #b9c8da; font: 11px/1.45 ui-monosp
   .search-box { min-width: 0; width: 100%; }
   .tabs { gap: 18px; overflow-x: auto; padding: 0 14px; white-space: nowrap; }
   .content-panel { padding: 12px 8px 6px; }
+  .trajectory-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(220px, 35%); }
+  .trajectory-inspector { max-height: 320px; }
   .dsh-conversation-scroll, .event-scroll { padding-left: 4px; padding-right: 4px; }
   .dsh-conversation-header { flex-wrap: wrap; gap: 7px 10px; }
   .conversation-running { margin-left: 0; }
