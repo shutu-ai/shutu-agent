@@ -254,6 +254,76 @@ func TestNativeProjectionFoldsSessionStatsFromLifecycleEvents(t *testing.T) {
 	}
 }
 
+func TestNativeProjectionFoldsDSHSubagentIdentityAndTiming(t *testing.T) {
+	tests := []struct {
+		name        string
+		events      []session.Event
+		wantMode    string
+		wantLabel   string
+		wantSeq     uint64
+		wantSettled int64
+		wantActive  bool
+	}{
+		{
+			name: "canonical descriptor includes pending turn",
+			events: []session.Event{
+				{Seq: 1, Type: session.EventTurnStart, At: time.UnixMilli(100), Version: session.EventVersion, Data: json.RawMessage(`{"turn":1}`)},
+				{Seq: 2, Type: "subagent/descriptor", At: time.UnixMilli(200), Version: session.EventVersion, Data: json.RawMessage(`{"version":2,"mode":"continuable","provider":"spawn","label":"research"}`)},
+				{Seq: 3, Type: session.EventTurnEnd, At: time.UnixMilli(500), Version: session.EventVersion, Data: json.RawMessage(`{"turn":1}`)},
+			},
+			wantMode: "continuable", wantLabel: "research", wantSeq: 2, wantSettled: 400,
+		},
+		{
+			name: "legacy start defaults to one shot",
+			events: []session.Event{
+				{Seq: 7, Type: session.EventSubagentStart, At: time.UnixMilli(700), Version: session.EventVersion, Data: json.RawMessage(`{"id":"child-1","label":"quick task"}`)},
+			},
+			wantMode: "one-shot", wantLabel: "quick task", wantSeq: 7,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cursor := newNativeProjectionCursor()
+			for _, ev := range test.events {
+				cursor.project("subagent", ev)
+			}
+			values := cursor.projectionBlock("", int64(test.wantSeq)).Values
+			identity, ok := values["subagent"].(map[string]any)
+			if !ok {
+				t.Fatalf("subagent projection = %#v", values["subagent"])
+			}
+			if identity["mode"] != test.wantMode || identity["label"] != test.wantLabel || identity["seq"] != test.wantSeq {
+				t.Fatalf("subagent identity = %#v", identity)
+			}
+			timing, ok := values["subagentTiming"].(map[string]any)
+			if !ok || timing["settledMs"] != test.wantSettled {
+				t.Fatalf("subagent timing = %#v", values["subagentTiming"])
+			}
+			_, active := timing["active"]
+			if active != test.wantActive {
+				t.Fatalf("subagent active = %v, want %v", active, test.wantActive)
+			}
+		})
+	}
+}
+
+func TestNativeProjectionRejectsMalformedDSHSubagentDescriptor(t *testing.T) {
+	cursor := newNativeProjectionCursor()
+	cursor.project("subagent", session.Event{
+		Seq: 1, Type: "subagent/descriptor", At: time.UnixMilli(100), Version: session.EventVersion,
+		Data: json.RawMessage(`{"version":1,"mode":"continuable","label":"research"}`),
+	})
+	values := cursor.projectionBlock("", 1).Values
+	if values["subagent"] != nil {
+		t.Fatalf("malformed subagent projection = %#v, want nil", values["subagent"])
+	}
+	timing, ok := values["subagentTiming"].(map[string]any)
+	if !ok || timing["settledMs"] != int64(0) {
+		t.Fatalf("malformed subagent timing = %#v", values["subagentTiming"])
+	}
+}
+
 func TestNativeSessionHistorySeedsProjectionBeforeSelectingMessagePage(t *testing.T) {
 	srv, st := newTestServer(t, "tok")
 	seedSession(t, st, "native-paged", []session.Event{

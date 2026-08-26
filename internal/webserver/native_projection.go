@@ -28,6 +28,7 @@ type nativeProjectionCursor struct {
 	todosSeen bool
 	stats     nativeProjectionSessionStats
 	goal      map[string]any
+	subagent  nativeProjectionSubagentState
 }
 
 func newNativeProjectionCursor() *nativeProjectionCursor {
@@ -180,8 +181,23 @@ type nativeProjectionOpenStep struct {
 	HasFirstToken bool
 }
 
+// nativeProjectionSubagentState mirrors the two DSH projections maintained by
+// the subagent package. A Shutu child log currently starts with
+// subagent/start, while the adapter also accepts the canonical
+// subagent/descriptor event for native sessions.
+type nativeProjectionSubagentState struct {
+	descriptorSeen      bool
+	pendingTurnStart    int64
+	hasPendingTurnStart bool
+	activeSince         int64
+	activeThrough       int64
+	active              bool
+	settledMs           int64
+}
+
 func (c *nativeProjectionCursor) foldProjection(ev session.Event, data map[string]any) {
 	c.foldSessionStats(ev, data)
+	c.foldSubagent(ev, data)
 	switch ev.Type {
 	case "session/title":
 		c.setProjectionValue("title", nativeEventString(data, "title", "text"))
@@ -250,6 +266,192 @@ func (c *nativeProjectionCursor) foldProjection(ev session.Event, data map[strin
 			}
 		}
 	}
+}
+
+func (c *nativeProjectionCursor) foldSubagent(ev session.Event, data map[string]any) {
+	state := &c.subagent
+	now := ev.At.UnixMilli()
+	if now < 0 {
+		now = 0
+	}
+
+	switch ev.Type {
+	case "subagent/descriptor", session.EventSubagentStart:
+		identity, valid := nativeSubagentIdentity(data, ev.Type == session.EventSubagentStart, ev.Seq)
+		if valid {
+			c.setProjectionValue("subagent", identity)
+		} else {
+			// DSH uses a null sentinel for malformed or unsupported
+			// descriptors so consumers can distinguish it from no projection.
+			c.setProjectionValue("subagent", nil)
+		}
+		state.descriptorSeen = true
+		state.settledMs = 0
+		state.active = false
+		state.activeSince = 0
+		state.activeThrough = 0
+		if state.hasPendingTurnStart {
+			state.active = true
+			state.activeSince = state.pendingTurnStart
+			state.activeThrough = now
+			state.hasPendingTurnStart = false
+		}
+		c.setProjectionValue("subagentTiming", nativeSubagentTimingValue(state))
+		return
+	case session.EventTurnStart:
+		if !state.descriptorSeen {
+			state.pendingTurnStart = now
+			state.hasPendingTurnStart = true
+			return
+		}
+		state.active = true
+		state.activeSince = now
+		state.activeThrough = now
+		c.setProjectionValue("subagentTiming", nativeSubagentTimingValue(state))
+	case session.EventTurnEnd:
+		if !state.descriptorSeen {
+			state.hasPendingTurnStart = false
+			return
+		}
+		if state.active {
+			if now >= state.activeSince {
+				state.settledMs += now - state.activeSince
+			}
+			state.active = false
+			state.activeSince = 0
+			state.activeThrough = 0
+		}
+		c.setProjectionValue("subagentTiming", nativeSubagentTimingValue(state))
+	default:
+		if !state.descriptorSeen || !state.active {
+			return
+		}
+		state.activeThrough = now
+		c.setProjectionValue("subagentTiming", nativeSubagentTimingValue(state))
+	}
+}
+
+func nativeSubagentIdentity(data map[string]any, legacyStart bool, seq uint64) (map[string]any, bool) {
+	mode := nativeEventString(data, "mode")
+	if legacyStart && mode == "" {
+		if nativeEventBool(data, "continuable") {
+			mode = "continuable"
+		} else {
+			mode = "one-shot"
+		}
+	}
+	if mode != "one-shot" && mode != "continuable" {
+		return nil, false
+	}
+	if !legacyStart {
+		if !nativeSubagentDescriptorValid(data, mode) {
+			return nil, false
+		}
+	}
+	identity := map[string]any{"mode": mode, "seq": seq}
+	label := nativeEventString(data, "label")
+	if mode == "continuable" {
+		if strings.TrimSpace(label) == "" {
+			return nil, false
+		}
+		identity["label"] = label
+	} else if label != "" {
+		identity["label"] = label
+	}
+	return identity, true
+}
+
+func nativeSubagentDescriptorValid(data map[string]any, mode string) bool {
+	version, ok := data["version"]
+	if !ok || !nativeSubagentVersionTwo(version) {
+		return false
+	}
+	if _, ok := data["provider"].(string); !ok {
+		return false
+	}
+	allowed := map[string]bool{"version": true, "mode": true, "provider": true, "label": true}
+	if mode == "continuable" {
+		allowed["agentProvider"] = true
+		allowed["agentModel"] = true
+		allowed["persona"] = true
+		allowed["toolFilter"] = true
+	}
+	for key := range data {
+		if !allowed[key] {
+			return false
+		}
+	}
+	if label, exists := data["label"]; exists {
+		if _, ok := label.(string); !ok {
+			return false
+		}
+	} else if mode == "continuable" {
+		return false
+	}
+	for _, key := range []string{"agentProvider", "agentModel", "persona"} {
+		if value, exists := data[key]; exists {
+			if _, ok := value.(string); !ok {
+				return false
+			}
+		}
+	}
+	if raw, exists := data["toolFilter"]; exists && !nativeSubagentToolFilterValid(raw) {
+		return false
+	}
+	return true
+}
+
+func nativeSubagentVersionTwo(value any) bool {
+	switch number := value.(type) {
+	case float64:
+		return number == 2
+	case json.Number:
+		parsed, err := number.Float64()
+		return err == nil && parsed == 2
+	case int:
+		return number == 2
+	case int64:
+		return number == 2
+	case uint64:
+		return number == 2
+	default:
+		return false
+	}
+}
+
+func nativeSubagentToolFilterValid(value any) bool {
+	filter, ok := value.(map[string]any)
+	if !ok || len(filter) == 0 {
+		return false
+	}
+	hasList := false
+	for key, raw := range filter {
+		if key != "allow" && key != "deny" {
+			return false
+		}
+		items, ok := raw.([]any)
+		if !ok {
+			return false
+		}
+		hasList = true
+		for _, item := range items {
+			if _, ok := item.(string); !ok {
+				return false
+			}
+		}
+	}
+	return hasList
+}
+
+func nativeSubagentTimingValue(state *nativeProjectionSubagentState) map[string]any {
+	value := map[string]any{"settledMs": state.settledMs}
+	if state.active {
+		value["active"] = map[string]any{
+			"since":   state.activeSince,
+			"through": state.activeThrough,
+		}
+	}
+	return value
 }
 
 func (c *nativeProjectionCursor) createGoalProjection(ev session.Event, data map[string]any) {
@@ -560,6 +762,12 @@ func (c *nativeProjectionCursor) projectionBlock(title string, lastSeq int64, pe
 	}
 	if _, ok := values["sessionStats"]; !ok {
 		values["sessionStats"] = nativeSessionStatsValue(&c.stats)
+	}
+	if _, ok := values["subagent"]; !ok {
+		values["subagent"] = nil
+	}
+	if _, ok := values["subagentTiming"]; !ok {
+		values["subagentTiming"] = nativeSubagentTimingValue(&c.subagent)
 	}
 	values["permissions"] = nativePermissionProjection(firstNonEmpty(permission...))
 	return nativeProjectionBlock{AsOfSeq: lastSeq, Values: values}
