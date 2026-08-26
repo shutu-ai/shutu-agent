@@ -34,6 +34,7 @@
 
 - [x] P36-1.1：生成 DSH 版本、Git revision、只读来源根目录和原生插件 roster manifest。
 - [ ] P36-2.1：实现会话、工作区、设置、模型、权限、文件、附件、命令、技能、队列、审批和导出接口。
+- [x] P36-2.1a：接入 DSH `goal.create/edit/pause/resume/complete/clear` 原生 RPC，复用 Shutu plan/goal 引擎、事件持久化和 revision CAS。
 - [ ] P36-2.2：补齐 host downlink、连接状态、断线重连、续传及剩余原生接口。
 - [x] P36-2.2a：host downlink 首次连接下发活动会话、session status、Workspace/archive 快照，并在 turn start/end 时推送状态变化。
 - [x] P36-2.2b：接入 `subagent.prompt/interrupt`，校验 parent/child lineage 与 continuable mode，并连接 live child inbox/cancel seam。

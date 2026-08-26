@@ -32,6 +32,7 @@ type planUpdateEvent struct {
 	ID        string `json:"id"`
 	Title     string `json:"title"`
 	Objective string `json:"objective"`
+	MaxRounds int    `json:"maxRounds"`
 }
 
 type planSnapshot struct {
@@ -207,6 +208,9 @@ func restoreEvents(events []session.Event) (map[string]Goal, map[string]Plan, er
 						g.Title = data.Title
 					}
 					g.Objective = data.Objective
+					if data.MaxRounds > 0 {
+						g.MaxRounds = data.MaxRounds
+					}
 					g.Revision = nextRestoreRevision(g.Revision)
 					goals[data.ID] = g
 				}

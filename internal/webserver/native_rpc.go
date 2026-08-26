@@ -271,6 +271,18 @@ type nativeSubagentInterruptRequest struct {
 	Mode            string `json:"mode"`
 }
 
+type nativeGoalRef struct {
+	ID       string `json:"id"`
+	Revision int    `json:"revision"`
+}
+
+type nativeGoalMutationRequest struct {
+	SessionID     string         `json:"sessionId"`
+	Ref           *nativeGoalRef `json:"ref"`
+	Objective     *string        `json:"objective"`
+	MaxGoalRounds *int           `json:"maxGoalRounds"`
+}
+
 type nativeSessionSearchRequest struct {
 	Query string `json:"query"`
 }
@@ -328,6 +340,7 @@ func (s *Server) registerNativeRoutes(mux *http.ServeMux) {
 		"settings.mutate", "settings.update", "settings.replace", "credentials.describe", "dynamicCordisRunner/syncInspectManifest",
 		"dynamicCordisRunner/inventory", "llm.providers", "llm.models", "llm.discoverModels", "skill.list",
 		"subagent.list", "subagent.history", "subagent.prompt", "subagent.interrupt",
+		"goal.create", "goal.edit", "goal.pause", "goal.resume", "goal.complete", "goal.clear",
 	} {
 		mux.Handle("POST /api/"+method, s.requireAuth(http.HandlerFunc(s.handleNativeRPC)))
 	}
@@ -963,6 +976,8 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 		return s.nativeSubagentPrompt(r, raw)
 	case "subagent.interrupt":
 		return s.nativeSubagentInterrupt(r, raw)
+	case "goal.create", "goal.edit", "goal.pause", "goal.resume", "goal.complete", "goal.clear":
+		return s.nativeGoalMutation(r, method, raw)
 	case "dynamicCordisRunner/syncInspectManifest":
 		return nativeRPCSuccess(nil)
 	case "dynamicCordisRunner/inventory":
@@ -1433,6 +1448,62 @@ func (s *Server) nativeSubagentInterrupt(r *http.Request, raw json.RawMessage) n
 		return nativeRPCFailure("subagent-interrupt-failed", err.Error(), nil)
 	}
 	return nativeRPCSuccess(map[string]any{"accepted": true})
+}
+
+func (s *Server) nativeGoalMutation(r *http.Request, method string, raw json.RawMessage) nativeRPCResult {
+	var req nativeGoalMutationRequest
+	if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
+		return failure
+	}
+	req.SessionID = strings.TrimSpace(req.SessionID)
+	if req.SessionID == "" {
+		return nativeRPCFailure("bad-request", "sessionId is required", nil)
+	}
+	mutation := NativeGoalMutation{Action: method, SessionID: req.SessionID}
+	if req.Objective != nil {
+		objective := strings.TrimSpace(*req.Objective)
+		req.Objective = &objective
+		mutation.Objective = req.Objective
+	}
+	if req.MaxGoalRounds != nil {
+		if *req.MaxGoalRounds <= 0 {
+			return nativeRPCFailure("bad-request", "maxGoalRounds must be positive", nil)
+		}
+		mutation.MaxGoalRounds = req.MaxGoalRounds
+	}
+	if method == "goal.create" {
+		if req.Objective == nil || *req.Objective == "" {
+			return nativeRPCFailure("bad-request", "objective is required", nil)
+		}
+	} else {
+		if req.Ref == nil || strings.TrimSpace(req.Ref.ID) == "" || req.Ref.Revision < 1 {
+			return nativeRPCFailure("bad-request", "ref.id and positive ref.revision are required", nil)
+		}
+		if method == "goal.edit" && req.Objective == nil && req.MaxGoalRounds == nil {
+			return nativeRPCFailure("bad-request", "goal.edit requires objective or maxGoalRounds", nil)
+		}
+		mutation.GoalID = strings.TrimSpace(req.Ref.ID)
+		mutation.Revision = req.Ref.Revision
+	}
+	if s.nativeGoalMutationFn == nil {
+		return nativeRPCFailure("not-supported", "goal mutation handler not wired", nil)
+	}
+	result, err := s.nativeGoalMutationFn(r.Context(), mutation)
+	if err != nil {
+		return nativeRPCFailure("goal-mutation-failed", err.Error(), nil)
+	}
+	if method == "goal.clear" {
+		if !result.Cleared {
+			return nativeRPCFailure("goal-mutation-failed", "goal clear handler did not confirm clearing", nil)
+		}
+		return nativeRPCSuccess(map[string]any{"cleared": true})
+	}
+	if strings.TrimSpace(result.GoalID) == "" || result.Revision < 1 {
+		return nativeRPCFailure("goal-mutation-failed", "goal mutation handler returned an invalid reference", nil)
+	}
+	return nativeRPCSuccess(map[string]any{"ref": map[string]any{
+		"id": result.GoalID, "revision": result.Revision,
+	}})
 }
 
 func (s *Server) nativeAgentPresetList() nativeRPCResult {

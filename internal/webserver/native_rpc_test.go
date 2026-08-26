@@ -31,6 +31,68 @@ func nativeResponse(t *testing.T, recBody []byte) nativeRPCResponse {
 	return response
 }
 
+func TestNativeGoalMutationsUseDSHShapesAndForwardOptionalFields(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+	var calls []NativeGoalMutation
+	srv.SetNativeGoalManager(func(_ context.Context, mutation NativeGoalMutation) (NativeGoalMutationResult, error) {
+		calls = append(calls, mutation)
+		if mutation.Action == "goal.clear" {
+			return NativeGoalMutationResult{Cleared: true}, nil
+		}
+		return NativeGoalMutationResult{GoalID: "goal-1", Revision: len(calls)}, nil
+	})
+
+	request := func(t *testing.T, method, payload string) nativeRPCResponse {
+		t.Helper()
+		rec := doReqBody(t, srv.Handler(), "POST", "/api/"+method, "tok", fmt.Sprintf(`{"type":"client-request","rpcId":"%s","method":"%s","payload":%s}`, method, method, payload))
+		return nativeResponse(t, rec.Body.Bytes())
+	}
+
+	if response := request(t, "goal.create", `{"sessionId":"s1","objective":"ship the native goal","maxGoalRounds":7}`); !response.Result.OK {
+		t.Fatalf("goal.create response = %+v", response)
+	}
+	if response := request(t, "goal.edit", `{"sessionId":"s1","ref":{"id":"goal-1","revision":1},"maxGoalRounds":9}`); !response.Result.OK {
+		t.Fatalf("goal.edit response = %+v", response)
+	}
+	for _, method := range []string{"goal.pause", "goal.resume", "goal.complete"} {
+		if response := request(t, method, fmt.Sprintf(`{"sessionId":"s1","ref":{"id":"goal-1","revision":2}}`)); !response.Result.OK {
+			t.Fatalf("%s response = %+v", method, response)
+		}
+	}
+	if response := request(t, "goal.clear", `{"sessionId":"s1","ref":{"id":"goal-1","revision":4}}`); !response.Result.OK {
+		t.Fatalf("goal.clear response = %+v", response)
+	}
+	if len(calls) != 6 || calls[0].Action != "goal.create" || calls[0].Objective == nil || *calls[0].Objective != "ship the native goal" || calls[0].MaxGoalRounds == nil || *calls[0].MaxGoalRounds != 7 {
+		t.Fatalf("goal.create callback = %+v", calls)
+	}
+	if calls[1].Action != "goal.edit" || calls[1].GoalID != "goal-1" || calls[1].Revision != 1 || calls[1].Objective != nil || calls[1].MaxGoalRounds == nil || *calls[1].MaxGoalRounds != 9 {
+		t.Fatalf("goal.edit callback = %+v", calls[1])
+	}
+}
+
+func TestNativeGoalMutationsRejectMalformedReferencesAndEdits(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+	srv.SetNativeGoalManager(func(context.Context, NativeGoalMutation) (NativeGoalMutationResult, error) {
+		t.Fatal("goal callback should not run for malformed requests")
+		return NativeGoalMutationResult{}, nil
+	})
+	request := func(t *testing.T, method, payload string) nativeRPCResponse {
+		t.Helper()
+		rec := doReqBody(t, srv.Handler(), "POST", "/api/"+method, "tok", fmt.Sprintf(`{"type":"client-request","rpcId":"bad","method":"%s","payload":%s}`, method, payload))
+		return nativeResponse(t, rec.Body.Bytes())
+	}
+	for _, test := range []struct{ method, payload string }{
+		{"goal.create", `{"sessionId":"s1"}`},
+		{"goal.edit", `{"sessionId":"s1","ref":{"id":"g","revision":1}}`},
+		{"goal.pause", `{"sessionId":"s1","ref":{"id":"g","revision":0}}`},
+	} {
+		response := request(t, test.method, test.payload)
+		if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "bad-request" {
+			t.Fatalf("%s malformed response = %+v", test.method, response)
+		}
+	}
+}
+
 func TestNativeRPCSessionHistoryAndPrompt(t *testing.T) {
 	srv, st := newTestServer(t, "tok")
 	seedSession(t, st, "native-session", []session.Event{{

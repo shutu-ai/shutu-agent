@@ -3,6 +3,7 @@ package plan
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -117,6 +118,54 @@ func (e *engine) UpdateGoal(ctx context.Context, id, title, objective string) (G
 		return Goal{}, err
 	}
 	return g, nil
+}
+
+// UpdateGoalIfRevision edits the mutable goal fields behind the dsh-shaped
+// native goal API. The revision fence makes concurrent tabs fail closed rather
+// than silently overwriting a newer objective or round budget.
+func (e *engine) UpdateGoalIfRevision(ctx context.Context, id string, revision int, objective *string, maxRounds *int) (Goal, error) {
+	if err := ctx.Err(); err != nil {
+		return Goal{}, err
+	}
+	if err := e.checkOpen(); err != nil {
+		return Goal{}, err
+	}
+	if objective == nil && maxRounds == nil {
+		return Goal{}, fmt.Errorf("plan: goal update has no fields")
+	}
+	if maxRounds != nil && *maxRounds <= 0 {
+		return Goal{}, fmt.Errorf("plan: max goal rounds must be positive")
+	}
+	g, err := e.prov.GetGoal(ctx, id)
+	if err != nil {
+		return Goal{}, err
+	}
+	if revision < 1 || g.Revision != revision {
+		return Goal{}, fmt.Errorf("plan: stale goal revision %d (current %d)", revision, g.Revision)
+	}
+	if objective != nil {
+		if strings.TrimSpace(*objective) == "" {
+			return Goal{}, fmt.Errorf("%w: objective is empty", ErrInvalidTitle)
+		}
+		g.Objective = strings.TrimSpace(*objective)
+		g.Title = firstGoalTitle(g.Objective)
+	}
+	if maxRounds != nil {
+		g.MaxRounds = *maxRounds
+	}
+	g.Revision = nextRevision(g.Revision)
+	if err := e.prov.PutGoal(ctx, g); err != nil {
+		return Goal{}, err
+	}
+	return g, nil
+}
+
+func firstGoalTitle(objective string) string {
+	fields := strings.Fields(objective)
+	if len(fields) == 0 {
+		return "Goal"
+	}
+	return fields[0]
 }
 
 // CreatePlan creates a pending plan under goalID — one pending todo per step —

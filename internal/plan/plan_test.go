@@ -115,6 +115,25 @@ func TestEngineCreateGoalPlanTodo(t *testing.T) {
 	}
 }
 
+func TestEngineNativeGoalEditUsesRevisionAndPreservesRoundBudget(t *testing.T) {
+	e := newTestEngine(t)
+	g, err := e.CreateGoal(context.Background(), "Ship", "ship the agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	maxRounds := 9
+	updated, err := e.UpdateGoalIfRevision(context.Background(), g.ID, g.Revision, nil, &maxRounds)
+	if err != nil {
+		t.Fatalf("UpdateGoalIfRevision: %v", err)
+	}
+	if updated.Revision != 2 || updated.MaxRounds != maxRounds || updated.Objective != g.Objective {
+		t.Fatalf("updated goal = %+v", updated)
+	}
+	if _, err := e.UpdateGoalIfRevision(context.Background(), g.ID, g.Revision, nil, &maxRounds); err == nil {
+		t.Fatal("stale goal revision was accepted")
+	}
+}
+
 func TestEngineCreatePlanStandalone(t *testing.T) {
 	e := newTestEngine(t)
 	p, err := e.CreatePlan(context.Background(), "", "Standalone", []string{"x"})

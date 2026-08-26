@@ -88,6 +88,7 @@ type Server struct {
 	nativeQueueUpdateFn       func(ctx context.Context, sessionID, itemID, action, text string) error
 	nativeSubagentPromptFn    func(ctx context.Context, childSessionID, text string) error
 	nativeSubagentInterruptFn func(childSessionID, reason string) error
+	nativeGoalMutationFn      func(ctx context.Context, mutation NativeGoalMutation) (NativeGoalMutationResult, error)
 
 	// statusFn is the dsh-session-status alignment: it computes the live state
 	// (warning/ongoing/done/idle + labels + running-subagent count) for one
@@ -535,6 +536,33 @@ func (s *Server) SetNativeSubagentManager(
 ) {
 	s.nativeSubagentPromptFn = prompt
 	s.nativeSubagentInterruptFn = interrupt
+}
+
+// NativeGoalMutation is the transport-neutral input for the DSH goal.*
+// mutation family. Optional pointers preserve the distinction between an
+// omitted edit field and an explicitly supplied value.
+type NativeGoalMutation struct {
+	Action        string
+	SessionID     string
+	GoalID        string
+	Revision      int
+	Objective     *string
+	MaxGoalRounds *int
+}
+
+// NativeGoalMutationResult is the acknowledgement returned by the live goal
+// manager. Non-clear mutations return the new compare-and-set reference.
+type NativeGoalMutationResult struct {
+	GoalID   string
+	Revision int
+	Cleared  bool
+}
+
+// SetNativeGoalManager wires DSH's goal.create/edit/pause/resume/complete/clear
+// RPCs to the composition root's durable goal engine. A nil manager leaves the
+// native routes explicitly unsupported.
+func (s *Server) SetNativeGoalManager(fn func(context.Context, NativeGoalMutation) (NativeGoalMutationResult, error)) {
+	s.nativeGoalMutationFn = fn
 }
 
 // SetSessionManager wires the session new/resume API (POST /api/sessions and

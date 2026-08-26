@@ -171,6 +171,9 @@ func (a *app) registerWebServer() error {
 			},
 		)
 	}
+	if a.plans != nil {
+		srv.SetNativeGoalManager(a.nativeGoalMutation)
+	}
 	srv.SetJobsProvider(a.webJobs)
 	// M10 P5 (ADR D-WEB2-I): wire the image-attachment store when multimodal is
 	// enabled (registerAttachments created it); otherwise the attachment APIs
@@ -1063,7 +1066,7 @@ func (a *app) webGoalCommand(ctx context.Context, input string) (string, error) 
 		if err != nil {
 			return "", err
 		}
-		if _, err := a.log.Append(session.EventPlanUpdate, session.NewPlanUpdate(string(plan.ScopeGoal), updated.ID, map[string]string{"title": updated.Title, "objective": updated.Objective})); err != nil {
+		if _, err := a.log.Append(session.EventPlanUpdate, session.NewPlanUpdate(string(plan.ScopeGoal), updated.ID, map[string]any{"title": updated.Title, "objective": updated.Objective})); err != nil {
 			return "", err
 		}
 		return "Goal updated.\n" + renderWebGoal(updated), nil

@@ -1505,6 +1505,7 @@ type planUpdateData struct {
 	ID        string `json:"id"`
 	Title     string `json:"title,omitempty"`
 	Objective string `json:"objective,omitempty"`
+	MaxRounds int    `json:"maxRounds,omitempty"`
 }
 
 // planDeleteData is the plan/delete payload: the tree level and id of the
@@ -1543,11 +1544,14 @@ func NewPlanCreate(scope, id, title string, acceptance []string, detail ...map[s
 
 // NewPlanUpdate builds the plan/update payload — reserved vocabulary for a
 // future plan-editing tool (dispatch-m6b-2 §1 / D3).
-func NewPlanUpdate(scope, id string, detail ...map[string]string) any {
+func NewPlanUpdate(scope, id string, detail ...map[string]any) any {
 	data := planUpdateData{Scope: scope, ID: id}
 	if len(detail) > 0 {
-		data.Title = detail[0]["title"]
-		data.Objective = detail[0]["objective"]
+		data.Title, _ = detail[0]["title"].(string)
+		data.Objective, _ = detail[0]["objective"].(string)
+		if rounds, ok := detail[0]["maxRounds"].(int); ok {
+			data.MaxRounds = rounds
+		}
 	}
 	return data
 }
