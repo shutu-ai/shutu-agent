@@ -31,7 +31,7 @@ node scripts/release-package.mjs --output D:\packages\shutu-agent
 
 1. 将交付目录复制到目标主机。
 2. 设置 `DEEPSEEK_API_KEY` 环境变量；API key 不写入配置文件或交付包。
-3. 按需编辑 `config.yaml` 中的 `web_server.addr`、`web_server.token`、`data_dir` 和工具开关。
+3. 必须编辑 `config.yaml` 中的 `web_server.token` 设置随机 bearer token；再按需调整 `web_server.addr`、`data_dir` 和工具开关。空 token 会拒绝启动，以避免裸奔。
 4. 启动 Web 门户：
 
 ```powershell
@@ -59,7 +59,7 @@ Invoke-WebRequest http://127.0.0.1:18099/api/health
 
 - [x] `release.json` 的 commit 与生成时的 HEAD 一致。
 - [x] `web/dist/index.html`、assets 和 `config/prompts/` 存在。
-- [x] 发布包中的 `--web-only --config config.yaml` 可启动。
+- [x] 发布包配置 bearer token 后，`--web-only --config config.yaml` 可启动。
 - [x] `/api/health` 返回 200。
 
 ## 目标环境验收清单
