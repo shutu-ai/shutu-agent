@@ -37,4 +37,21 @@ DSH `AppWebEntry` 启动前必须由 Host 注入：
 - `window.__ModuleLoader__`
 - `window.__DSH_BOOT__`
 
-Shutu 当前尚未提供这两个 Host bridge，因此 native dist 已可构建，但不能把 native 开关作为默认生产入口。P36-2 将实现 manifest、插件 bundle、RPC 和 WebSocket downlink 后，才切换默认模式并进行浏览器验收。
+## P36-2 已落地的 Host transport
+
+Go web server 已增加 DSH Connection 的核心 wire adapter：
+
+- `POST /api/host.describe`
+- `POST /api/session.list`
+- `POST /api/session.search`
+- `POST /api/session.create`
+- `POST /api/session.history`
+- `POST /api/session.rename`
+- `POST /api/session.prompt`
+- `POST /api/session.cancel`
+- `POST /api/workspace.list`
+- `GET /api/events.mux` 和 `GET /api/events.host`（downlink-only WebSocket）
+
+所有 unary 请求使用 `client-request` / `server-response` 和 `rpcId` 回显；事件使用 DSH 的 `session/subscribed` 与 `session/event` frame。当前仍是增量适配：Host 事件推送、重连/续传、其余 RPC 方法和 DSH client plugin bundle 由后续 P36-2 及 P36-3/P36-4 完成，因此 native build 仍不作为默认生产入口。
+
+Host bridge 的核心 RPC/downlink 已接入，但 manifest、插件 bundle、Host 事件推送、重连/续传和完整 RPC 仍在后续 P36-2/P36-3/P36-4 中补齐，因此 native dist 仍不作为默认生产入口。

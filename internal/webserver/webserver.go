@@ -428,6 +428,9 @@ func New(st store.Store, token, addr string) (*Server, error) {
 	// M10 W4 (ADR D-WEB2-H): the read-only subagent and background-job panels.
 	mux.Handle("GET /api/subagents", s.requireAuth(http.HandlerFunc(s.handleSubagents)))
 	mux.Handle("GET /api/jobs", s.requireAuth(http.HandlerFunc(s.handleJobs)))
+	// DSH native Connection transport: unary client-request RPC plus the two
+	// downlink-only WebSocket streams. The existing REST routes remain intact.
+	s.registerNativeRoutes(mux)
 	s.srv = &http.Server{
 		Addr:              addr,
 		Handler:           mux,

@@ -21,7 +21,7 @@
 | P34 | 性能、真实后端联调与验收 | P0 | 部分完成（保留真实大数据基线） | P25、P27、P32、P33 |
 | P35 | 生产部署与交付验证 | P2 | 部分完成（待目标环境） | P34 |
 | P36-1 | DSH 原生前端构建入口 | P0 | 部分完成（待 P36-2 bridge） | P34、P35 |
-| P36-2 | DSH Web API/RPC/WebSocket 适配层 | P0 | 未开始 | P36-1 |
+| P36-2 | DSH Web API/RPC/WebSocket 适配层 | P0 | 部分完成（核心 RPC/downlink） | P36-1 |
 | P36-3 | DSH Session/Conversation 数据模型适配 | P0 | 未开始 | P36-2 |
 | P36-4 | DSH 原生 UI 插件与视觉替换 | P0 | 未开始 | P36-1、P36-3 |
 | P36-5 | DSH 全量交互与状态能力 | P0 | 未开始 | P36-2、P36-4 |
@@ -152,12 +152,14 @@
 
 ### P36-2：DSH Web API/RPC/WebSocket 适配层
 
-- [ ] 实现 DSH client connection 所需的 RPC 请求/响应和错误协议。
+- [x] 实现 DSH client connection 所需的 RPC 请求/响应和错误协议；新增 `client-request` / `server-response` envelope、`rpcId` 回显和结构化错误。
+- [x] 接入核心会话/工作区方法：`host.describe`、`session.list/search/create/history/rename/prompt/cancel`、`workspace.list`。
+- [x] 实现 `/api/events.mux`、`/api/events.host` 的 downlink-only WebSocket 升级和 session subscription/event frame。
 - [ ] 实现会话、工作区、设置、模型、权限、文件、附件、命令、技能、队列、审批和导出接口。
-- [ ] 实现 events downlink、host downlink、连接状态、断线重连和续传。
-- [ ] 为新协议建立 Go handler、契约测试和 replay fixture。
+- [ ] 补齐 host downlink 事件、连接状态、断线重连、续传，以及剩余设置/模型/权限/文件/附件/命令/技能/队列/审批/导出接口。
+- [x] 已建立 Go handler、核心契约测试和 WebSocket subscription baseline 测试；replay fixture 与完整协议覆盖留待后续补齐。
 
-验收标准：DSH 原生 client 不需要 Shutu 专用 UI API 即可完成启动、列会话、打开会话、发送消息和接收实时事件。
+验收标准：核心 RPC/downlink 已具备；待 P36-3/P36-4 补齐原生插件依赖的方法和插件事件后，DSH 原生 client 才能完成完整启动、打开、发送和恢复验收。
 
 ### P36-3：DSH Session/Conversation 数据模型适配
 
