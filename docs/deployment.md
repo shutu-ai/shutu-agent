@@ -5,6 +5,7 @@
 ```text
 bin/shutu-agent(.exe)  Go 服务
 web/dist/              React/Cordis 前端静态资源
+config/prompts/        standard/code 模式提示词资源
 config.yaml            服务配置，web_server.dist_dir 使用相对路径 web/dist
 release.json           构建提交和目标平台元数据
 deployment.md          本说明
@@ -24,7 +25,7 @@ node scripts/release-package.mjs
 node scripts/release-package.mjs --output D:\packages\shutu-agent
 ```
 
-脚本会重新构建并校验前端，然后构建当前平台的 Go 可执行文件。默认包输出到 `release/`，该目录不纳入 Git。
+脚本会重新构建并校验前端，然后构建当前平台的 Go 可执行文件，并复制 standard/code 模式运行所需的 `config/prompts/`。默认包输出到 `release/`，该目录不纳入 Git。
 
 ## 首次启动
 
@@ -52,7 +53,16 @@ Invoke-WebRequest http://127.0.0.1:18099/api/health
 - 回滚时停止当前进程，恢复旧版本目录；不要删除共享的 `data_dir`。
 - 新包不依赖 `deepseek-harness` 运行时目录；DSH 目录只用于开发期工具链和参考实现。
 
-## 验收清单
+## 本地交付包验收
+
+以下检查已在仓库工作区完成；目标主机仍需按下一节执行一次。
+
+- [x] `release.json` 的 commit 与生成时的 HEAD 一致。
+- [x] `web/dist/index.html`、assets 和 `config/prompts/` 存在。
+- [x] 发布包中的 `--web-only --config config.yaml` 可启动。
+- [x] `/api/health` 返回 200。
+
+## 目标环境验收清单
 
 - [ ] `release.json` 的 commit 与发布提交一致。
 - [ ] `web/dist/index.html` 和 assets 存在。

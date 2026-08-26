@@ -32,9 +32,11 @@ run(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'verify'], webRoot
 await rm(output, { recursive: true, force: true })
 await mkdir(join(output, 'bin'), { recursive: true })
 await mkdir(join(output, 'web'), { recursive: true })
+await mkdir(join(output, 'config'), { recursive: true })
 run('go', ['build', '-o', join(output, 'bin', binaryName), './cmd/pa'])
 await cp(join(webRoot, 'dist'), join(output, 'web', 'dist'), { recursive: true })
 await cp(join(root, 'config.yaml'), join(output, 'config.yaml'))
+await cp(join(root, 'config', 'prompts'), join(output, 'config', 'prompts'), { recursive: true })
 await cp(join(root, 'docs', 'deployment.md'), join(output, 'deployment.md'))
 const manifest = {
   name: 'shutu-agent',
