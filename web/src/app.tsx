@@ -756,9 +756,12 @@ function FilesPanel({ store, sessionId, onClose, onReference, openPath }: {
 function EventImages({ store, sessionId, images }: { store: WebStore; sessionId: string; images: readonly ImageView[] }) {
   const imageKey = images.map(image => image.id).join(',')
   const [urls, setUrls] = useState<Record<string, string>>({})
+  const [failed, setFailed] = useState<ReadonlySet<string>>(new Set())
+  const [retry, setRetry] = useState(0)
   useEffect(() => {
     const abort = new AbortController()
     const objectUrls: string[] = []
+    setFailed(new Set())
     void Promise.all(images.map(async image => {
       try {
         const blob = await store.loadAttachment(sessionId, image.id, abort.signal)
@@ -766,15 +769,16 @@ function EventImages({ store, sessionId, images }: { store: WebStore; sessionId:
         objectUrls.push(url)
         return [image.id, url] as const
       } catch {
-        return null
+        return [image.id, ''] as const
       }
     })).then(entries => {
       if (abort.signal.aborted) return
-      setUrls(Object.fromEntries(entries.filter((entry): entry is readonly [string, string] => entry !== null)))
+      setUrls(Object.fromEntries(entries.filter((entry): entry is readonly [string, string] => entry !== null && entry[1] !== '')))
+      setFailed(new Set(entries.filter((entry): entry is readonly [string, string] => entry !== null && entry[1] === '').map(entry => entry[0])))
     })
     return () => { abort.abort(); objectUrls.forEach(url => URL.revokeObjectURL(url)) }
-  }, [imageKey, sessionId, store])
-  return <div className="event-images">{images.map(image => urls[image.id] ? <img key={image.id} src={urls[image.id]} alt="消息附件" /> : <span className="event-image-loading" key={image.id}>图片加载中…</span>)}</div>
+  }, [imageKey, retry, sessionId, store])
+  return <div className="event-images">{images.map(image => urls[image.id] ? <img key={image.id} src={urls[image.id]} alt="Message attachment" /> : failed.has(image.id) ? <button type="button" className="event-image-loading" key={image.id} onClick={() => setRetry(value => value + 1)}>Image unavailable · Retry</button> : <span className="event-image-loading" key={image.id}>Loading image…</span>)}</div>
 }
 
 function basename(path: string): string {

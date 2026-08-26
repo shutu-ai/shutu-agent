@@ -132,6 +132,19 @@ describe('ShutuApi', () => {
     expect(events).toEqual([8, 9])
   })
 
+  it('ignores malformed or incomplete SSE frames without dropping valid events', async () => {
+    const payload = 'data: {not-json}\n\ndata: {"seq": 10, "type": "tool/result", "version": 1, "time": "2026-08-25T00:00:00Z", "summary": "ok"}\n\ndata: {"type": "missing-seq"}\n\n'
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new TextEncoder().encode(payload)); controller.close() },
+    })
+    const api = new ShutuApi('https://shutu.test', '', async () => new Response(stream, { status: 200 }))
+    const events: number[] = []
+
+    await api.stream('session-1', 0, new AbortController().signal, event => events.push(event.seq))
+
+    expect(events).toEqual([10])
+  })
+
   it('maps sidebar session actions to the new session endpoints', async () => {
     const requests: { path: string; method: string; body?: string }[] = []
     const api = new ShutuApi('https://shutu.test', '', async (input, init) => {

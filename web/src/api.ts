@@ -437,6 +437,12 @@ export class ShutuApiError extends Error {
   constructor(message: string, readonly status: number) { super(message) }
 }
 
+function isEventView(value: unknown): value is EventView {
+  if (value === null || typeof value !== 'object') return false
+  const event = value as Partial<EventView>
+  return typeof event.seq === 'number' && Number.isFinite(event.seq) && typeof event.type === 'string' && typeof event.version === 'number' && typeof event.time === 'string'
+}
+
 export class ShutuApi implements WebApi {
   private tokenValue: string
 
@@ -749,7 +755,15 @@ export class ShutuApi implements WebApi {
             .filter(line => line.startsWith('data: '))
             .map(line => line.slice(6))
             .join('')
-          if (data !== '') onEvent(JSON.parse(data) as EventView)
+          if (data !== '') {
+            try {
+              const event: unknown = JSON.parse(data)
+              if (isEventView(event)) onEvent(event)
+            } catch {
+              // Ignore one malformed frame and keep the stream alive; the next
+              // reconnect still resumes from the last valid sequence.
+            }
+          }
           boundary = buffer.indexOf('\n\n')
         }
       }
