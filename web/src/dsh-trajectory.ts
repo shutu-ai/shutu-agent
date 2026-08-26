@@ -8,6 +8,12 @@ export interface DshTrajectoryProjection {
   timeline: DshTimelineModel | null
 }
 
+export interface DshTrajectoryEvent extends EventView {
+  collapsedAssistantSeq?: number
+  collapsedToolCount?: number
+  collapsedToolNames?: readonly string[]
+}
+
 function isStructuralEvent(event: EventView): boolean {
   return event.type === 'turn/start' || event.type === 'turn/end' ||
     event.type === 'step/start' || event.type === 'step/end' ||
@@ -31,6 +37,47 @@ export function collapseDshTrajectoryTurns(events: readonly EventView[]): readon
   }
   flush()
   return compacted
+}
+
+function isToolEvent(event: EventView): boolean {
+  return event.type.startsWith('tool/')
+}
+
+function toolCallSummary(events: readonly EventView[]): string {
+  const names = [...new Set(events.map(event => event.tool_name).filter((name): name is string => name !== undefined && name !== ''))]
+  const count = events.length
+  return `${count} tool call${count === 1 ? '' : 's'}${names.length === 0 ? '' : ` · ${names.join(', ')}`}`
+}
+
+/** Collapse the contiguous tool calls immediately following selected assistant messages. */
+export function collapseDshAssistantToolCalls(events: readonly EventView[], collapsedAssistants: ReadonlySet<number>): readonly DshTrajectoryEvent[] {
+  const output: DshTrajectoryEvent[] = []
+  for (let index = 0; index < events.length; index += 1) {
+    const event = events[index]
+    if (event === undefined) continue
+    output.push(event)
+    if (event.type !== 'assistant/message' || !collapsedAssistants.has(event.seq)) continue
+    const calls: EventView[] = []
+    let next = index + 1
+    while (next < events.length && isToolEvent(events[next]!)) {
+      calls.push(events[next]!)
+      next += 1
+    }
+    if (calls.length === 0) continue
+    const last = calls[calls.length - 1]!
+    output.push({
+      seq: last.seq,
+      type: 'tool/summary',
+      version: last.version,
+      time: last.time,
+      summary: toolCallSummary(calls),
+      collapsedAssistantSeq: event.seq,
+      collapsedToolCount: calls.length,
+      collapsedToolNames: [...new Set(calls.map(call => call.tool_name).filter((name): name is string => name !== undefined && name !== ''))],
+    })
+    index = next - 1
+  }
+  return output
 }
 
 function cellKind(event: EventView): string {

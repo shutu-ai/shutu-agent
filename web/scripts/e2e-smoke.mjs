@@ -30,6 +30,8 @@ const events = [
   { seq: 10, type: 'turn/start', version: 1, time: '2026-08-26T10:01:00Z', summary: 'turn start', details: { turn: 2 } },
   { seq: 11, type: 'user/message', version: 1, time: '2026-08-26T10:01:01Z', summary: 'continue' },
   { seq: 12, type: 'assistant/message', version: 1, time: '2026-08-26T10:01:02Z', summary: 'Done' },
+  { seq: 13, type: 'assistant/message', version: 1, time: '2026-08-26T10:01:03Z', summary: 'Tool-enabled assistant' },
+  { seq: 14, type: 'tool/result', version: 1, time: '2026-08-26T10:01:04Z', summary: 'tool finished', tool_name: 'read', tool_output: 'README.md' },
 ]
 
 function json(route, value) {
@@ -102,6 +104,11 @@ async function runDesktop(browser) {
   const toolRow = page.locator('.virtual-row').filter({ hasText: 'src/app.tsx' })
   await toolRow.getByRole('button', { name: 'Expand details' }).click()
   await assertVisibleRowsDoNotOverlap(page)
+  const assistantRow = page.locator('.virtual-row').filter({ hasText: 'Tool-enabled assistant' })
+  await assistantRow.getByRole('button', { name: 'Collapse tool calls' }).click()
+  await assistantRow.getByRole('button', { name: 'Expand tool calls' }).waitFor()
+  await page.getByRole('button', { name: 'Expand tool calls' }).first().click()
+  await assistantRow.getByRole('button', { name: 'Collapse tool calls' }).waitFor()
   await collapse.click()
   await page.getByRole('button', { name: 'Expand turns' }).waitFor()
   const after = await page.locator('.virtual-row').count()

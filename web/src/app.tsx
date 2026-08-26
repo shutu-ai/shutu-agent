@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, use
 import type { AttachmentView, CommandView, ConfigView, ContextView, DirectoryListing, EventDetails, EventView, FeedbackView, GoalView, ImageView, InteractionView, JobView, MCPServerView, PlanView, ProviderModelView, ProviderView, QueueItem, RunningSnapshot, SessionSearchHit, SessionStateView, SessionSummary, SettingsView, SkillView, SkillsView, SubagentView, TodoView, WorkspaceView } from './api'
 import { ShutuApiError } from './api'
 import { projectDshConversation, type DshConversationNode, type DshConversationSnapshot } from './dsh-conversation'
-import { collapseDshTrajectoryTurns, projectDshTrajectory, type DshTimelineMode } from './dsh-trajectory'
+import { collapseDshAssistantToolCalls, collapseDshTrajectoryTurns, projectDshTrajectory, type DshTimelineMode, type DshTrajectoryEvent } from './dsh-trajectory'
 import { deriveProducedFiles } from './produced-files'
 import { WebStore } from './store'
 import { buildVirtualOffsets, virtualRange } from './virtual-list'
@@ -73,6 +73,7 @@ function useMeasuredVirtualRows(keys: readonly string[], estimate: number, scrol
 }
 
 function eventLabel(event: EventView): string {
+  if (event.type === 'tool/summary') return 'Tool calls'
   if (event.tool_name) return event.tool_name
   if (event.type === 'user/message') return 'User'
   if (event.type === 'assistant/message') return 'Assistant'
@@ -791,7 +792,7 @@ function RichText({ text }: { text: string }) {
   })}</div>
 }
 
-function EventCard({ event, store, sessionId, feedback, producedPaths = [], onFeedback, onCopy, onRetry, onFork, onOpenFile }: { event: EventView; store: WebStore; sessionId: string; feedback?: FeedbackView; producedPaths?: readonly string[]; onFeedback: (seq: number, rating: 'positive' | 'negative') => void; onCopy?: (text: string) => void; onRetry?: (text: string) => void; onFork?: () => void; onOpenFile?: (path: string) => void }) {
+function EventCard({ event, store, sessionId, feedback, producedPaths = [], onFeedback, onCopy, onRetry, onFork, onOpenFile, toolCallsAction }: { event: EventView; store: WebStore; sessionId: string; feedback?: FeedbackView; producedPaths?: readonly string[]; onFeedback: (seq: number, rating: 'positive' | 'negative') => void; onCopy?: (text: string) => void; onRetry?: (text: string) => void; onFork?: () => void; onOpenFile?: (path: string) => void; toolCallsAction?: { label: string; onClick: () => void } }) {
   const [expanded, setExpanded] = useState(false)
   const text = event.tool_output || event.reasoning || event.summary || event.compaction_summary || 'No content'
   const entries = detailEntries(event.details)
@@ -810,8 +811,9 @@ function EventCard({ event, store, sessionId, feedback, producedPaths = [], onFe
         {event.version > 1 && <span className="version">v{event.version}</span>}
       </div>
       <div className="event-content">
-        {event.call_id && <span className="call-id">call {event.call_id}</span>}
-        <RichText text={text} />
+         {event.call_id && <span className="call-id">call {event.call_id}</span>}
+         <RichText text={text} />
+         {toolCallsAction && <button type="button" className="text-button" onClick={toolCallsAction.onClick}>{toolCallsAction.label}</button>}
         {event.type === 'assistant/message' && <div className="event-actions message-actions" aria-label="Message actions"><button type="button" onClick={() => onCopy ? onCopy(text) : void navigator.clipboard?.writeText(text)}>Copy</button><button type="button" onClick={() => onRetry ? onRetry(text) : void store.send(text)}>Retry</button><button type="button" onClick={() => onFork ? onFork() : void store.forkSession(sessionId)}>Fork</button></div>}
         {event.images && event.images.length > 0 && <EventImages store={store} sessionId={sessionId} images={event.images} />}
         {event.type === 'assistant/message' && <ProducedFiles paths={producedPaths} onOpenFile={onOpenFile} />}
@@ -946,7 +948,25 @@ function VirtualEvents({ events, store, sessionId, feedbackBySeq, producedBySeq,
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const [collapsed, setCollapsed] = useState(false)
-  const displayEvents = useMemo(() => collapsed ? collapseDshTrajectoryTurns(events) : events, [collapsed, events])
+  const [collapsedAssistants, setCollapsedAssistants] = useState<ReadonlySet<number>>(new Set())
+  const assistantToolCallSeqs = useMemo(() => {
+    const seqs = new Set<number>()
+    for (let index = 0; index < events.length; index += 1) {
+      if (events[index]?.type !== 'assistant/message' || !events[index + 1] || !events[index + 1]!.type.startsWith('tool/')) continue
+      seqs.add(events[index]!.seq)
+    }
+    return seqs
+  }, [events])
+  useEffect(() => {
+    setCollapsedAssistants(current => {
+      const next = new Set([...current].filter(seq => assistantToolCallSeqs.has(seq)))
+      return next.size === current.size ? current : next
+    })
+  }, [assistantToolCallSeqs])
+  const displayEvents = useMemo<readonly DshTrajectoryEvent[]>(() => {
+    const visible = collapsed ? collapseDshTrajectoryTurns(events) : events
+    return collapseDshAssistantToolCalls(visible, collapsedAssistants)
+  }, [collapsed, collapsedAssistants, events])
   const [scrollTop, setScrollTop] = useState(0)
   const [viewportHeight, setViewportHeight] = useState(640)
   const overscan = 8
@@ -954,6 +974,10 @@ function VirtualEvents({ events, store, sessionId, feedbackBySeq, producedBySeq,
   const { offsets, measureRow } = useMeasuredVirtualRows(rowKeys, ROW_HEIGHT_ESTIMATE, scrollRef)
   const { start, end } = virtualRange(offsets, scrollTop, viewportHeight, overscan)
   const visible = displayEvents.slice(start, end)
+  const allAssistantCallsCollapsed = assistantToolCallSeqs.size > 0 && [...assistantToolCallSeqs].every(seq => collapsedAssistants.has(seq))
+  const toggleAllAssistantCalls = useCallback(() => {
+    setCollapsedAssistants(current => allAssistantCallsCollapsed ? new Set() : new Set(assistantToolCallSeqs))
+  }, [allAssistantCallsCollapsed, assistantToolCallSeqs])
 
   useEffect(() => {
     const onResize = () => setViewportHeight(Math.max(320, window.innerHeight - 230))
@@ -977,13 +1001,14 @@ function VirtualEvents({ events, store, sessionId, feedbackBySeq, producedBySeq,
     setScrollTop(top)
     if (top < 100) onReachTop()
   }}>
-    <div className="trajectory-toolbar"><button type="button" className="text-button" onClick={() => setCollapsed(value => !value)} aria-label={collapsed ? 'Expand turns' : 'Collapse turns'}>{collapsed ? 'Expand turns' : 'Collapse turns'}</button><span>{collapsed ? `${displayEvents.length} compact records` : `${displayEvents.length} records`}</span></div>
+    <div className="trajectory-toolbar"><button type="button" className="text-button" onClick={() => setCollapsed(value => !value)} aria-label={collapsed ? 'Expand turns' : 'Collapse turns'}>{collapsed ? 'Expand turns' : 'Collapse turns'}</button><button type="button" className="text-button" onClick={toggleAllAssistantCalls} disabled={assistantToolCallSeqs.size === 0} aria-label={allAssistantCallsCollapsed ? 'Expand tool calls' : 'Collapse tool calls'}>{allAssistantCallsCollapsed ? 'Expand calls' : 'Collapse calls'}</button><span>{collapsed ? `${displayEvents.length} compact records` : `${displayEvents.length} records`}</span></div>
     {loadingOlder && <div className="history-loading">Loading earlier events…</div>}
     <div className="virtual-canvas" style={{ height: offsets[offsets.length - 1] ?? 0 }}>
       {visible.map((event, index) => {
         const key = String(event.seq)
+        const hasToolCalls = event.type === 'assistant/message' && assistantToolCallSeqs.has(event.seq)
         return <div className="virtual-row" data-virtual-row-key={key} key={key} ref={element => measureRow(key, element)} style={{ transform: `translateY(${offsets[start + index] ?? 0}px)` }}>
-        <EventCard event={event} store={store} sessionId={sessionId} feedback={feedbackBySeq[event.seq]} producedPaths={producedBySeq.get(event.seq)} onFeedback={onFeedback} onCopy={onCopy} onRetry={onRetry} onFork={onFork} onOpenFile={onOpenFile} />
+        <EventCard event={event} store={store} sessionId={sessionId} feedback={feedbackBySeq[event.seq]} producedPaths={producedBySeq.get(event.seq)} onFeedback={onFeedback} onCopy={onCopy} onRetry={onRetry} onFork={onFork} onOpenFile={onOpenFile} toolCallsAction={hasToolCalls ? { label: collapsedAssistants.has(event.seq) ? 'Expand tool calls' : 'Collapse tool calls', onClick: () => setCollapsedAssistants(current => { const next = new Set(current); if (next.has(event.seq)) next.delete(event.seq); else next.add(event.seq); return next }) } : undefined} />
       </div>
       })}
     </div>

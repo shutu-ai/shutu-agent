@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { EventView } from './api'
-import { collapseDshTrajectoryTurns, projectDshTrajectory } from './dsh-trajectory'
+import { collapseDshAssistantToolCalls, collapseDshTrajectoryTurns, projectDshTrajectory } from './dsh-trajectory'
 
 const event = (seq: number, type: string, summary: string, details?: Record<string, unknown>): EventView => ({
   seq, type, version: 1, time: `2026-08-25T00:00:0${seq}Z`, summary, ...(details ? { details } : {}),
@@ -36,5 +36,19 @@ describe('DSH trajectory adapter', () => {
     ])
 
     expect(compacted.map(item => item.seq)).toEqual([2, 5, 7, 11])
+  })
+
+  it('collapses contiguous tool calls after one assistant without hiding later records', () => {
+    const compacted = collapseDshAssistantToolCalls([
+      event(1, 'assistant/message', 'plan'),
+      { ...event(2, 'tool/result', 'first'), tool_name: 'glob' },
+      { ...event(3, 'tool/result', 'second'), tool_name: 'read' },
+      event(4, 'assistant/message', 'final'),
+    ], new Set([1]))
+
+    expect(compacted.map(item => item.seq)).toEqual([1, 3, 4])
+    expect(compacted[1]?.type).toBe('tool/summary')
+    expect(compacted[1]?.summary).toBe('2 tool calls · glob, read')
+    expect(compacted[1]?.collapsedAssistantSeq).toBe(1)
   })
 })
