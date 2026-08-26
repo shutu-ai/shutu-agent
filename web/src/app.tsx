@@ -868,7 +868,16 @@ function inspectorPayload(event: EventView, keys: readonly string[]): string | n
 
 function TrajectoryInspector({ event, record, onClose }: { event: DshTrajectoryEvent; record?: DshTrajectoryRecord; onClose: () => void }) {
   const [tab, setTab] = useState<InspectorTab>('overview')
-  useEffect(() => setTab('overview'), [event.seq])
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
+  useEffect(() => {
+    setTab('overview')
+    const onKeyDown = (keyboardEvent: globalThis.KeyboardEvent): void => {
+      if (keyboardEvent.key === 'Escape') onCloseRef.current()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [event.seq])
   const usage = event.details?.usage
   const usageEntries = typeof usage === 'object' && usage !== null
     ? Object.entries(usage).filter(([, value]) => value !== undefined && value !== null)
@@ -1137,7 +1146,7 @@ function VirtualEvents({ events, store, sessionId, feedbackBySeq, producedBySeq,
       {visible.map((event, index) => {
         const key = String(event.seq)
         const hasToolCalls = event.type === 'assistant/message' && assistantToolCallSeqs.has(event.seq)
-        return <div className={`virtual-row ${selectedSeq === event.seq ? 'selected' : ''} ${timelineFocusSeqs.has(event.seq) ? 'timeline-focused' : ''}`} data-virtual-row-key={key} key={key} ref={element => measureRow(key, element)} onClick={() => onSelectSeq(event.seq)} style={{ transform: `translateY(${offsets[start + index] ?? 0}px)` }}>
+        return <div className={`virtual-row ${selectedSeq === event.seq ? 'selected' : ''} ${timelineFocusSeqs.has(event.seq) ? 'timeline-focused' : ''}`} data-virtual-row-key={key} key={key} ref={element => measureRow(key, element)} role="button" tabIndex={0} aria-label={`Trajectory record #${event.seq}`} onClick={() => onSelectSeq(event.seq)} onKeyDown={keyboardEvent => { if ((keyboardEvent.key === 'Enter' || keyboardEvent.key === ' ') && keyboardEvent.target === keyboardEvent.currentTarget) { keyboardEvent.preventDefault(); onSelectSeq(event.seq) } }} style={{ transform: `translateY(${offsets[start + index] ?? 0}px)` }}>
         <EventCard event={event} store={store} sessionId={sessionId} feedback={feedbackBySeq[event.seq]} producedPaths={producedBySeq.get(event.seq)} onFeedback={onFeedback} onCopy={onCopy} onRetry={onRetry} onFork={onFork} onOpenFile={onOpenFile} onInspect={() => onSelectSeq(event.seq)} toolCallsAction={hasToolCalls ? { label: collapsedAssistants.has(event.seq) ? 'Expand tool calls' : 'Collapse tool calls', onClick: () => setCollapsedAssistants(current => { const next = new Set(current); if (next.has(event.seq)) next.delete(event.seq); else next.add(event.seq); return next }) } : undefined} />
       </div>
       })}
