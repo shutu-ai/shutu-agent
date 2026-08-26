@@ -164,6 +164,37 @@ func TestNativeHistoryReturnsDSHProjectionBaseline(t *testing.T) {
 	}
 }
 
+func TestNativeProjectionFoldsSessionStatsFromLifecycleEvents(t *testing.T) {
+	events := []session.Event{
+		{Seq: 1, Type: session.EventTurnStart, At: time.UnixMilli(900), Version: session.EventVersion, Data: json.RawMessage(`{"turn":1}`)},
+		{Seq: 2, Type: session.EventStepStart, At: time.UnixMilli(1000), Version: session.EventVersion, Data: json.RawMessage(`{"step":1}`)},
+		{Seq: 3, Type: session.EventAssistantChunk, At: time.UnixMilli(1800), Version: session.EventVersion, Data: json.RawMessage(`{"text":"a"}`)},
+		{Seq: 4, Type: session.EventAssistantMessage, At: time.UnixMilli(4800), Version: session.EventVersion, Data: json.RawMessage(`{"text":"answer","usage":{"outputTokens":60}}`)},
+		{Seq: 5, Type: session.EventToolCall, At: time.UnixMilli(5000), Version: session.EventVersion, Data: json.RawMessage(`{"turn":1,"step":1,"callId":"call-1","name":"read"}`)},
+		{Seq: 6, Type: session.EventToolResult, At: time.UnixMilli(6500), Version: session.EventVersion, Data: json.RawMessage(`{"turn":1,"step":1,"callId":"call-1","output":"ok"}`)},
+		{Seq: 7, Type: session.EventStepEnd, At: time.UnixMilli(6600), Version: session.EventVersion, Data: json.RawMessage(`{"step":1}`)},
+		{Seq: 8, Type: session.EventTurnEnd, At: time.UnixMilli(6700), Version: session.EventVersion, Data: json.RawMessage(`{"turn":1}`)},
+	}
+	cursor := newNativeProjectionCursor()
+	for _, ev := range events {
+		cursor.project("stats", ev)
+	}
+	var stats map[string]int64
+	encoded, _ := json.Marshal(cursor.projectionBlock("", 8).Values["sessionStats"])
+	if err := json.Unmarshal(encoded, &stats); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]int64{
+		"turns": 1, "steps": 1, "llmMs": 3800, "toolMs": 1500,
+		"ttftMs": 800, "ttftSteps": 1, "decodeMs": 3000, "decodeTokens": 60,
+	}
+	for key, value := range want {
+		if stats[key] != value {
+			t.Fatalf("sessionStats[%s] = %d, want %d (all=%#v)", key, stats[key], value, stats)
+		}
+	}
+}
+
 func TestNativeSessionHistorySeedsProjectionBeforeSelectingMessagePage(t *testing.T) {
 	srv, st := newTestServer(t, "tok")
 	seedSession(t, st, "native-paged", []session.Event{

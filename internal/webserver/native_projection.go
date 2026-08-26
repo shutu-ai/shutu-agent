@@ -26,10 +26,14 @@ type nativeProjectionCursor struct {
 	usageSeen bool
 	todos     []map[string]any
 	todosSeen bool
+	stats     nativeProjectionSessionStats
 }
 
 func newNativeProjectionCursor() *nativeProjectionCursor {
-	return &nativeProjectionCursor{turn: -1, values: make(map[string]any), changed: make(map[string]any)}
+	values := make(map[string]any)
+	stats := &nativeProjectionSessionStats{}
+	values["sessionStats"] = nativeSessionStatsValue(stats)
+	return &nativeProjectionCursor{turn: -1, values: values, changed: make(map[string]any), stats: *stats}
 }
 
 func (c *nativeProjectionCursor) project(sessionID string, ev session.Event) nativeSessionEvent {
@@ -152,7 +156,31 @@ type nativeProjectionTokenUsage struct {
 	CacheWriteTokens    int64
 }
 
+type nativeProjectionSessionStats struct {
+	Turns        int64
+	Steps        int64
+	LLMMs        int64
+	ToolMs       int64
+	TTFTMs       int64
+	TTFTSteps    int64
+	DecodeMs     int64
+	DecodeTokens int64
+	LastTurn     int
+	HasLastTurn  bool
+	OpenStep     *nativeProjectionOpenStep
+	PendingTools map[string]int64
+}
+
+type nativeProjectionOpenStep struct {
+	Turn          int
+	Step          int
+	StartTime     int64
+	FirstTokenAt  int64
+	HasFirstToken bool
+}
+
 func (c *nativeProjectionCursor) foldProjection(ev session.Event, data map[string]any) {
+	c.foldSessionStats(ev, data)
 	switch ev.Type {
 	case "session/title":
 		c.setProjectionValue("title", nativeEventString(data, "title", "text"))
@@ -202,6 +230,111 @@ func (c *nativeProjectionCursor) foldProjection(ev session.Event, data map[strin
 			}
 		}
 	}
+}
+
+func (c *nativeProjectionCursor) foldSessionStats(ev session.Event, data map[string]any) {
+	stats := &c.stats
+	turn := nativeEventInt(data, "turn", c.turn)
+	step := nativeEventInt(data, "step", c.step)
+	now := ev.At.UnixMilli()
+	switch ev.Type {
+	case session.EventStepStart:
+		stats.OpenStep = &nativeProjectionOpenStep{Turn: turn, Step: step, StartTime: now}
+	case session.EventAssistantChunk, session.EventAssistantReasoning:
+		open := stats.OpenStep
+		if open != nil && open.Turn == turn && open.Step == step && !open.HasFirstToken && nativeEventString(data, "text") != "" {
+			open.FirstTokenAt = now
+			open.HasFirstToken = true
+		}
+	case session.EventAssistantMessage:
+		open := stats.OpenStep
+		if open != nil && open.Turn == turn && open.Step == step {
+			if now >= open.StartTime {
+				stats.LLMMs += now - open.StartTime
+			}
+			if open.HasFirstToken {
+				if open.FirstTokenAt >= open.StartTime {
+					stats.TTFTMs += open.FirstTokenAt - open.StartTime
+				}
+				stats.TTFTSteps++
+				if usage := nativeEventObject(data, "usage"); usage != nil {
+					if output, ok := nativeNonnegativeEventInt64(usage, "outputTokens", "output_tokens"); ok {
+						stats.DecodeTokens += output
+						if now >= open.FirstTokenAt {
+							stats.DecodeMs += now - open.FirstTokenAt
+						}
+					}
+				}
+			}
+			stats.OpenStep = nil
+		}
+	case session.EventToolCall, "tool/start":
+		callID := nativeEventString(data, "callId", "call_id")
+		if callID != "" {
+			if stats.PendingTools == nil {
+				stats.PendingTools = make(map[string]int64)
+			}
+			stats.PendingTools[callID] = now
+		}
+	case session.EventToolResult, "tool/error":
+		callID := nativeEventString(data, "callId", "call_id")
+		if callID == "" {
+			if message := nativeEventObject(data, "message"); message != nil {
+				if source := nativeEventObject(message, "source"); source != nil {
+					callID = nativeEventString(source, "callId", "call_id")
+				}
+			}
+		}
+		if started, ok := stats.PendingTools[callID]; ok {
+			if now >= started {
+				stats.ToolMs += now - started
+			}
+			delete(stats.PendingTools, callID)
+		}
+	case session.EventStepEnd:
+		if !stats.HasLastTurn || stats.LastTurn != turn {
+			stats.Turns++
+		}
+		stats.Steps++
+		stats.LastTurn = turn
+		stats.HasLastTurn = true
+		stats.OpenStep = nil
+	case session.EventTurnEnd:
+		stats.PendingTools = nil
+	}
+	next := nativeSessionStatsValue(stats)
+	if !nativeSessionStatsEqual(c.values["sessionStats"], next) {
+		c.setProjectionValue("sessionStats", next)
+	}
+}
+
+func nativeSessionStatsValue(stats *nativeProjectionSessionStats) map[string]any {
+	return map[string]any{
+		"turns":        stats.Turns,
+		"steps":        stats.Steps,
+		"llmMs":        stats.LLMMs,
+		"toolMs":       stats.ToolMs,
+		"ttftMs":       stats.TTFTMs,
+		"ttftSteps":    stats.TTFTSteps,
+		"decodeMs":     stats.DecodeMs,
+		"decodeTokens": stats.DecodeTokens,
+	}
+}
+
+func nativeSessionStatsEqual(previous any, next map[string]any) bool {
+	object, ok := previous.(map[string]any)
+	if !ok {
+		return false
+	}
+	for key, value := range next {
+		if nativeEventInt64(object, key) != nativeEventInt64(next, key) {
+			return false
+		}
+		if nativeEventValue(object, key) == nil && value != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func (c *nativeProjectionCursor) setProjectionValue(key string, value any) {
@@ -302,6 +435,9 @@ func (c *nativeProjectionCursor) projectionBlock(title string, lastSeq int64) na
 	}
 	if !c.todosSeen {
 		values["todos"] = nil
+	}
+	if _, ok := values["sessionStats"]; !ok {
+		values["sessionStats"] = nativeSessionStatsValue(&c.stats)
 	}
 	return nativeProjectionBlock{AsOfSeq: lastSeq, Values: values}
 }
@@ -644,6 +780,28 @@ func nativeEventInt64(object map[string]any, keys ...string) int64 {
 		return int64(number)
 	}
 	return 0
+}
+
+func nativeNonnegativeEventInt64(object map[string]any, keys ...string) (int64, bool) {
+	value := nativeEventValue(object, keys...)
+	switch number := value.(type) {
+	case float64:
+		if number < 0 {
+			return 0, false
+		}
+		return int64(number), true
+	case json.Number:
+		parsed, err := number.Int64()
+		return parsed, err == nil && parsed >= 0
+	case int:
+		return int64(number), number >= 0
+	case int64:
+		return number, number >= 0
+	case uint64:
+		return int64(number), number <= uint64(^uint64(0)>>1)
+	default:
+		return 0, false
+	}
 }
 
 func maxInt64(value, minimum int64) int64 {
