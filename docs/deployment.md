@@ -27,6 +27,12 @@ node scripts/release-package.mjs --output D:\packages\shutu-agent
 
 脚本会重新构建并校验前端，然后构建当前平台的 Go 可执行文件，并复制 standard/code 模式运行所需的 `config/prompts/`。默认包输出到 `release/`，该目录不纳入 Git。
 
+仓库内可用发布包做一次本地升级/回滚演练（使用临时端口和共享临时 `data_dir`）：
+
+```powershell
+node scripts/deployment-smoke.mjs
+```
+
 ## 首次启动
 
 1. 将交付目录复制到目标主机。
@@ -61,6 +67,7 @@ Invoke-WebRequest http://127.0.0.1:18099/api/health
 - [x] `web/dist/index.html`、assets 和 `config/prompts/` 存在。
 - [x] 发布包配置 bearer token 后，`--web-only --config config.yaml` 可启动。
 - [x] `/api/health` 返回 200。
+- [x] `deployment-smoke.mjs` 完成旧版本启动、新版本切换和旧版本回滚。
 
 ## 目标环境验收清单
 
