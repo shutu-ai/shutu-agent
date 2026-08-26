@@ -114,11 +114,23 @@ async function runDesktop(browser) {
   const settings = page.getByRole('dialog')
   await settings.waitFor()
   assert.match(await settings.innerText(), /通用设置/)
-  await settings.getByRole('button', { name: '关闭' }).click()
-  await page.getByRole('button', { name: '收起侧边栏' }).click()
-  await page.getByRole('button', { name: '打开侧边栏' }).waitFor()
+  await page.keyboard.press('Escape')
+  await assert.rejects(() => settings.waitFor({ state: 'visible', timeout: 250 }), /Timeout/)
+  const collapse = page.getByRole('button', { name: '收起侧边栏' })
+  await collapse.focus()
+  await page.keyboard.press('Enter')
+  const expand = page.getByRole('button', { name: '打开侧边栏' })
+  await expand.waitFor()
+  await expand.focus()
+  await page.keyboard.press('Enter')
+  await collapse.waitFor()
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
   assert.ok(overflow <= 1, `desktop page has horizontal overflow: ${overflow}px`)
+  const unnamedButtons = await page.getByRole('button').evaluateAll(buttons => buttons.filter(button => {
+    const label = button.getAttribute('aria-label') ?? button.textContent ?? button.getAttribute('title') ?? ''
+    return label.trim().length === 0
+  }).length)
+  assert.equal(unnamedButtons, 0, 'native desktop has an unnamed button')
   assert.deepEqual(issues, [])
   await page.screenshot({ path: resolve(artifactDirectory, 'shutu-native-desktop.png') })
   await page.close()
@@ -136,6 +148,16 @@ async function runMobile(browser) {
   await waitForNativeShell(page)
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
   assert.ok(overflow <= 1, `mobile page has horizontal overflow: ${overflow}px`)
+  const smallTargets = await page.getByRole('button').evaluateAll(buttons => buttons.filter(button => {
+    const rect = button.getBoundingClientRect()
+    return rect.width > 0 && rect.height > 0 && (rect.width < 24 || rect.height < 24)
+  }).length)
+  assert.equal(smallTargets, 0, 'native mobile has a visible button below the 24px target minimum')
+  const unnamedButtons = await page.getByRole('button').evaluateAll(buttons => buttons.filter(button => {
+    const label = button.getAttribute('aria-label') ?? button.textContent ?? button.getAttribute('title') ?? ''
+    return label.trim().length === 0
+  }).map(button => button.outerHTML.slice(0, 240)))
+  assert.deepEqual(unnamedButtons, [], `native mobile has unnamed buttons: ${unnamedButtons.join(' | ')}`)
   assert.deepEqual(issues, [])
   await page.screenshot({ path: resolve(artifactDirectory, 'shutu-native-mobile.png') })
   await page.close()

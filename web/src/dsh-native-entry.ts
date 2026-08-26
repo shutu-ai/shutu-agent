@@ -85,7 +85,27 @@ export async function mountDshNativeApp(container: HTMLElement): Promise<void> {
   if (!hasDshNativeBoot()) {
     throw new Error('shutu web: DSH native boot contract is unavailable; configure the DSH host bridge first')
   }
+  installDshNativeAccessibilityBridge()
   await new AppWebEntry(container).run()
+}
+
+/**
+ * Keep the compact DSH settings trigger discoverable to assistive technology.
+ * The upstream shell intentionally renders only the icon in the rail and does
+ * not expose a label on that button. This host-owned bridge repairs the DOM
+ * contract without changing the read-only DSH source tree.
+ */
+export function installDshNativeAccessibilityBridge(documentObject: Document = document): () => void {
+  const apply = (): void => {
+    for (const button of documentObject.querySelectorAll<HTMLButtonElement>('button[aria-haspopup="dialog"]')) {
+      if (button.getAttribute('aria-label')?.trim() || button.textContent?.trim()) continue
+      button.setAttribute('aria-label', 'Settings')
+    }
+  }
+  apply()
+  const observer = new MutationObserver(apply)
+  observer.observe(documentObject.body, { childList: true, subtree: true })
+  return () => observer.disconnect()
 }
 
 /** Report the build marker used by the native manifest and diagnostics. */
