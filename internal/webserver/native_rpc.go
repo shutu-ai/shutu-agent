@@ -875,9 +875,11 @@ func (s *Server) nativeSessionHistory(r *http.Request, raw json.RawMessage) nati
 		CreatedAt: meta.CreatedAt.UnixMilli(),
 		CWD:       meta.CWD,
 	}
+	permission := ""
 	if configs, ok := s.store.(store.SessionConfigStore); ok {
 		if config, configErr := configs.GetSessionConfig(r.Context(), req.SessionID); configErr == nil {
 			header.AgentPreset = config.AgentPreset
+			permission = config.Permission
 		}
 	}
 	value := map[string]any{"header": header, "events": entries, "hasMore": start > 0}
@@ -886,7 +888,7 @@ func (s *Server) nativeSessionHistory(r *http.Request, raw json.RawMessage) nati
 		if len(events) > 0 {
 			lastSeq = int64(events[len(events)-1].Seq)
 		}
-		value["projections"] = projection.projectionBlock(meta.Title, lastSeq)
+		value["projections"] = projection.projectionBlock(meta.Title, lastSeq, permission)
 	}
 	return nativeRPCSuccess(value)
 }

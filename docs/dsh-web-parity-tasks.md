@@ -6,6 +6,7 @@
 - [x] P36-3：`session.history` 返回 DSH Session header（version、id、createdAt、cwd；可用时带 agentPreset），列表同步暴露持久化 title。
 - [x] P36-3：完成首批 DSH projection baseline：`asOfSeq`、`title`、`todos`、`plan`、`tokenUsage` 与 `contextPressure`；历史 tail 与 live mux 共用同一投影游标。
 - [x] P36-3：按 DSH session-stats 规则折叠 `sessionStats`（turn/step、LLM/tool 时延、TTFT、decode），覆盖取消步骤、空输出和工具结果乱序场景。
+- [x] P36-3：从 plan/goal 生命周期与会话配置折叠 DSH `goal`、`permissions` 投影；目标状态、轮次、阻塞原因和权限选择可在 history tail 恢复。
 - [ ] P36-3：完整 projection baseline（所有已挂载 projection key）与生产数据规模验收仍待后续任务补齐。
 
 状态基线：P0–P23 已完成。P24–P35 已完成首轮实现；P36-1–P36-8 为“DSH 原生 UI 接入/视觉替换”新目标。未勾选项表示仍需补齐或在真实环境验收，不将未验证内容标记为完成。

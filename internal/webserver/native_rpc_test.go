@@ -14,6 +14,7 @@ import (
 
 	"github.com/jabing/shutu-agent/internal/llm"
 	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/jabing/shutu-agent/internal/store"
 )
 
 func nativeResponse(t *testing.T, recBody []byte) nativeRPCResponse {
@@ -161,6 +162,64 @@ func TestNativeHistoryReturnsDSHProjectionBaseline(t *testing.T) {
 	}
 	if !plan["active"] || plan["pending"] {
 		t.Fatalf("projection plan = %#v", plan)
+	}
+}
+
+func TestNativeHistoryReturnsGoalAndPermissionProjection(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	seedSession(t, st, "native-goal", []session.Event{
+		{Seq: 1, Type: session.EventPlanCreate, At: time.UnixMilli(1001), Version: session.EventVersion, Data: json.RawMessage(`{"scope":"goal","id":"goal-1","title":"Release","detail":{"objective":"ship the release","status":"pending","revision":1,"maxRounds":3}}`)},
+		{Seq: 2, Type: session.EventGoalRoundStart, At: time.UnixMilli(1002), Version: session.EventVersion, Data: json.RawMessage(`{"goalId":"goal-1","round":1}`)},
+		{Seq: 3, Type: session.EventPlanStatus, At: time.UnixMilli(1003), Version: session.EventVersion, Data: json.RawMessage(`{"scope":"goal","id":"goal-1","status":"blocked","reason":"waiting for approval"}`)},
+		{Seq: 4, Type: session.EventPlanUpdate, At: time.UnixMilli(1004), Version: session.EventVersion, Data: json.RawMessage(`{"scope":"goal","id":"goal-1","objective":"ship the verified release","revision":2}`)},
+	})
+	if err := st.SetSessionConfig(context.Background(), "native-goal", store.SessionConfig{Permission: "readonly"}); err != nil {
+		t.Fatalf("set session permission: %v", err)
+	}
+
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/session.history", "tok", `{"type":"client-request","rpcId":"goal-1","method":"session.history","payload":{"sessionId":"native-goal"}}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK {
+		t.Fatalf("session.history response = %+v", response)
+	}
+	var history struct {
+		Projections nativeProjectionBlock `json:"projections"`
+	}
+	encoded, _ := json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &history); err != nil {
+		t.Fatal(err)
+	}
+	var goal map[string]any
+	encoded, _ = json.Marshal(history.Projections.Values["goal"])
+	if err := json.Unmarshal(encoded, &goal); err != nil {
+		t.Fatal(err)
+	}
+	var goalSnapshot map[string]any
+	encoded, _ = json.Marshal(goal["goal"])
+	if err := json.Unmarshal(encoded, &goalSnapshot); err != nil {
+		t.Fatal(err)
+	}
+	if goalSnapshot["id"] != "goal-1" || goalSnapshot["objective"] != "ship the verified release" || goalSnapshot["phase"] != "blocked" || goalSnapshot["maxGoalRounds"] != float64(3) {
+		t.Fatalf("goal snapshot = %#v", goalSnapshot)
+	}
+	if goal["roundsStarted"] != float64(1) || goal["createdAt"] != float64(1001) || goal["updatedAt"] != float64(1004) {
+		t.Fatalf("goal projection metadata = %#v", goal)
+	}
+	var reason map[string]any
+	encoded, _ = json.Marshal(goalSnapshot["blockedReason"])
+	if err := json.Unmarshal(encoded, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if reason["code"] != "blocked" || reason["message"] != "waiting for approval" {
+		t.Fatalf("goal blocked reason = %#v", reason)
+	}
+	var permissions map[string]any
+	encoded, _ = json.Marshal(history.Projections.Values["permissions"])
+	if err := json.Unmarshal(encoded, &permissions); err != nil {
+		t.Fatal(err)
+	}
+	if permissions["currentValue"] != "readonly" {
+		t.Fatalf("permissions projection = %#v", permissions)
 	}
 }
 

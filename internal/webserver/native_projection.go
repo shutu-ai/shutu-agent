@@ -27,6 +27,7 @@ type nativeProjectionCursor struct {
 	todos     []map[string]any
 	todosSeen bool
 	stats     nativeProjectionSessionStats
+	goal      map[string]any
 }
 
 func newNativeProjectionCursor() *nativeProjectionCursor {
@@ -191,21 +192,40 @@ func (c *nativeProjectionCursor) foldProjection(ev session.Event, data map[strin
 			c.setProjectionValue("todos", nativeTodoValues(c.todos))
 		}
 	case session.EventPlanCreate:
-		if nativeEventString(data, "scope") == "todo" {
+		switch nativeEventString(data, "scope") {
+		case "goal":
+			c.createGoalProjection(ev, data)
+		case "todo":
 			c.upsertTodo(data)
 		}
 	case session.EventPlanUpdate:
-		if nativeEventString(data, "scope") == "todo" {
+		switch nativeEventString(data, "scope") {
+		case "goal":
+			c.updateGoalProjection(ev, data)
+		case "todo":
 			c.upsertTodo(data)
 		}
 	case session.EventPlanStatus:
-		if nativeEventString(data, "scope") == "todo" {
+		switch nativeEventString(data, "scope") {
+		case "goal":
+			c.updateGoalStatus(ev, data)
+		case "todo":
 			c.updateTodoStatus(nativeEventString(data, "id"), nativeEventString(data, "status"))
 		}
 	case session.EventPlanDelete:
-		if nativeEventString(data, "scope") == "todo" {
+		switch nativeEventString(data, "scope") {
+		case "goal":
+			c.setProjectionValue("goal", nil)
+			c.goal = nil
+		case "todo":
 			c.deleteTodo(nativeEventString(data, "id"))
 		}
+	case session.EventGoalRoundStart:
+		c.updateGoalRounds(ev, data)
+	case session.EventGoalRoundEnd:
+		c.updateGoalStatus(ev, data)
+	case "permission/preset":
+		c.setProjectionValue("permissions", nativePermissionProjection(nativeEventString(data, "currentValue", "current", "permission")))
 	case session.EventPlanMode:
 		c.setProjectionValue("plan", map[string]any{
 			"active":  nativeEventBool(data, "active"),
@@ -229,6 +249,107 @@ func (c *nativeProjectionCursor) foldProjection(ev session.Event, data map[strin
 				c.addUsage(usage)
 			}
 		}
+	}
+}
+
+func (c *nativeProjectionCursor) createGoalProjection(ev session.Event, data map[string]any) {
+	if nativeEventString(data, "id") == "" {
+		return
+	}
+	detail := nativeEventObject(data, "detail")
+	objective := nativeEventString(detail, "objective")
+	status := nativeEventString(detail, "status")
+	revision := nativeEventInt(data, "revision", nativeEventInt(detail, "revision", 1))
+	if revision < 1 {
+		revision = 1
+	}
+	maxRounds := nativeEventInt(data, "maxRounds", nativeEventInt(detail, "maxRounds", 0))
+	roundsStarted := nativeEventInt(data, "roundsStarted", nativeEventInt(detail, "roundsStarted", 0))
+	createdAt := ev.At.UnixMilli()
+	if createdAt < 0 {
+		createdAt = 0
+	}
+	c.goal = map[string]any{
+		"goal": map[string]any{
+			"id": nativeEventString(data, "id"), "revision": revision, "objective": objective,
+			"phase": nativeGoalPhase(status), "maxGoalRounds": maxRounds,
+		},
+		"roundsStarted": roundsStarted, "createdAt": createdAt, "updatedAt": createdAt,
+	}
+	c.setProjectionValue("goal", c.goal)
+}
+
+func (c *nativeProjectionCursor) updateGoalProjection(ev session.Event, data map[string]any) {
+	if c.goal == nil || nativeEventString(data, "scope") != "goal" || nativeEventString(data, "id") != nativeGoalID(c.goal) {
+		return
+	}
+	goal := nativeProjectionMap(c.goal["goal"])
+	if title := nativeEventString(data, "objective"); title != "" {
+		goal["objective"] = title
+	}
+	if title := nativeEventString(data, "title"); title != "" {
+		// The DSH GoalSnapshot has no title field; title is intentionally not
+		// copied into the wire projection.
+		_ = title
+	}
+	revision := nativeEventInt(data, "revision", nativeEventInt(goal, "revision", 1)+1)
+	goal["revision"] = revision
+	c.goal["goal"] = goal
+	c.goal["updatedAt"] = ev.At.UnixMilli()
+	c.setProjectionValue("goal", c.goal)
+}
+
+func (c *nativeProjectionCursor) updateGoalStatus(ev session.Event, data map[string]any) {
+	if c.goal == nil {
+		return
+	}
+	id := nativeEventString(data, "id", "goalId", "goal_id")
+	if id != "" && id != nativeGoalID(c.goal) {
+		return
+	}
+	goal := nativeProjectionMap(c.goal["goal"])
+	if status := nativeEventString(data, "status", "phase"); status != "" {
+		goal["phase"] = nativeGoalPhase(status)
+		if nativeGoalPhase(status) == "blocked" {
+			if reason := nativeEventString(data, "reason", "error"); reason != "" {
+				goal["blockedReason"] = map[string]any{"code": "blocked", "message": reason}
+			}
+		} else {
+			delete(goal, "blockedReason")
+		}
+	}
+	c.goal["goal"] = goal
+	c.goal["updatedAt"] = ev.At.UnixMilli()
+	c.setProjectionValue("goal", c.goal)
+}
+
+func (c *nativeProjectionCursor) updateGoalRounds(ev session.Event, data map[string]any) {
+	if c.goal == nil || nativeEventString(data, "goalId", "goal_id") != nativeGoalID(c.goal) {
+		return
+	}
+	round := nativeEventInt(data, "round", 0)
+	if round > nativeEventInt(c.goal, "roundsStarted", 0) {
+		c.goal["roundsStarted"] = round
+		c.goal["updatedAt"] = ev.At.UnixMilli()
+		c.setProjectionValue("goal", c.goal)
+	}
+}
+
+func nativeGoalID(value map[string]any) string {
+	goal := nativeProjectionMap(value["goal"])
+	return nativeEventString(goal, "id")
+}
+
+func nativeGoalPhase(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "done", "complete", "completed", "success":
+		return "complete"
+	case "blocked":
+		return "blocked"
+	case "paused", "cancelled", "canceled", "aborted":
+		return "paused"
+	default:
+		return "active"
 	}
 }
 
@@ -338,8 +459,9 @@ func nativeSessionStatsEqual(previous any, next map[string]any) bool {
 }
 
 func (c *nativeProjectionCursor) setProjectionValue(key string, value any) {
-	c.values[key] = value
-	c.changed[key] = value
+	stored := nativeProjectionValueCopy(value)
+	c.values[key] = stored
+	c.changed[key] = nativeProjectionValueCopy(stored)
 }
 
 func (c *nativeProjectionCursor) addUsage(usage map[string]any) {
@@ -423,10 +545,10 @@ func (c *nativeProjectionCursor) projectionChanges() map[string]any {
 	return changes
 }
 
-func (c *nativeProjectionCursor) projectionBlock(title string, lastSeq int64) nativeProjectionBlock {
+func (c *nativeProjectionCursor) projectionBlock(title string, lastSeq int64, permission ...string) nativeProjectionBlock {
 	values := make(map[string]any, len(c.values)+1)
 	for key, value := range c.values {
-		values[key] = value
+		values[key] = nativeProjectionValueCopy(value)
 	}
 	if title == "" {
 		values["title"] = nil
@@ -439,7 +561,51 @@ func (c *nativeProjectionCursor) projectionBlock(title string, lastSeq int64) na
 	if _, ok := values["sessionStats"]; !ok {
 		values["sessionStats"] = nativeSessionStatsValue(&c.stats)
 	}
+	values["permissions"] = nativePermissionProjection(firstNonEmpty(permission...))
 	return nativeProjectionBlock{AsOfSeq: lastSeq, Values: values}
+}
+
+func nativeProjectionValueCopy(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		copy := make(map[string]any, len(typed))
+		for key, item := range typed {
+			copy[key] = nativeProjectionValueCopy(item)
+		}
+		return copy
+	case []any:
+		copy := make([]any, len(typed))
+		for index, item := range typed {
+			copy[index] = nativeProjectionValueCopy(item)
+		}
+		return copy
+	default:
+		return value
+	}
+}
+
+func nativePermissionProjection(permission string) map[string]any {
+	permission = strings.ToLower(strings.TrimSpace(permission))
+	if permission != "readonly" && permission != "full" {
+		permission = "standard"
+	}
+	return map[string]any{
+		"options": []any{
+			map[string]any{"value": "readonly", "name": "Read-only"},
+			map[string]any{"value": "standard", "name": "Standard"},
+			map[string]any{"value": "full", "name": "Full access"},
+		},
+		"currentValue": permission,
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func nativeProjectionMap(value any) map[string]any {
