@@ -6,6 +6,7 @@
     "build": "node scripts/run-dsh-tool.mjs vite build",
     "verify": "node scripts/verify-dist.mjs",
     "e2e": "node scripts/e2e-smoke.mjs",
+    "performance": "node scripts/performance-smoke.mjs",
     "release": "node scripts/release.mjs",
     "typecheck": "node scripts/run-dsh-tool.mjs typescript --noEmit",
     "test": "node scripts/run-dsh-tool.mjs vitest run"
