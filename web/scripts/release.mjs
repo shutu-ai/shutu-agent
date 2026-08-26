@@ -10,6 +10,7 @@ const steps = [
   ['test', '--', '--run'],
   ['run', 'build'],
   ['run', 'verify'],
+  ['run', 'e2e'],
 ]
 
 for (const args of steps) {
