@@ -2400,8 +2400,101 @@ func (s *Server) handleNativeHostWebSocket(w http.ResponseWriter, r *http.Reques
 	ctx, cancel := contextWithConnection(r)
 	defer cancel()
 	defer conn.Close()
+	var writes sync.Mutex
+	write := func(method string, payload any) error {
+		body, err := json.Marshal(nativeEventEnvelope{
+			Type: nativeRPCTypeServerRequest, RPCID: nativeRPCID(), Method: method, Payload: payload,
+		})
+		if err != nil {
+			return err
+		}
+		writes.Lock()
+		defer writes.Unlock()
+		return writeNativeWebSocketText(conn, body)
+	}
+	metas, err := s.store.ListSessions(ctx)
+	if err != nil {
+		return
+	}
+	for _, meta := range metas {
+		if !meta.ArchivedAt.IsZero() {
+			continue
+		}
+		events, loadErr := s.store.LoadSession(ctx, meta.ID)
+		if loadErr != nil {
+			continue
+		}
+		parent, origin, depth := nativeSessionLineage(events)
+		added := map[string]any{
+			"type": "host/session-added", "sessionId": meta.ID, "blank": len(events) == 0,
+		}
+		if parent != "" {
+			added["parentSessionId"] = parent
+		}
+		if origin != "" {
+			added["origin"] = origin
+		}
+		if meta.CWD != "" {
+			added["cwd"] = meta.CWD
+		}
+		if err := write("host/session-added", added); err != nil {
+			return
+		}
+		if s.statusFn != nil {
+			status := s.statusFn(ctx, meta)
+			if err := write("host/session-status", map[string]any{
+				"type": "host/session-status", "sessionId": meta.ID, "running": status.State == "ongoing",
+			}); err != nil {
+				return
+			}
+		}
+		if s.evSrc != nil {
+			sessionID := meta.ID
+			unsub := s.evSrc(sessionID, func(ev session.Event) {
+				running, ok := nativeHostRunningTransition(ev.Type)
+				if !ok {
+					return
+				}
+				_ = write("host/session-status", map[string]any{
+					"type": "host/session-status", "sessionId": sessionID, "running": running,
+				})
+			})
+			if unsub != nil {
+				defer unsub()
+			}
+		}
+		_ = depth // reserved for the session-added contract's future depth field.
+	}
+	workspaces, err := s.store.ListWorkspaces(ctx)
+	if err != nil {
+		return
+	}
+	workspaceViews, archived := nativeWorkspaceViews(workspaces, metas)
+	for _, workspace := range workspaceViews {
+		if err := write("host/workspace-changed", map[string]any{
+			"type": "host/workspace-changed", "workspace": workspace,
+		}); err != nil {
+			return
+		}
+	}
+	if err := write("host/archived-sessions-changed", map[string]any{
+		"type": "host/archived-sessions-changed", "archivedSessionIds": archived,
+	}); err != nil {
+		return
+	}
 	go drainNativeWebSocket(reader, cancel)
 	<-ctx.Done()
+}
+
+func nativeHostRunningTransition(eventType string) (bool, bool) {
+	switch eventType {
+	case session.EventTurnStart:
+		return true, true
+	case session.EventTurnEnd:
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 func contextWithConnection(r *http.Request) (context.Context, context.CancelFunc) {
