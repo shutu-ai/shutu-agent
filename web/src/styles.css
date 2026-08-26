@@ -168,6 +168,7 @@ pre { margin: 3px 0 0; overflow: auto; color: #b9c8da; font: 11px/1.45 ui-monosp
 .virtual-row.timeline-focused:not(.selected) .event-card { border-color: #7596b8; box-shadow: 0 0 0 1px #7596b833; }
 .history-loading { position: sticky; z-index: 2; top: 0; width: max-content; margin: 0 auto 5px; border: 1px solid #34584b; border-radius: 12px; padding: 3px 9px; color: #a9e8c1; background: #142b27; font-size: 11px; }
 .history-boundary { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 28px; margin: 4px auto 8px; color: #738499; font-size: 11px; }
+.history-range { color: #53677b; font-variant-numeric: tabular-nums; }
 .history-boundary.loading { position: sticky; z-index: 2; top: 0; width: max-content; min-height: 0; border: 1px solid #34584b; border-radius: 12px; padding: 3px 9px; color: #a9e8c1; background: #142b27; }
 .history-boundary.error { justify-content: space-between; max-width: 520px; border: 1px solid #6d3c3c; border-radius: 7px; padding: 6px 9px; color: #ffb2a8; background: #291b22; }
 .history-boundary button { border: 1px solid #91504a; border-radius: 5px; padding: 3px 9px; color: #ffd4cc; background: transparent; }

@@ -7,6 +7,9 @@ export interface WebState {
   selectedId: string | null
   events: readonly EventView[]
   hasOlder: boolean
+  historyStartSeq: number | null
+  historyEndSeq: number | null
+  historyCursor: { beforeSeq?: number; afterSeq?: number } | null
   historyError: string | null
   loading: boolean
   loadingOlder: boolean
@@ -47,7 +50,7 @@ function saveSessionId(id: string | null): void {
 }
 
 const EMPTY: WebState = {
-  sessions: [], workspaces: { workspaces: [], ungrouped_ids: [] }, selectedId: null, events: [], hasOlder: false, historyError: null,
+  sessions: [], workspaces: { workspaces: [], ungrouped_ids: [] }, selectedId: null, events: [], hasOlder: false, historyStartSeq: null, historyEndSeq: null, historyCursor: null, historyError: null,
   loading: false, loadingOlder: false, sending: false, connected: false, error: null, authRequired: false,
 }
 
@@ -84,7 +87,7 @@ export class WebStore {
       if (current !== undefined) await this.open(current.id)
       else {
         saveSessionId(null)
-        this.patch({ selectedId: null, events: [], hasOlder: false, historyError: null, loading: false })
+        this.patch({ selectedId: null, events: [], hasOlder: false, historyStartSeq: null, historyEndSeq: null, historyCursor: null, historyError: null, loading: false })
       }
       if (this.pollTimer === null) {
         this.pollTimer = setInterval(() => { void this.refreshSessions() }, 30_000)
@@ -116,13 +119,22 @@ export class WebStore {
     this.streamAbort = abort
     this.knownSeqs.clear()
     saveSessionId(sessionId)
-    this.patch({ selectedId: sessionId, events: [], hasOlder: false, historyError: null, loading: true, loadingOlder: false, sending: false, connected: false, error: null, authRequired: false })
+    this.patch({ selectedId: sessionId, events: [], hasOlder: false, historyStartSeq: null, historyEndSeq: null, historyCursor: null, historyError: null, loading: true, loadingOlder: false, sending: false, connected: false, error: null, authRequired: false })
     try {
       await this.api.resumeSession(sessionId, abort.signal)
       const page = await this.api.loadEvents(sessionId, { limit: 100 }, abort.signal)
       if (generation !== this.generation) return
       for (const event of page.events) this.knownSeqs.add(event.seq)
-      this.patch({ events: page.events, hasOlder: page.has_more, loading: false })
+      this.patch({
+        events: page.events,
+        hasOlder: page.has_more,
+        historyStartSeq: page.first_seq ?? page.events[0]?.seq ?? null,
+        historyEndSeq: page.last_seq ?? page.events.at(-1)?.seq ?? null,
+        historyCursor: page.next_before_seq === undefined && page.next_after_seq === undefined
+          ? null
+          : { ...(page.next_before_seq === undefined ? {} : { beforeSeq: page.next_before_seq }), ...(page.next_after_seq === undefined ? {} : { afterSeq: page.next_after_seq }) },
+        loading: false,
+      })
       void this.streamLoop(sessionId, page.last_seq ?? page.events.at(-1)?.seq ?? 0, abort, generation)
     } catch (error) {
       if (abort.signal.aborted) return
@@ -154,7 +166,7 @@ export class WebStore {
       this.generation += 1
       saveSessionId(null)
       this.knownSeqs.clear()
-      this.patch({ selectedId: null, events: [], hasOlder: false, historyError: null, loading: false, connected: false })
+      this.patch({ selectedId: null, events: [], hasOlder: false, historyStartSeq: null, historyEndSeq: null, historyCursor: null, historyError: null, loading: false, connected: false })
       return
     }
     await this.open(next.id)
@@ -171,7 +183,17 @@ export class WebStore {
       if (generation !== this.generation || sessionId !== this.state.selectedId) return
       const known = new Set(this.state.events.map(event => event.seq))
       const older = page.events.filter(event => !known.has(event.seq))
-      this.patch({ events: [...older, ...this.state.events], hasOlder: page.has_more, historyError: null, loadingOlder: false })
+      this.patch({
+        events: [...older, ...this.state.events],
+        hasOlder: page.has_more,
+        historyStartSeq: page.first_seq ?? older[0]?.seq ?? this.state.historyStartSeq,
+        historyEndSeq: page.last_seq ?? this.state.historyEndSeq,
+        historyCursor: page.next_before_seq === undefined && page.next_after_seq === undefined
+          ? null
+          : { ...(page.next_before_seq === undefined ? {} : { beforeSeq: page.next_before_seq }), ...(page.next_after_seq === undefined ? {} : { afterSeq: page.next_after_seq }) },
+        historyError: null,
+        loadingOlder: false,
+      })
     } catch (error) {
       if (generation !== this.generation || sessionId !== this.state.selectedId) return
       this.patch({ loadingOlder: false, historyError: error instanceof Error ? error.message : String(error) })

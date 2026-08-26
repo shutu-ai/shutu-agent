@@ -12,6 +12,7 @@ const event = (seq: number): EventView => ({
 
 const page = (events: EventView[], hasMore = false): EventPage => ({
   events, has_more: hasMore, first_seq: events[0]?.seq, last_seq: events.at(-1)?.seq,
+  ...(hasMore && events[0] !== undefined ? { next_before_seq: events[0].seq } : {}),
 })
 
 const waitForAbort = (signal: AbortSignal): Promise<void> => new Promise(resolve => {
@@ -165,6 +166,9 @@ describe('WebStore', () => {
     const store = new WebStore(api)
 
     await store.open('one')
+    expect(store.getSnapshot().historyStartSeq).toBe(10)
+    expect(store.getSnapshot().historyEndSeq).toBe(10)
+    expect(store.getSnapshot().historyCursor).toEqual({ beforeSeq: 10 })
     const loadingOlder = store.loadOlder()
     await Promise.resolve()
     await store.open('two')

@@ -1028,10 +1028,10 @@ function conversationNodeLabel(node: DshConversationNode): string {
   }
 }
 
-function HistoryBoundary({ hasOlder, loading, error, onRetry }: { hasOlder: boolean; loading: boolean; error: string | null; onRetry: () => void }) {
+function HistoryBoundary({ hasOlder, loading, error, startSeq, endSeq, onRetry }: { hasOlder: boolean; loading: boolean; error: string | null; startSeq?: number | null; endSeq?: number | null; onRetry: () => void }) {
   if (loading) return <div className="history-boundary loading" role="status" aria-live="polite">Loading earlier history…</div>
   if (error !== null) return <div className="history-boundary error" role="alert"><span>Unable to load earlier history: {error}</span><button type="button" onClick={onRetry}>Retry</button></div>
-  return <div className="history-boundary" role="status" aria-live="polite">{hasOlder ? 'Scroll to load earlier history' : 'Start of history'}</div>
+  return <div className="history-boundary" role="status" aria-live="polite">{hasOlder ? 'Scroll to load earlier history' : 'Start of history'}{startSeq !== null && startSeq !== undefined && endSeq !== null && endSeq !== undefined && <span className="history-range"> · #{startSeq}–#{endSeq}</span>}</div>
 }
 
 function DshConversation({ events, sessionId, store, feedbackBySeq, producedBySeq, onFeedback, onCopy, onRetry, onFork, onOpenFile, onReachTop, loadingOlder }: {
@@ -1075,7 +1075,7 @@ function DshConversation({ events, sessionId, store, feedbackBySeq, producedBySe
     if (top < 100) onReachTop()
   }}>
     <DshConversationHeader snapshot={snapshot} />
-    <HistoryBoundary hasOlder={webState.hasOlder} loading={loadingOlder} error={webState.historyError} onRetry={() => void store.loadOlder()} />
+    <HistoryBoundary hasOlder={webState.hasOlder} startSeq={webState.historyStartSeq} endSeq={webState.historyEndSeq} loading={loadingOlder} error={webState.historyError} onRetry={() => void store.loadOlder()} />
     <div className="dsh-conversation-canvas" style={{ height: offsets[offsets.length - 1] ?? 0 }}>
       {visible.map((node, index) => {
         const raw = eventBySeq.get(node.seq)
@@ -1204,7 +1204,7 @@ function VirtualEvents({ events, store, sessionId, feedbackBySeq, producedBySeq,
     if (top < 100) onReachTop()
   }}>
     <div className="trajectory-toolbar"><button type="button" className="text-button" onClick={() => setCollapsed(value => !value)} aria-label={collapsed ? 'Expand turns' : 'Collapse turns'}>{collapsed ? 'Expand turns' : 'Collapse turns'}</button><button type="button" className="text-button" onClick={toggleAllAssistantCalls} disabled={assistantToolCallSeqs.size === 0} aria-label={allAssistantCallsCollapsed ? 'Expand tool calls' : 'Collapse tool calls'}>{allAssistantCallsCollapsed ? 'Expand calls' : 'Collapse calls'}</button><button type="button" className="text-button" onClick={() => { setCollapsed(false); setCollapsedAssistants(new Set()) }} aria-label="Reset trajectory view">Reset view</button><span aria-live="polite">{collapsed ? `${displayEvents.length} compact records` : `${displayEvents.length} records`}</span></div>
-    <HistoryBoundary hasOlder={webState.hasOlder} loading={loadingOlder} error={webState.historyError} onRetry={() => void store.loadOlder()} />
+    <HistoryBoundary hasOlder={webState.hasOlder} startSeq={webState.historyStartSeq} endSeq={webState.historyEndSeq} loading={loadingOlder} error={webState.historyError} onRetry={() => void store.loadOlder()} />
     <div className="virtual-canvas" style={{ height: offsets[offsets.length - 1] ?? 0 }}>
       {visible.map((event, index) => {
         const key = String(event.seq)
