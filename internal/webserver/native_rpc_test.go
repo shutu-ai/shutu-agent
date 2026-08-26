@@ -277,6 +277,42 @@ func TestNativeRPCSessionHistoryAndPrompt(t *testing.T) {
 	}
 }
 
+func TestNativeSessionPromptPersistsBase64ImagesAndUsesQueueForText(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	if err := st.CreateSession(context.Background(), "native-prompt", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	att, err := attachment.NewStore(filepath.Join(t.TempDir(), "attachments"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.SetAttachmentStore(att)
+	var gotImages []llm.ImageRef
+	srv.SetMessageHandler(func(_ context.Context, sessionID, text string, images []llm.ImageRef) error {
+		if sessionID != "native-prompt" || text != "describe this" {
+			t.Fatalf("prompt callback = %q/%q", sessionID, text)
+		}
+		gotImages = images
+		return nil
+	})
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/session.prompt", "tok", `{"type":"client-request","rpcId":"image-1","method":"session.prompt","payload":{"sessionId":"native-prompt","mode":"queue","content":[{"type":"text","text":"describe this"},{"type":"image","mediaType":"image/png","data":"data:image/png;base64,aGVsbG8="}]}}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK || len(gotImages) != 1 || gotImages[0].MediaType != "image/png" || gotImages[0].Bytes != 5 {
+		t.Fatalf("image prompt response=%+v images=%+v", response, gotImages)
+	}
+
+	var queued string
+	srv.SetQueueManager(nil, func(_ context.Context, sessionID, text string) (QueueItem, error) {
+		queued = sessionID + ":" + text
+		return QueueItem{ID: "q-native", Text: text}, nil
+	}, nil)
+	rec = doReqBody(t, srv.Handler(), "POST", "/api/session.prompt", "tok", `{"type":"client-request","rpcId":"queue-1","method":"session.prompt","payload":{"sessionId":"native-prompt","mode":"queue","content":[{"type":"text","text":"queue this"}]}}`)
+	response = nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK || queued != "native-prompt:queue this" {
+		t.Fatalf("queue prompt response=%+v queued=%q", response, queued)
+	}
+}
+
 func TestNativeHistoryReturnsDSHProjectionBaseline(t *testing.T) {
 	srv, st := newTestServer(t, "tok")
 	seedSession(t, st, "native-projections", []session.Event{

@@ -2606,27 +2606,62 @@ func (s *Server) nativeSessionPrompt(r *http.Request, raw json.RawMessage) nativ
 	if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
 		return failure
 	}
-	if s.msgFn == nil {
-		return nativeRPCFailure("not-supported", "message handler not wired", nil)
-	}
 	if req.Mode != "queue" && req.Mode != "steer" {
 		return nativeRPCFailure("bad-request", "mode must be queue or steer", nil)
 	}
 	var text string
+	images := make([]llm.ImageRef, 0)
 	for _, part := range req.Content {
 		switch part.Type {
 		case "text":
 			text += part.Text
 		case "image":
-			return nativeRPCFailure("not-supported", "native image prompt is not wired", nil)
+			if s.att == nil {
+				return nativeRPCFailure("not-supported", "native image prompt is not wired", nil)
+			}
+			encoded := strings.TrimSpace(part.Data)
+			if strings.HasPrefix(encoded, "data:") {
+				separator := strings.IndexByte(encoded, ',')
+				if separator < 0 {
+					return nativeRPCFailure("bad-request", "image data URL is invalid", nil)
+				}
+				encoded = encoded[separator+1:]
+			}
+			data, err := base64.StdEncoding.DecodeString(encoded)
+			if err != nil {
+				return nativeRPCFailure("bad-request", "image data must be Base64", map[string]any{"message": err.Error()})
+			}
+			ref, err := s.att.SaveImage(strings.TrimSpace(part.MediaType), data, maxWebImageBytes)
+			if err != nil {
+				return nativeRPCFailure("attachment-error", err.Error(), nil)
+			}
+			images = append(images, ref)
 		default:
 			return nativeRPCFailure("bad-request", "unsupported prompt content type", nil)
 		}
 	}
-	if strings.TrimSpace(text) == "" {
-		return nativeRPCFailure("bad-request", "text content is required", nil)
+	if strings.TrimSpace(text) == "" && len(images) == 0 {
+		return nativeRPCFailure("bad-request", "text or image content is required", nil)
 	}
-	if err := s.msgFn(r.Context(), req.SessionID, text, []llm.ImageRef{}); err != nil {
+	// DSH uses queue mode for a prompt submitted while another turn is active.
+	// Let the composition root's queue owner accept it immediately; it will
+	// drain after the current turn and publish the same live events. Image
+	// prompts stay on msgFn because the process queue is intentionally text-only.
+	if req.Mode == "queue" && len(images) == 0 && s.queueEnqueueFn != nil {
+		if _, err := s.queueEnqueueFn(r.Context(), req.SessionID, text); err != nil {
+			return nativeRPCFailure("prompt-failed", err.Error(), nil)
+		}
+		return nativeRPCSuccess(map[string]any{"accepted": true})
+	}
+	if s.msgFn == nil {
+		return nativeRPCFailure("not-supported", "message handler not wired", nil)
+	}
+	if req.Mode == "steer" && s.stopFn != nil {
+		if err := s.stopFn(req.SessionID); err != nil && !strings.Contains(err.Error(), "no turn running") {
+			return nativeRPCFailure("prompt-failed", err.Error(), nil)
+		}
+	}
+	if err := s.msgFn(r.Context(), req.SessionID, text, images); err != nil {
 		return nativeRPCFailure("prompt-failed", err.Error(), nil)
 	}
 	return nativeRPCSuccess(map[string]any{"accepted": true})
