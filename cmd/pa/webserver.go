@@ -343,13 +343,7 @@ func (m nativeCommandManager) Execute(ctx context.Context, sessionID, line strin
 	if !known {
 		return webserver.NativeCommandExecution{}, false, nil
 	}
-	if len(images) > 0 {
-		return webserver.NativeCommandExecution{
-			CommandID: fmt.Sprintf("shutu-cmd-%d", time.Now().UnixNano()),
-			Result:    webserver.NativeCommandResult{Kind: "error", Text: "native command image attachments are not supported yet"},
-		}, true, nil
-	}
-	if err := m.app.webMessage(ctx, sessionID, line, nil); err != nil {
+	if err := m.app.webMessage(ctx, sessionID, line, images); err != nil {
 		return webserver.NativeCommandExecution{}, true, err
 	}
 	return webserver.NativeCommandExecution{

@@ -313,6 +313,89 @@ func TestNativeSessionPromptPersistsBase64ImagesAndUsesQueueForText(t *testing.T
 	}
 }
 
+func TestNativeMessageFeedbackUsesDSHMessageIDsAndVersionCAS(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	seedSession(t, st, "feedback-native", []session.Event{{
+		Seq: 1, Type: session.EventAssistantMessage, At: time.UnixMilli(2000), Version: session.EventVersion,
+		Data: json.RawMessage(`{"text":"native reply"}`),
+	}})
+	call := func(t *testing.T, method, payload string) nativeRPCResponse {
+		t.Helper()
+		rec := doReqBody(t, srv.Handler(), "POST", "/api/"+method, "tok", fmt.Sprintf(`{"type":"client-request","rpcId":"feedback","method":"%s","payload":%s}`, method, payload))
+		return nativeResponse(t, rec.Body.Bytes())
+	}
+	messageID := nativeMessageID("feedback-native", 1)
+	list := call(t, "messageFeedback/list", `{"args":[{"sessionId":"feedback-native"}]}`)
+	if !list.Result.OK {
+		t.Fatalf("initial feedback list = %+v", list)
+	}
+	put := call(t, "messageFeedback/put", fmt.Sprintf(`{"args":[{"sessionId":"feedback-native","messageId":%q,"rating":"positive","ifVersion":null}]}`, messageID))
+	if !put.Result.OK {
+		t.Fatalf("feedback put transport = %+v", put)
+	}
+	var putValue struct {
+		OK    bool `json:"ok"`
+		Value struct {
+			MessageID string `json:"messageId"`
+			Version   string `json:"version"`
+		} `json:"value"`
+	}
+	encoded, _ := json.Marshal(put.Result.Value)
+	if err := json.Unmarshal(encoded, &putValue); err != nil || !putValue.OK || putValue.Value.MessageID != messageID || putValue.Value.Version == "" {
+		t.Fatalf("feedback put value = %s", encoded)
+	}
+	stale := call(t, "messageFeedback/put", fmt.Sprintf(`{"args":[{"sessionId":"feedback-native","messageId":%q,"rating":"negative","ifVersion":"stale"}]}`, messageID))
+	encoded, _ = json.Marshal(stale.Result.Value)
+	var staleValue struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.Unmarshal(encoded, &staleValue); err != nil || staleValue.OK {
+		t.Fatalf("stale feedback put = %s", encoded)
+	}
+	deleted := call(t, "messageFeedback/delete", fmt.Sprintf(`{"args":[{"sessionId":"feedback-native","messageId":%q,"ifVersion":%q}]}`, messageID, putValue.Value.Version))
+	encoded, _ = json.Marshal(deleted.Result.Value)
+	var deletedValue struct {
+		OK    bool `json:"ok"`
+		Value struct {
+			Absent bool `json:"absent"`
+		} `json:"value"`
+	}
+	if err := json.Unmarshal(encoded, &deletedValue); err != nil || !deletedValue.OK || !deletedValue.Value.Absent {
+		t.Fatalf("feedback delete = %s", encoded)
+	}
+}
+
+func TestNativeFileReferencesListUsesSessionCWDAndRemoteArguments(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "src", "main.go"), []byte("package main"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	seedSession(t, st, "file-session", nil)
+	if err := st.SetSessionCWD(context.Background(), "file-session", root); err != nil {
+		t.Fatal(err)
+	}
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/fileReferences/list", "tok", `{"type":"client-request","rpcId":"file-ref","method":"fileReferences/list","payload":{"args":[{"id":"file-session"},"src/",{}]}}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK {
+		t.Fatalf("file reference response = %+v", response)
+	}
+	var values []struct {
+		Path string `json:"path"`
+		Kind string `json:"kind"`
+	}
+	encoded, _ := json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &values); err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 1 || values[0].Path != "src/main.go" || values[0].Kind != "file" {
+		t.Fatalf("file reference values = %+v", values)
+	}
+}
+
 func TestNativeHistoryReturnsDSHProjectionBaseline(t *testing.T) {
 	srv, st := newTestServer(t, "tok")
 	seedSession(t, st, "native-projections", []session.Event{

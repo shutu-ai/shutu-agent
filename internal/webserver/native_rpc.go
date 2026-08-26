@@ -229,6 +229,24 @@ type nativeSessionIDRequest struct {
 	SessionID string `json:"sessionId"`
 }
 
+type nativeMessageFeedbackListRequest struct {
+	SessionID string `json:"sessionId"`
+}
+
+type nativeMessageFeedbackPutRequest struct {
+	SessionID string  `json:"sessionId"`
+	MessageID string  `json:"messageId"`
+	Rating    string  `json:"rating"`
+	Note      *string `json:"note"`
+	IfVersion *string `json:"ifVersion"`
+}
+
+type nativeMessageFeedbackDeleteRequest struct {
+	SessionID string `json:"sessionId"`
+	MessageID string `json:"messageId"`
+	IfVersion string `json:"ifVersion"`
+}
+
 type nativeCommandRequest struct {
 	SessionID string
 	Line      string
@@ -403,6 +421,8 @@ func (s *Server) registerNativeRoutes(mux *http.ServeMux) {
 	for _, method := range []string{
 		"host.describe", "host.listDirectory", "host.createDirectory", "host.pickDirectory",
 		"commands/list", "commands/execute",
+		"messageFeedback/list", "messageFeedback/put", "messageFeedback/delete",
+		"fileReferences/list",
 		"session.list", "session.search", "session.create",
 		"session.history", "session.rename", "session.prompt", "session.cancel", "session.attachment",
 		"session.models", "session.selectModel", "session.fork", "session.updateQueue",
@@ -458,6 +478,141 @@ func nativeDecode(raw json.RawMessage, value any) nativeRPCResult {
 		return nativeRPCFailure("bad-request", "payload is invalid JSON", map[string]any{"message": err.Error()})
 	}
 	return nativeRPCResult{}
+}
+
+// nativeDecodeRemoteRequest unwraps the generated Typert Remote shape:
+// {args: [request]}. Keeping this at the wire boundary allows the native
+// handlers to expose the same request objects as DSH without coupling them to
+// the browser's generated client details.
+func nativeDecodeRemoteRequest(raw json.RawMessage, value any) error {
+	var envelope struct {
+		Args json.RawMessage `json:"args"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return err
+	}
+	if len(envelope.Args) == 0 || string(envelope.Args) == "null" {
+		return json.Unmarshal(raw, value)
+	}
+	if envelope.Args[0] == '[' {
+		var args []json.RawMessage
+		if err := json.Unmarshal(envelope.Args, &args); err != nil {
+			return err
+		}
+		if len(args) == 0 {
+			return errors.New("remote request args are empty")
+		}
+		return json.Unmarshal(args[0], value)
+	}
+	return json.Unmarshal(envelope.Args, value)
+}
+
+func nativeRemoteArguments(raw json.RawMessage) ([]json.RawMessage, error) {
+	var envelope struct {
+		Args json.RawMessage `json:"args"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return nil, err
+	}
+	if len(envelope.Args) == 0 || string(envelope.Args) == "null" {
+		return nil, errors.New("remote request args are missing")
+	}
+	if envelope.Args[0] == '[' {
+		var args []json.RawMessage
+		if err := json.Unmarshal(envelope.Args, &args); err != nil {
+			return nil, err
+		}
+		return args, nil
+	}
+	return []json.RawMessage{envelope.Args}, nil
+}
+
+func (s *Server) nativeFileReferencesList(r *http.Request, raw json.RawMessage) nativeRPCResult {
+	args, err := nativeRemoteArguments(raw)
+	if err != nil || len(args) < 2 {
+		return nativeRPCFailure("bad-request", "file reference request requires agent and query", nil)
+	}
+	var agent struct {
+		ID        string `json:"id"`
+		SessionID string `json:"sessionId"`
+		CWD       string `json:"cwd"`
+	}
+	if err := json.Unmarshal(args[0], &agent); err != nil {
+		return nativeRPCFailure("bad-request", "file reference agent is invalid", nil)
+	}
+	var query string
+	if err := json.Unmarshal(args[1], &query); err != nil {
+		return nativeRPCFailure("bad-request", "file reference query is invalid", nil)
+	}
+	sessionID := strings.TrimSpace(agent.ID)
+	if sessionID == "" {
+		sessionID = strings.TrimSpace(agent.SessionID)
+	}
+	root := strings.TrimSpace(agent.CWD)
+	if sessionID != "" {
+		if meta, metaErr := s.store.GetSessionMeta(r.Context(), sessionID); metaErr == nil {
+			root = meta.CWD
+		}
+	}
+	if root == "" {
+		root, err = s.sessionDefaultWorkdir()
+		if err != nil {
+			return nativeRPCSuccess([]any{})
+		}
+	}
+	root, err = filepath.Abs(root)
+	if err != nil {
+		return nativeRPCSuccess([]any{})
+	}
+	query = strings.ReplaceAll(strings.TrimSpace(query), `\`, "/")
+	query = strings.TrimPrefix(query, "@")
+	slash := strings.LastIndexByte(query, '/')
+	displayDirectory, fragment := "", query
+	if slash >= 0 {
+		displayDirectory, fragment = query[:slash+1], query[slash+1:]
+	}
+	if !strings.HasPrefix(fragment, ".") && strings.Contains(displayDirectory, "/.") {
+		return nativeRPCSuccess([]any{})
+	}
+	directory := filepath.Join(root, filepath.FromSlash(strings.TrimSuffix(displayDirectory, "/")))
+	rel, err := filepath.Rel(root, directory)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return nativeRPCSuccess([]any{})
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return nativeRPCSuccess([]any{})
+	}
+	fragmentLower := strings.ToLower(fragment)
+	values := make([]map[string]any, 0, 20)
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.HasPrefix(name, ".") && !strings.HasPrefix(fragment, ".") {
+			continue
+		}
+		if name == ".git" || name == "node_modules" {
+			continue
+		}
+		if fragmentLower != "" && !strings.Contains(strings.ToLower(name), fragmentLower) {
+			continue
+		}
+		kind := "file"
+		if entry.IsDir() {
+			kind = "directory"
+		} else if !entry.Type().IsRegular() {
+			continue
+		}
+		values = append(values, map[string]any{"path": displayDirectory + name, "kind": kind})
+		if len(values) >= 20 {
+			break
+		}
+	}
+	sort.SliceStable(values, func(i, j int) bool {
+		left, _ := values[i]["path"].(string)
+		right, _ := values[j]["path"].(string)
+		return strings.ToLower(left) < strings.ToLower(right)
+	})
+	return nativeRPCSuccess(values)
 }
 
 func (s *Server) nativeSettingsDescribe() nativeRPCResult {
@@ -890,6 +1045,14 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 			"commandId": execution.CommandID,
 			"result":    result,
 		})
+	case "messageFeedback/list":
+		return s.nativeMessageFeedbackList(r, raw)
+	case "messageFeedback/put":
+		return s.nativeMessageFeedbackPut(r, raw)
+	case "messageFeedback/delete":
+		return s.nativeMessageFeedbackDelete(r, raw)
+	case "fileReferences/list":
+		return s.nativeFileReferencesList(r, raw)
 	case "session.list":
 		return s.nativeSessionList(r)
 	case "session.search":
@@ -1222,6 +1385,174 @@ func nativeCanOpenPath() bool {
 	default:
 		return false
 	}
+}
+
+func nativeFeedbackItem(sessionID string, item store.MessageFeedback) map[string]any {
+	value := map[string]any{
+		"messageId": nativeMessageID(sessionID, item.Seq),
+		"rating":    item.Rating,
+		"version":   nativeFeedbackVersion(item),
+		"createdAt": item.CreatedAt.UnixMilli(),
+		"updatedAt": item.UpdatedAt.UnixMilli(),
+	}
+	if item.Note != "" {
+		value["note"] = item.Note
+	}
+	return value
+}
+
+func nativeFeedbackVersion(item store.MessageFeedback) string {
+	// The existing sidecar predates DSH's opaque version column. Derive a
+	// stable equality token from the durable row and include the mutable fields
+	// so every material replacement invalidates an older browser observation.
+	noteHash := sha1.Sum([]byte(item.Note))
+	return fmt.Sprintf("shutu-feedback:%d:%d:%s:%x", item.UpdatedAt.UnixNano(), item.Seq, item.Rating, noteHash[:6])
+}
+
+func nativeFeedbackSeq(events []session.Event, sessionID, messageID string) (uint64, bool) {
+	for _, event := range events {
+		if event.Type == session.EventAssistantMessage && nativeMessageID(sessionID, event.Seq) == messageID {
+			return event.Seq, true
+		}
+	}
+	return 0, false
+}
+
+func nativeFeedbackRejected(errorValue map[string]any) any {
+	return map[string]any{"ok": false, "error": errorValue}
+}
+
+func nativeFeedbackSuccess(value any) any {
+	return map[string]any{"ok": true, "value": value}
+}
+
+func (s *Server) nativeMessageFeedbackList(r *http.Request, raw json.RawMessage) nativeRPCResult {
+	var req nativeMessageFeedbackListRequest
+	if err := nativeDecodeRemoteRequest(raw, &req); err != nil {
+		return nativeRPCFailure("bad-request", "feedback request is invalid", map[string]any{"message": err.Error()})
+	}
+	req.SessionID = strings.TrimSpace(req.SessionID)
+	if req.SessionID == "" {
+		return nativeRPCFailure("bad-request", "sessionId is required", nil)
+	}
+	feedback, ok := s.store.(store.MessageFeedbackStore)
+	if !ok {
+		return nativeRPCFailure("not-supported", "message feedback store not wired", nil)
+	}
+	items, err := feedback.ListMessageFeedback(r.Context(), req.SessionID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nativeRPCSuccess(nativeFeedbackRejected(map[string]any{"code": "session-not-found", "sessionId": req.SessionID}))
+		}
+		return nativeRPCFailure("feedback-list-failed", err.Error(), nil)
+	}
+	events, err := s.store.LoadSession(r.Context(), req.SessionID)
+	if err != nil {
+		return nativeRPCFailure("feedback-list-failed", err.Error(), nil)
+	}
+	values := make([]any, 0, len(items))
+	for _, item := range items {
+		if _, found := nativeFeedbackSeq(events, req.SessionID, nativeMessageID(req.SessionID, item.Seq)); found {
+			values = append(values, nativeFeedbackItem(req.SessionID, item))
+		}
+	}
+	return nativeRPCSuccess(nativeFeedbackSuccess(map[string]any{"items": values}))
+}
+
+func (s *Server) nativeMessageFeedbackPut(r *http.Request, raw json.RawMessage) nativeRPCResult {
+	var req nativeMessageFeedbackPutRequest
+	if err := nativeDecodeRemoteRequest(raw, &req); err != nil {
+		return nativeRPCFailure("bad-request", "feedback request is invalid", map[string]any{"message": err.Error()})
+	}
+	req.SessionID = strings.TrimSpace(req.SessionID)
+	req.MessageID = strings.TrimSpace(req.MessageID)
+	if req.SessionID == "" || req.MessageID == "" {
+		return nativeRPCFailure("bad-request", "sessionId and messageId are required", nil)
+	}
+	if req.Rating != "positive" && req.Rating != "negative" {
+		return nativeRPCSuccess(nativeFeedbackRejected(map[string]any{"code": "invalid-rating"}))
+	}
+	if req.Note != nil {
+		if strings.TrimSpace(*req.Note) == "" {
+			return nativeRPCSuccess(nativeFeedbackRejected(map[string]any{"code": "note-blank"}))
+		}
+		if len([]byte(*req.Note)) > store.MaxMessageFeedbackNoteBytes {
+			return nativeRPCSuccess(nativeFeedbackRejected(map[string]any{"code": "note-too-large", "maxBytes": store.MaxMessageFeedbackNoteBytes, "actualBytes": len([]byte(*req.Note))}))
+		}
+	}
+	feedback, ok := s.store.(store.MessageFeedbackStore)
+	if !ok {
+		return nativeRPCFailure("not-supported", "message feedback store not wired", nil)
+	}
+	events, err := s.store.LoadSession(r.Context(), req.SessionID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nativeRPCSuccess(nativeFeedbackRejected(map[string]any{"code": "session-not-found", "sessionId": req.SessionID}))
+		}
+		return nativeRPCFailure("feedback-put-failed", err.Error(), nil)
+	}
+	seq, found := nativeFeedbackSeq(events, req.SessionID, req.MessageID)
+	if !found {
+		return nativeRPCSuccess(nativeFeedbackRejected(map[string]any{"code": "target-not-found", "sessionId": req.SessionID, "messageId": req.MessageID}))
+	}
+	current, exists, err := feedback.GetMessageFeedback(r.Context(), req.SessionID, seq)
+	if err != nil {
+		return nativeRPCFailure("feedback-put-failed", err.Error(), nil)
+	}
+	if (exists && req.IfVersion == nil) || (exists && req.IfVersion != nil && *req.IfVersion != nativeFeedbackVersion(current)) || (!exists && req.IfVersion != nil) {
+		var currentValue any
+		if exists {
+			currentValue = nativeFeedbackItem(req.SessionID, current)
+		}
+		return nativeRPCSuccess(nativeFeedbackRejected(map[string]any{"code": "version-conflict", "current": currentValue}))
+	}
+	note := ""
+	if req.Note != nil {
+		note = *req.Note
+	}
+	updated, err := feedback.PutMessageFeedback(r.Context(), req.SessionID, seq, req.Rating, note)
+	if err != nil {
+		return nativeRPCFailure("feedback-put-failed", err.Error(), nil)
+	}
+	return nativeRPCSuccess(nativeFeedbackSuccess(nativeFeedbackItem(req.SessionID, updated)))
+}
+
+func (s *Server) nativeMessageFeedbackDelete(r *http.Request, raw json.RawMessage) nativeRPCResult {
+	var req nativeMessageFeedbackDeleteRequest
+	if err := nativeDecodeRemoteRequest(raw, &req); err != nil {
+		return nativeRPCFailure("bad-request", "feedback request is invalid", map[string]any{"message": err.Error()})
+	}
+	req.SessionID = strings.TrimSpace(req.SessionID)
+	req.MessageID = strings.TrimSpace(req.MessageID)
+	if req.SessionID == "" || req.MessageID == "" {
+		return nativeRPCFailure("bad-request", "sessionId and messageId are required", nil)
+	}
+	feedback, ok := s.store.(store.MessageFeedbackStore)
+	if !ok {
+		return nativeRPCFailure("not-supported", "message feedback store not wired", nil)
+	}
+	events, err := s.store.LoadSession(r.Context(), req.SessionID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nativeRPCSuccess(nativeFeedbackRejected(map[string]any{"code": "session-not-found", "sessionId": req.SessionID}))
+		}
+		return nativeRPCFailure("feedback-delete-failed", err.Error(), nil)
+	}
+	seq, found := nativeFeedbackSeq(events, req.SessionID, req.MessageID)
+	if !found {
+		return nativeRPCSuccess(nativeFeedbackSuccess(map[string]any{"absent": true}))
+	}
+	current, exists, err := feedback.GetMessageFeedback(r.Context(), req.SessionID, seq)
+	if err != nil {
+		return nativeRPCFailure("feedback-delete-failed", err.Error(), nil)
+	}
+	if exists && req.IfVersion != nativeFeedbackVersion(current) {
+		return nativeRPCSuccess(nativeFeedbackRejected(map[string]any{"code": "version-conflict", "current": nativeFeedbackItem(req.SessionID, current)}))
+	}
+	if err := feedback.DeleteMessageFeedback(r.Context(), req.SessionID, seq); err != nil {
+		return nativeRPCFailure("feedback-delete-failed", err.Error(), nil)
+	}
+	return nativeRPCSuccess(nativeFeedbackSuccess(map[string]any{"absent": true}))
 }
 
 func (s *Server) nativeHostListDirectory(rawPath string) nativeRPCResult {
