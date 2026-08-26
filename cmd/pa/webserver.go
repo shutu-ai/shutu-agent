@@ -208,6 +208,9 @@ func (a *app) registerWebServer() error {
 		}
 	})
 	srv.SetNativeCredentialManager(a.nativeCredentialSet, a.nativeCredentialUnset)
+	if a.agentPresets != nil {
+		srv.SetNativeAgentPresetManager(a.agentPresets)
+	}
 	srv.SetNativeSettingsDocumentOpener(func(ctx context.Context) error {
 		path, err := filepath.Abs(a.configPath)
 		if err != nil {

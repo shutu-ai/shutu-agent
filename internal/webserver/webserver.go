@@ -92,6 +92,7 @@ type Server struct {
 	nativeCredentialSetFn        func(ctx context.Context, ref, value string) error
 	nativeCredentialUnsetFn      func(ctx context.Context, ref string) error
 	nativeSettingsOpenDocumentFn func(ctx context.Context) error
+	nativeAgentPresetManager     NativeAgentPresetManager
 
 	// statusFn is the dsh-session-status alignment: it computes the live state
 	// (warning/ongoing/done/idle + labels + running-subagent count) for one
@@ -561,6 +562,48 @@ type NativeGoalMutationResult struct {
 	Cleared  bool
 }
 
+// NativeAgentPreset is one DSH agent-preset roster entry. The composition
+// root owns how presets are stored and composed; the webserver only transports
+// the sanitized native contract.
+type NativeAgentPreset struct {
+	ID          string
+	Trust       string
+	IsDefault   bool
+	Name        string
+	Description string
+	Broken      string
+}
+
+type NativeAgentPresetCatalog struct {
+	Presets     []NativeAgentPreset
+	Authorable  bool
+	HasDocument bool
+}
+
+type NativeAgentPresetDetails struct {
+	AgentPreset string
+	Trust       string
+	Content     string
+	Name        string
+	Description string
+}
+
+type NativeAgentPresetDocument struct {
+	Opened bool
+	Path   string
+}
+
+// NativeAgentPresetManager wires the DSH authoring calls. IDs, trust and
+// content are resolved by the composition root; no filesystem path crosses
+// the browser request boundary.
+type NativeAgentPresetManager interface {
+	List(context.Context) (NativeAgentPresetCatalog, error)
+	Read(context.Context, string) (NativeAgentPresetDetails, error)
+	Copy(context.Context, string, string, string) (string, error)
+	OpenDocument(context.Context, string) (NativeAgentPresetDocument, error)
+	Remove(context.Context, string) error
+}
+
 // SetNativeGoalManager wires DSH's goal.create/edit/pause/resume/complete/clear
 // RPCs to the composition root's durable goal engine. A nil manager leaves the
 // native routes explicitly unsupported.
@@ -583,6 +626,11 @@ func (s *Server) SetNativeCredentialManager(
 // a path, so this callback cannot be used to open an arbitrary host file.
 func (s *Server) SetNativeSettingsDocumentOpener(fn func(context.Context) error) {
 	s.nativeSettingsOpenDocumentFn = fn
+}
+
+// SetNativeAgentPresetManager wires the DSH agent-preset authoring surface.
+func (s *Server) SetNativeAgentPresetManager(manager NativeAgentPresetManager) {
+	s.nativeAgentPresetManager = manager
 }
 
 // SetSessionManager wires the session new/resume API (POST /api/sessions and

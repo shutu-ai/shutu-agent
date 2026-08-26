@@ -713,6 +713,75 @@ func TestNativeAgentPresetsListSelectAndLock(t *testing.T) {
 	}
 }
 
+type nativeAgentPresetManagerStub struct {
+	removed string
+}
+
+func (m *nativeAgentPresetManagerStub) List(context.Context) (NativeAgentPresetCatalog, error) {
+	return NativeAgentPresetCatalog{
+		Presets: []NativeAgentPreset{{ID: "custom", Trust: "user", Name: "Custom"}}, Authorable: true, HasDocument: true,
+	}, nil
+}
+
+func (m *nativeAgentPresetManagerStub) Read(context.Context, string) (NativeAgentPresetDetails, error) {
+	return NativeAgentPresetDetails{AgentPreset: "custom", Trust: "user", Content: "custom prompt", Name: "Custom"}, nil
+}
+
+func (m *nativeAgentPresetManagerStub) Copy(context.Context, string, string, string) (string, error) {
+	return "copied", nil
+}
+
+func (m *nativeAgentPresetManagerStub) OpenDocument(context.Context, string) (NativeAgentPresetDocument, error) {
+	return NativeAgentPresetDocument{Path: `C:\preset`}, nil
+}
+
+func (m *nativeAgentPresetManagerStub) Remove(_ context.Context, id string) error {
+	m.removed = id
+	return nil
+}
+
+func TestNativeAgentPresetAuthoringRPCs(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+	manager := &nativeAgentPresetManagerStub{}
+	srv.SetNativeAgentPresetManager(manager)
+	call := func(id, method string, payload any) nativeRPCResponse {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{
+			"type": "client-request", "rpcId": id, "method": method, "payload": payload,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := doReqBody(t, srv.Handler(), "POST", "/api/"+method, "tok", string(body))
+		return nativeResponse(t, rec.Body.Bytes())
+	}
+	if response := call("list", "agentPreset.list", map[string]any{}); !response.Result.OK {
+		t.Fatalf("list response=%+v", response)
+	}
+	for _, item := range []struct {
+		id      string
+		method  string
+		payload map[string]any
+		wantKey string
+	}{
+		{"read", "agentPreset.read", map[string]any{"agentPreset": "custom"}, "content"},
+		{"copy", "agentPreset.copy", map[string]any{"from": "standard", "agentPreset": "custom-copy"}, "agentPreset"},
+		{"open", "agentPreset.openDocument", map[string]any{"agentPreset": "custom"}, "path"},
+	} {
+		response := call(item.id, item.method, item.payload)
+		if !response.Result.OK {
+			t.Fatalf("%s response=%+v", item.method, response)
+		}
+		value, ok := response.Result.Value.(map[string]any)
+		if !ok || value[item.wantKey] == nil {
+			t.Fatalf("%s value=%+v", item.method, response.Result.Value)
+		}
+	}
+	if response := call("remove", "agentPreset.remove", map[string]any{"agentPreset": "custom"}); !response.Result.OK || manager.removed != "custom" {
+		t.Fatalf("remove response=%+v removed=%q", response, manager.removed)
+	}
+}
+
 func TestNativeSessionSelectModelPersistsAndProjectsSelection(t *testing.T) {
 	srv, st := newTestServer(t, "tok")
 	srv.SetConfigProvider(func() map[string]any {

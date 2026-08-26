@@ -37,6 +37,7 @@
 - [x] P36-2.1a：接入 DSH `goal.create/edit/pause/resume/complete/clear` 原生 RPC，复用 Shutu plan/goal 引擎、事件持久化和 revision CAS。
 - [x] P36-2.1b：接入 `host.openPath` 与 `credentials.set/unset`，补齐主机 opener、凭据引用校验、环境变量只读保护和 provider key 持久化。
 - [x] P36-2.1c：接入 `settings.openDocument`，由服务端绑定配置文档并复用主机 opener，不向浏览器暴露任意路径。
+- [x] P36-2.1d：接入 `agentPreset.read/copy/openDocument/remove`，以数据目录安全存储用户 preset，并让 `session.create/select` 识别用户 preset。
 - [ ] P36-2.2：补齐 host downlink、连接状态、断线重连、续传及剩余原生接口。
 - [x] P36-2.2a：host downlink 首次连接下发活动会话、session status、Workspace/archive 快照，并在 turn start/end 时推送状态变化。
 - [x] P36-2.2b：接入 `subagent.prompt/interrupt`，校验 parent/child lineage 与 continuable mode，并连接 live child inbox/cancel seam。

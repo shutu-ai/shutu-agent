@@ -336,7 +336,7 @@ func (s *Server) registerNativeRoutes(mux *http.ServeMux) {
 		"session.models", "session.selectModel", "session.fork", "session.updateQueue",
 		"workspace.list", "workspace.create", "workspace.rename", "workspace.delete",
 		"workspace.insertBefore", "workspace.insertSessionBefore", "workspace.archiveSession",
-		"agentPreset.list", "agentPreset.select", "settings.describe",
+		"agentPreset.list", "agentPreset.select", "agentPreset.read", "agentPreset.copy", "agentPreset.openDocument", "agentPreset.remove", "settings.describe",
 		"settings.openDocument", "settings.mutate", "settings.update", "settings.replace", "credentials.describe", "credentials.set", "credentials.unset", "dynamicCordisRunner/syncInspectManifest",
 		"host.openPath",
 		"dynamicCordisRunner/inventory", "llm.providers", "llm.models", "llm.discoverModels", "skill.list",
@@ -873,9 +873,17 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 		}
 		return s.nativeWorkspaceArchiveSession(r, req.SessionID)
 	case "agentPreset.list":
-		return s.nativeAgentPresetList()
+		return s.nativeAgentPresetList(r)
 	case "agentPreset.select":
 		return s.nativeAgentPresetSelect(r, raw)
+	case "agentPreset.read":
+		return s.nativeAgentPresetRead(r, raw)
+	case "agentPreset.copy":
+		return s.nativeAgentPresetCopy(r, raw)
+	case "agentPreset.openDocument":
+		return s.nativeAgentPresetOpenDocument(r, raw)
+	case "agentPreset.remove":
+		return s.nativeAgentPresetRemove(r, raw)
 	case "settings.describe":
 		return s.nativeSettingsDescribe()
 	case "settings.openDocument":
@@ -1662,7 +1670,32 @@ func (s *Server) nativeGoalMutation(r *http.Request, method string, raw json.Raw
 	}})
 }
 
-func (s *Server) nativeAgentPresetList() nativeRPCResult {
+func (s *Server) nativeAgentPresetList(r *http.Request) nativeRPCResult {
+	if s.nativeAgentPresetManager != nil {
+		catalog, err := s.nativeAgentPresetManager.List(r.Context())
+		if err != nil {
+			return nativeRPCFailure("agent-preset-list-failed", err.Error(), nil)
+		}
+		presets := make([]any, 0, len(catalog.Presets))
+		for _, preset := range catalog.Presets {
+			entry := map[string]any{
+				"id": preset.ID, "trust": preset.Trust, "isDefault": preset.IsDefault,
+			}
+			if preset.Name != "" {
+				entry["name"] = preset.Name
+			}
+			if preset.Description != "" {
+				entry["description"] = preset.Description
+			}
+			if preset.Broken != "" {
+				entry["broken"] = preset.Broken
+			}
+			presets = append(presets, entry)
+		}
+		return nativeRPCSuccess(map[string]any{
+			"presets": presets, "authorable": catalog.Authorable, "hasDocument": catalog.HasDocument,
+		})
+	}
 	defaultPreset := "standard"
 	if s.cfgFn != nil {
 		if mode := nativeString(s.cfgFn()["mode"]); nativeAgentPresetKnown(mode) {
@@ -1688,6 +1721,25 @@ func (s *Server) nativeAgentPresetList() nativeRPCResult {
 	})
 }
 
+func (s *Server) nativeAgentPresetAvailable(ctx context.Context, preset string) bool {
+	if nativeAgentPresetKnown(preset) {
+		return true
+	}
+	if s.nativeAgentPresetManager == nil {
+		return false
+	}
+	catalog, err := s.nativeAgentPresetManager.List(ctx)
+	if err != nil {
+		return false
+	}
+	for _, entry := range catalog.Presets {
+		if entry.ID == preset && entry.Broken == "" {
+			return true
+		}
+	}
+	return false
+}
+
 func nativeAgentPresetKnown(preset string) bool {
 	switch preset {
 	case "minimal", "standard", "code":
@@ -1710,7 +1762,7 @@ func (s *Server) nativeAgentPresetSelect(r *http.Request, raw json.RawMessage) n
 	if req.SessionID == "" || req.AgentPreset == "" {
 		return nativeRPCFailure("bad-request", "sessionId and agentPreset are required", nil)
 	}
-	if !nativeAgentPresetKnown(req.AgentPreset) {
+	if !s.nativeAgentPresetAvailable(r.Context(), req.AgentPreset) {
 		return nativeRPCFailure("agent-preset-invalid", "agent preset is not available", map[string]any{"agentPreset": req.AgentPreset})
 	}
 	configs, ok := s.store.(store.SessionConfigStore)
@@ -1733,6 +1785,118 @@ func (s *Server) nativeAgentPresetSelect(r *http.Request, raw json.RawMessage) n
 		return nativeRPCFailure("agent-preset-select-failed", err.Error(), nil)
 	}
 	return nativeRPCSuccess(map[string]any{"agentPreset": req.AgentPreset})
+}
+
+func nativeAgentPresetIDValid(id string) bool {
+	if id == "" || len(id) > 128 {
+		return false
+	}
+	for index, char := range id {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || char == '_' || (index > 0 && char >= '0' && char <= '9') || char == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func (s *Server) nativeAgentPresetRead(r *http.Request, raw json.RawMessage) nativeRPCResult {
+	if s.nativeAgentPresetManager == nil {
+		return nativeRPCFailure("not-supported", "agent preset authoring is not wired", nil)
+	}
+	var req struct {
+		AgentPreset string `json:"agentPreset"`
+	}
+	if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
+		return failure
+	}
+	req.AgentPreset = strings.TrimSpace(req.AgentPreset)
+	if !nativeAgentPresetIDValid(req.AgentPreset) {
+		return nativeRPCFailure("bad-request", "agentPreset must be a valid id", nil)
+	}
+	details, err := s.nativeAgentPresetManager.Read(r.Context(), req.AgentPreset)
+	if err != nil {
+		return nativeRPCFailure("agent-preset-read-failed", err.Error(), map[string]any{"agentPreset": req.AgentPreset})
+	}
+	value := map[string]any{"agentPreset": details.AgentPreset, "trust": details.Trust, "content": details.Content}
+	if details.Name != "" {
+		value["name"] = details.Name
+	}
+	if details.Description != "" {
+		value["description"] = details.Description
+	}
+	return nativeRPCSuccess(value)
+}
+
+func (s *Server) nativeAgentPresetCopy(r *http.Request, raw json.RawMessage) nativeRPCResult {
+	if s.nativeAgentPresetManager == nil {
+		return nativeRPCFailure("not-supported", "agent preset authoring is not wired", nil)
+	}
+	var req struct {
+		From        string `json:"from"`
+		AgentPreset string `json:"agentPreset"`
+		Name        string `json:"name"`
+	}
+	if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
+		return failure
+	}
+	req.From, req.AgentPreset, req.Name = strings.TrimSpace(req.From), strings.TrimSpace(req.AgentPreset), strings.TrimSpace(req.Name)
+	if !nativeAgentPresetIDValid(req.From) || !nativeAgentPresetIDValid(req.AgentPreset) {
+		return nativeRPCFailure("bad-request", "from and agentPreset must be valid ids", nil)
+	}
+	if len(req.Name) > 256 {
+		return nativeRPCFailure("bad-request", "name is too long", nil)
+	}
+	id, err := s.nativeAgentPresetManager.Copy(r.Context(), req.From, req.AgentPreset, req.Name)
+	if err != nil {
+		return nativeRPCFailure("agent-preset-copy-failed", err.Error(), nil)
+	}
+	return nativeRPCSuccess(map[string]any{"agentPreset": id})
+}
+
+func (s *Server) nativeAgentPresetOpenDocument(r *http.Request, raw json.RawMessage) nativeRPCResult {
+	if s.nativeAgentPresetManager == nil {
+		return nativeRPCFailure("not-supported", "agent preset authoring is not wired", nil)
+	}
+	var req struct {
+		AgentPreset string `json:"agentPreset"`
+	}
+	if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
+		return failure
+	}
+	req.AgentPreset = strings.TrimSpace(req.AgentPreset)
+	if !nativeAgentPresetIDValid(req.AgentPreset) {
+		return nativeRPCFailure("bad-request", "agentPreset must be a valid id", nil)
+	}
+	document, err := s.nativeAgentPresetManager.OpenDocument(r.Context(), req.AgentPreset)
+	if err != nil {
+		return nativeRPCFailure("agent-preset-open-failed", err.Error(), nil)
+	}
+	value := map[string]any{"opened": document.Opened}
+	if !document.Opened {
+		value["path"] = document.Path
+	}
+	return nativeRPCSuccess(value)
+}
+
+func (s *Server) nativeAgentPresetRemove(r *http.Request, raw json.RawMessage) nativeRPCResult {
+	if s.nativeAgentPresetManager == nil {
+		return nativeRPCFailure("not-supported", "agent preset authoring is not wired", nil)
+	}
+	var req struct {
+		AgentPreset string `json:"agentPreset"`
+	}
+	if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
+		return failure
+	}
+	req.AgentPreset = strings.TrimSpace(req.AgentPreset)
+	if !nativeAgentPresetIDValid(req.AgentPreset) {
+		return nativeRPCFailure("bad-request", "agentPreset must be a valid id", nil)
+	}
+	if err := s.nativeAgentPresetManager.Remove(r.Context(), req.AgentPreset); err != nil {
+		return nativeRPCFailure("agent-preset-remove-failed", err.Error(), nil)
+	}
+	return nativeRPCSuccess(map[string]any{})
 }
 
 func (s *Server) nativeSessionModels(r *http.Request, raw json.RawMessage) nativeRPCResult {
@@ -2134,7 +2298,7 @@ func (s *Server) nativeSessionCreate(r *http.Request, raw json.RawMessage) nativ
 		return failure
 	}
 	req.AgentPreset = strings.TrimSpace(req.AgentPreset)
-	if req.AgentPreset != "" && !nativeAgentPresetKnown(req.AgentPreset) {
+	if req.AgentPreset != "" && !s.nativeAgentPresetAvailable(r.Context(), req.AgentPreset) {
 		return nativeRPCFailure("agent-preset-invalid", "agent preset is not available", map[string]any{"agentPreset": req.AgentPreset})
 	}
 	id, err := s.sessFn(r.Context(), "new", req.SessionID)

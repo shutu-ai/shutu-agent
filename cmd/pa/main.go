@@ -212,12 +212,13 @@ func main() {
 	defer stop()
 
 	app := &app{
-		cfg:        cfg,
-		configPath: filepath.Clean(*configPath),
-		store:      st,
-		reg:        reg,
-		prompt:     promptBuilder,
-		basePolicy: pol,
+		cfg:          cfg,
+		configPath:   filepath.Clean(*configPath),
+		store:        st,
+		reg:          reg,
+		prompt:       promptBuilder,
+		agentPresets: newNativeAgentPresetStore(cfg.DataDir, cfg.PromptsDir, cfg.Mode),
+		basePolicy:   pol,
 		// M10 W1: the real-time event hub (ADR D-WEB2-B) exists for the whole
 		// process lifetime so attachSink can broadcast every persisted event to
 		// the web's SSE subscribers whenever the webserver is enabled.
@@ -585,11 +586,12 @@ func resolveFrontendDist(configPath, distDir string) string {
 
 // app holds the REPL's mutable session state.
 type app struct {
-	cfg        config.Config
-	configPath string
-	store      store.Store
-	reg        *tools.Registry
-	prompt     *prompt.Builder
+	cfg          config.Config
+	configPath   string
+	store        store.Store
+	reg          *tools.Registry
+	prompt       *prompt.Builder
+	agentPresets *nativeAgentPresetStore
 	// basePolicy is the startup Execute policy (global mode + permission
 	// preset). Per-session permission tiers swap a derived policy around a turn
 	// (turnMu serializes turns) and restore basePolicy afterwards.
@@ -1023,6 +1025,10 @@ func (a *app) applySessionRuntime(id string) (sessionRuntime, func()) {
 		}
 	}
 	rt.mode = mode
+	toolMode := mode
+	if a.agentPresets != nil && !nativeAgentPresetKnown(mode) {
+		toolMode = a.agentPresets.Mode(mode)
+	}
 	if a.log != nil && session.FoldPlanMode(a.log.Events()) {
 		rt.prompt = rt.prompt.Clone().Add(prompt.Section{Name: "plan-mode", Order: 900, Text: planModeSection})
 	}
@@ -1031,8 +1037,8 @@ func (a *app) applySessionRuntime(id string) (sessionRuntime, func()) {
 	// presentation mode; standard never executes run_code, PTC only run_code,
 	// minimal only its fixed seam).
 	base := a.basePolicy
-	base.Enabled = modeToolWhitelist(mode, base.Enabled)
-	pol, _ := a.sessionPolicyFrom(base, perm, mode)
+	base.Enabled = modeToolWhitelist(toolMode, base.Enabled)
+	pol, _ := a.sessionPolicyFrom(base, perm, toolMode)
 	a.reg.SetPolicy(pol)
 	return rt, func() { a.reg.SetPolicy(a.basePolicy) }
 }
@@ -1134,7 +1140,14 @@ func (a *app) promptFor(mode string) *prompt.Builder {
 	if b, ok := a.promptByMode[mode]; ok {
 		return b
 	}
-	if b, err := buildPrompt(mode, a.cfg.PromptsDir); err == nil {
+	var b *prompt.Builder
+	var err error
+	if a.agentPresets != nil && !nativeAgentPresetKnown(mode) {
+		b, err = a.agentPresets.Prompt(mode)
+	} else {
+		b, err = buildPrompt(mode, a.cfg.PromptsDir)
+	}
+	if err == nil {
 		if mode != config.ModeMinimal {
 			b.SetTools(func() []llm.ToolSchema { return toolSpecsForMode(mode, a.reg.Specs()) })
 		}
