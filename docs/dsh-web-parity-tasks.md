@@ -1,6 +1,6 @@
 # DSH Web 功能对齐任务清单
 
-状态基线：P0–P23 已完成。P24–P35 已完成首轮实现；未勾选项表示仍需补齐或在真实环境验收，不将未验证内容标记为完成。
+状态基线：P0–P23 已完成。P24–P35 已完成首轮实现；P36-1–P36-8 为“DSH 原生 UI 接入/视觉替换”新目标。未勾选项表示仍需补齐或在真实环境验收，不将未验证内容标记为完成。
 
 约束：`deepseek-harness` 仅作为只读参考，不修改其任何文件；新功能可以使用干净的新接口，不保留旧数据或旧接口兼容层。
 
@@ -20,6 +20,14 @@
 | P33 | 可访问性与键盘交互 | P2 | 已完成 | P28、P29、P31 |
 | P34 | 性能、真实后端联调与验收 | P0 | 部分完成（保留真实大数据基线） | P25、P27、P32、P33 |
 | P35 | 生产部署与交付验证 | P2 | 部分完成（待目标环境） | P34 |
+| P36-1 | DSH 原生前端构建入口 | P0 | 进行中 | P34、P35 |
+| P36-2 | DSH Web API/RPC/WebSocket 适配层 | P0 | 未开始 | P36-1 |
+| P36-3 | DSH Session/Conversation 数据模型适配 | P0 | 未开始 | P36-2 |
+| P36-4 | DSH 原生 UI 插件与视觉替换 | P0 | 未开始 | P36-1、P36-3 |
+| P36-5 | DSH 全量交互与状态能力 | P0 | 未开始 | P36-2、P36-4 |
+| P36-6 | 视觉、响应式、键盘与无障碍验收 | P1 | 未开始 | P36-4、P36-5 |
+| P36-7 | 真实任务性能与持续流式验收 | P1 | 未开始 | P36-5、P36-6 |
+| P36-8 | 原生 UI 生产交付与目标环境验证 | P1 | 未开始 | P36-7 |
 
 ## 详细任务
 
@@ -133,6 +141,79 @@
 
 验收标准：交付包可在目标环境独立启动，核心页面、API、SSE 和错误处理均可用，并有可重复的部署步骤。
 
+### P36-1：DSH 原生前端构建入口（进行中）
+
+- [ ] 在 `shutu-agent` 内建立独立的 React/Cordis/Vite 原生入口，不再以当前单体 `App` 作为最终 UI 根节点。
+- [ ] 以只读方式复用 DSH client package 的 boot、module loader、uiRenderer、slot 和 plugin manifest 约定。
+- [ ] 解决依赖、构建、dist、source map 和发布包闭包，运行时不依赖 `deepseek-harness` 源目录。
+- [ ] 建立 DSH 版本/来源清单，确保后续 DSH 参考变化可追踪。
+
+验收标准：Shutu 前端能独立启动 DSH boot 和 Cordis plugin graph，根节点由 DSH `uiRenderer` 装载，发布 dist 自包含；`deepseek-harness` 无文件变更。
+
+### P36-2：DSH Web API/RPC/WebSocket 适配层
+
+- [ ] 实现 DSH client connection 所需的 RPC 请求/响应和错误协议。
+- [ ] 实现会话、工作区、设置、模型、权限、文件、附件、命令、技能、队列、审批和导出接口。
+- [ ] 实现 events downlink、host downlink、连接状态、断线重连和续传。
+- [ ] 为新协议建立 Go handler、契约测试和 replay fixture。
+
+验收标准：DSH 原生 client 不需要 Shutu 专用 UI API 即可完成启动、列会话、打开会话、发送消息和接收实时事件。
+
+### P36-3：DSH Session/Conversation 数据模型适配
+
+- [ ] 将 Go 事件映射为 DSH Session header、surface、Conversation node 和 request/tool/turn 关系。
+- [ ] 对齐 stable ID、seq、父子关系、分页游标、实时 frame 和 compaction 语义。
+- [ ] 对齐 Markdown、代码块、reasoning、图片、附件、Token、错误和 produced files 数据。
+- [ ] 确保 replay、live stream 和 reconnect 使用同一份投影结果。
+
+验收标准：DSH 原生 Conversation、Tool、Trajectory 和 Inspector 组件可以直接消费 Shutu 适配后的 DSH 数据。
+
+### P36-4：DSH 原生 UI 插件与视觉替换
+
+- [ ] 接入 DSH layout、theme、brand、sidebar、workspace 和 conversation 插件。
+- [ ] 接入 DSH tool、trajectory、composer、command、input trigger、reference 和 skill 插件。
+- [ ] 接入 DSH subagent、jobs、model、permission、plan、goal、settings、attachment 和 question 插件。
+- [ ] 移除当前 Shutu 自定义主布局、颜色 token、组件层级和页面导航作为最终渲染路径。
+
+验收标准：页面 DOM 结构、布局、主题 token、组件文案和视觉行为与 DSH 原生 Web 一致。
+
+### P36-5：DSH 全量交互与状态能力
+
+- [ ] 完成新建、切换、归档、删除、Fork 会话和 Workspace 管理。
+- [ ] 完成发送、重试、取消、队列、steer、审批、问题、计划和目标操作。
+- [ ] 完成 Tool 展开/折叠、请求详情、Trajectory、搜索、历史分页和滚动定位。
+- [ ] 完成子代理、后台任务、技能、文件引用、附件、模型、权限、Provider 和设置。
+- [ ] 完成 export、feedback、错误恢复、重连和 session 状态提示。
+
+验收标准：DSH Web E2E 场景在 Shutu 后端上逐项通过，不保留当前自定义 UI 的替代交互。
+
+### P36-6：视觉、响应式、键盘与无障碍验收
+
+- [ ] 建立 DSH 桌面/移动端、深色/浅色、空数据/加载/错误状态截图基线。
+- [ ] 对比布局尺寸、字体、间距、颜色、边框、滚动条、焦点和弹层行为。
+- [ ] 验证 Tab、快捷键、Escape、读屏语义、ARIA、焦点恢复和触控目标。
+- [ ] 为每个 DSH 核心页面保留截图和交互证据。
+
+验收标准：视觉差异在约定阈值内，主要交互和无障碍检查与 DSH 结果一致。
+
+### P36-7：真实任务性能与持续流式验收
+
+- [ ] 用真实“网页版超级玛丽”长任务验证 5 万、10 万级历史记录。
+- [ ] 验证 reasoning/token/tool 持续流、长文本、代码块和密集工具调用。
+- [ ] 记录 FPS、JS heap、DOM、Long Task、事件到 UI 延迟和重连恢复时间。
+- [ ] 在原生 DSH UI 替换完成后重新设定并通过性能阈值。
+
+验收标准：当前版本在目标数据规模和持续流式输出下无明显卡顿、泄漏、重复事件或功能回退。
+
+### P36-8：原生 UI 生产交付与目标环境验证
+
+- [ ] 生成包含 DSH 原生 dist、Go 服务、协议适配层和版本元数据的自包含交付包。
+- [ ] 验证本机、目标 Windows/Linux 环境的启动、健康检查、API、WebSocket 和静态资源。
+- [ ] 验证升级、数据目录复用、回滚和失败恢复。
+- [ ] 完成目标环境部署记录、验收报告和回滚操作手册。
+
+验收标准：交付包在目标环境呈现与 DSH 一致的 UI 和功能，并有可重复的部署、升级和回滚步骤。
+
 ## 推荐执行顺序
 
 ```text
@@ -151,4 +232,4 @@ P25 + P27 + P32 + P33 ──> P34 联调与验收
 P34 ──> P35 部署交付
 ```
 
-P24–P35 已完成首轮实现；P34 的真实生产大数据基线和 P35 的目标环境部署/升级/回滚仍需在对应环境完成，再建立新的 P36+ 任务。
+P24–P35 已完成首轮实现；P34/P35 的真实环境事项与 P36-1–P36-8 的 DSH 原生 UI 接入并行推进，所有未勾选项需在对应验收证据完成后再标记完成。
