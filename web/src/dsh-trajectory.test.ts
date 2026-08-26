@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { EventView } from './api'
-import { collapseDshAssistantToolCalls, collapseDshTrajectoryTurns, projectDshTrajectory } from './dsh-trajectory'
+import { collapseDshAssistantToolCalls, collapseDshTrajectoryTurns, projectDshTrajectory, projectDshTrajectoryRecords } from './dsh-trajectory'
 
 const event = (seq: number, type: string, summary: string, details?: Record<string, unknown>): EventView => ({
   seq, type, version: 1, time: `2026-08-25T00:00:0${seq}Z`, summary, ...(details ? { details } : {}),
@@ -50,5 +50,36 @@ describe('DSH trajectory adapter', () => {
     expect(compacted[1]?.type).toBe('tool/summary')
     expect(compacted[1]?.summary).toBe('2 tool calls · glob, read')
     expect(compacted[1]?.collapsedAssistantSeq).toBe(1)
+  })
+
+  it('normalizes request and tool relationships with stable record ids', () => {
+    const records = projectDshTrajectoryRecords([
+      event(1, 'turn/start', 'start', { turn: 3 }),
+      event(2, 'llm/request_start', 'request', { request_id: 'req-1', usage: { input_tokens: 4 } }),
+      { ...event(3, 'assistant/message', 'call'), tool_name: 'read', call_id: 'call-1' },
+      { ...event(4, 'tool/call', 'read'), tool_name: 'read', tool_args: '{"path":"a"}', call_id: 'call-1' },
+      { ...event(5, 'tool/result', 'done'), tool_name: 'read', tool_output: 'ok', call_id: 'call-1' },
+      event(6, 'llm/request_end', 'complete', { request_id: 'req-1', usage: { input_tokens: 4, output_tokens: 2, total_tokens: 6 } }),
+    ])
+
+    expect(records.map(record => record.id)).toEqual([
+      'event:1:v1', 'event:2:v1', 'event:3:v1', 'event:4:v1', 'event:5:v1', 'event:6:v1',
+    ])
+    expect(records[1]?.kind).toBe('request')
+    expect(records[2]?.requestId).toBe('request:req-1')
+    expect(records[3]?.parentId).toBe(records[2]?.id)
+    expect(records[4]?.parentId).toBe(records[3]?.id)
+    expect(records[4]?.childIds).toEqual([])
+    expect(records[5]?.requestId).toBe('request:req-1')
+    expect(records[5]?.usage?.totalTokens).toBe(6)
+    expect(records[1]?.childIds).toEqual([records[2]?.id, records[5]?.id])
+    expect(records[2]?.childIds).toEqual([records[3]?.id])
+  })
+
+  it('keeps malformed timestamps and unknown events inspectable', () => {
+    const records = projectDshTrajectoryRecords([event(1, 'custom/event', 'opaque')].map(item => ({ ...item, time: 'not-a-date' })))
+    expect(records[0]?.kind).toBe('unknown')
+    expect(records[0]?.startedAt).toBeNull()
+    expect(records[0]?.text).toBe('opaque')
   })
 })
