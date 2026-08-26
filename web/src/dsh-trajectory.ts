@@ -61,23 +61,66 @@ export interface DshTrajectoryEvent extends EventView {
   collapsedAssistantSeq?: number
   collapsedToolCount?: number
   collapsedToolNames?: readonly string[]
+  streaming?: boolean
 }
 
 function isStructuralEvent(event: EventView): boolean {
   return event.type === 'turn/start' || event.type === 'turn/end' ||
     event.type === 'step/start' || event.type === 'step/end' ||
     event.type === 'assistant/chunk' || event.type === 'assistant/reasoning' ||
+    event.type === 'assistant/stream' ||
     event.type.startsWith('llm/')
+}
+
+function isAssistantStreamEvent(event: EventView): boolean {
+  return event.type === 'assistant/chunk' || event.type === 'assistant/reasoning'
+}
+
+function mergeAssistantStream(events: readonly EventView[]): DshTrajectoryEvent | null {
+  const first = events[0]
+  if (first === undefined) return null
+  const text = events.filter(event => event.type === 'assistant/chunk').map(event => event.summary).join('')
+  const reasoning = events.filter(event => event.type === 'assistant/reasoning').map(event => event.reasoning || event.summary).join('')
+  const last = events[events.length - 1]!
+  return {
+    ...first,
+    type: 'assistant/stream',
+    summary: text || reasoning || first.summary,
+    ...(reasoning ? { reasoning } : {}),
+    time: last.time,
+    details: { ...first.details, status: 'running' },
+    streaming: true,
+  }
+}
+
+function compactTurn(turn: readonly EventView[]): readonly DshTrajectoryEvent[] {
+  const streamEvents = turn.filter(isAssistantStreamEvent)
+  const committed = turn.some(event => event.type === 'assistant/message')
+  const merged = !committed ? mergeAssistantStream(streamEvents) : null
+  const output: DshTrajectoryEvent[] = []
+  let inserted = false
+  for (const event of turn) {
+    if (isAssistantStreamEvent(event)) {
+      if (merged !== null && !inserted) {
+        output.push(merged)
+        inserted = true
+      }
+      continue
+    }
+    if (!isStructuralEvent(event)) output.push(event)
+  }
+  if (output.length > 0) return output
+  if (merged !== null) return [merged]
+  if (turn.length > 0) return [turn[turn.length - 1]!]
+  return []
 }
 
 /** Return the compact DSH trajectory view for a session. */
 export function collapseDshTrajectoryTurns(events: readonly EventView[]): readonly EventView[] {
-  const compacted: EventView[] = []
+  const compacted: DshTrajectoryEvent[] = []
   let turn: EventView[] = []
   const flush = (): void => {
-    const surface = turn.filter(event => !isStructuralEvent(event))
-    if (surface.length > 0) compacted.push(...surface)
-    else if (turn.length > 0) compacted.push(turn[turn.length - 1])
+    compacted.push(...compactTurn(turn))
     turn = []
   }
   for (const event of events) {

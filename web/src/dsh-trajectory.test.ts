@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { EventView } from './api'
-import { collapseDshAssistantToolCalls, collapseDshTrajectoryTurns, projectDshTrajectory, projectDshTrajectoryRecords } from './dsh-trajectory'
+import { collapseDshAssistantToolCalls, collapseDshTrajectoryTurns, projectDshTrajectory, projectDshTrajectoryRecords, type DshTrajectoryEvent } from './dsh-trajectory'
 
 const event = (seq: number, type: string, summary: string, details?: Record<string, unknown>): EventView => ({
   seq, type, version: 1, time: `2026-08-25T00:00:0${seq}Z`, summary, ...(details ? { details } : {}),
@@ -81,5 +81,32 @@ describe('DSH trajectory adapter', () => {
     expect(records[0]?.kind).toBe('unknown')
     expect(records[0]?.startedAt).toBeNull()
     expect(records[0]?.text).toBe('opaque')
+  })
+
+  it('merges uncommitted assistant chunks into one stable live record', () => {
+    const compacted = collapseDshTrajectoryTurns([
+      event(1, 'turn/start', 'start'),
+      event(2, 'user/message', 'question'),
+      event(3, 'assistant/chunk', 'Hel'),
+      event(4, 'assistant/reasoning', 'thinking'),
+      event(5, 'assistant/chunk', 'lo'),
+    ])
+
+    expect(compacted.map(item => item.seq)).toEqual([2, 3])
+    expect(compacted[1]?.type).toBe('assistant/stream')
+    expect(compacted[1]?.summary).toBe('Hello')
+    expect(compacted[1]?.reasoning).toBe('thinking')
+    expect((compacted[1] as DshTrajectoryEvent)?.streaming).toBe(true)
+  })
+
+  it('drops uncommitted chunks when the final assistant message arrives', () => {
+    const compacted = collapseDshTrajectoryTurns([
+      event(1, 'user/message', 'question'),
+      event(2, 'assistant/chunk', 'partial'),
+      event(3, 'assistant/message', 'complete'),
+    ])
+
+    expect(compacted.map(item => item.seq)).toEqual([1, 3])
+    expect(compacted.some(item => item.type === 'assistant/stream')).toBe(false)
   })
 })
