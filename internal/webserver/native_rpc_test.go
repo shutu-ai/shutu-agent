@@ -446,6 +446,30 @@ func TestNativeSessionReferenceCandidatesReturnCanonicalMentions(t *testing.T) {
 	}
 }
 
+func TestNativePluginInventoryMatchesNativeManifestShape(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/pluginInventory/list", "tok", `{"type":"client-request","rpcId":"plugins","method":"pluginInventory/list","payload":{"args":[]}}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK {
+		t.Fatalf("plugin inventory response = %+v", response)
+	}
+	var value struct {
+		Entries []struct {
+			EntryID    string `json:"entryId"`
+			ModuleName string `json:"moduleName"`
+			Enabled    bool   `json:"enabled"`
+			FiberPhase string `json:"fiberPhase"`
+		} `json:"entries"`
+	}
+	encoded, _ := json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &value); err != nil {
+		t.Fatal(err)
+	}
+	if len(value.Entries) < 30 || value.Entries[0].EntryID == "" || value.Entries[0].EntryID != value.Entries[0].ModuleName || !value.Entries[0].Enabled || value.Entries[0].FiberPhase != "active" {
+		t.Fatalf("plugin inventory value = %+v", value.Entries)
+	}
+}
+
 func TestNativeHistoryReturnsDSHProjectionBaseline(t *testing.T) {
 	srv, st := newTestServer(t, "tok")
 	seedSession(t, st, "native-projections", []session.Event{

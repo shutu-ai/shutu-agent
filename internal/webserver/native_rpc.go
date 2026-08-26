@@ -424,6 +424,7 @@ func (s *Server) registerNativeRoutes(mux *http.ServeMux) {
 		"messageFeedback/list", "messageFeedback/put", "messageFeedback/delete",
 		"fileReferences/list",
 		"sessionReferenceResolver/candidates",
+		"pluginInventory/list",
 		"session.list", "session.search", "session.create",
 		"session.history", "session.rename", "session.prompt", "session.cancel", "session.attachment",
 		"session.models", "session.selectModel", "session.fork", "session.updateQueue",
@@ -672,6 +673,33 @@ func (s *Server) nativeSessionReferenceCandidates(r *http.Request, raw json.RawM
 		}
 	}
 	return nativeRPCSuccess(values)
+}
+
+func nativePluginInventory() nativeRPCResult {
+	packages := []string{
+		"connection", "hmr", "locale", "runtime", "ui-agent-preset", "ui-attachment",
+		"ui-brand-official", "ui-commands", "ui-conversation", "ui-deliverables",
+		"ui-directory-picker-browse", "ui-goal", "ui-input-trigger", "ui-jobs",
+		"ui-layout", "ui-message-feedback", "ui-model-selection", "ui-permission-presets",
+		"ui-plan", "ui-reference", "ui-renderer", "ui-settings", "ui-settings-general",
+		"ui-settings-models", "ui-settings-plugin-inventory", "ui-settings-plugins",
+		"ui-sidebar", "ui-skill", "ui-subagent", "ui-theme", "ui-tool", "ui-trajectory",
+		"ui-user-questions", "ui-workflow-run", "ui-workspace",
+	}
+	entries := make([]any, 0, len(packages)+4)
+	for _, name := range packages {
+		id := "@deepseek-ai/dsh-client-" + name
+		entries = append(entries, map[string]any{"entryId": id, "moduleName": id, "enabled": true, "fiberPhase": "active"})
+	}
+	for _, item := range []struct{ id, module string }{
+		{"@deepseek-ai/dsh-typert-registry", "@deepseek-ai/dsh-typert-registry"},
+		{"@deepseek-ai/dsh-cordis-client-runner", "@deepseek-ai/dsh-cordis-client-runner"},
+		{"@deepseek-ai/dsh-client-ui-cordis", "@deepseek-ai/dsh-client-ui-cordis"},
+		{"@deepseek-ai/dsh-session-log-export", "@deepseek-ai/dsh-session-log-export"},
+	} {
+		entries = append(entries, map[string]any{"entryId": item.id, "moduleName": item.module, "enabled": true, "fiberPhase": "active"})
+	}
+	return nativeRPCSuccess(map[string]any{"entries": entries})
 }
 
 func (s *Server) nativeSettingsDescribe() nativeRPCResult {
@@ -1114,6 +1142,8 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 		return s.nativeFileReferencesList(r, raw)
 	case "sessionReferenceResolver/candidates":
 		return s.nativeSessionReferenceCandidates(r, raw)
+	case "pluginInventory/list":
+		return nativePluginInventory()
 	case "session.list":
 		return s.nativeSessionList(r)
 	case "session.search":
