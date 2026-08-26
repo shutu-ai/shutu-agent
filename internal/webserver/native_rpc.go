@@ -241,13 +241,16 @@ type nativeSessionSearchRequest struct {
 
 type nativeWorkspaceView struct {
 	WorkspaceID string   `json:"workspaceId"`
+	Path        string   `json:"path"`
 	Title       string   `json:"title"`
-	Path        string   `json:"path,omitempty"`
 	SessionIDs  []string `json:"sessionIds"`
+	CreatedAt   string   `json:"createdAt"`
+	UpdatedAt   string   `json:"updatedAt"`
 }
 
 type nativeWorkspaceListValue struct {
-	Items []nativeWorkspaceView `json:"items"`
+	Items              []nativeWorkspaceView `json:"items"`
+	ArchivedSessionIDs []string              `json:"archivedSessionIds"`
 }
 
 type nativeEventEnvelope struct {
@@ -283,7 +286,9 @@ func (s *Server) registerNativeRoutes(mux *http.ServeMux) {
 		"session.list", "session.search", "session.create",
 		"session.history", "session.rename", "session.prompt", "session.cancel", "session.attachment",
 		"session.models", "session.selectModel",
-		"workspace.list", "agentPreset.list", "agentPreset.select", "settings.describe",
+		"workspace.list", "workspace.create", "workspace.rename", "workspace.delete",
+		"workspace.insertBefore", "workspace.insertSessionBefore", "workspace.archiveSession",
+		"agentPreset.list", "agentPreset.select", "settings.describe",
 		"settings.mutate", "credentials.describe", "dynamicCordisRunner/syncInspectManifest",
 		"dynamicCordisRunner/inventory", "llm.providers", "llm.models",
 	} {
@@ -749,6 +754,56 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 		return nativeRPCSuccess(map[string]any{"accepted": true})
 	case "workspace.list":
 		return s.nativeWorkspaceList(r)
+	case "workspace.create":
+		var req struct {
+			Path string `json:"path"`
+		}
+		if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
+			return failure
+		}
+		return s.nativeWorkspaceCreate(r, req.Path)
+	case "workspace.rename":
+		var req struct {
+			WorkspaceID string `json:"workspaceId"`
+			Title       string `json:"title"`
+		}
+		if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
+			return failure
+		}
+		return s.nativeWorkspaceRename(r, req.WorkspaceID, req.Title)
+	case "workspace.delete":
+		var req struct {
+			WorkspaceID string `json:"workspaceId"`
+		}
+		if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
+			return failure
+		}
+		return s.nativeWorkspaceDelete(r, req.WorkspaceID)
+	case "workspace.insertBefore":
+		var req struct {
+			WorkspaceID     string `json:"workspaceId"`
+			BeforeWorkspace string `json:"beforeWorkspaceId"`
+		}
+		if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
+			return failure
+		}
+		return s.nativeWorkspaceInsertBefore(r, req.WorkspaceID, req.BeforeWorkspace)
+	case "workspace.insertSessionBefore":
+		var req struct {
+			WorkspaceID   string `json:"workspaceId"`
+			SessionID     string `json:"sessionId"`
+			BeforeSession string `json:"beforeSessionId"`
+		}
+		if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
+			return failure
+		}
+		return s.nativeWorkspaceInsertSessionBefore(r, req.WorkspaceID, req.SessionID, req.BeforeSession)
+	case "workspace.archiveSession":
+		var req nativeSessionIDRequest
+		if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
+			return failure
+		}
+		return s.nativeWorkspaceArchiveSession(r, req.SessionID)
 	case "agentPreset.list":
 		return s.nativeAgentPresetList()
 	case "agentPreset.select":
@@ -1572,19 +1627,297 @@ func (s *Server) nativeWorkspaceList(r *http.Request) nativeRPCResult {
 	if err != nil {
 		return nativeRPCFailure("internal", err.Error(), nil)
 	}
-	byWorkspace := make(map[string][]string)
-	for _, m := range metas {
-		if m.ArchivedAt.IsZero() && m.WorkspaceID != "" {
-			byWorkspace[m.WorkspaceID] = append(byWorkspace[m.WorkspaceID], m.ID)
+	items, archived := nativeWorkspaceViews(workspaces, metas)
+	return nativeRPCSuccess(nativeWorkspaceListValue{Items: items, ArchivedSessionIDs: archived})
+}
+
+func nativeWorkspaceViews(workspaces []store.WorkspaceMeta, metas []store.SessionMeta) ([]nativeWorkspaceView, []string) {
+	byWorkspace := make(map[string][]store.SessionMeta)
+	archived := make([]string, 0)
+	for _, meta := range metas {
+		if !meta.ArchivedAt.IsZero() {
+			archived = append(archived, meta.ID)
+		}
+		if meta.WorkspaceID != "" {
+			byWorkspace[meta.WorkspaceID] = append(byWorkspace[meta.WorkspaceID], meta)
 		}
 	}
 	items := make([]nativeWorkspaceView, 0, len(workspaces))
-	for _, ws := range workspaces {
-		ids := append([]string(nil), byWorkspace[ws.ID]...)
-		sort.Strings(ids)
-		items = append(items, nativeWorkspaceView{WorkspaceID: ws.ID, Title: ws.Title, Path: ws.Path, SessionIDs: ids})
+	for _, workspace := range workspaces {
+		members := append([]store.SessionMeta(nil), byWorkspace[workspace.ID]...)
+		sort.SliceStable(members, func(left, right int) bool {
+			if members[left].Sort != members[right].Sort {
+				return members[left].Sort < members[right].Sort
+			}
+			if !members[left].UpdatedAt.Equal(members[right].UpdatedAt) {
+				return members[left].UpdatedAt.After(members[right].UpdatedAt)
+			}
+			return members[left].ID < members[right].ID
+		})
+		ids := make([]string, 0, len(members))
+		for _, member := range members {
+			ids = append(ids, member.ID)
+		}
+		createdAt := nativeWorkspaceTime(workspace.CreatedAt)
+		items = append(items, nativeWorkspaceView{
+			WorkspaceID: workspace.ID, Path: workspace.Path, Title: workspace.Title,
+			SessionIDs: ids, CreatedAt: createdAt, UpdatedAt: createdAt,
+		})
 	}
-	return nativeRPCSuccess(nativeWorkspaceListValue{Items: items})
+	return items, archived
+}
+
+func nativeWorkspaceTime(value time.Time) string {
+	if value.IsZero() {
+		return time.Unix(0, 0).UTC().Format(time.RFC3339Nano)
+	}
+	return value.UTC().Format(time.RFC3339Nano)
+}
+
+func nativeWorkspaceFind(items []nativeWorkspaceView, id string) (nativeWorkspaceView, bool) {
+	for _, item := range items {
+		if item.WorkspaceID == id {
+			return item, true
+		}
+	}
+	return nativeWorkspaceView{}, false
+}
+
+func nativeWorkspaceCanonicalPath(rawPath string) (string, error) {
+	path := strings.TrimSpace(rawPath)
+	if path == "" {
+		return "", errors.New("workspace path is required")
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace path: %w", err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", fmt.Errorf("workspace path %q is unavailable: %w", abs, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("workspace path %q is not a directory", abs)
+	}
+	canonical, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize workspace path %q: %w", abs, err)
+	}
+	return filepath.Clean(canonical), nil
+}
+
+func (s *Server) nativeWorkspaceCreate(r *http.Request, rawPath string) nativeRPCResult {
+	path, err := nativeWorkspaceCanonicalPath(rawPath)
+	if err != nil {
+		return nativeRPCFailure("workspace-invalid-path", err.Error(), map[string]any{"path": strings.TrimSpace(rawPath)})
+	}
+	workspaces, err := s.store.ListWorkspaces(r.Context())
+	if err != nil {
+		return nativeRPCFailure("internal", err.Error(), nil)
+	}
+	metas, err := s.store.ListSessions(r.Context())
+	if err != nil {
+		return nativeRPCFailure("internal", err.Error(), nil)
+	}
+	items, _ := nativeWorkspaceViews(workspaces, metas)
+	for _, workspace := range items {
+		if filepath.Clean(workspace.Path) == path {
+			return nativeRPCSuccess(map[string]any{"workspace": workspace, "created": false})
+		}
+	}
+	id, err := newWorkspaceID()
+	if err != nil {
+		return nativeRPCFailure("workspace-create-failed", err.Error(), nil)
+	}
+	if pathStore, ok := s.store.(store.WorkspacePathStore); ok {
+		err = pathStore.CreateWorkspaceWithPath(r.Context(), id, filepath.Base(path), path)
+	} else {
+		err = s.store.CreateWorkspace(r.Context(), id, filepath.Base(path))
+	}
+	if err != nil {
+		return nativeRPCFailure("workspace-create-failed", err.Error(), nil)
+	}
+	now := nativeWorkspaceTime(time.Now())
+	created := nativeWorkspaceView{
+		WorkspaceID: id, Path: path, Title: filepath.Base(path), SessionIDs: []string{},
+		CreatedAt: now, UpdatedAt: now,
+	}
+	return nativeRPCSuccess(map[string]any{"workspace": created, "created": true})
+}
+
+func (s *Server) nativeWorkspaceRename(r *http.Request, id, rawTitle string) nativeRPCResult {
+	id = strings.TrimSpace(id)
+	title := strings.TrimSpace(boundRunes(rawTitle, maxWorkspaceTitle))
+	if id == "" || title == "" {
+		return nativeRPCFailure("bad-request", "workspaceId and a non-blank title are required", nil)
+	}
+	workspaces, err := s.store.ListWorkspaces(r.Context())
+	if err != nil {
+		return nativeRPCFailure("internal", err.Error(), nil)
+	}
+	metas, err := s.store.ListSessions(r.Context())
+	if err != nil {
+		return nativeRPCFailure("internal", err.Error(), nil)
+	}
+	items, _ := nativeWorkspaceViews(workspaces, metas)
+	current, found := nativeWorkspaceFind(items, id)
+	if !found {
+		return nativeRPCFailure("workspace-not-found", "workspace not found", map[string]any{"workspaceId": id})
+	}
+	for _, workspace := range items {
+		if workspace.WorkspaceID != id && workspace.Title == title {
+			return nativeRPCFailure("workspace-name-conflict", "workspace title is already in use", map[string]any{"workspaceId": workspace.WorkspaceID})
+		}
+	}
+	if current.Title == title {
+		return nativeRPCSuccess(map[string]any{"workspace": current})
+	}
+	if err := s.store.SetWorkspaceTitle(r.Context(), id, title); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nativeRPCFailure("workspace-not-found", "workspace not found", map[string]any{"workspaceId": id})
+		}
+		return nativeRPCFailure("workspace-rename-failed", err.Error(), nil)
+	}
+	current.Title = title
+	return nativeRPCSuccess(map[string]any{"workspace": current})
+}
+
+func (s *Server) nativeWorkspaceDelete(r *http.Request, id string) nativeRPCResult {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nativeRPCFailure("bad-request", "workspaceId is required", nil)
+	}
+	if err := s.store.DeleteWorkspace(r.Context(), id); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nativeRPCFailure("workspace-not-found", "workspace not found", map[string]any{"workspaceId": id})
+		}
+		return nativeRPCFailure("workspace-delete-failed", err.Error(), nil)
+	}
+	return nativeRPCSuccess(map[string]any{"deleted": true})
+}
+
+func (s *Server) nativeWorkspaceInsertBefore(r *http.Request, id, beforeID string) nativeRPCResult {
+	id = strings.TrimSpace(id)
+	beforeID = strings.TrimSpace(beforeID)
+	if id == "" {
+		return nativeRPCFailure("bad-request", "workspaceId is required", nil)
+	}
+	workspaces, err := s.store.ListWorkspaces(r.Context())
+	if err != nil {
+		return nativeRPCFailure("internal", err.Error(), nil)
+	}
+	order := make([]string, 0, len(workspaces))
+	known := make(map[string]bool, len(workspaces))
+	for _, workspace := range workspaces {
+		order = append(order, workspace.ID)
+		known[workspace.ID] = true
+	}
+	if !known[id] || (beforeID != "" && !known[beforeID]) {
+		return nativeRPCFailure("workspace-not-found", "workspace or anchor not found", nil)
+	}
+	if id == beforeID {
+		return nativeRPCSuccess(map[string]any{"workspaceIds": order})
+	}
+	without := make([]string, 0, len(order)-1)
+	for _, workspaceID := range order {
+		if workspaceID != id {
+			without = append(without, workspaceID)
+		}
+	}
+	index := len(without)
+	if beforeID != "" {
+		for position, workspaceID := range without {
+			if workspaceID == beforeID {
+				index = position
+				break
+			}
+		}
+	}
+	order = append(without[:index:index], append([]string{id}, without[index:]...)...)
+	if err := s.store.ReorderWorkspaces(r.Context(), order); err != nil {
+		return nativeRPCFailure("workspace-order-failed", err.Error(), nil)
+	}
+	return nativeRPCSuccess(map[string]any{"workspaceIds": order})
+}
+
+func (s *Server) nativeWorkspaceInsertSessionBefore(r *http.Request, workspaceID, sessionID, beforeID string) nativeRPCResult {
+	workspaceID, sessionID, beforeID = strings.TrimSpace(workspaceID), strings.TrimSpace(sessionID), strings.TrimSpace(beforeID)
+	if workspaceID == "" || sessionID == "" {
+		return nativeRPCFailure("bad-request", "workspaceId and sessionId are required", nil)
+	}
+	workspaces, err := s.store.ListWorkspaces(r.Context())
+	if err != nil {
+		return nativeRPCFailure("internal", err.Error(), nil)
+	}
+	metas, err := s.store.ListSessions(r.Context())
+	if err != nil {
+		return nativeRPCFailure("internal", err.Error(), nil)
+	}
+	items, _ := nativeWorkspaceViews(workspaces, metas)
+	workspace, found := nativeWorkspaceFind(items, workspaceID)
+	if !found {
+		return nativeRPCFailure("workspace-not-found", "workspace not found", map[string]any{"workspaceId": workspaceID})
+	}
+	order := append([]string(nil), workspace.SessionIDs...)
+	contains := func(id string) bool {
+		for _, member := range order {
+			if member == id {
+				return true
+			}
+		}
+		return false
+	}
+	if !contains(sessionID) || (beforeID != "" && !contains(beforeID)) {
+		return nativeRPCFailure("workspace-move-invalid", "session or anchor is not accounted by this workspace", nil)
+	}
+	if sessionID == beforeID {
+		return nativeRPCSuccess(map[string]any{"workspace": workspace})
+	}
+	without := make([]string, 0, len(order)-1)
+	for _, member := range order {
+		if member != sessionID {
+			without = append(without, member)
+		}
+	}
+	index := len(without)
+	if beforeID != "" {
+		for position, member := range without {
+			if member == beforeID {
+				index = position
+				break
+			}
+		}
+	}
+	order = append(without[:index:index], append([]string{sessionID}, without[index:]...)...)
+	if err := s.store.ReorderSessions(r.Context(), workspaceID, order); err != nil {
+		return nativeRPCFailure("workspace-move-invalid", err.Error(), nil)
+	}
+	workspace.SessionIDs = order
+	return nativeRPCSuccess(map[string]any{"workspace": workspace})
+}
+
+func (s *Server) nativeWorkspaceArchiveSession(r *http.Request, sessionID string) nativeRPCResult {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nativeRPCFailure("bad-request", "sessionId is required", nil)
+	}
+	if err := s.store.ArchiveSession(r.Context(), sessionID, true); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nativeRPCFailure("session-not-found", "session not found", map[string]any{"sessionId": sessionID})
+		}
+		return nativeRPCFailure("archive-failed", err.Error(), nil)
+	}
+	metas, err := s.store.ListSessions(r.Context())
+	if err != nil {
+		return nativeRPCFailure("internal", err.Error(), nil)
+	}
+	archived := make([]string, 0)
+	for _, meta := range metas {
+		if !meta.ArchivedAt.IsZero() {
+			archived = append(archived, meta.ID)
+		}
+	}
+	return nativeRPCSuccess(map[string]any{"archivedSessionIds": archived})
 }
 
 func (s *Server) handleNativeMuxWebSocket(w http.ResponseWriter, r *http.Request) {

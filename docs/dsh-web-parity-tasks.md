@@ -17,6 +17,7 @@
 - [x] P36-2：接入标准 `host.listDirectory`、`host.createDirectory`、`host.pickDirectory`，返回 DSH 目录条目、面包屑、截断标志及结构化能力错误。
 - [x] P36-2：接入 `agentPreset.list/select`，将 `minimal/standard/code` 投影为系统 preset；选择仅允许空白会话，并与 `session.create.agentPreset` 共用会话配置存储。
 - [x] P36-2：接入 `session.selectModel`，持久化会话级 provider/model/reasoning effort，并让 `session.models.current` 返回会话覆盖值。
+- [x] P36-2：接入完整 `workspace.*` 原生写操作：创建/幂等解析、重命名冲突、删除、工作区/会话排序及归档快照；`workspace.list` 返回标准时间字段和 `archivedSessionIds`。
 - [ ] P36-3：完整 projection baseline（所有已挂载 projection key）与生产数据规模验收仍待后续任务补齐。
 
 状态基线：P0–P23 已完成。P24–P35 已完成首轮实现；P36-1–P36-8 为“DSH 原生 UI 接入/视觉替换”新目标。未勾选项表示仍需补齐或在真实环境验收，不将未验证内容标记为完成。

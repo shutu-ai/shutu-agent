@@ -688,6 +688,167 @@ func TestNativeSessionSelectModelPersistsAndProjectsSelection(t *testing.T) {
 	}
 }
 
+func TestNativeWorkspaceLifecycleAndOrdering(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	call := func(id, method string, payload any) nativeRPCResponse {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{
+			"type": "client-request", "rpcId": id, "method": method, "payload": payload,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := doReqBody(t, srv.Handler(), "POST", "/api/"+method, "tok", string(body))
+		return nativeResponse(t, rec.Body.Bytes())
+	}
+	workspace := func(response nativeRPCResponse) nativeWorkspaceView {
+		t.Helper()
+		var value struct {
+			Workspace nativeWorkspaceView `json:"workspace"`
+		}
+		encoded, _ := json.Marshal(response.Result.Value)
+		if err := json.Unmarshal(encoded, &value); err != nil {
+			t.Fatal(err)
+		}
+		return value.Workspace
+	}
+
+	rootA, rootB := t.TempDir(), t.TempDir()
+	canonicalA, err := nativeWorkspaceCanonicalPath(rootA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createdA := call("workspace-create-a", "workspace.create", map[string]any{"path": rootA})
+	if !createdA.Result.OK {
+		code, message := "", ""
+		if createdA.Result.Error != nil {
+			code, message = createdA.Result.Error.Code, createdA.Result.Error.Message
+		}
+		t.Fatalf("workspace.create A = %+v (%s: %s)", createdA, code, message)
+	}
+	wsA := workspace(createdA)
+	if wsA.WorkspaceID == "" || wsA.Path != canonicalA || wsA.Title != filepath.Base(canonicalA) || wsA.CreatedAt == "" || wsA.UpdatedAt == "" {
+		t.Fatalf("workspace A = %+v, want path=%q title=%q", wsA, canonicalA, filepath.Base(canonicalA))
+	}
+	createdAgain := call("workspace-create-again", "workspace.create", map[string]any{"path": filepath.Join(rootA, ".")})
+	if !createdAgain.Result.OK {
+		t.Fatalf("idempotent workspace.create = %+v", createdAgain)
+	}
+	var createdAgainValue struct {
+		Created   bool                `json:"created"`
+		Workspace nativeWorkspaceView `json:"workspace"`
+	}
+	encoded, _ := json.Marshal(createdAgain.Result.Value)
+	if err := json.Unmarshal(encoded, &createdAgainValue); err != nil {
+		t.Fatal(err)
+	}
+	if createdAgainValue.Created || createdAgainValue.Workspace.WorkspaceID != wsA.WorkspaceID {
+		t.Fatalf("idempotent workspace result = %+v", createdAgainValue)
+	}
+
+	createdB := call("workspace-create-b", "workspace.create", map[string]any{"path": rootB})
+	if !createdB.Result.OK {
+		t.Fatalf("workspace.create B = %+v", createdB)
+	}
+	wsB := workspace(createdB)
+	if err := st.CreateSession(context.Background(), "ws-a-1", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateSession(context.Background(), "ws-a-2", time.Now().Add(time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateSession(context.Background(), "ws-b-1", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"ws-a-1", "ws-a-2"} {
+		if err := st.SetSessionWorkspace(context.Background(), id, wsA.WorkspaceID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.SetSessionWorkspace(context.Background(), "ws-b-1", wsB.WorkspaceID); err != nil {
+		t.Fatal(err)
+	}
+
+	response := call("session-order", "workspace.insertSessionBefore", map[string]any{
+		"workspaceId": wsA.WorkspaceID, "sessionId": "ws-a-2", "beforeSessionId": "ws-a-1",
+	})
+	if !response.Result.OK {
+		t.Fatalf("workspace.insertSessionBefore = %+v", response)
+	}
+	ordered := workspace(response)
+	if len(ordered.SessionIDs) != 2 || ordered.SessionIDs[0] != "ws-a-2" || ordered.SessionIDs[1] != "ws-a-1" {
+		t.Fatalf("session order = %+v", ordered.SessionIDs)
+	}
+
+	response = call("workspace-order", "workspace.insertBefore", map[string]any{
+		"workspaceId": wsB.WorkspaceID, "beforeWorkspaceId": wsA.WorkspaceID,
+	})
+	if !response.Result.OK {
+		t.Fatalf("workspace.insertBefore = %+v", response)
+	}
+	var workspaceOrder struct {
+		WorkspaceIDs []string `json:"workspaceIds"`
+	}
+	encoded, _ = json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &workspaceOrder); err != nil {
+		t.Fatal(err)
+	}
+	if len(workspaceOrder.WorkspaceIDs) != 2 || workspaceOrder.WorkspaceIDs[0] != wsB.WorkspaceID {
+		t.Fatalf("workspace order = %+v", workspaceOrder.WorkspaceIDs)
+	}
+
+	response = call("workspace-rename", "workspace.rename", map[string]any{"workspaceId": wsA.WorkspaceID, "title": "Project A"})
+	if !response.Result.OK || workspace(response).Title != "Project A" {
+		t.Fatalf("workspace.rename = %+v", response)
+	}
+	response = call("workspace-conflict", "workspace.rename", map[string]any{"workspaceId": wsB.WorkspaceID, "title": "Project A"})
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "workspace-name-conflict" {
+		t.Fatalf("workspace rename conflict = %+v", response)
+	}
+
+	response = call("workspace-archive", "workspace.archiveSession", map[string]any{"sessionId": "ws-a-1"})
+	if !response.Result.OK {
+		t.Fatalf("workspace.archiveSession = %+v", response)
+	}
+	var archive struct {
+		Archived []string `json:"archivedSessionIds"`
+	}
+	encoded, _ = json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &archive); err != nil {
+		t.Fatal(err)
+	}
+	if len(archive.Archived) != 1 || archive.Archived[0] != "ws-a-1" {
+		t.Fatalf("archive result = %+v", archive)
+	}
+
+	response = call("workspace-list", "workspace.list", map[string]any{})
+	if !response.Result.OK {
+		t.Fatalf("workspace.list = %+v", response)
+	}
+	var listing nativeWorkspaceListValue
+	encoded, _ = json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &listing); err != nil {
+		t.Fatal(err)
+	}
+	listedA, ok := nativeWorkspaceFind(listing.Items, wsA.WorkspaceID)
+	if !ok || len(listedA.SessionIDs) != 2 || len(listing.ArchivedSessionIDs) != 1 {
+		t.Fatalf("workspace listing = %+v", listing)
+	}
+
+	response = call("workspace-delete", "workspace.delete", map[string]any{"workspaceId": wsB.WorkspaceID})
+	if !response.Result.OK {
+		t.Fatalf("workspace.delete = %+v", response)
+	}
+	response = call("workspace-delete-missing", "workspace.delete", map[string]any{"workspaceId": wsB.WorkspaceID})
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "workspace-not-found" {
+		t.Fatalf("missing workspace.delete = %+v", response)
+	}
+	response = call("workspace-invalid-path", "workspace.create", map[string]any{"path": filepath.Join(rootA, "missing")})
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "workspace-invalid-path" {
+		t.Fatalf("invalid workspace.create = %+v", response)
+	}
+}
+
 func TestNativeSessionCreatePersistsAgentPreset(t *testing.T) {
 	srv, st := newTestServer(t, "tok")
 	srv.SetSessionManager(func(ctx context.Context, action, requestedID string) (string, error) {
