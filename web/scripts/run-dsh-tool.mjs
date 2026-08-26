@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
@@ -42,10 +42,17 @@ const project = resolveTypeScriptProject()
 const args = project === undefined
   ? process.argv.slice(3)
   : ['--project', project, ...process.argv.slice(3)]
-const result = spawnSync(process.execPath, [tool, ...args], {
-  cwd: webRoot,
-  env: process.env,
-  stdio: 'inherit',
-})
+let result
+try {
+  result = spawnSync(process.execPath, [tool, ...args], {
+    cwd: webRoot,
+    env: process.env,
+    stdio: 'inherit',
+  })
+} finally {
+  if (project !== undefined) {
+    try { unlinkSync(project) } catch { /* best-effort cleanup */ }
+  }
+}
 if (result.error) throw result.error
 process.exit(result.status ?? 1)

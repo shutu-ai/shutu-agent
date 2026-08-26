@@ -63,6 +63,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "pa:", err)
 		os.Exit(1)
 	}
+	cfg.WebServer.DistDir = resolveFrontendDist(*configPath, cfg.WebServer.DistDir)
 
 	st, err := store.OpenSQLite(filepath.Join(cfg.DataDir, "pa.db"))
 	if err != nil {
@@ -568,6 +569,17 @@ func main() {
 	} else {
 		app.repl(ctx)
 	}
+}
+
+// resolveFrontendDist makes a configured relative frontend path portable when
+// pa is launched from outside the configuration directory. Absolute paths are
+// preserved; an empty path remains empty so the web server can report the
+// missing frontend only when the web portal is enabled.
+func resolveFrontendDist(configPath, distDir string) string {
+	if strings.TrimSpace(distDir) == "" || filepath.IsAbs(distDir) {
+		return distDir
+	}
+	return filepath.Clean(filepath.Join(filepath.Dir(configPath), distDir))
 }
 
 // app holds the REPL's mutable session state.

@@ -496,5 +496,6 @@ web_server:
   enabled: true
   addr: 127.0.0.1:18099
   token: ""
-  # React/Cordis frontend output from: cd web && npm.cmd run build
+  # React/Cordis frontend output from: cd web && npm.cmd run build. A relative
+  # path is resolved from the directory containing this config file.
   dist_dir: web/dist

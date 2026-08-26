@@ -43,6 +43,28 @@ func makeWebServerApp(t *testing.T, enabled bool, token string) (*app, *store.SQ
 	}, st
 }
 
+func TestResolveFrontendDist(t *testing.T) {
+	absolute := filepath.Join(t.TempDir(), "dist")
+	tests := []struct {
+		name       string
+		configPath string
+		distDir    string
+		want       string
+	}{
+		{name: "same directory", configPath: "config.yaml", distDir: "web/dist", want: filepath.Clean("web/dist")},
+		{name: "nested config", configPath: filepath.Join("configs", "agent.yaml"), distDir: filepath.Join("..", "web", "dist"), want: filepath.Clean(filepath.Join("web", "dist"))},
+		{name: "absolute", configPath: "config.yaml", distDir: absolute, want: absolute},
+		{name: "empty", configPath: "config.yaml", distDir: "", want: ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := resolveFrontendDist(test.configPath, test.distDir); got != test.want {
+				t.Fatalf("resolveFrontendDist(%q, %q) = %q, want %q", test.configPath, test.distDir, got, test.want)
+			}
+		})
+	}
+}
+
 // TestRegisterWebServerDisabledRegistersNothing verifies the D10 gate: with
 // web_server.enabled=false the composition root leaves a.webserver nil and
 // starts no listener (dispatch-m10 section 5).

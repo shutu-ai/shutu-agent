@@ -8,8 +8,15 @@ Build from this directory:
 
 ```text
 npm.cmd run typecheck
+npm.cmd test -- --run
 npm.cmd run build
+npm.cmd run verify
 ```
+
+For a release-ready frontend, run `npm.cmd run release`; it executes all four
+steps and fails if `dist/index.html` references source-only paths or missing
+bundles. The final `dist/` directory is the only frontend artifact required by
+the Go server.
 
 The scripts resolve the DSH toolchain through `SHUTU_DSH_ROOT`. A sibling
 `deepseek-harness` checkout is used only as the local default; CI or a deploy

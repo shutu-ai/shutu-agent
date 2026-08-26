@@ -2921,9 +2921,10 @@ func (s *Server) handleAttachmentGet(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleEventStream implements GET /api/sessions/{id}/events/stream — the SSE
-// real-time event flow (M10 W1, ADR D-WEB2-B): it first replays the session's
-// stored events as frames (snapshot), then subscribes the injected event source
-// and forwards every new event as a frame. Each frame is
+// real-time event flow (M10 W1, ADR D-WEB2-B): it subscribes the injected event
+// source before replaying the session's stored events as frames (snapshot),
+// queues concurrent events during replay, and then forwards every new event as
+// a frame. Each frame is
 // `id: <seq>\ndata: {seq,type,time,summary}\n\n` and is flushed immediately
 // (http.Flusher). The handler returns when the request context is cancelled
 // (client disconnect), unsubscribing the event source. It does not use
@@ -2967,17 +2968,40 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	fmt.Fprint(w, "retry: 3000\n")
 	argsByCall := collectToolArgs(allEvents)
+	pending := make(chan session.Event, 128)
+	unsub := s.evSrc(id, func(ev session.Event) {
+		select {
+		case pending <- ev:
+		case <-r.Context().Done():
+		}
+	})
+	defer unsub()
 	for _, ev := range events {
 		writeSSEEvent(w, ev, argsByCall)
 	}
 	fl.Flush()
-	unsub := s.evSrc(id, func(ev session.Event) {
-		collectToolArgsInto(argsByCall, ev)
-		writeSSEEvent(w, ev, argsByCall)
-		fl.Flush()
-	})
-	defer unsub()
-	<-r.Context().Done()
+	for {
+		select {
+		case ev := <-pending:
+			collectToolArgsInto(argsByCall, ev)
+			writeSSEEvent(w, ev, argsByCall)
+			fl.Flush()
+		case <-r.Context().Done():
+			// A publisher can enqueue an event immediately before the client
+			// disconnects. Drain already-buffered events once so cancellation
+			// does not make the stream lose a frame.
+			for {
+				select {
+				case ev := <-pending:
+					collectToolArgsInto(argsByCall, ev)
+					writeSSEEvent(w, ev, argsByCall)
+				default:
+					fl.Flush()
+					return
+				}
+			}
+		}
+	}
 }
 
 func streamResumeSeq(r *http.Request) (uint64, error) {
