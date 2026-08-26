@@ -546,13 +546,37 @@ type stepData struct {
 }
 
 type llmRequestData struct {
-	Provider string          `json:"provider,omitempty"`
-	Model    string          `json:"model,omitempty"`
-	Effort   string          `json:"reasoningEffort,omitempty"`
-	Status   string          `json:"status,omitempty"`
-	Error    string          `json:"error,omitempty"`
-	Usage    *llm.TokenUsage `json:"usage,omitempty"`
-	Attempts int             `json:"attempts,omitempty"`
+	RequestID string              `json:"requestId,omitempty"`
+	Provider  string              `json:"provider,omitempty"`
+	Model     string              `json:"model,omitempty"`
+	Effort    string              `json:"reasoningEffort,omitempty"`
+	Status    string              `json:"status,omitempty"`
+	Error     string              `json:"error,omitempty"`
+	Usage     *llm.TokenUsage     `json:"usage,omitempty"`
+	Attempts  int                 `json:"attempts,omitempty"`
+	Messages  []llmRequestMessage `json:"messages,omitempty"`
+	Tools     []llmRequestTool    `json:"tools,omitempty"`
+}
+
+type llmRequestMessage struct {
+	Role       string               `json:"role"`
+	Text       string               `json:"text,omitempty"`
+	Reasoning  string               `json:"reasoning,omitempty"`
+	ToolCallID string               `json:"toolCallId,omitempty"`
+	ToolCalls  []llmRequestToolCall `json:"toolCalls,omitempty"`
+	Images     int                  `json:"images,omitempty"`
+}
+
+type llmRequestToolCall struct {
+	ID        string `json:"id,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Arguments string `json:"arguments,omitempty"`
+}
+
+type llmRequestTool struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description,omitempty"`
+	Parameters  map[string]any `json:"parameters,omitempty"`
 }
 
 // NewTurnStart and NewTurnEnd provide durable lifecycle anchors for a turn.
@@ -574,6 +598,45 @@ func NewLLMRequestStart(provider, model, effort string) any {
 	return llmRequestData{Provider: provider, Model: model, Effort: effort}
 }
 
+// NewLLMRequestStartDetail records the exact model-facing request projection
+// used by the web Inspector. It deliberately stores content blocks as safe
+// role/text/tool-call facts, never image bytes or provider credentials.
+func NewLLMRequestStartDetail(requestID string, req llm.ChatRequest) any {
+	messages := make([]llmRequestMessage, 0, len(req.Messages))
+	for _, message := range req.Messages {
+		detail := llmRequestMessage{Role: string(message.Role), ToolCallID: message.ToolCallID}
+		for _, block := range message.Content {
+			switch block.Kind {
+			case llm.BlockText:
+				detail.Text += block.Text
+			case llm.BlockReasoning:
+				detail.Reasoning += block.Text
+			case llm.BlockImage:
+				detail.Images++
+			}
+		}
+		if len(message.ToolCalls) > 0 {
+			detail.ToolCalls = make([]llmRequestToolCall, 0, len(message.ToolCalls))
+			for _, call := range message.ToolCalls {
+				detail.ToolCalls = append(detail.ToolCalls, llmRequestToolCall{ID: call.ID, Name: call.Name, Arguments: call.Arguments})
+			}
+		}
+		messages = append(messages, detail)
+	}
+	tools := make([]llmRequestTool, 0, len(req.Tools))
+	for _, tool := range req.Tools {
+		tools = append(tools, llmRequestTool{Name: tool.Name, Description: tool.Description, Parameters: tool.Parameters})
+	}
+	return llmRequestData{
+		RequestID: requestID,
+		Provider:  req.Provider,
+		Model:     req.Model,
+		Effort:    req.ReasoningEffort,
+		Messages:  messages,
+		Tools:     tools,
+	}
+}
+
 func NewLLMRequestEnd(provider, model, effort, status, errText string) any {
 	return llmRequestData{Provider: provider, Model: model, Effort: effort, Status: status, Error: errText}
 }
@@ -585,6 +648,17 @@ func NewLLMRequestEndWithUsage(provider, model, effort, status, errText string, 
 		u = &copy
 	}
 	return llmRequestData{Provider: provider, Model: model, Effort: effort, Status: status, Error: errText, Usage: u, Attempts: attempts}
+}
+
+// NewLLMRequestEndWithUsageDetail closes a request using the same stable ID as
+// its start event, allowing clients to aggregate request/response facts.
+func NewLLMRequestEndWithUsageDetail(requestID, provider, model, effort, status, errText string, usage llm.TokenUsage, attempts int) any {
+	var u *llm.TokenUsage
+	if !usage.Empty() {
+		copy := usage
+		u = &copy
+	}
+	return llmRequestData{RequestID: requestID, Provider: provider, Model: model, Effort: effort, Status: status, Error: errText, Usage: u, Attempts: attempts}
 }
 
 func NewLLMRetry(provider, model string, retry llm.RetryEvent) any {

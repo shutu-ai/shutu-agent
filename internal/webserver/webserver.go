@@ -3305,6 +3305,7 @@ func eventDetails(ev session.Event) map[string]any {
 // opaque request payload or credentials.
 func llmRequestDetails(ev session.Event) map[string]any {
 	var raw struct {
+		RequestID  string          `json:"requestId"`
 		Provider   string          `json:"provider"`
 		Model      string          `json:"model"`
 		Effort     string          `json:"reasoningEffort"`
@@ -3315,11 +3316,31 @@ func llmRequestDetails(ev session.Event) map[string]any {
 		DelayMS    int64           `json:"delayMs"`
 		Attempts   int             `json:"attempts"`
 		Usage      *llm.TokenUsage `json:"usage"`
+		Messages   []struct {
+			Role       string `json:"role"`
+			Text       string `json:"text"`
+			Reasoning  string `json:"reasoning"`
+			ToolCallID string `json:"toolCallId"`
+			ToolCalls  []struct {
+				ID        string `json:"id"`
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			} `json:"toolCalls"`
+			Images int `json:"images"`
+		} `json:"messages"`
+		Tools []struct {
+			Name        string         `json:"name"`
+			Description string         `json:"description"`
+			Parameters  map[string]any `json:"parameters"`
+		} `json:"tools"`
 	}
 	if json.Unmarshal(ev.Data, &raw) != nil {
 		return nil
 	}
-	out := make(map[string]any, 8)
+	out := make(map[string]any, 16)
+	if raw.RequestID != "" {
+		out["request_id"] = raw.RequestID
+	}
 	if raw.Provider != "" {
 		out["provider"] = raw.Provider
 	}
@@ -3355,6 +3376,59 @@ func llmRequestDetails(ev session.Event) map[string]any {
 			"reasoning_tokens":    raw.Usage.ReasoningTokens,
 			"cached_input_tokens": raw.Usage.CachedInputTokens,
 		}
+	}
+	if len(raw.Messages) > 0 {
+		const maxMessages = 100
+		messages := raw.Messages
+		if len(messages) > maxMessages {
+			messages = messages[:maxMessages]
+			out["messages_truncated"] = true
+		}
+		projected := make([]map[string]any, 0, len(messages))
+		for _, message := range messages {
+			item := map[string]any{"role": message.Role}
+			if message.Text != "" {
+				item["text"] = boundRunes(message.Text, maxSummary)
+			}
+			if message.Reasoning != "" {
+				item["reasoning"] = boundRunes(message.Reasoning, maxSummary)
+			}
+			if message.ToolCallID != "" {
+				item["tool_call_id"] = message.ToolCallID
+			}
+			if message.Images > 0 {
+				item["images"] = message.Images
+			}
+			if len(message.ToolCalls) > 0 {
+				calls := make([]map[string]any, 0, len(message.ToolCalls))
+				for _, call := range message.ToolCalls {
+					calls = append(calls, map[string]any{"id": call.ID, "name": call.Name, "arguments": boundRunes(call.Arguments, maxSummary)})
+				}
+				item["tool_calls"] = calls
+			}
+			projected = append(projected, item)
+		}
+		out["messages"] = projected
+	}
+	if len(raw.Tools) > 0 {
+		const maxTools = 100
+		tools := raw.Tools
+		if len(tools) > maxTools {
+			tools = tools[:maxTools]
+			out["tools_truncated"] = true
+		}
+		projected := make([]map[string]any, 0, len(tools))
+		for _, tool := range tools {
+			item := map[string]any{"name": tool.Name}
+			if tool.Description != "" {
+				item["description"] = boundRunes(tool.Description, maxSummary)
+			}
+			if tool.Parameters != nil {
+				item["parameters"] = tool.Parameters
+			}
+			projected = append(projected, item)
+		}
+		out["tools"] = projected
 	}
 	if len(out) == 0 {
 		return nil

@@ -178,6 +178,15 @@ pre { margin: 3px 0 0; overflow: auto; color: #b9c8da; font: 11px/1.45 ui-monosp
 .inspector-close { border: 0; padding: 0 3px; color: #8091a5; background: transparent; font-size: 20px; line-height: 1; }
 .inspector-close:hover { color: #e7edf5; }
 .inspector-summary { display: flex; align-items: center; justify-content: space-between; padding: 9px 13px 7px; color: #718096; font-size: 10px; }
+.inspector-request-summary { border-bottom: 1px solid #243244; padding: 10px 13px 4px; }
+.inspector-request-summary > strong { display: block; margin-bottom: 8px; color: #a9e8c1; font-size: 11px; }
+.inspector-actions { display: flex; gap: 6px; margin: 8px 0 4px; }
+.inspector-actions button { border: 1px solid #35506a; border-radius: 5px; padding: 4px 7px; color: #cbd7e3; background: #162537; font-size: 10px; }
+.inspector-actions button:disabled { cursor: not-allowed; opacity: .45; }
+.inspector-token-summary { display: grid; gap: 3px; margin-top: 8px; color: #9fb0c1; font: 10px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.inspector-message-list { display: grid; gap: 10px; margin: 0; padding-left: 20px; }
+.inspector-message-list li::marker { color: #71869b; }
+.inspector-message-list strong { color: #a9e8c1; font-size: 10px; text-transform: uppercase; }
 .inspector-status { border-radius: 10px; padding: 2px 7px; color: #b9c7d5; background: #233244; }
 .inspector-status.done { color: #a9e8c1; background: #142b27; }
 .inspector-status.running { color: #f0c78e; background: #302619; }

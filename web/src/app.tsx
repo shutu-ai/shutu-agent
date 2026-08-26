@@ -866,7 +866,14 @@ function inspectorPayload(event: EventView, keys: readonly string[]): string | n
   return null
 }
 
-function TrajectoryInspector({ event, record, onClose }: { event: DshTrajectoryEvent; record?: DshTrajectoryRecord; onClose: () => void }) {
+function TrajectoryInspector({ event, record, records, onClose, onRetryRequest, onCancelRequest }: {
+  event: DshTrajectoryEvent
+  record?: DshTrajectoryRecord
+  records: readonly DshTrajectoryRecord[]
+  onClose: () => void
+  onRetryRequest?: (input: string) => void
+  onCancelRequest?: () => void
+}) {
   const [tab, setTab] = useState<InspectorTab>('overview')
   const onCloseRef = useRef(onClose)
   onCloseRef.current = onClose
@@ -878,21 +885,77 @@ function TrajectoryInspector({ event, record, onClose }: { event: DshTrajectoryE
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [event.seq])
-  const usage = event.details?.usage
+  const requestId = record?.requestId ?? (typeof event.details?.request_id === 'string' ? `request:${event.details.request_id}` : null)
+  const requestRecords = requestId === null
+    ? record === undefined ? [] : [record]
+    : records.filter(candidate => candidate.requestId === requestId)
+  const requestStart = requestRecords.find(candidate => candidate.eventType === 'llm/request_start')
+  const requestEnd = requestRecords.find(candidate => candidate.eventType === 'llm/request_end')
+  const requestEvent = requestStart?.event ?? event
+  const requestDetails = requestEvent.details ?? {}
+  const usage = requestEnd?.event.details?.usage ?? event.details?.usage
   const usageEntries = typeof usage === 'object' && usage !== null
     ? Object.entries(usage).filter(([, value]) => value !== undefined && value !== null)
     : []
-  const detailEntriesForDisplay = detailEntries(event.details).filter(([key]) => key !== 'usage')
-  const status = record?.status === 'failed' || event.type.includes('error') || event.type.includes('failed') || event.compaction_error
+  const detailEntriesForDisplay = detailEntries(requestDetails).filter(([key]) => !['usage', 'messages', 'tools'].includes(key))
+  const status = requestEnd?.status === 'failed' || requestEnd?.event.details?.status === 'error' || record?.status === 'failed' || event.type.includes('error') || event.type.includes('failed') || event.compaction_error
     ? 'Failed'
-    : record?.status === 'running' || event.details?.status === 'running' || event.type.endsWith('/start') || event.type === 'llm/request_start'
+    : requestEnd !== undefined || record?.status === 'completed' || event.details?.status === 'completed' || event.type.endsWith('/end') || event.type === 'llm/request_end'
+      ? 'Completed'
+      : record?.status === 'running' || event.details?.status === 'running' || event.type.endsWith('/start') || event.type === 'llm/request_start'
       ? 'Running'
       : 'Completed'
   const output = event.tool_output ?? event.reasoning ?? event.compaction_summary ?? event.summary
-  const input = event.tool_args ?? inspectorPayload(event, ['input', 'messages', 'request', 'options'])
-  const error = typeof event.details?.error === 'string' ? event.details.error : event.compaction_error
+  const requestMessages = Array.isArray(requestDetails.messages) ? requestDetails.messages : []
+  const requestTools = Array.isArray(requestDetails.tools) ? requestDetails.tools : []
+  const input = requestMessages.length > 0
+    ? detailText(requestMessages)
+    : event.tool_args ?? inspectorPayload(event, ['input', 'messages', 'request', 'options'])
+  const requestOutput = requestRecords
+    .map(candidate => candidate.outputDetail || candidate.text)
+    .filter(Boolean)
+    .join('\n\n')
+  const error = typeof requestDetails.error === 'string' ? requestDetails.error : event.compaction_error
   const normalizedUsage = record?.usage
+  const retryText = [...requestMessages].reverse().find(message => {
+    return typeof message === 'object' && message !== null && (message as { role?: unknown }).role === 'user'
+  })
+  const retryInput = retryText && typeof retryText === 'object' && typeof (retryText as { text?: unknown }).text === 'string'
+    ? (retryText as { text: string }).text
+    : ''
+  const parent = record?.parentId === null || record?.parentId === undefined
+    ? undefined
+    : records.find(candidate => candidate.id === record.parentId)
+  const requestMeta = [
+    ['Request ID', requestId ?? 'Not assigned'],
+    ['Provider', requestDetails.provider ?? event.details?.provider],
+    ['Model', requestDetails.model ?? event.details?.model],
+    ['Reasoning effort', requestDetails.reasoning_effort ?? event.details?.reasoning_effort],
+    ['Message source', 'shutu-agent loop'],
+    ['Messages', requestMessages.length > 0 ? requestMessages.length : undefined],
+    ['Tool schemas', requestTools.length > 0 ? requestTools.length : undefined],
+    ['Attempts', requestDetails.attempts ?? event.details?.attempts],
+  ].filter(([, value]) => value !== undefined && value !== null && value !== '') as Array<[string, unknown]>
+  const cumulativeUsage: Record<string, number> = {}
+  for (const candidate of records) {
+    if (candidate.eventType !== 'llm/request_end' || candidate.seq > event.seq || candidate.usage === undefined) continue
+    for (const [key, value] of Object.entries(candidate.usage)) cumulativeUsage[key] = (cumulativeUsage[key] ?? 0) + value
+  }
+  const renderJson = (value: unknown, empty: string): string => {
+    if (value === undefined || value === null || value === '') return empty
+    return typeof value === 'string' ? value : JSON.stringify(value, null, 2) ?? empty
+  }
   return <aside className="trajectory-inspector" aria-label="Trajectory event details">
+    <section className="inspector-request-summary" aria-label="Request summary">
+      <strong>{requestId === null ? 'Event context' : 'Request context'}</strong>
+      <dl className="inspector-meta">
+        {requestMeta.map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{detailText(value)}</dd></div>)}
+        {parent && <div><dt>Parent</dt><dd>{parent.id} · {parent.label}</dd></div>}
+        {record && <div><dt>Children</dt><dd>{record.childIds.length}</dd></div>}
+      </dl>
+      {(usageEntries.length > 0 || Object.keys(cumulativeUsage).length > 0) && <div className="inspector-token-summary"><span>Per request: {detailText(usage ?? normalizedUsage)}</span><span>Cumulative: {detailText(cumulativeUsage)}</span></div>}
+      {requestId !== null && <div className="inspector-actions"><button type="button" onClick={() => retryInput && onRetryRequest?.(retryInput)} disabled={!retryInput || onRetryRequest === undefined}>Retry request</button><button type="button" onClick={() => onCancelRequest?.()} disabled={status !== 'Running' || onCancelRequest === undefined}>Cancel</button></div>}
+    </section>
     <div className="inspector-head"><div><span className="eyebrow">EVENT INSPECTOR</span><strong>#{event.seq} {eventLabel(event)}</strong></div><button type="button" className="inspector-close" onClick={onClose} aria-label="Close event details">×</button></div>
     <div className="inspector-summary"><span className={`inspector-status ${status === 'Failed' ? 'danger' : status === 'Running' ? 'running' : 'done'}`}>{status}</span><time>{formatTime(event.time)}</time></div>
     <nav className="inspector-tabs" role="tablist" aria-label="Event detail sections">
@@ -900,9 +963,9 @@ function TrajectoryInspector({ event, record, onClose }: { event: DshTrajectoryE
     </nav>
     <div className="inspector-body" role="tabpanel">
       {tab === 'overview' && <div className="inspector-overview"><p className="inspector-summary-text">{event.summary || 'No summary recorded.'}</p><dl className="inspector-meta"><div><dt>Type</dt><dd>{event.type}</dd></div>{record && <><div><dt>Record ID</dt><dd>{record.id}</dd></div><div><dt>Kind</dt><dd>{record.kind}</dd></div>{record.turn !== null && <div><dt>Turn</dt><dd>{record.turn}</dd></div>}{record.requestId && <div><dt>Request ID</dt><dd>{record.requestId}</dd></div>}{record.parentId && <div><dt>Parent</dt><dd>{record.parentId}</dd></div>}<div><dt>Children</dt><dd>{record.childIds.length}</dd></div></>}{event.tool_name && <div><dt>Tool</dt><dd>{event.tool_name}</dd></div>}{event.call_id && <div><dt>Call ID</dt><dd>{event.call_id}</dd></div>}{event.version > 1 && <div><dt>Version</dt><dd>v{event.version}</dd></div>}</dl>{error && <section className="inspector-section"><h3>Error</h3><pre className="inspector-code">{error}</pre></section>}{(usageEntries.length > 0 || normalizedUsage !== undefined) && <section className="inspector-section"><h3>Token usage</h3><dl className="inspector-meta">{normalizedUsage ? Object.entries(normalizedUsage).map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{detailText(value)}</dd></div>) : usageEntries.map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{detailText(value)}</dd></div>)}</dl></section>}{detailEntriesForDisplay.length > 0 && <section className="inspector-section"><h3>Request details</h3><dl className="inspector-meta">{detailEntriesForDisplay.map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{value}</dd></div>)}</dl></section>}</div>}
-      {tab === 'input' && <pre className="inspector-code">{input || 'No request input recorded.'}</pre>}
-      {tab === 'output' && <pre className="inspector-code">{output || 'No output recorded.'}</pre>}
-      {tab === 'raw' && <pre className="inspector-code">{detailText(event)}</pre>}
+      {tab === 'input' && <div>{requestMessages.length > 0 ? <ol className="inspector-message-list">{requestMessages.map((message, index) => <li key={index}><strong>{typeof message === 'object' && message !== null && 'role' in message ? String((message as { role?: unknown }).role) : `Message ${index + 1}`}</strong><pre className="inspector-code">{renderJson(message, 'Empty message')}</pre></li>)}</ol> : <pre className="inspector-code">{input || 'No request input recorded.'}</pre>}{requestTools.length > 0 && <section className="inspector-section"><h3>Tool schemas</h3><pre className="inspector-code">{renderJson(requestTools, 'No tool schemas recorded.')}</pre></section>}</div>}
+      {tab === 'output' && <pre className="inspector-code">{requestOutput || output || 'No output recorded.'}</pre>}
+      {tab === 'raw' && <pre className="inspector-code">{renderJson(event, 'No raw event recorded.')}</pre>}
       {tab === 'timing' && <dl className="inspector-meta"><div><dt>Recorded at</dt><dd>{event.time}</dd></div>{record?.startedAt !== null && record?.startedAt !== undefined && <div><dt>Started at</dt><dd>{new Date(record.startedAt).toISOString()}</dd></div>}{event.details?.duration_ms !== undefined && <div><dt>Duration</dt><dd>{detailText(event.details.duration_ms)} ms</dd></div>}{event.details?.durationMs !== undefined && <div><dt>Duration</dt><dd>{detailText(event.details.durationMs)} ms</dd></div>}{event.details?.attempt !== undefined && <div><dt>Attempt</dt><dd>{detailText(event.details.attempt)}</dd></div>}{event.details?.attempts !== undefined && <div><dt>Attempts</dt><dd>{detailText(event.details.attempts)}</dd></div>}{event.details?.max_retries !== undefined && <div><dt>Max retries</dt><dd>{detailText(event.details.max_retries)}</dd></div>}{event.details?.maxRetries !== undefined && <div><dt>Max retries</dt><dd>{detailText(event.details.maxRetries)}</dd></div>}</dl>}
     </div>
   </aside>
@@ -1516,6 +1579,13 @@ export function App({ store }: { store: WebStore }) {
   const selectTrajectorySeqs = useCallback((seqs: readonly number[]): void => {
     setTrajectoryFocusSeqs(new Set(seqs))
   }, [])
+  const retryTrajectoryRequest = useCallback((text: string): void => {
+    setSendError(null)
+    void store.send(text).catch(reportError)
+  }, [reportError, store])
+  const cancelTrajectoryRequest = useCallback((): void => {
+    void store.stop().catch(reportError)
+  }, [reportError, store])
   const producedBySeq = useMemo(() => deriveProducedFiles(state.events), [state.events])
   const searchIndex = useMemo(() => new TrajectorySearchIndex(state.events), [state.events])
   const searchMatches = useMemo(() => searchIndex.search(search), [search, searchIndex])
@@ -1741,6 +1811,7 @@ export function App({ store }: { store: WebStore }) {
       }
     } catch (error) { setSendError(error instanceof Error ? error.message : String(error)) }
   }
+  const onFeedback = submitFeedback
 
   const stopRun = async (): Promise<void> => {
     setSendError(null)
@@ -1784,7 +1855,7 @@ export function App({ store }: { store: WebStore }) {
       <InteractionPanel store={store} sessionId={state.selectedId} onError={reportError} />
       <QueuePanel store={store} sessionId={state.selectedId} active={state.sending} onError={reportError} />
        <section className="content-panel">
-        {filesOpen && state.selectedId !== null ? <FilesPanel store={store} sessionId={state.selectedId} openPath={fileOpenPath} onClose={() => { setFilesOpen(false); setFileOpenPath(null) }} onReference={referenceFile} /> : state.authRequired ? <form className="auth-card" onSubmit={event => { event.preventDefault(); void authenticate() }}><strong>Authentication required</strong><span>Enter the bearer token configured for the Shutu web server.</span><input aria-label="Bearer token" type="password" autoComplete="current-password" value={token} onChange={event => setToken(event.target.value)} placeholder="Bearer token" /><button type="submit" disabled={token.trim() === ''}>Connect</button></form> : state.loading ? <div className="empty"><div className="spinner" />Loading session…</div> : tab === 'running' ? <RunningPanel store={store} sessionId={state.selectedId} /> : state.selectedId === null ? <div className="empty"><strong>Start a new conversation</strong><span>Select a session or send a message from the agent.</span></div> : filtered.length === 0 ? <div className="empty"><strong>{search ? 'No matching events' : 'No events yet'}</strong><span>{search ? 'Try a different search term.' : 'Events will appear here as the session runs.'}</span></div> : tab === 'trajectory' ? <div className="trajectory-layout"><div className="trajectory-main"><DshTimeline events={trajectoryEvents} onSelectSeq={selectTrajectorySeq} onSelectSeqs={selectTrajectorySeqs} /><VirtualEvents events={filtered} store={store} sessionId={state.selectedId} feedbackBySeq={feedbackBySeq} producedBySeq={producedBySeq} onFeedback={submitFeedback} onOpenFile={openFilePreview} focusSeq={focusedSeq} selectedSeq={trajectorySelectedSeq} timelineFocusSeqs={trajectoryFocusSeqs} onSelectSeq={selectTrajectorySeq} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} /></div>{selectedTrajectoryEvent !== null && <TrajectoryInspector event={selectedTrajectoryEvent} record={selectedTrajectoryRecord} onClose={() => setTrajectorySelectedSeq(null)} />}</div> : <DshConversation events={filtered} sessionId={state.selectedId} store={store} feedbackBySeq={feedbackBySeq} onFeedback={submitFeedback} onOpenFile={openFilePreview} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} />}
+        {filesOpen && state.selectedId !== null ? <FilesPanel store={store} sessionId={state.selectedId} openPath={fileOpenPath} onClose={() => { setFilesOpen(false); setFileOpenPath(null) }} onReference={referenceFile} /> : state.authRequired ? <form className="auth-card" onSubmit={event => { event.preventDefault(); void authenticate() }}><strong>Authentication required</strong><span>Enter the bearer token configured for the Shutu web server.</span><input aria-label="Bearer token" type="password" autoComplete="current-password" value={token} onChange={event => setToken(event.target.value)} placeholder="Bearer token" /><button type="submit" disabled={token.trim() === ''}>Connect</button></form> : state.loading ? <div className="empty"><div className="spinner" />Loading session…</div> : tab === 'running' ? <RunningPanel store={store} sessionId={state.selectedId} /> : state.selectedId === null ? <div className="empty"><strong>Start a new conversation</strong><span>Select a session or send a message from the agent.</span></div> : filtered.length === 0 ? <div className="empty"><strong>{search ? 'No matching events' : 'No events yet'}</strong><span>{search ? 'Try a different search term.' : 'Events will appear here as the session runs.'}</span></div> : tab === 'trajectory' ? <div className="trajectory-layout"><div className="trajectory-main"><DshTimeline events={trajectoryEvents} onSelectSeq={selectTrajectorySeq} onSelectSeqs={selectTrajectorySeqs} /><VirtualEvents events={filtered} store={store} sessionId={state.selectedId} feedbackBySeq={feedbackBySeq} producedBySeq={producedBySeq} onFeedback={submitFeedback} onOpenFile={openFilePreview} focusSeq={focusedSeq} selectedSeq={trajectorySelectedSeq} timelineFocusSeqs={trajectoryFocusSeqs} onSelectSeq={selectTrajectorySeq} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} /></div>{selectedTrajectoryEvent !== null && <TrajectoryInspector event={selectedTrajectoryEvent} record={selectedTrajectoryRecord} records={trajectoryRecords} onRetryRequest={retryTrajectoryRequest} onCancelRequest={cancelTrajectoryRequest} onClose={() => setTrajectorySelectedSeq(null)} />}</div> : <DshConversation events={filtered} sessionId={state.selectedId} store={store} feedbackBySeq={feedbackBySeq} onFeedback={onFeedback} onOpenFile={openFilePreview} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} />}
       </section>
       <form className="composer" onSubmit={event => { event.preventDefault(); if (state.sending && draft.trim() === '' && pendingImages.length === 0) void stopRun(); else void submit() }}><CommandMenu commands={commands} query={commandQuery ?? ''} activeIndex={commandIndex} onSelect={selectCommand} />{pendingImages.length > 0 && <div className="attachment-preview-list">{pendingImages.map(item => <div className="attachment-preview" key={item.ref.id}><img src={item.previewUrl} alt="待发送图片" /><button type="button" onClick={() => removePendingImage(item.ref.id)} aria-label="移除附件">×</button></div>)}</div>}<div className="composer-row"><label className="attach-button" aria-label="添加图片"><input type="file" accept="image/*" multiple disabled={state.selectedId === null || state.sending || uploading} onChange={event => { void attachFiles(event.currentTarget.files); event.currentTarget.value = '' }} />📎</label><textarea value={draft} onChange={event => handleDraftChange(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder={uploading ? '正在上传图片…' : state.sending ? 'Agent is running…' : 'Send a message…'} rows={2} /><button type="submit" disabled={state.selectedId === null || uploading || (!state.sending && draft.trim() === '' && pendingImages.length === 0)}>{state.sending ? (draft.trim() ? 'Queue' : 'Stop') : 'Send'} <span>{state.sending ? '■' : '↵'}</span></button></div></form>
     </main></TrajectorySearchContext.Provider>

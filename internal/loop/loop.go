@@ -356,12 +356,13 @@ func (l *Loop) step(ctx context.Context, turnNumber, stepNumber int) (done bool,
 	messages = append(messages, llm.Message{Role: llm.RoleSystem, Content: []llm.ContentBlock{llm.Text(l.prompt.Build())}})
 	messages = append(messages, history...)
 
+	requestID := fmt.Sprintf("turn:%d:step:%d", turnNumber, stepNumber)
+	request := llm.ChatRequest{Provider: l.provider, Model: l.model, ReasoningEffort: l.effort, Messages: messages, Tools: specs}
 	if l.provider != "" {
-		if _, err := l.log.Append(session.EventLLMRequestStart, session.NewLLMRequestStart(l.provider, l.model, l.effort)); err != nil {
+		if _, err := l.log.Append(session.EventLLMRequestStart, session.NewLLMRequestStartDetail(requestID, request)); err != nil {
 			return false, err
 		}
 	}
-	request := llm.ChatRequest{Provider: l.provider, Model: l.model, ReasoningEffort: l.effort, Messages: messages, Tools: specs}
 	reader, err := l.llm.Stream(ctx, request)
 	if err != nil && l.recoverContextOverflow != nil && isContextOverflowError(err) && l.recoverContextOverflow(ctx) {
 		// Compaction appends a surface replacement marker. Rebuild history so the
@@ -371,7 +372,8 @@ func (l *Loop) step(ctx context.Context, turnNumber, stepNumber int) (done bool,
 		messages = append(messages, llm.Message{Role: llm.RoleSystem, Content: []llm.ContentBlock{llm.Text(l.prompt.Build())}})
 		messages = append(messages, history...)
 		if l.provider != "" {
-			if _, startErr := l.log.Append(session.EventLLMRequestStart, session.NewLLMRequestStart(l.provider, l.model, l.effort)); startErr != nil {
+			request.Messages = messages
+			if _, startErr := l.log.Append(session.EventLLMRequestStart, session.NewLLMRequestStartDetail(requestID, request)); startErr != nil {
 				return false, startErr
 			}
 		}
@@ -389,7 +391,7 @@ func (l *Loop) step(ctx context.Context, turnNumber, stepNumber int) (done bool,
 					}
 				}
 			}
-			_, _ = l.log.Append(session.EventLLMRequestEnd, session.NewLLMRequestEndWithUsage(l.provider, l.model, l.effort, "error", err.Error(), llm.TokenUsage{}, attempts))
+			_, _ = l.log.Append(session.EventLLMRequestEnd, session.NewLLMRequestEndWithUsageDetail(requestID, l.provider, l.model, l.effort, "error", err.Error(), llm.TokenUsage{}, attempts))
 		}
 		return false, err
 	}
@@ -429,7 +431,7 @@ func (l *Loop) step(ctx context.Context, turnNumber, stepNumber int) (done bool,
 				l.onError(err)
 			}
 			if l.provider != "" {
-				_, _ = l.log.Append(session.EventLLMRequestEnd, session.NewLLMRequestEndWithUsage(l.provider, l.model, l.effort, "error", err.Error(), usage, attempts))
+				_, _ = l.log.Append(session.EventLLMRequestEnd, session.NewLLMRequestEndWithUsageDetail(requestID, l.provider, l.model, l.effort, "error", err.Error(), usage, attempts))
 			}
 			return false, err
 		}
@@ -463,7 +465,7 @@ func (l *Loop) step(ctx context.Context, turnNumber, stepNumber int) (done bool,
 		return false, err
 	}
 	if l.provider != "" {
-		if _, err := l.log.Append(session.EventLLMRequestEnd, session.NewLLMRequestEndWithUsage(l.provider, l.model, l.effort, "completed", "", usage, attempts)); err != nil {
+		if _, err := l.log.Append(session.EventLLMRequestEnd, session.NewLLMRequestEndWithUsageDetail(requestID, l.provider, l.model, l.effort, "completed", "", usage, attempts)); err != nil {
 			return false, err
 		}
 	}

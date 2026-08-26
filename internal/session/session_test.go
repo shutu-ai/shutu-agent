@@ -33,6 +33,28 @@ func TestAppendAssignsSeqAndType(t *testing.T) {
 	}
 }
 
+func TestLLMRequestStartDetailPreservesInspectorProjection(t *testing.T) {
+	payload := NewLLMRequestStartDetail("turn:1:step:1", llm.ChatRequest{
+		Provider: "deepseek", Model: "reasoner", ReasoningEffort: "high",
+		Messages: []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("hello")}}},
+		Tools:    []llm.ToolSchema{{Name: "read", Description: "read a file", Parameters: map[string]any{"type": "object"}}},
+	})
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal request detail: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode request detail: %v", err)
+	}
+	if got["requestId"] != "turn:1:step:1" || got["provider"] != "deepseek" || got["model"] != "reasoner" {
+		t.Fatalf("request metadata = %+v", got)
+	}
+	if len(got["messages"].([]any)) != 1 || len(got["tools"].([]any)) != 1 {
+		t.Fatalf("request context = %+v, want one message and one tool", got)
+	}
+}
+
 func TestEventsSnapshotIsolation(t *testing.T) {
 	l := New()
 	l.Append(EventUserMessage, NewUserMessage("a"))

@@ -303,7 +303,7 @@ func TestSessionEventsCursorPagination(t *testing.T) {
 	now := time.Now()
 	seedSession(t, st, "s-page", []session.Event{
 		{Seq: 1, Type: session.EventUserMessage, At: now, Version: 1, Data: mustData(t, map[string]any{"Text": "one"})},
-		{Seq: 2, Type: session.EventLLMRequestStart, At: now, Version: 1, Data: mustData(t, map[string]any{"provider": "deepseek", "model": "reasoner", "reasoningEffort": "high"})},
+		{Seq: 2, Type: session.EventLLMRequestStart, At: now, Version: 1, Data: mustData(t, map[string]any{"requestId": "turn:1:step:1", "provider": "deepseek", "model": "reasoner", "reasoningEffort": "high", "messages": []any{map[string]any{"role": "user", "text": "hello"}}, "tools": []any{map[string]any{"name": "read", "parameters": map[string]any{"type": "object"}}}})},
 		{Seq: 3, Type: session.EventLLMRequestEnd, At: now, Version: 1, Data: mustData(t, map[string]any{"provider": "deepseek", "model": "reasoner", "status": "completed", "usage": map[string]any{"inputTokens": 12, "outputTokens": 7, "totalTokens": 19}})},
 	})
 
@@ -320,6 +320,12 @@ func TestSessionEventsCursorPagination(t *testing.T) {
 	}
 	if page.Events[1].Details["usage"].(map[string]any)["total_tokens"] != float64(19) {
 		t.Fatalf("request usage details = %+v, want total_tokens=19", page.Events[1].Details)
+	}
+	if page.Events[0].Details["request_id"] != "turn:1:step:1" {
+		t.Fatalf("request id details = %+v, want stable request id", page.Events[0].Details)
+	}
+	if len(page.Events[0].Details["messages"].([]any)) != 1 || len(page.Events[0].Details["tools"].([]any)) != 1 {
+		t.Fatalf("request context details = %+v, want one message and one tool", page.Events[0].Details)
 	}
 
 	rec = doReq(t, srv.Handler(), "GET", "/api/sessions/s-page/events?before_seq=2&limit=2", "tok")
