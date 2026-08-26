@@ -21,6 +21,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -41,6 +45,7 @@ const (
 	nativeSettingsOnboarding   = "ui-onboarding"
 	nativeSettingsDeepSeek     = "llm-deepseek"
 	nativeSettingsPiAI         = "llm-pi-ai"
+	nativeDirectoryMaxEntries  = 1000
 )
 
 var nativeSettingsSchema = map[string]any{
@@ -267,7 +272,8 @@ type nativeSubscribedFrame struct {
 
 func (s *Server) registerNativeRoutes(mux *http.ServeMux) {
 	for _, method := range []string{
-		"host.describe", "session.list", "session.search", "session.create",
+		"host.describe", "host.listDirectory", "host.createDirectory", "host.pickDirectory",
+		"session.list", "session.search", "session.create",
 		"session.history", "session.rename", "session.prompt", "session.cancel", "session.attachment",
 		"session.models",
 		"workspace.list", "agentPreset.list", "settings.describe",
@@ -661,6 +667,25 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 			}
 		}
 		return nativeRPCSuccess(value)
+	case "host.listDirectory":
+		var req struct {
+			Path string `json:"path"`
+		}
+		if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
+			return failure
+		}
+		return s.nativeHostListDirectory(req.Path)
+	case "host.createDirectory":
+		var req struct {
+			Path string `json:"path"`
+			Name string `json:"name"`
+		}
+		if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
+			return failure
+		}
+		return s.nativeHostCreateDirectory(req.Path, req.Name)
+	case "host.pickDirectory":
+		return s.nativeHostPickDirectory(r)
 	case "session.list":
 		return s.nativeSessionList(r)
 	case "session.search":
@@ -797,6 +822,152 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 	default:
 		return nativeRPCFailure("not-supported", "native RPC method is not implemented", map[string]any{"method": method})
 	}
+}
+
+func (s *Server) nativeHostListDirectory(rawPath string) nativeRPCResult {
+	path, err := s.nativeDirectoryPath(rawPath, true)
+	if err != nil {
+		return nativeRPCFailure("directory-unreadable", err.Error(), map[string]any{"path": strings.TrimSpace(rawPath)})
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		if err == nil {
+			err = fmt.Errorf("path is not a directory")
+		}
+		return nativeRPCFailure("directory-unreadable", fmt.Sprintf("cannot list %q: %v", path, err), map[string]any{"path": path})
+	}
+
+	// Readdirnames keeps the scan memory bounded even when a host directory has
+	// a very large number of children. Retain maxEntries+1 sorted candidates so
+	// the extra row proves that the returned level was truncated.
+	directory, err := os.Open(path)
+	if err != nil {
+		return nativeRPCFailure("directory-unreadable", fmt.Sprintf("cannot list %q: %v", path, err), map[string]any{"path": path})
+	}
+	defer directory.Close()
+	entries := make([]workspaceDirectoryEntry, 0, nativeDirectoryMaxEntries+1)
+	truncated := false
+	for {
+		names, readErr := directory.Readdirnames(1)
+		for _, name := range names {
+			childPath := filepath.Join(path, name)
+			childInfo, infoErr := os.Lstat(childPath)
+			if infoErr != nil || (!childInfo.IsDir() && childInfo.Mode()&os.ModeSymlink == 0) {
+				continue
+			}
+			if childInfo.Mode()&os.ModeSymlink != 0 {
+				targetInfo, targetErr := os.Stat(childPath)
+				if targetErr != nil || !targetInfo.IsDir() {
+					continue
+				}
+			}
+			candidate := workspaceDirectoryEntry{
+				Name: name, Path: childPath, Hidden: strings.HasPrefix(name, "."),
+			}
+			if nativeInsertDirectoryEntry(&entries, candidate, nativeDirectoryMaxEntries+1) {
+				truncated = true
+			}
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return nativeRPCFailure("directory-unreadable", fmt.Sprintf("cannot list %q: %v", path, readErr), map[string]any{"path": path})
+		}
+	}
+	if len(entries) > nativeDirectoryMaxEntries {
+		entries = entries[:nativeDirectoryMaxEntries]
+		truncated = true
+	}
+	home, _ := os.UserHomeDir()
+	return nativeRPCSuccess(workspaceDirectoryListing{
+		Path: path, Home: home, Crumbs: workspaceDirectoryCrumbs(path), Entries: entries, Truncated: truncated,
+	})
+}
+
+func nativeInsertDirectoryEntry(entries *[]workspaceDirectoryEntry, candidate workspaceDirectoryEntry, keep int) bool {
+	rows := *entries
+	index := sort.Search(len(rows), func(index int) bool { return rows[index].Name >= candidate.Name })
+	if len(rows) == keep && index == len(rows) {
+		return true
+	}
+	rows = append(rows, workspaceDirectoryEntry{})
+	copy(rows[index+1:], rows[index:])
+	rows[index] = candidate
+	if len(rows) > keep {
+		*entries = rows[:keep]
+		return true
+	}
+	*entries = rows
+	return false
+}
+
+func (s *Server) nativeHostCreateDirectory(rawPath, name string) nativeRPCResult {
+	parent, err := s.nativeDirectoryPath(rawPath, false)
+	if err != nil {
+		return nativeRPCFailure("directory-create-failed", err.Error(), map[string]any{"path": strings.TrimSpace(rawPath)})
+	}
+	info, err := os.Stat(parent)
+	if err != nil || !info.IsDir() {
+		if err == nil {
+			err = fmt.Errorf("path is not a directory")
+		}
+		return nativeRPCFailure("directory-create-failed", fmt.Sprintf("parent directory %q is unavailable: %v", parent, err), map[string]any{"path": parent})
+	}
+	if strings.TrimSpace(name) == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\\`) {
+		target := filepath.Join(parent, name)
+		return nativeRPCFailure("directory-create-failed", fmt.Sprintf("%q is not a single path segment", name), map[string]any{"path": target})
+	}
+	target := filepath.Join(parent, name)
+	if err := os.Mkdir(target, 0o755); err != nil {
+		if os.IsExist(err) {
+			return nativeRPCFailure("directory-exists", fmt.Sprintf("%q already exists", target), map[string]any{"path": target})
+		}
+		return nativeRPCFailure("directory-create-failed", fmt.Sprintf("cannot create %q: %v", target, err), map[string]any{"path": target})
+	}
+	return nativeRPCSuccess(map[string]any{"path": filepath.Clean(target)})
+}
+
+func (s *Server) nativeDirectoryPath(rawPath string, useDefault bool) (string, error) {
+	path := strings.TrimSpace(rawPath)
+	if path == "" && useDefault {
+		path, err := s.sessionDefaultWorkdir()
+		if err != nil {
+			return "", fmt.Errorf("resolve default directory: %w", err)
+		}
+		return filepath.Clean(path), nil
+	}
+	if path == "" {
+		return "", fmt.Errorf("directory path is required")
+	}
+	if !filepath.IsAbs(path) || (runtime.GOOS == "windows" && filepath.VolumeName(path) == "") {
+		return "", fmt.Errorf("%q is not a fully qualified path", path)
+	}
+	return filepath.Clean(path), nil
+}
+
+func (s *Server) nativeHostPickDirectory(r *http.Request) nativeRPCResult {
+	if runtime.GOOS != "windows" {
+		return nativeRPCFailure("directory-picker-unavailable", "native directory picker is unavailable on this host", map[string]any{"capability": "browse"})
+	}
+	const script = `Add-Type -AssemblyName System.Windows.Forms; $d=New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description='Select workspace directory'; $d.ShowNewFolderButton=$true; if($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK){[Console]::Write($d.SelectedPath)}`
+	cmd := exec.CommandContext(r.Context(), "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-WindowStyle", "Hidden", "-Command", script)
+	output, err := cmd.Output()
+	if err != nil {
+		if r.Context().Err() != nil {
+			return nativeRPCFailure("cancelled", "directory picker canceled", nil)
+		}
+		return nativeRPCFailure("internal", fmt.Sprintf("open directory picker: %v", err), nil)
+	}
+	selected := strings.TrimSpace(string(output))
+	if selected == "" {
+		return nativeRPCSuccess(map[string]any{"path": nil})
+	}
+	path, err := s.nativeDirectoryPath(selected, false)
+	if err != nil {
+		return nativeRPCFailure("directory-picker-unavailable", err.Error(), nil)
+	}
+	return nativeRPCSuccess(map[string]any{"path": path})
 }
 
 func nativeStoreFailure(err error) nativeRPCResult {

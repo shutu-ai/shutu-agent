@@ -9,6 +9,9 @@ import (
 	"io"
 	"net"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -537,6 +540,107 @@ func TestNativeSessionModelsUsesStandardSessionMethod(t *testing.T) {
 	}
 	if _, ok := value["current"].(map[string]any); !ok || value["routable"] != false {
 		t.Fatalf("session.models value = %#v", value)
+	}
+}
+
+func TestNativeHostDirectoryBrowseAndCreate(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+	root := t.TempDir()
+	srv.SetDefaultWorkdir(root)
+	for _, name := range []string{"alpha", ".hidden"} {
+		if err := os.Mkdir(filepath.Join(root, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "file.txt"), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	call := func(id, method string, payload any) nativeRPCResponse {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{
+			"type": "client-request", "rpcId": id, "method": method, "payload": payload,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := doReqBody(t, srv.Handler(), "POST", "/api/"+method, "tok", string(body))
+		return nativeResponse(t, rec.Body.Bytes())
+	}
+
+	response := call("directory-list", "host.listDirectory", map[string]any{"path": root})
+	if !response.Result.OK {
+		t.Fatalf("host.listDirectory response = %+v", response)
+	}
+	var listing workspaceDirectoryListing
+	encoded, _ := json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &listing); err != nil {
+		t.Fatal(err)
+	}
+	if listing.Path != filepath.Clean(root) || listing.Truncated || len(listing.Crumbs) == 0 {
+		t.Fatalf("directory listing metadata = %+v", listing)
+	}
+	names := make(map[string]workspaceDirectoryEntry, len(listing.Entries))
+	for _, entry := range listing.Entries {
+		names[entry.Name] = entry
+	}
+	if names["alpha"].Path != filepath.Join(root, "alpha") || !names[".hidden"].Hidden {
+		t.Fatalf("directory entries = %+v", names)
+	}
+	if _, ok := names["file.txt"]; ok {
+		t.Fatalf("file was returned as directory: %+v", names)
+	}
+
+	response = call("directory-default", "host.listDirectory", map[string]any{})
+	if !response.Result.OK {
+		t.Fatalf("default host.listDirectory response = %+v", response)
+	}
+	encoded, _ = json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &listing); err != nil {
+		t.Fatal(err)
+	}
+	if listing.Path != filepath.Clean(root) {
+		t.Fatalf("default directory path = %q, want %q", listing.Path, filepath.Clean(root))
+	}
+
+	response = call("directory-create", "host.createDirectory", map[string]any{"path": root, "name": "created"})
+	if !response.Result.OK {
+		t.Fatalf("host.createDirectory response = %+v", response)
+	}
+	var created struct {
+		Path string `json:"path"`
+	}
+	encoded, _ = json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &created); err != nil {
+		t.Fatal(err)
+	}
+	if created.Path != filepath.Join(root, "created") {
+		t.Fatalf("created path = %q", created.Path)
+	}
+
+	response = call("directory-exists", "host.createDirectory", map[string]any{"path": root, "name": "created"})
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "directory-exists" {
+		t.Fatalf("duplicate directory response = %+v", response)
+	}
+	response = call("directory-invalid-name", "host.createDirectory", map[string]any{"path": root, "name": "../escape"})
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "directory-create-failed" {
+		t.Fatalf("invalid directory name response = %+v", response)
+	}
+	response = call("directory-relative", "host.listDirectory", map[string]any{"path": "relative"})
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "directory-unreadable" {
+		t.Fatalf("relative directory response = %+v", response)
+	}
+}
+
+func TestNativeHostPickDirectoryUnavailableOutsideWindows(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("native picker is intentionally interactive on Windows")
+	}
+	srv, _ := newTestServer(t, "tok")
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/host.pickDirectory", "tok", `{"type":"client-request","rpcId":"pick","method":"host.pickDirectory","payload":{}}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "directory-picker-unavailable" {
+		t.Fatalf("host.pickDirectory response = %+v", response)
 	}
 }
 
