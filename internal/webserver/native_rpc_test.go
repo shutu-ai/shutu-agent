@@ -88,6 +88,88 @@ func TestNativeRPCRejectsMethodMismatchAndAuth(t *testing.T) {
 	}
 }
 
+func TestNativeSettingsDescribeAndMutate(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/settings.describe", "tok", `{"type":"client-request","rpcId":"settings-1","method":"settings.describe","payload":{}}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK {
+		t.Fatalf("settings.describe response = %+v", response)
+	}
+	var described struct {
+		Namespaces []map[string]any `json:"namespaces"`
+	}
+	encoded, _ := json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &described); err != nil {
+		t.Fatal(err)
+	}
+	if len(described.Namespaces) != 1 || described.Namespaces[0]["ns"] != nativeSettingsOnboarding {
+		t.Fatalf("settings namespaces = %+v", described.Namespaces)
+	}
+
+	rec = doReqBody(t, srv.Handler(), "POST", "/api/settings.mutate", "tok", `{"type":"client-request","rpcId":"settings-2","method":"settings.mutate","payload":{"ns":"ui-onboarding","ops":[{"op":"set","path":["welcomeNoticeVersion"],"value":"2026-08-13.1"}]}}`)
+	response = nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK {
+		t.Fatalf("settings.mutate response = %+v", response)
+	}
+	var view struct {
+		NS       string         `json:"ns"`
+		Value    map[string]any `json:"value"`
+		Revision int            `json:"revision"`
+	}
+	encoded, _ = json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &view); err != nil {
+		t.Fatal(err)
+	}
+	if view.NS != nativeSettingsOnboarding || view.Value["welcomeNoticeVersion"] != "2026-08-13.1" || view.Revision != 1 {
+		t.Fatalf("settings view = %+v", view)
+	}
+}
+
+func TestNativeLLMCatalogUsesSanitizedConfig(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+	srv.SetConfigProvider(func() map[string]any {
+		return map[string]any{"providers": []map[string]any{
+			{
+				"id": "deepseek-official", "name": "DeepSeek", "available": true,
+				"configured": true, "env_var": "DEEPSEEK_API_KEY", "candidates": []string{"deepseek-v4-flash"},
+			},
+		}}
+	})
+
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/llm.providers", "tok", `{"type":"client-request","rpcId":"llm-1","method":"llm.providers","payload":{}}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK {
+		t.Fatalf("llm.providers response = %+v", response)
+	}
+	var providers struct {
+		Providers []map[string]any `json:"providers"`
+	}
+	encoded, _ := json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &providers); err != nil {
+		t.Fatal(err)
+	}
+	if len(providers.Providers) != 1 || providers.Providers[0]["provider"] != "deepseek-official" {
+		t.Fatalf("llm providers = %+v", providers.Providers)
+	}
+
+	rec = doReqBody(t, srv.Handler(), "POST", "/api/llm.models", "tok", `{"type":"client-request","rpcId":"llm-2","method":"llm.models","payload":{}}`)
+	response = nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK {
+		t.Fatalf("llm.models response = %+v", response)
+	}
+	var models struct {
+		Groups []map[string]any `json:"groups"`
+	}
+	encoded, _ = json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &models); err != nil {
+		t.Fatal(err)
+	}
+	if len(models.Groups) != 1 {
+		t.Fatalf("llm model groups = %+v", models.Groups)
+	}
+}
+
 func TestNativeMuxWebSocketSendsSubscriptionBaseline(t *testing.T) {
 	srv, st := newTestServer(t, "tok")
 	seedSession(t, st, "native-ws", nil)

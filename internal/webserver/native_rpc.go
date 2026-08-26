@@ -34,6 +34,8 @@ const (
 	nativeHostPath             = "/api/events.host"
 	webSocketGUID              = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 	nativeSettingsOnboarding   = "ui-onboarding"
+	nativeSettingsDeepSeek     = "llm-deepseek"
+	nativeSettingsPiAI         = "llm-pi-ai"
 )
 
 var nativeSettingsSchema = map[string]any{
@@ -46,6 +48,41 @@ var nativeSettingsSchema = map[string]any{
 type nativeSettingsDocument struct {
 	Value    map[string]any
 	Revision int
+}
+
+func nativeSettingsSchemaFor(namespace string) map[string]any {
+	if namespace != nativeSettingsPiAI {
+		return cloneNativeSettingsValue(nativeSettingsSchema).(map[string]any)
+	}
+	// This is the serialized schemastery graph needed by the DSH model editor:
+	// providers is a keyed object, each profile has an api field, and api is the
+	// same four-protocol union the editor reads for custom routes.
+	return map[string]any{
+		"uid": 0,
+		"refs": map[string]any{
+			"0": map[string]any{"uid": 0, "type": "object", "meta": map[string]any{"default": map[string]any{}}, "dict": map[string]any{"providers": 1}},
+			"1": map[string]any{"uid": 1, "type": "dict", "meta": map[string]any{"default": map[string]any{}}, "inner": 2, "sKey": 3},
+			"2": map[string]any{"uid": 2, "type": "object", "meta": map[string]any{"default": map[string]any{}}, "dict": map[string]any{
+				"api": 4, "apiKeyEnv": 5, "baseURL": 6, "displayName": 7, "model": 8, "models": 9,
+			}},
+			"3":  map[string]any{"uid": 3, "type": "string", "meta": map[string]any{}},
+			"4":  map[string]any{"uid": 4, "type": "union", "meta": map[string]any{}, "list": []any{10, 11, 12, 13}},
+			"5":  map[string]any{"uid": 5, "type": "string", "meta": map[string]any{}},
+			"6":  map[string]any{"uid": 6, "type": "string", "meta": map[string]any{}},
+			"7":  map[string]any{"uid": 7, "type": "string", "meta": map[string]any{}},
+			"8":  map[string]any{"uid": 8, "type": "string", "meta": map[string]any{}},
+			"9":  map[string]any{"uid": 9, "type": "array", "meta": map[string]any{"default": []any{}}, "inner": 14},
+			"10": map[string]any{"uid": 10, "type": "const", "meta": map[string]any{}, "value": "openai-completions"},
+			"11": map[string]any{"uid": 11, "type": "const", "meta": map[string]any{}, "value": "openai-responses"},
+			"12": map[string]any{"uid": 12, "type": "const", "meta": map[string]any{}, "value": "anthropic-messages"},
+			"13": map[string]any{"uid": 13, "type": "const", "meta": map[string]any{}, "value": "google-generative-ai"},
+			"14": map[string]any{"uid": 14, "type": "object", "meta": map[string]any{"default": map[string]any{}}, "dict": map[string]any{
+				"id": 5, "name": 7, "contextWindow": 15, "maxTokens": 16,
+			}},
+			"15": map[string]any{"uid": 15, "type": "number", "meta": map[string]any{}},
+			"16": map[string]any{"uid": 16, "type": "number", "meta": map[string]any{}},
+		},
+	}
 }
 
 type nativeSettingsPathOp struct {
@@ -234,11 +271,17 @@ func nativeDecode(raw json.RawMessage, value any) nativeRPCResult {
 func (s *Server) nativeSettingsDescribe() nativeRPCResult {
 	s.nativeSettingsMu.Lock()
 	defer s.nativeSettingsMu.Unlock()
-	document := s.nativeSettings[nativeSettingsOnboarding]
+	s.ensureNativeSettingsFromConfigLocked()
+	namespaces := make([]any, 0, 3)
+	for _, namespace := range []string{nativeSettingsOnboarding, nativeSettingsDeepSeek, nativeSettingsPiAI} {
+		if document, ok := s.nativeSettings[namespace]; ok {
+			namespaces = append(namespaces, s.nativeSettingsView(namespace, document))
+		}
+	}
 	return nativeRPCSuccess(map[string]any{
 		"writable":    true,
 		"hasDocument": true,
-		"namespaces":  []any{s.nativeSettingsView(nativeSettingsOnboarding, document)},
+		"namespaces":  namespaces,
 	})
 }
 
@@ -250,12 +293,13 @@ func (s *Server) nativeSettingsMutate(raw json.RawMessage) nativeRPCResult {
 	if strings.TrimSpace(req.Namespace) == "" {
 		return nativeRPCFailure("bad-request", "ns is required", nil)
 	}
-	if req.Namespace != nativeSettingsOnboarding {
+	if !nativeSettingsNamespace(req.Namespace) {
 		return nativeRPCFailure("not-found", "native settings namespace is not registered", map[string]any{"ns": req.Namespace})
 	}
 
 	s.nativeSettingsMu.Lock()
 	defer s.nativeSettingsMu.Unlock()
+	s.ensureNativeSettingsFromConfigLocked()
 	document := s.nativeSettings[req.Namespace]
 	if document.Value == nil {
 		document.Value = map[string]any{}
@@ -282,7 +326,7 @@ func (s *Server) nativeSettingsView(namespace string, document nativeSettingsDoc
 	value := cloneNativeSettingsMap(document.Value)
 	return map[string]any{
 		"ns":       namespace,
-		"schema":   cloneNativeSettingsValue(nativeSettingsSchema),
+		"schema":   nativeSettingsSchemaFor(namespace),
 		"value":    value,
 		"user":     cloneNativeSettingsMap(document.Value),
 		"applies":  "live",
@@ -348,6 +392,191 @@ func cloneNativeSettingsValue(value any) any {
 		return cloned
 	default:
 		return value
+	}
+}
+
+func (s *Server) ensureNativeSettingsFromConfigLocked() {
+	if s.nativeSettings == nil {
+		s.nativeSettings = make(map[string]nativeSettingsDocument)
+	}
+	s.nativeSettings[nativeSettingsOnboarding] = s.nativeSettings[nativeSettingsOnboarding]
+	if s.cfgFn == nil {
+		return
+	}
+	configView := s.cfgFn()
+	providers := nativeConfigProviderMaps(configView["providers"])
+	if _, exists := s.nativeSettings[nativeSettingsDeepSeek]; !exists {
+		profile := map[string]any{}
+		for _, provider := range providers {
+			if nativeString(provider["id"]) != "deepseek-official" {
+				continue
+			}
+			nativeCopyProviderProfile(profile, provider)
+			break
+		}
+		s.nativeSettings[nativeSettingsDeepSeek] = nativeSettingsDocument{Value: profile}
+	}
+	if _, exists := s.nativeSettings[nativeSettingsPiAI]; !exists {
+		profiles := map[string]any{}
+		for _, provider := range providers {
+			id := nativeString(provider["id"])
+			if id == "" || id == "deepseek-official" {
+				continue
+			}
+			if !nativeBool(provider["configured"]) && !nativeBool(provider["available"]) && !nativeBool(provider["custom"]) {
+				continue
+			}
+			profile := map[string]any{}
+			nativeCopyProviderProfile(profile, provider)
+			profiles[id] = profile
+		}
+		s.nativeSettings[nativeSettingsPiAI] = nativeSettingsDocument{
+			Value: map[string]any{"providers": profiles},
+		}
+	}
+}
+
+func nativeSettingsNamespace(namespace string) bool {
+	return namespace == nativeSettingsOnboarding || namespace == nativeSettingsDeepSeek || namespace == nativeSettingsPiAI
+}
+
+func nativeCopyProviderProfile(profile map[string]any, provider map[string]any) {
+	if value := nativeString(provider["env_var"]); value != "" {
+		profile["apiKeyEnv"] = value
+	}
+	if value := nativeString(provider["base_url"]); value != "" {
+		profile["baseURL"] = value
+	}
+	if value := nativeString(provider["protocol"]); value != "" {
+		profile["api"] = value
+	}
+	if value := nativeString(provider["model"]); value != "" {
+		profile["model"] = value
+	}
+	if value := nativeString(provider["name"]); value != "" {
+		profile["displayName"] = value
+	}
+	models := nativeProviderModels(provider)
+	if len(models) > 0 {
+		profile["models"] = models
+	}
+}
+
+func nativeProviderModels(provider map[string]any) []any {
+	if models := nativeConfigMaps(provider["models"]); len(models) > 0 {
+		result := make([]any, 0, len(models))
+		for _, model := range models {
+			id := nativeString(model["id"])
+			if id == "" {
+				continue
+			}
+			entry := map[string]any{"id": id}
+			if name := nativeString(model["name"]); name != "" {
+				entry["name"] = name
+			}
+			if contextWindow := nativeNumber(model["context_window"]); contextWindow > 0 {
+				entry["contextWindow"] = contextWindow
+			}
+			if maxTokens := nativeNumber(model["max_tokens"]); maxTokens > 0 {
+				entry["maxTokens"] = maxTokens
+			}
+			result = append(result, entry)
+		}
+		return result
+	}
+	candidates := nativeStrings(provider["candidates"])
+	result := make([]any, 0, len(candidates))
+	for _, candidate := range candidates {
+		result = append(result, map[string]any{"id": candidate})
+	}
+	return result
+}
+
+func nativeProviderReasoning(provider map[string]any, modelID string) map[string]any {
+	encoded, err := json.Marshal(provider["reasoning"])
+	if err != nil || string(encoded) == "null" {
+		return nil
+	}
+	var catalog map[string]map[string]any
+	if json.Unmarshal(encoded, &catalog) != nil {
+		return nil
+	}
+	metadata, ok := catalog[modelID]
+	if !ok {
+		return nil
+	}
+	efforts := nativeConfigMaps(metadata["efforts"])
+	resultEfforts := make([]any, 0, len(efforts))
+	for _, effort := range efforts {
+		id := nativeString(effort["id"])
+		if id == "" {
+			continue
+		}
+		name := nativeString(effort["name"])
+		if name == "" {
+			name = id
+		}
+		resultEfforts = append(resultEfforts, map[string]any{"id": id, "name": name})
+	}
+	if len(resultEfforts) == 0 {
+		return nil
+	}
+	result := map[string]any{"efforts": resultEfforts}
+	if effort := nativeString(metadata["default_effort"]); effort != "" {
+		result["defaultEffort"] = effort
+	}
+	return result
+}
+
+func nativeConfigProviderMaps(value any) []map[string]any {
+	return nativeConfigMaps(value)
+}
+
+func nativeConfigMaps(value any) []map[string]any {
+	encoded, err := json.Marshal(value)
+	if err != nil || string(encoded) == "null" {
+		return nil
+	}
+	var decoded []map[string]any
+	if json.Unmarshal(encoded, &decoded) != nil {
+		return nil
+	}
+	return decoded
+}
+
+func nativeStrings(value any) []string {
+	encoded, err := json.Marshal(value)
+	if err != nil || string(encoded) == "null" {
+		return nil
+	}
+	var decoded []string
+	if json.Unmarshal(encoded, &decoded) != nil {
+		return nil
+	}
+	return decoded
+}
+
+func nativeString(value any) string {
+	text, ok := value.(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(text)
+}
+
+func nativeBool(value any) bool {
+	result, _ := value.(bool)
+	return result
+}
+
+func nativeNumber(value any) int {
+	switch number := value.(type) {
+	case int:
+		return number
+	case float64:
+		return int(number)
+	default:
+		return 0
 	}
 }
 
@@ -450,35 +679,101 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 			return failure
 		}
 		credentials := make(map[string]any, len(req.Refs))
+		providers := []map[string]any{}
+		if s.cfgFn != nil {
+			providers = nativeConfigProviderMaps(s.cfgFn()["providers"])
+		}
 		for _, ref := range req.Refs {
-			// Never return a secret or infer configuration from process
-			// environment here. The DSH UI can still render the credential
-			// boundary and will report it as unavailable/read-only.
-			credentials[ref] = map[string]any{"configured": false, "writable": false}
+			configured := false
+			for _, provider := range providers {
+				if nativeString(provider["env_var"]) == ref {
+					configured = nativeBool(provider["configured"])
+					break
+				}
+			}
+			// Never return a secret. The configured bit is a non-sensitive
+			// capability hint already exposed by the existing sanitized config
+			// view, allowing DSH to render the correct provider row state.
+			credentials[ref] = map[string]any{"configured": configured, "writable": true}
 		}
 		return nativeRPCSuccess(map[string]any{"credentials": credentials})
 	case "llm.providers":
-		provider := "deepseek-official"
-		displayName := "DeepSeek"
-		if cfg := s.cfgFn; cfg != nil {
-			view := cfg()
-			if configured, ok := view["provider"].(string); ok && strings.TrimSpace(configured) != "" {
-				provider = configured
-				displayName = configured
-			}
+		providers := []map[string]any{}
+		if s.cfgFn != nil {
+			providers = nativeConfigProviderMaps(s.cfgFn()["providers"])
 		}
-		return nativeRPCSuccess(map[string]any{"providers": []any{
-			map[string]any{
-				"provider": provider, "displayName": displayName,
-				"settingsNs": "llm-deepseek", "settingsPath": []string{},
-				"active": true,
-			},
-		}})
+		if len(providers) == 0 {
+			providers = []map[string]any{{
+				"id": "deepseek-official", "name": "DeepSeek", "registered": true, "available": true,
+			}}
+		}
+		entries := make([]any, 0, len(providers))
+		for _, provider := range providers {
+			id := nativeString(provider["id"])
+			if id == "" {
+				continue
+			}
+			settingsNS := nativeSettingsPiAI
+			settingsPath := []string{"providers", id}
+			if id == "deepseek-official" {
+				settingsNS = nativeSettingsDeepSeek
+				settingsPath = []string{}
+			}
+			entry := map[string]any{
+				"provider": id, "displayName": nativeString(provider["name"]),
+				"settingsNs": settingsNS, "settingsPath": settingsPath,
+				"active": nativeBool(provider["available"]),
+			}
+			if entry["displayName"] == "" {
+				entry["displayName"] = id
+			}
+			if nativeBool(provider["custom"]) {
+				entry["declared"] = true
+			}
+			entries = append(entries, entry)
+		}
+		return nativeRPCSuccess(map[string]any{"providers": entries})
 	case "llm.models":
-		// The native model catalog is intentionally empty until the live
-		// provider adapter is exposed through the clean DSH RPC surface. The
-		// response shape still lets Models render its empty/loading state.
-		return nativeRPCSuccess(map[string]any{"groups": []any{}, "failures": []any{}})
+		providers := []map[string]any{}
+		if s.cfgFn != nil {
+			providers = nativeConfigProviderMaps(s.cfgFn()["providers"])
+		}
+		groups := make([]any, 0, len(providers))
+		for _, provider := range providers {
+			id := nativeString(provider["id"])
+			models := nativeProviderModels(provider)
+			if id == "" || len(models) == 0 {
+				continue
+			}
+			items := make([]any, 0, len(models))
+			for _, raw := range models {
+				model, ok := raw.(map[string]any)
+				if !ok {
+					continue
+				}
+				modelID := nativeString(model["id"])
+				if modelID == "" {
+					continue
+				}
+				entry := map[string]any{"id": modelID, "name": modelID}
+				if name := nativeString(model["name"]); name != "" {
+					entry["name"] = name
+				}
+				if reasoning := nativeProviderReasoning(provider, modelID); reasoning != nil {
+					entry["reasoning"] = reasoning
+				}
+				items = append(items, entry)
+			}
+			if len(items) == 0 {
+				continue
+			}
+			name := nativeString(provider["name"])
+			if name == "" {
+				name = id
+			}
+			groups = append(groups, map[string]any{"id": id, "name": name, "models": items})
+		}
+		return nativeRPCSuccess(map[string]any{"groups": groups, "failures": []any{}})
 	case "dynamicCordisRunner/syncInspectManifest":
 		return nativeRPCSuccess(nil)
 	case "dynamicCordisRunner/inventory":
