@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import { spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -13,6 +13,8 @@ const { chromium } = createRequire(import.meta.url)(resolve(dshRoot, 'apps/web/n
 const host = '127.0.0.1'
 const port = Number(process.env.SHUTU_E2E_PORT ?? 18117)
 const baseUrl = `http://${host}:${port}/`
+const artifactDirectory = resolve(process.env.SHUTU_E2E_ARTIFACT_DIR ?? process.env.TEMP ?? process.env.TMP ?? '.')
+mkdirSync(artifactDirectory, { recursive: true })
 
 if (!existsSync(vite)) {
   throw new Error(`Vite is unavailable at ${vite}; set SHUTU_DSH_ROOT to a DSH checkout.`)
@@ -118,7 +120,7 @@ async function runDesktop(browser) {
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
   assert.ok(overflow <= 1, `desktop page has horizontal overflow: ${overflow}px`)
   assert.deepEqual(issues, [])
-  await page.screenshot({ path: resolve(process.env.TEMP ?? process.env.TMP ?? '.', 'shutu-native-desktop.png') })
+  await page.screenshot({ path: resolve(artifactDirectory, 'shutu-native-desktop.png') })
   await page.close()
   return { sockets: [...sockets].sort(), console: 'clean' }
 }
@@ -135,7 +137,7 @@ async function runMobile(browser) {
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
   assert.ok(overflow <= 1, `mobile page has horizontal overflow: ${overflow}px`)
   assert.deepEqual(issues, [])
-  await page.screenshot({ path: resolve(process.env.TEMP ?? process.env.TMP ?? '.', 'shutu-native-mobile.png') })
+  await page.screenshot({ path: resolve(artifactDirectory, 'shutu-native-mobile.png') })
   await page.close()
   return { viewport: '390x844', overflow, console: 'clean' }
 }

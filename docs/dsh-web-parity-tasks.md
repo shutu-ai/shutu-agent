@@ -61,6 +61,7 @@
 - [ ] P36-5.5：完成 export、feedback、错误恢复、重连和 session 状态提示。
 - [x] P36-5.5a：原生 Remote 接入 `messageFeedback/list|put|delete` 的 messageId/version CAS；斜杠命令支持图片附件。
 - [ ] P36-6.1：建立桌面/移动端、深色/浅色、空数据/加载/错误状态截图基线。
+- [x] P36-6.1a：通过 Playwright 保存原生 DSH 空数据桌面/移动基线截图；截图目录支持 `SHUTU_E2E_ARTIFACT_DIR`，本轮命令与结果记录在 `docs/dsh-web-parity-acceptance.md`。
 - [ ] P36-6.2：对比布局尺寸、字体、间距、颜色、边框、滚动条、焦点和弹层行为。
 - [ ] P36-6.3：验证 Tab、快捷键、Escape、读屏语义、ARIA、焦点恢复和触控目标。
 - [ ] P36-6.4：为每个 DSH 核心页面保留截图和交互证据。

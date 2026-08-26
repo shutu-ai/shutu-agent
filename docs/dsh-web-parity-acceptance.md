@@ -1,5 +1,9 @@
 # DSH Web 对齐验收记录
 
+## P36 原生 DSH UI 基线（2026-08-27）
+
+`npm.cmd run e2e` 已通过 Playwright 原生入口验证：桌面 `1280x900`、移动 `390x844`，`/api/events.mux` 与 `/api/events.host` 均建立，控制台无 error/warning，页面横向溢出为 `0`。使用 `SHUTU_E2E_ARTIFACT_DIR=docs/evidence/dsh-native-2026-08-27` 可保存本轮桌面/移动空数据截图；深色、加载、错误状态和逐页交互证据仍待 P36-6 后续任务。
+
 本记录对应 P34。`deepseek-harness` 仅作为只读参考，验收对象为 `shutu-agent`。
 
 ## 自动化检查
