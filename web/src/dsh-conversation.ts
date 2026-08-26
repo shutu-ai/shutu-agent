@@ -1,4 +1,4 @@
-import type { EventView } from './api'
+import type { EventView, ImageView } from './api'
 
 /** DSH ConversationSnapshot-compatible surface used by the shutu web client. */
 export type DshConversationNode =
@@ -24,6 +24,8 @@ export interface DshAssistantNode {
   readonly turn: number
   readonly step: number
   readonly blocks: readonly { kind: 'text' | 'reasoning'; text: string }[]
+  readonly images?: readonly ImageView[]
+  readonly requestId?: string
   readonly usage?: unknown
   readonly provenance?: { provider: string; model: string }
   readonly timing?: { stepStartTime: number | null; firstTokenTime: number | null; completedTime: number }
@@ -37,6 +39,7 @@ export interface DshToolResultNode {
   readonly call: { name: string; argsRaw: string } | null
   readonly content: string
   readonly isError: boolean
+  readonly requestId: string | null
 }
 
 export interface DshToolRunningNode {
@@ -46,6 +49,7 @@ export interface DshToolRunningNode {
   readonly callId: string
   readonly name: string
   readonly argsRaw: string
+  readonly requestId: string | null
 }
 
 export interface DshContextNode {
@@ -102,6 +106,7 @@ interface CallState {
   readonly name: string
   readonly argsRaw: string
   readonly time: number
+  readonly requestId: string | null
 }
 
 function objectDetails(event: EventView): Record<string, unknown> {
@@ -115,6 +120,15 @@ function textOf(event: EventView): string {
 function numberOf(event: EventView, key: string): number | undefined {
   const value = objectDetails(event)[key]
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function stringOf(event: EventView, ...keys: string[]): string | undefined {
+  const details = objectDetails(event)
+  for (const key of keys) {
+    const value = details[key]
+    if (typeof value === 'string' && value !== '') return value
+  }
+  return undefined
 }
 
 function timeOf(event: EventView): number {
@@ -139,6 +153,7 @@ export function projectDshConversation(events: readonly EventView[], sessionId =
   const turns = new Map<number, DshConversationTurn>()
   const turnEnds = new Map<number, number>()
   let currentTurn = 0
+  let currentRequestId: string | null = null
 
   const add = (node: DshConversationNode): void => {
     nodes.push(node)
@@ -159,9 +174,18 @@ export function projectDshConversation(events: readonly EventView[], sessionId =
       turnEnds.set(turn, event.seq)
       continue
     }
+    if (event.type === 'llm/request_start') {
+      const request = stringOf(event, 'request_id', 'requestId', 'requestID', 'id')
+      currentRequestId = request === undefined ? `request:${event.seq}` : `request:${request}`
+      continue
+    }
+    if (event.type === 'llm/request_end') {
+      currentRequestId = null
+      continue
+    }
     if (event.type === 'user/message') {
       if (event.context_message) {
-        add({ kind: 'context', seq: event.seq, time, text: textOf(event), source: 'context' })
+        add({ kind: 'context', seq: event.seq, time, text: textOf(event), source: event.context_source || stringOf(event, 'source') || 'context' })
       } else {
         add({ kind: 'user', seq: event.seq, time, text: textOf(event) })
       }
@@ -177,6 +201,8 @@ export function projectDshConversation(events: readonly EventView[], sessionId =
       add({
         kind: 'assistant', seq: event.seq, time, turn: numberOf(event, 'turn') ?? currentTurn,
         step: numberOf(event, 'step') ?? 0, blocks,
+        ...(event.images && event.images.length > 0 ? { images: event.images } : {}),
+        ...(currentRequestId !== null ? { requestId: currentRequestId } : {}),
         ...(details.usage === undefined ? {} : { usage: details.usage }),
         ...(provider !== undefined && model !== undefined ? { provenance: { provider, model } } : {}),
         timing: { stepStartTime: null, firstTokenTime: null, completedTime: time },
@@ -185,7 +211,7 @@ export function projectDshConversation(events: readonly EventView[], sessionId =
     }
     if (event.type === 'tool/call' || event.type === 'tool/start') {
       const callId = event.call_id || `call:${event.seq}`
-      calls.set(callId, { callId, seq: event.seq, name: event.tool_name || event.summary, argsRaw: event.tool_args || '', time })
+      calls.set(callId, { callId, seq: event.seq, name: event.tool_name || event.summary, argsRaw: event.tool_args || '', time, requestId: currentRequestId })
       continue
     }
     if (event.type === 'tool/result' || event.type === 'tool/error') {
@@ -195,7 +221,7 @@ export function projectDshConversation(events: readonly EventView[], sessionId =
       add({
         kind: 'tool-result', seq: event.seq, time, callId,
         call: call === undefined ? null : { name: call.name, argsRaw: call.argsRaw },
-        content: textOf(event), isError: event.type === 'tool/error',
+        content: textOf(event), isError: event.type === 'tool/error', requestId: call?.requestId ?? currentRequestId,
       })
       continue
     }
@@ -212,7 +238,7 @@ export function projectDshConversation(events: readonly EventView[], sessionId =
   }
 
   for (const call of calls.values()) {
-    add({ kind: 'tool-running', seq: call.seq, time: call.time, callId: call.callId, name: call.name, argsRaw: call.argsRaw })
+    add({ kind: 'tool-running', seq: call.seq, time: call.time, callId: call.callId, name: call.name, argsRaw: call.argsRaw, requestId: call.requestId })
   }
   nodes.sort((left, right) => left.seq - right.seq)
 

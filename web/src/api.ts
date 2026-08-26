@@ -283,6 +283,7 @@ export interface EventView {
   call_id?: string
   images?: ImageView[]
   context_message?: boolean
+  context_source?: string
   compaction_summary?: string
   compaction_tokens?: number
   compaction_error?: string

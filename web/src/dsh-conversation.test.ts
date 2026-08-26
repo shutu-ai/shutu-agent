@@ -33,4 +33,19 @@ describe('DSH conversation carrier', () => {
     expect(snapshot.runningCalls).toMatchObject([{ callId: 'c2', name: 'shell' }])
     expect(snapshot.nodes).toMatchObject([{ kind: 'tool-running', seq: 1 }])
   })
+
+  it('carries request identity, context provenance and assistant images', () => {
+    const snapshot = projectDshConversation([
+      event(1, 'llm/request_start', 'request', { details: { request_id: 'r-1' } }),
+      event(2, 'user/message', 'context', { context_message: true, context_source: 'skill-catalog' }),
+      event(3, 'assistant/message', 'answer', { images: [{ id: 'img-1', media_type: 'image/png' }] }),
+      event(4, 'tool/call', 'read', { tool_name: 'read', call_id: 'c-1' }),
+      event(5, 'tool/result', 'done', { tool_name: 'read', call_id: 'c-1' }),
+      event(6, 'llm/request_end', 'complete', { details: { request_id: 'r-1' } }),
+    ], 's-1')
+
+    expect(snapshot.nodes[0]).toMatchObject({ kind: 'context', source: 'skill-catalog' })
+    expect(snapshot.nodes[1]).toMatchObject({ kind: 'assistant', requestId: 'request:r-1', images: [{ id: 'img-1' }] })
+    expect(snapshot.nodes[2]).toMatchObject({ kind: 'tool-result', requestId: 'request:r-1', callId: 'c-1' })
+  })
 })
