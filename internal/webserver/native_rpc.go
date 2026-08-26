@@ -303,8 +303,8 @@ func (s *Server) registerNativeRoutes(mux *http.ServeMux) {
 		"workspace.list", "workspace.create", "workspace.rename", "workspace.delete",
 		"workspace.insertBefore", "workspace.insertSessionBefore", "workspace.archiveSession",
 		"agentPreset.list", "agentPreset.select", "settings.describe",
-		"settings.mutate", "credentials.describe", "dynamicCordisRunner/syncInspectManifest",
-		"dynamicCordisRunner/inventory", "llm.providers", "llm.models",
+		"settings.mutate", "settings.update", "settings.replace", "credentials.describe", "dynamicCordisRunner/syncInspectManifest",
+		"dynamicCordisRunner/inventory", "llm.providers", "llm.models", "llm.discoverModels",
 	} {
 		mux.Handle("POST /api/"+method, s.requireAuth(http.HandlerFunc(s.handleNativeRPC)))
 	}
@@ -373,36 +373,41 @@ func (s *Server) nativeSettingsMutate(raw json.RawMessage) nativeRPCResult {
 	if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
 		return failure
 	}
-	if strings.TrimSpace(req.Namespace) == "" {
+	return s.nativeSettingsApply(req.Namespace, req.Ops, req.Expected)
+}
+
+func (s *Server) nativeSettingsApply(namespace string, ops []nativeSettingsPathOp, expected *int) nativeRPCResult {
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
 		return nativeRPCFailure("bad-request", "ns is required", nil)
 	}
-	if !nativeSettingsNamespace(req.Namespace) {
-		return nativeRPCFailure("not-found", "native settings namespace is not registered", map[string]any{"ns": req.Namespace})
+	if !nativeSettingsNamespace(namespace) {
+		return nativeRPCFailure("not-found", "native settings namespace is not registered", map[string]any{"ns": namespace})
 	}
 
 	s.nativeSettingsMu.Lock()
 	defer s.nativeSettingsMu.Unlock()
 	s.ensureNativeSettingsFromConfigLocked()
-	document := s.nativeSettings[req.Namespace]
+	document := s.nativeSettings[namespace]
 	if document.Value == nil {
 		document.Value = map[string]any{}
 	}
-	if req.Expected != nil && *req.Expected != document.Revision {
+	if expected != nil && *expected != document.Revision {
 		return nativeRPCFailure("settings-conflict", "settings changed since it was read", map[string]any{
-			"expectedRevision": *req.Expected,
+			"expectedRevision": *expected,
 			"actualRevision":   document.Revision,
 		})
 	}
-	for _, op := range req.Ops {
+	for _, op := range ops {
 		if err := applyNativeSettingsOp(&document.Value, op); err != nil {
 			return nativeRPCFailure("settings-rejected", err.Error(), nil)
 		}
 	}
-	if len(req.Ops) > 0 {
+	if len(ops) > 0 {
 		document.Revision++
 	}
-	s.nativeSettings[req.Namespace] = document
-	return nativeRPCSuccess(s.nativeSettingsView(req.Namespace, document))
+	s.nativeSettings[namespace] = document
+	return nativeRPCSuccess(s.nativeSettingsView(namespace, document))
 }
 
 func (s *Server) nativeSettingsView(namespace string, document nativeSettingsDocument) map[string]any {
@@ -830,6 +835,35 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 		return s.nativeSettingsDescribe()
 	case "settings.mutate":
 		return s.nativeSettingsMutate(raw)
+	case "settings.update":
+		var req struct {
+			Namespace string         `json:"ns"`
+			Patch     map[string]any `json:"patch"`
+			Expected  *int           `json:"expectedRevision"`
+		}
+		if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
+			return failure
+		}
+		keys := make([]string, 0, len(req.Patch))
+		for key := range req.Patch {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		ops := make([]nativeSettingsPathOp, 0, len(keys))
+		for _, key := range keys {
+			ops = append(ops, nativeSettingsPathOp{Op: "set", Path: []string{key}, Value: req.Patch[key]})
+		}
+		return s.nativeSettingsApply(req.Namespace, ops, req.Expected)
+	case "settings.replace":
+		var req struct {
+			Namespace string         `json:"ns"`
+			Section   map[string]any `json:"section"`
+			Expected  *int           `json:"expectedRevision"`
+		}
+		if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
+			return failure
+		}
+		return s.nativeSettingsApply(req.Namespace, []nativeSettingsPathOp{{Op: "set", Value: req.Section}}, req.Expected)
 	case "credentials.describe":
 		var req struct {
 			Refs []string `json:"refs"`
@@ -894,6 +928,8 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 		return nativeRPCSuccess(map[string]any{"providers": entries})
 	case "llm.models":
 		return s.nativeLLMModels()
+	case "llm.discoverModels":
+		return s.nativeLLMDiscoverModels(r, raw)
 	case "dynamicCordisRunner/syncInspectManifest":
 		return nativeRPCSuccess(nil)
 	case "dynamicCordisRunner/inventory":
@@ -1097,6 +1133,56 @@ func (s *Server) nativeLLMModels() nativeRPCResult {
 		groups = append(groups, map[string]any{"id": id, "name": name, "models": items})
 	}
 	return nativeRPCSuccess(map[string]any{"groups": groups, "failures": []any{}})
+}
+
+func (s *Server) nativeLLMDiscoverModels(r *http.Request, raw json.RawMessage) nativeRPCResult {
+	if s.setDiscoverFn == nil {
+		return nativeRPCFailure("not-supported", "provider discovery not wired", nil)
+	}
+	var req struct {
+		SettingsNS string `json:"settingsNs"`
+		Provider   string `json:"provider"`
+		BaseURL    string `json:"baseURL"`
+		API        string `json:"api"`
+		APIKey     string `json:"apiKey"`
+	}
+	if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
+		return failure
+	}
+	if strings.TrimSpace(req.SettingsNS) == "" {
+		return nativeRPCFailure("bad-request", "settingsNs is required", nil)
+	}
+	models, err := s.setDiscoverFn(r.Context(), ProviderDiscover{
+		Provider: strings.TrimSpace(req.Provider),
+		BaseURL:  strings.TrimSpace(req.BaseURL),
+		Protocol: strings.TrimSpace(req.API),
+		APIKey:   req.APIKey,
+	})
+	if err != nil {
+		return nativeRPCFailure("model-discovery-failed", err.Error(), map[string]any{
+			"settingsNs": req.SettingsNS,
+			"baseURL":    strings.TrimSpace(req.BaseURL),
+		})
+	}
+	entries := make([]map[string]any, 0, len(models))
+	for _, model := range models {
+		id := strings.TrimSpace(model.ID)
+		if id == "" {
+			continue
+		}
+		entry := map[string]any{"id": id}
+		if name := strings.TrimSpace(model.Name); name != "" {
+			entry["name"] = name
+		}
+		if model.ContextWindow > 0 {
+			entry["contextWindow"] = model.ContextWindow
+		}
+		if model.MaxTokens > 0 {
+			entry["maxTokens"] = model.MaxTokens
+		}
+		entries = append(entries, entry)
+	}
+	return nativeRPCSuccess(map[string]any{"models": entries})
 }
 
 func (s *Server) nativeAgentPresetList() nativeRPCResult {

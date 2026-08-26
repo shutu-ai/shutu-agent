@@ -1461,6 +1461,77 @@ func TestNativeSessionUpdateQueueUsesDSHActionUnion(t *testing.T) {
 	}
 }
 
+func TestNativeSettingsUpdateReplaceAndLLMDiscovery(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+	var discovery ProviderDiscover
+	srv.SetProviderDiscover(func(_ context.Context, request ProviderDiscover) ([]ProviderModel, error) {
+		discovery = request
+		return []ProviderModel{{ID: "gpt-4o", Name: "GPT-4o", ContextWindow: 128000, MaxTokens: 16384}, {ID: ""}}, nil
+	})
+	call := func(id, method string, payload any) nativeRPCResponse {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{"type": "client-request", "rpcId": id, "method": method, "payload": payload})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := doReqBody(t, srv.Handler(), "POST", "/api/"+method, "tok", string(body))
+		return nativeResponse(t, rec.Body.Bytes())
+	}
+
+	response := call("settings-update", "settings.update", map[string]any{
+		"ns": "ui-onboarding", "patch": map[string]any{"completed": true}, "expectedRevision": 0,
+	})
+	if !response.Result.OK {
+		t.Fatalf("settings.update response = %+v", response)
+	}
+	var view map[string]any
+	encoded, _ := json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &view); err != nil {
+		t.Fatal(err)
+	}
+	if view["revision"] != float64(1) || view["value"].(map[string]any)["completed"] != true {
+		t.Fatalf("settings.update view = %#v", view)
+	}
+	response = call("settings-conflict", "settings.update", map[string]any{
+		"ns": "ui-onboarding", "patch": map[string]any{"other": true}, "expectedRevision": 0,
+	})
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "settings-conflict" {
+		t.Fatalf("settings conflict response = %+v", response)
+	}
+	response = call("settings-replace", "settings.replace", map[string]any{
+		"ns": "ui-onboarding", "section": map[string]any{"replacement": "yes"}, "expectedRevision": 1,
+	})
+	if !response.Result.OK {
+		t.Fatalf("settings.replace response = %+v", response)
+	}
+	encoded, _ = json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &view); err != nil {
+		t.Fatal(err)
+	}
+	values := view["value"].(map[string]any)
+	if view["revision"] != float64(2) || values["replacement"] != "yes" || values["completed"] != nil {
+		t.Fatalf("settings.replace view = %#v", view)
+	}
+
+	response = call("discover", "llm.discoverModels", map[string]any{
+		"settingsNs": "llm-pi-ai", "provider": "custom", "baseURL": "https://gateway.example/v1",
+		"api": "openai-completions", "apiKey": "secret-value",
+	})
+	if !response.Result.OK || discovery.BaseURL != "https://gateway.example/v1" || discovery.Protocol != "openai-completions" || discovery.APIKey != "secret-value" {
+		t.Fatalf("llm.discoverModels response=%+v request=%+v", response, discovery)
+	}
+	var discovered struct {
+		Models []map[string]any `json:"models"`
+	}
+	encoded, _ = json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &discovered); err != nil {
+		t.Fatal(err)
+	}
+	if len(discovered.Models) != 1 || discovered.Models[0]["id"] != "gpt-4o" || discovered.Models[0]["contextWindow"] != float64(128000) || discovered.Models[0]["maxTokens"] != float64(16384) {
+		t.Fatalf("discovered models = %#v", discovered.Models)
+	}
+}
+
 func readNativeTextFrame(reader *bufio.Reader) ([]byte, error) {
 	first, err := reader.ReadByte()
 	if err != nil {
