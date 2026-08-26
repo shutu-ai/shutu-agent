@@ -1859,7 +1859,11 @@ func (a *app) webSubagents(ctx context.Context, sessionID string) ([]map[string]
 	}
 	out := make([]map[string]any, 0, len(children))
 	for _, c := range children {
-		out = append(out, map[string]any{"id": c.ID, "label": c.Label, "running": c.Running})
+		mode := "one-shot"
+		if c.Continuable {
+			mode = "continuable"
+		}
+		out = append(out, map[string]any{"id": c.ID, "label": c.Label, "running": c.Running, "mode": mode, "has_children": false})
 	}
 	return out, nil
 }

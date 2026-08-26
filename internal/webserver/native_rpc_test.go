@@ -1532,6 +1532,85 @@ func TestNativeSettingsUpdateReplaceAndLLMDiscovery(t *testing.T) {
 	}
 }
 
+func TestNativeSkillListProjectsUserInvocableCatalog(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+	srv.SetSkillManager(func(_ context.Context, action string, _ SkillRequest) (map[string]any, error) {
+		if action != "list" {
+			t.Fatalf("skill action = %q, want list", action)
+		}
+		return map[string]any{"skills": []map[string]any{
+			{"name": "zeta", "description": "last", "when_to_use": "later", "model_invocable": true, "user_invocable": true},
+			{"name": "internal", "description": "hidden", "model_invocable": true, "user_invocable": false},
+			{"name": "alpha", "description": "first", "model_invocable": false, "user_invocable": true},
+		}}, nil
+	})
+	body := `{"type":"client-request","rpcId":"skill-1","method":"skill.list","payload":{"sessionId":"session-1"}}`
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/skill.list", "tok", body)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK {
+		t.Fatalf("skill.list response = %+v", response)
+	}
+	var value struct {
+		Skills []map[string]any `json:"skills"`
+	}
+	encoded, _ := json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &value); err != nil {
+		t.Fatal(err)
+	}
+	if len(value.Skills) != 2 || value.Skills[0]["name"] != "alpha" || value.Skills[1]["name"] != "zeta" {
+		t.Fatalf("skill list = %#v", value.Skills)
+	}
+	if value.Skills[1]["whenToUse"] != "later" || value.Skills[0]["modelInvocable"] != false {
+		t.Fatalf("skill projections = %#v", value.Skills)
+	}
+
+	rec = doReqBody(t, srv.Handler(), "POST", "/api/skill.list", "tok", `{"type":"client-request","rpcId":"skill-2","method":"skill.list","payload":{}}`)
+	response = nativeResponse(t, rec.Body.Bytes())
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "bad-request" {
+		t.Fatalf("missing session skill.list response = %+v", response)
+	}
+}
+
+func TestNativeSubagentListProjectsParentScopedCatalog(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	seedSession(t, st, "parent-session", nil)
+	srv.SetSubagentProvider(func(_ context.Context, sessionID string) ([]map[string]any, error) {
+		if sessionID != "parent-session" {
+			t.Fatalf("parent session = %q", sessionID)
+		}
+		return []map[string]any{
+			{"id": "child-z", "label": "Z task", "running": false, "mode": "one-shot", "has_children": true},
+			{"id": "child-a", "label": "A task", "running": true, "mode": "continuable", "has_children": false},
+		}, nil
+	})
+	body := `{"type":"client-request","rpcId":"subagent-1","method":"subagent.list","payload":{"parentSessionId":"parent-session"}}`
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/subagent.list", "tok", body)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK {
+		t.Fatalf("subagent.list response = %+v", response)
+	}
+	var value struct {
+		Entries         []map[string]any `json:"entries"`
+		ParentAvailable bool             `json:"parentAvailable"`
+	}
+	encoded, _ := json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &value); err != nil {
+		t.Fatal(err)
+	}
+	if !value.ParentAvailable || len(value.Entries) != 2 || value.Entries[0]["id"] != "child-a" || value.Entries[1]["id"] != "child-z" {
+		t.Fatalf("subagent entries = %#v", value)
+	}
+	if value.Entries[0]["activity"] != "running" || value.Entries[0]["mode"] != "continuable" || value.Entries[1]["hasChildren"] != true {
+		t.Fatalf("subagent projections = %#v", value.Entries)
+	}
+
+	rec = doReqBody(t, srv.Handler(), "POST", "/api/subagent.list", "tok", `{"type":"client-request","rpcId":"subagent-2","method":"subagent.list","payload":{"parentSessionId":"missing"}}`)
+	response = nativeResponse(t, rec.Body.Bytes())
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "subagent-parent-not-found" {
+		t.Fatalf("missing parent response = %+v", response)
+	}
+}
+
 func readNativeTextFrame(reader *bufio.Reader) ([]byte, error) {
 	first, err := reader.ReadByte()
 	if err != nil {

@@ -304,7 +304,8 @@ func (s *Server) registerNativeRoutes(mux *http.ServeMux) {
 		"workspace.insertBefore", "workspace.insertSessionBefore", "workspace.archiveSession",
 		"agentPreset.list", "agentPreset.select", "settings.describe",
 		"settings.mutate", "settings.update", "settings.replace", "credentials.describe", "dynamicCordisRunner/syncInspectManifest",
-		"dynamicCordisRunner/inventory", "llm.providers", "llm.models", "llm.discoverModels",
+		"dynamicCordisRunner/inventory", "llm.providers", "llm.models", "llm.discoverModels", "skill.list",
+		"subagent.list",
 	} {
 		mux.Handle("POST /api/"+method, s.requireAuth(http.HandlerFunc(s.handleNativeRPC)))
 	}
@@ -930,6 +931,10 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 		return s.nativeLLMModels()
 	case "llm.discoverModels":
 		return s.nativeLLMDiscoverModels(r, raw)
+	case "skill.list":
+		return s.nativeSkillList(r, raw)
+	case "subagent.list":
+		return s.nativeSubagentList(r, raw)
 	case "dynamicCordisRunner/syncInspectManifest":
 		return nativeRPCSuccess(nil)
 	case "dynamicCordisRunner/inventory":
@@ -1183,6 +1188,103 @@ func (s *Server) nativeLLMDiscoverModels(r *http.Request, raw json.RawMessage) n
 		entries = append(entries, entry)
 	}
 	return nativeRPCSuccess(map[string]any{"models": entries})
+}
+
+func (s *Server) nativeSkillList(r *http.Request, raw json.RawMessage) nativeRPCResult {
+	if s.skillsFn == nil {
+		return nativeRPCFailure("not-supported", "skill registry not wired", nil)
+	}
+	var req struct {
+		SessionID string `json:"sessionId"`
+	}
+	if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
+		return failure
+	}
+	if strings.TrimSpace(req.SessionID) == "" {
+		return nativeRPCFailure("bad-request", "sessionId is required", nil)
+	}
+	result, err := s.skillsFn(r.Context(), "list", SkillRequest{})
+	if err != nil {
+		return nativeRPCFailure("skill-list-failed", err.Error(), map[string]any{"sessionId": req.SessionID})
+	}
+	rows, _ := result["skills"].([]map[string]any)
+	entries := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		if !nativeBool(row["user_invocable"]) {
+			continue
+		}
+		name := nativeString(row["name"])
+		if name == "" {
+			continue
+		}
+		entry := map[string]any{
+			"name":           name,
+			"description":    nativeString(row["description"]),
+			"modelInvocable": nativeBool(row["model_invocable"]),
+		}
+		if whenToUse := nativeString(row["when_to_use"]); whenToUse != "" {
+			entry["whenToUse"] = whenToUse
+		}
+		entries = append(entries, entry)
+	}
+	sort.SliceStable(entries, func(left, right int) bool {
+		return nativeString(entries[left]["name"]) < nativeString(entries[right]["name"])
+	})
+	return nativeRPCSuccess(map[string]any{"skills": entries})
+}
+
+func (s *Server) nativeSubagentList(r *http.Request, raw json.RawMessage) nativeRPCResult {
+	if s.subFn == nil {
+		return nativeRPCFailure("not-supported", "subagent registry not wired", nil)
+	}
+	var req struct {
+		ParentSessionID string `json:"parentSessionId"`
+	}
+	if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
+		return failure
+	}
+	req.ParentSessionID = strings.TrimSpace(req.ParentSessionID)
+	if req.ParentSessionID == "" {
+		return nativeRPCFailure("bad-request", "parentSessionId is required", nil)
+	}
+	if _, err := s.store.GetSessionMeta(r.Context(), req.ParentSessionID); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nativeRPCFailure("subagent-parent-not-found", "parent session not found", map[string]any{"parentSessionId": req.ParentSessionID})
+		}
+		return nativeRPCFailure("internal", err.Error(), nil)
+	}
+	rows, err := s.subFn(r.Context(), req.ParentSessionID)
+	if err != nil {
+		return nativeRPCFailure("subagent-list-failed", err.Error(), map[string]any{"parentSessionId": req.ParentSessionID})
+	}
+	entries := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		id := nativeString(row["id"])
+		if id == "" {
+			continue
+		}
+		mode := nativeString(row["mode"])
+		if mode != "continuable" {
+			mode = "one-shot"
+		}
+		entry := map[string]any{
+			"kind":        "child",
+			"id":          id,
+			"mode":        mode,
+			"activity":    map[bool]string{true: "running", false: "inactive"}[nativeBool(row["running"])],
+			"hasChildren": nativeBool(row["has_children"]),
+		}
+		if label := nativeString(row["label"]); label != "" {
+			entry["label"] = label
+		} else if mode == "continuable" {
+			entry["label"] = id
+		}
+		entries = append(entries, entry)
+	}
+	sort.SliceStable(entries, func(left, right int) bool {
+		return nativeString(entries[left]["id"]) < nativeString(entries[right]["id"])
+	})
+	return nativeRPCSuccess(map[string]any{"entries": entries, "parentAvailable": true})
 }
 
 func (s *Server) nativeAgentPresetList() nativeRPCResult {

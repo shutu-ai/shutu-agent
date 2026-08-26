@@ -114,9 +114,10 @@ type Provider interface {
 // ChildSummary is a read-only projection of one spawned child for
 // ListChildren.
 type ChildSummary struct {
-	ID      string
-	Label   string
-	Running bool
+	ID          string
+	Label       string
+	Running     bool
+	Continuable bool
 }
 
 // childrenLister is the optional extension a Provider implements to enumerate

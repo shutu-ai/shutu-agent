@@ -432,7 +432,7 @@ func (p *SpawnProvider) ListChildren(ctx context.Context, parentSessionID string
 		c.mu.Lock()
 		running := !c.settled
 		c.mu.Unlock()
-		out = append(out, ChildSummary{ID: c.id, Label: c.label, Running: running})
+		out = append(out, ChildSummary{ID: c.id, Label: c.label, Running: running, Continuable: c.continuable})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, nil
