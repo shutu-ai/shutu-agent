@@ -207,7 +207,7 @@ func TestNativeGoalsRemoteNamespaceUnwrapsDSHArguments(t *testing.T) {
 		got = mutation
 		return NativeGoalMutationResult{GoalID: "goal-remote", Revision: 3}, nil
 	})
-	rec := doReqBody(t, srv.Handler(), "POST", "/api/goals/create", "tok", `{"type":"client-request","rpcId":"goals","method":"goals/create","payload":{"args":[{"id":"s-remote"},{"objective":"ship it","maxGoalRounds":5}]}}`)
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/goals/create", "tok", `{"type":"client-request","rpcId":"goals","method":"goals/create","payload":{"args":["s-remote",{"objective":"ship it","maxGoalRounds":5}]}}`)
 	response := nativeResponse(t, rec.Body.Bytes())
 	if !response.Result.OK || got.Action != "goal.create" || got.SessionID != "s-remote" || got.Objective == nil || *got.Objective != "ship it" || got.MaxGoalRounds == nil || *got.MaxGoalRounds != 5 {
 		t.Fatalf("goals/create response=%+v mutation=%+v", response, got)
@@ -402,7 +402,7 @@ func TestNativeFileReferencesListUsesSessionCWDAndRemoteArguments(t *testing.T) 
 	if err := st.SetSessionCWD(context.Background(), "file-session", root); err != nil {
 		t.Fatal(err)
 	}
-	rec := doReqBody(t, srv.Handler(), "POST", "/api/fileReferences/list", "tok", `{"type":"client-request","rpcId":"file-ref","method":"fileReferences/list","payload":{"args":[{"id":"file-session"},"src/",{}]}}`)
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/fileReferences/list", "tok", `{"type":"client-request","rpcId":"file-ref","method":"fileReferences/list","payload":{"args":["file-session","src/",{}]}}`)
 	response := nativeResponse(t, rec.Body.Bytes())
 	if !response.Result.OK {
 		t.Fatalf("file reference response = %+v", response)
@@ -427,7 +427,7 @@ func TestNativeSessionReferenceCandidatesReturnCanonicalMentions(t *testing.T) {
 	if err := st.SetSessionTitle(context.Background(), "release-session", "Release notes", session.TitleSourceUser); err != nil {
 		t.Fatal(err)
 	}
-	rec := doReqBody(t, srv.Handler(), "POST", "/api/sessionReferenceResolver/candidates", "tok", `{"type":"client-request","rpcId":"session-ref","method":"sessionReferenceResolver/candidates","payload":{"args":[{"id":"current-session"},"release",{}]}}`)
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/sessionReferenceResolver/candidates", "tok", `{"type":"client-request","rpcId":"session-ref","method":"sessionReferenceResolver/candidates","payload":{"args":["current-session","release",{}]}}`)
 	response := nativeResponse(t, rec.Body.Bytes())
 	if !response.Result.OK {
 		t.Fatalf("session reference response = %+v", response)

@@ -530,28 +530,44 @@ func nativeRemoteArguments(raw json.RawMessage) ([]json.RawMessage, error) {
 	return []json.RawMessage{envelope.Args}, nil
 }
 
-func (s *Server) nativeFileReferencesList(r *http.Request, raw json.RawMessage) nativeRPCResult {
-	args, err := nativeRemoteArguments(raw)
-	if err != nil || len(args) < 2 {
-		return nativeRPCFailure("bad-request", "file reference request requires agent and query", nil)
+func nativeRemoteSessionID(raw json.RawMessage) (sessionID, cwd string, err error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) > 0 && trimmed[0] == '"' {
+		if err := json.Unmarshal(trimmed, &sessionID); err != nil {
+			return "", "", err
+		}
+		return strings.TrimSpace(sessionID), "", nil
 	}
 	var agent struct {
 		ID        string `json:"id"`
 		SessionID string `json:"sessionId"`
 		CWD       string `json:"cwd"`
 	}
-	if err := json.Unmarshal(args[0], &agent); err != nil {
+	if err := json.Unmarshal(trimmed, &agent); err != nil {
+		return "", "", err
+	}
+	if strings.TrimSpace(agent.ID) != "" {
+		sessionID = agent.ID
+	} else {
+		sessionID = agent.SessionID
+	}
+	return strings.TrimSpace(sessionID), strings.TrimSpace(agent.CWD), nil
+}
+
+func (s *Server) nativeFileReferencesList(r *http.Request, raw json.RawMessage) nativeRPCResult {
+	args, err := nativeRemoteArguments(raw)
+	if err != nil || len(args) < 2 {
+		return nativeRPCFailure("bad-request", "file reference request requires agent and query", nil)
+	}
+	sessionID, agentCWD, err := nativeRemoteSessionID(args[0])
+	if err != nil {
 		return nativeRPCFailure("bad-request", "file reference agent is invalid", nil)
 	}
 	var query string
 	if err := json.Unmarshal(args[1], &query); err != nil {
 		return nativeRPCFailure("bad-request", "file reference query is invalid", nil)
 	}
-	sessionID := strings.TrimSpace(agent.ID)
-	if sessionID == "" {
-		sessionID = strings.TrimSpace(agent.SessionID)
-	}
-	root := strings.TrimSpace(agent.CWD)
+	root := agentCWD
 	if sessionID != "" {
 		if meta, metaErr := s.store.GetSessionMeta(r.Context(), sessionID); metaErr == nil {
 			root = meta.CWD
@@ -630,10 +646,8 @@ func (s *Server) nativeSessionReferenceCandidates(r *http.Request, raw json.RawM
 	if err != nil || len(args) < 2 {
 		return nativeRPCFailure("bad-request", "session reference request requires agent and query", nil)
 	}
-	var agent struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(args[0], &agent); err != nil {
+	sessionID, _, err := nativeRemoteSessionID(args[0])
+	if err != nil {
 		return nativeRPCFailure("bad-request", "session reference agent is invalid", nil)
 	}
 	var query string
@@ -647,7 +661,7 @@ func (s *Server) nativeSessionReferenceCandidates(r *http.Request, raw json.RawM
 	needle := strings.ToLower(strings.TrimSpace(query))
 	values := make([]map[string]any, 0, 20)
 	for _, meta := range metas {
-		if meta.ID == strings.TrimSpace(agent.ID) {
+		if meta.ID == sessionID {
 			continue
 		}
 		label := strings.TrimSpace(meta.Title)
@@ -2171,13 +2185,11 @@ func nativeGoalRemotePayload(raw json.RawMessage, operation string) (json.RawMes
 	if err != nil || len(args) < 2 {
 		return nil, errors.New("goal request requires agent and operation arguments")
 	}
-	var agent struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(args[0], &agent); err != nil || strings.TrimSpace(agent.ID) == "" {
+	sessionID, _, err := nativeRemoteSessionID(args[0])
+	if err != nil || sessionID == "" {
 		return nil, errors.New("goal agent id is required")
 	}
-	payload := map[string]any{"sessionId": strings.TrimSpace(agent.ID)}
+	payload := map[string]any{"sessionId": sessionID}
 	if operation == "create" {
 		var request struct {
 			Objective     *string `json:"objective"`
