@@ -494,18 +494,45 @@ func TestNativeSessionHistorySeedsProjectionBeforeSelectingMessagePage(t *testin
 	if err := json.Unmarshal(encoded, &history); err != nil {
 		t.Fatal(err)
 	}
-	if len(history.Events) != 3 || history.Events[0].Event.Seq != 4 || !history.HasMore {
+	if len(history.Events) != 1 || history.Events[0].Event.Seq != 6 || !history.HasMore {
 		t.Fatalf("paged history = %+v", history)
 	}
 	var assistant struct {
 		Turn int `json:"turn"`
 	}
-	if err := json.Unmarshal(history.Events[2].Event.Data, &assistant); err != nil {
+	if err := json.Unmarshal(history.Events[0].Event.Data, &assistant); err != nil {
 		t.Fatal(err)
 	}
 	if assistant.Turn != 2 {
 		t.Fatalf("page projection turn = %d, want 2", assistant.Turn)
 	}
+}
+
+func TestNativeHistoryPageBoundsSkipsReplacementAndKeepsMessageSources(t *testing.T) {
+	input := []session.Event{
+		{Seq: 1, Type: session.EventUserMessage, At: time.UnixMilli(1001), Version: session.EventVersion, Data: json.RawMessage(`{"text":"old"}`)},
+		{Seq: 2, Type: session.EventAssistantMessage, At: time.UnixMilli(1002), Version: session.EventVersion, Data: json.RawMessage(`{"text":"answer","sourceEventSeqs":[1,2]}`)},
+		{Seq: 3, Type: session.EventUserMessage, At: time.UnixMilli(1003), Version: session.EventVersion, Data: json.RawMessage(`{"text":"summary","surfaceOp":{"op":"replace","start":1,"end":2}}`)},
+	}
+	cursor := newNativeProjectionCursor()
+	projected := make([]nativeSessionEvent, 0, len(input))
+	for _, event := range input {
+		projected = append(projected, cursor.project("paged", event))
+	}
+
+	start, end := nativeHistoryPageBounds(projected, nil, 1)
+	if start != 0 || end != len(projected) {
+		t.Fatalf("replacement page bounds = (%d,%d), want (0,%d)", start, end, len(projected))
+	}
+
+	start, end = nativeHistoryPageBounds(projected, uint64Ptr(3), 1)
+	if start != 0 || end != 2 {
+		t.Fatalf("source-group page bounds = (%d,%d), want (0,2)", start, end)
+	}
+}
+
+func uint64Ptr(value uint64) *uint64 {
+	return &value
 }
 
 func TestNativeProjectionUsesOneDSHShapeForReplayAndLive(t *testing.T) {

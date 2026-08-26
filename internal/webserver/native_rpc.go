@@ -924,13 +924,13 @@ func (s *Server) nativeSessionHistory(r *http.Request, raw json.RawMessage) nati
 	if err != nil {
 		return nativeStoreFailure(err)
 	}
-	start, end := nativeHistoryPageBounds(events, req.BeforeSeq, limit)
 	entries := make([]nativeHistoryEntry, 0, len(events))
 	projection := newNativeProjectionCursor()
 	projected := make([]nativeSessionEvent, 0, len(events))
 	for _, ev := range events {
 		projected = append(projected, projection.project(req.SessionID, ev))
 	}
+	start, end := nativeHistoryPageBounds(projected, req.BeforeSeq, limit)
 	for _, event := range projected[start:end] {
 		entries = append(entries, nativeHistoryEntry{Event: event})
 	}
@@ -972,9 +972,11 @@ func (s *Server) nativeSessionHistory(r *http.Request, raw json.RawMessage) nati
 // The projection must be seeded by the complete ordered log before this
 // window is selected: a page may begin with an assistant chunk, a tool result,
 // or a compaction replacement whose turn/surface owner lives on an earlier
-// page. Keeping the bounds calculation separate also makes the sequence
-// cursor semantics explicit (beforeSeq is exclusive; zero selects the tail).
-func nativeHistoryPageBounds(events []session.Event, before *uint64, maxMessages int) (start, end int) {
+// page. Only append-origin user/assistant messages consume the page budget;
+// replacement copies remain in the contiguous raw range but do not count.
+// Keeping the bounds calculation separate also makes the sequence cursor
+// semantics explicit (beforeSeq is exclusive; zero selects the tail).
+func nativeHistoryPageBounds(events []nativeSessionEvent, before *uint64, maxMessages int) (start, end int) {
 	end = len(events)
 	if before != nil && *before != 0 {
 		end = sort.Search(len(events), func(index int) bool {
@@ -987,17 +989,41 @@ func nativeHistoryPageBounds(events []session.Event, before *uint64, maxMessages
 	if end > len(events) {
 		end = len(events)
 	}
+	if maxMessages <= 0 {
+		maxMessages = defaultEventPageLimit
+	}
+	cut := uint64(0)
 	for index, messages := end-1, 0; index >= 0; index-- {
 		event := events[index]
-		if event.Type == session.EventUserMessage || event.Type == session.EventAssistantMessage {
-			messages++
+		if !nativeIsAppendSurfaceMessage(event) {
+			continue
 		}
-		if event.Type == session.EventTurnStart && messages >= maxMessages {
-			start = index
+		messages++
+		groupStart := event.Seq
+		for _, source := range event.SourceEventSeqs {
+			if source < groupStart {
+				groupStart = source
+			}
+		}
+		if messages >= maxMessages {
+			cut = groupStart
 			break
 		}
 	}
+	if cut == 0 {
+		return 0, end
+	}
+	start = sort.Search(end, func(index int) bool {
+		return events[index].Seq >= cut
+	})
 	return start, end
+}
+
+func nativeIsAppendSurfaceMessage(event nativeSessionEvent) bool {
+	if event.Type != session.EventUserMessage && event.Type != session.EventAssistantMessage {
+		return false
+	}
+	return event.SurfaceOp == "append"
 }
 
 func (s *Server) nativeSessionCreate(r *http.Request, raw json.RawMessage) nativeRPCResult {
