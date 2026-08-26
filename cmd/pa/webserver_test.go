@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -27,11 +28,16 @@ func makeWebServerApp(t *testing.T, enabled bool, token string) (*app, *store.SQ
 	if err != nil {
 		t.Fatalf("OpenSQLite: %v", err)
 	}
+	dist := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dist, "index.html"), []byte("<div id=\"react-root\">DSH</div>"), 0o644); err != nil {
+		t.Fatalf("write frontend index: %v", err)
+	}
 	return &app{
 		cfg: config.Config{WebServer: config.WebServerConfig{
 			Enabled: enabled,
 			Addr:    "127.0.0.1:0", // ephemeral in tests; production default is 127.0.0.1:8080
 			Token:   token,
+			DistDir: dist,
 		}},
 		store: st,
 	}, st

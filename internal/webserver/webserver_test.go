@@ -1,5 +1,5 @@
 // webserver_test.go — the M10 portal tests (docs/dispatch-m10.md §3): New
-// validation, bearer auth, sessions/events JSON API, static hosting, the
+// validation, bearer auth, sessions/events JSON API, React SPA hosting, the
 // bounded event summary, and the /api/stats dashboard rollup (M10c §3). The
 // store is a real SQLite backend on a temp dir (the same backend the REPL
 // uses), seeded through CreateSession + AppendEvents.
@@ -114,6 +114,13 @@ func TestNewValidation(t *testing.T) {
 
 func TestAuthRequired(t *testing.T) {
 	srv, _ := newTestServer(t, "secret")
+	dist := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dist, "index.html"), []byte("<div id=\"react-root\">DSH</div>"), 0o644); err != nil {
+		t.Fatalf("write frontend index: %v", err)
+	}
+	if err := srv.SetFrontendDist(dist); err != nil {
+		t.Fatalf("SetFrontendDist: %v", err)
+	}
 	h := srv.Handler()
 	if rec := doReq(t, h, "GET", "/api/sessions", ""); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("no token → %d, want 401", rec.Code)
@@ -124,7 +131,7 @@ func TestAuthRequired(t *testing.T) {
 	if rec := doReq(t, h, "GET", "/api/sessions", "secret"); rec.Code != http.StatusOK {
 		t.Fatalf("right token → %d, want 200", rec.Code)
 	}
-	// The static shell is public so the login view can load (D-WEB-2): it
+	// The React shell is public so the login view can load (D-WEB-2): it
 	// holds no data; only the API routes are gated.
 	if rec := doReq(t, h, "GET", "/", ""); rec.Code != http.StatusOK {
 		t.Fatalf("static / without token → %d, want 200 (login shell must load)", rec.Code)
@@ -378,20 +385,24 @@ func TestMessageFeedbackAPI(t *testing.T) {
 	}
 }
 
-func TestStaticServed(t *testing.T) {
+func TestFrontendDistRequired(t *testing.T) {
 	srv, _ := newTestServer(t, "tok")
 	h := srv.Handler()
-	if rec := doReq(t, h, "GET", "/", "tok"); rec.Code != http.StatusOK || !strings.Contains(rec.Header().Get("Content-Type"), "text/html") {
-		t.Fatalf("GET / → %d %q, want 200 text/html", rec.Code, rec.Header().Get("Content-Type"))
+	if rec := doReq(t, h, "GET", "/", "tok"); rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), "frontend dist not configured") {
+		t.Fatalf("GET / without dist = %d %q, want a configuration error", rec.Code, rec.Body.String())
 	}
-	if rec := doReq(t, h, "GET", "/static/app.js", "tok"); rec.Code != http.StatusOK {
-		t.Fatalf("GET /static/app.js → %d, want 200", rec.Code)
+	if rec := doReq(t, h, "GET", "/static/app.js", "tok"); rec.Code != http.StatusInternalServerError {
+		t.Fatalf("legacy /static/app.js = %d, want unavailable", rec.Code)
 	}
-	if rec := doReq(t, h, "GET", "/", "tok"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "id=\"slash-menu\"") {
-		t.Fatalf("index.html missing slash menu container")
+	dist := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dist, "index.html"), []byte("<div id=\"react-root\">DSH</div>"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if rec := doReq(t, h, "GET", "/nope", "tok"); rec.Code != http.StatusNotFound {
-		t.Fatalf("GET /nope → %d, want 404", rec.Code)
+	if err := srv.SetFrontendDist(dist); err != nil {
+		t.Fatalf("SetFrontendDist: %v", err)
+	}
+	if rec := doReq(t, h, "GET", "/", "tok"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "react-root") {
+		t.Fatalf("React index = %d %q, want React root", rec.Code, rec.Body.String())
 	}
 }
 
@@ -407,7 +418,9 @@ func TestExternalFrontendDistServedAsSPA(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dist, "assets", "app.js"), []byte("console.log('dsh')"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	srv.SetFrontendDist(dist)
+	if err := srv.SetFrontendDist(dist); err != nil {
+		t.Fatalf("SetFrontendDist: %v", err)
+	}
 
 	if rec := doReq(t, srv.Handler(), "GET", "/", "tok"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "react-root") {
 		t.Fatalf("external index = %d %q, want React root", rec.Code, rec.Body.String())
@@ -419,16 +432,8 @@ func TestExternalFrontendDistServedAsSPA(t *testing.T) {
 	if rec := doReq(t, srv.Handler(), "GET", "/session/s-1/trajectory", "tok"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "react-root") {
 		t.Fatalf("SPA route = %d %q, want index fallback", rec.Code, rec.Body.String())
 	}
-}
-
-func TestFavicon(t *testing.T) {
-	srv, _ := newTestServer(t, "tok")
-	rec := doReq(t, srv.Handler(), "GET", "/favicon.ico", "tok")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /favicon.ico → %d, want 200 (never 404)", rec.Code)
-	}
-	if ct := rec.Header().Get("Content-Type"); ct != "image/png" {
-		t.Fatalf("favicon Content-Type = %q, want image/png", ct)
+	if rec := doReq(t, srv.Handler(), "GET", "/static/app.js", "tok"); rec.Code != http.StatusNotFound {
+		t.Fatalf("legacy static route = %d, want 404", rec.Code)
 	}
 }
 

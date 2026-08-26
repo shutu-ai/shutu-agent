@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -361,6 +362,10 @@ func TestWebConfigRedacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
+	dist := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dist, "index.html"), []byte("<div id=\"react-root\">DSH</div>"), 0o644); err != nil {
+		t.Fatalf("write frontend index: %v", err)
+	}
 	a := &app{
 		cfg: config.Config{
 			Model:   "deepseek-chat",
@@ -375,7 +380,7 @@ func TestWebConfigRedacts(t *testing.T) {
 			Web:        config.WebConfig{Enabled: config.Bool(true)},
 			Compaction: config.CompactionConfig{Enabled: config.Bool(true)},
 			Eval:       config.EvalConfig{Enabled: config.Bool(false)},
-			WebServer:  config.WebServerConfig{Enabled: true, Addr: "127.0.0.1:0", Token: "super-secret"},
+			WebServer:  config.WebServerConfig{Enabled: true, Addr: "127.0.0.1:0", Token: "super-secret", DistDir: dist},
 		},
 		store: st,
 	}

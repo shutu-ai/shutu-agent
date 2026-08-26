@@ -3,7 +3,7 @@
 // (M10b). Data views are read-only (D-WEB-4); injected workspace actions
 // (messages, session controls and approval decisions) are explicit exceptions.
 // Every API route sits behind the bearer-token middleware; the frontend is vanilla
-// JS embedded into the binary (go:embed) — zero new dependencies.
+// React/Cordis dist is served from the configured filesystem directory.
 package webserver
 
 import (
@@ -13,13 +13,11 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
-	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -40,9 +38,6 @@ import (
 	"github.com/jabing/shutu-agent/internal/store"
 )
 
-//go:embed static
-var staticFS embed.FS
-
 // maxSummary is the rune cap on the bounded per-event summary the events API
 // exposes (防超大载荷 / 防泄露完整日志正文, D-WEB-4). Message bodies
 // (user/message, assistant/message) are the text the frontend must display in
@@ -60,9 +55,8 @@ type Server struct {
 	tokenHash [32]byte // sha256 of the configured token; the plaintext never survives New
 	authOn    bool     // token != "" → bearer check enforced
 	addr      string
-	// frontendDir is an optional external SPA dist root. It is deliberately a
-	// server setter rather than a constructor argument so existing embedders and
-	// tests remain source-compatible.
+	// frontendDir is the React/Cordis SPA dist root. The server never serves an
+	// embedded or legacy frontend when this path is absent.
 	frontendDir string
 	// defaultWorkdir is the fallback cwd for ungrouped sessions and legacy
 	// title-only workspaces. The composition root sets it from config; an empty
@@ -311,15 +305,23 @@ func (s *Server) SetProviderDiscover(fn func(ctx context.Context, request Provid
 // and by workspaces created without an explicit path.
 func (s *Server) SetDefaultWorkdir(dir string) { s.defaultWorkdir = dir }
 
-// SetFrontendDist selects an external React/Cordis SPA dist directory. An
-// empty value keeps the embedded legacy portal. The directory is read-only
-// from the server side and is never accepted from a request path.
-func (s *Server) SetFrontendDist(dir string) {
+// SetFrontendDist selects the React/Cordis SPA dist directory. The directory
+// must contain index.html so a misconfigured production server fails during
+// startup instead of exposing a different frontend.
+func (s *Server) SetFrontendDist(dir string) error {
 	if strings.TrimSpace(dir) == "" {
-		s.frontendDir = ""
-		return
+		return errors.New("webserver: frontend dist is required")
 	}
-	s.frontendDir = filepath.Clean(dir)
+	clean := filepath.Clean(dir)
+	info, err := os.Stat(filepath.Join(clean, "index.html"))
+	if err != nil {
+		return fmt.Errorf("webserver: frontend index: %w", err)
+	}
+	if info.IsDir() {
+		return errors.New("webserver: frontend index is a directory")
+	}
+	s.frontendDir = clean
+	return nil
 }
 
 // empty opens the portal to the local machine (dsh-style, no login); a token
@@ -338,13 +340,11 @@ func New(st store.Store, token, addr string) (*Server, error) {
 		authOn:    token != "",
 		addr:      addr,
 	}
-	// The static shell (login view + frontend assets) is public so a fresh
+	// The React shell (login view + frontend assets) is public so a fresh
 	// browser can load the page and present the token form (D-WEB-2): it holds
 	// no data. Every /api route sits behind the bearer middleware.
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", s.handleIndex)
-	mux.HandleFunc("GET /favicon.ico", s.handleFavicon)
-	mux.HandleFunc("GET /static/{file...}", s.handleStatic)
 	mux.Handle("GET /api/health", s.requireAuth(http.HandlerFunc(s.handleHealth)))
 	mux.Handle("GET /api/stats", s.requireAuth(http.HandlerFunc(s.handleStats)))
 	mux.Handle("GET /api/sessions", s.requireAuth(http.HandlerFunc(s.handleSessions)))
@@ -600,7 +600,7 @@ func (w *panicSafeWriter) Flush() {
 
 // requireAuth wraps an /api handler with the bearer-token check (D-WEB-2): the
 // presented token's SHA-256 must match the stored digest under a constant-time
-// compare. Only the API routes are gated; the static shell stays public so the
+// compare. Only the API routes are gated; the React shell stays public so the
 // login view can load (data never leaves the API). It also recovers a panicking
 // handler into a JSON 500 (M10 W3 robustness): a crashed route must never
 // answer a bare connection reset, and the panic + stack is logged for repair.
@@ -641,40 +641,19 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// handleFavicon serves the browser favicon: the user's black brand logo
-// (big_logo_1.png). index.html declares it via <link rel="icon">; this route
-// catches direct /favicon.ico requests so they never 404 (dsh: favicon = the
-// brand mark).
-func (s *Server) handleFavicon(w http.ResponseWriter, r *http.Request) {
-	b, err := staticFS.ReadFile("static/big_logo_1.png")
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
-	w.Header().Set("Content-Type", "image/png")
-	w.Header().Set("Cache-Control", "no-cache")
-	_, _ = w.Write(b)
-}
-
-// handleIndex serves the embedded single-page shell. In the ServeMux the
-// pattern "GET /" matches every unmatched path, so a strict path check keeps
-// unknown routes a 404 rather than serving the shell.
+// handleIndex serves the configured React/Cordis single-page shell. In the
+// ServeMux the pattern "GET /" matches every unmatched path, so the dist
+// handler also owns client-side routes and static assets.
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	if s.frontendDir != "" {
-		s.serveFrontend(w, r)
+	if s.frontendDir == "" {
+		http.Error(w, "frontend dist not configured", http.StatusInternalServerError)
 		return
 	}
-	if r.URL.Path != "/" {
+	if r.URL.Path == "/favicon.ico" || strings.HasPrefix(r.URL.Path, "/static/") {
 		http.NotFound(w, r)
 		return
 	}
-	b, err := staticFS.ReadFile("static/index.html")
-	if err != nil {
-		http.Error(w, "index missing", http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write(b)
+	s.serveFrontend(w, r)
 }
 
 // serveFrontend serves the external SPA with a safe path boundary. Existing
@@ -704,21 +683,6 @@ func (s *Server) serveFrontend(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-cache")
 	http.ServeFile(w, r, index)
-}
-
-// handleStatic serves embedded static assets under /static/ (StripPrefix
-// removes the route prefix so the FileServer resolves inside the static dir).
-// no-cache: every reload revalidates the embedded assets, so a rebuilt binary
-// (new app.js/style.css) is picked up by a plain refresh instead of the
-// browser's heuristic cache.
-func (s *Server) handleStatic(w http.ResponseWriter, r *http.Request) {
-	sub, err := fs.Sub(staticFS, "static")
-	if err != nil {
-		http.Error(w, "static missing", http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Cache-Control", "no-cache")
-	http.StripPrefix("/static/", http.FileServer(http.FS(sub))).ServeHTTP(w, r)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
