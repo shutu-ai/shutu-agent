@@ -132,12 +132,28 @@ type nativePromptPart struct {
 
 type nativeSessionListItem struct {
 	SessionID       string `json:"sessionId"`
+	Title           string `json:"title,omitempty"`
 	UpdatedAt       int64  `json:"updatedAt"`
 	Running         bool   `json:"running"`
 	Blank           bool   `json:"blank"`
 	ParentSessionID string `json:"parentSessionId,omitempty"`
 	Origin          string `json:"origin,omitempty"`
 	CWD             string `json:"cwd,omitempty"`
+	AgentPreset     string `json:"agentPreset,omitempty"`
+}
+
+// nativeSessionHeader is the DSH session-header projection. The SQLite
+// session metadata currently owns cwd/createdAt; optional lineage and preset
+// fields remain omitted until their durable source is available.
+type nativeSessionHeader struct {
+	Version         int    `json:"version"`
+	ID              string `json:"id"`
+	CreatedAt       int64  `json:"createdAt"`
+	CWD             string `json:"cwd,omitempty"`
+	ParentSessionID string `json:"parentSession,omitempty"`
+	SeedLength      int    `json:"seedLength,omitempty"`
+	Origin          string `json:"origin,omitempty"`
+	DelegationDepth int    `json:"delegationDepth,omitempty"`
 	AgentPreset     string `json:"agentPreset,omitempty"`
 }
 
@@ -804,7 +820,7 @@ func (s *Server) nativeSessionList(r *http.Request) nativeRPCResult {
 			continue
 		}
 		item := nativeSessionListItem{
-			SessionID: m.ID, UpdatedAt: m.UpdatedAt.UnixMilli(), Running: false,
+			SessionID: m.ID, Title: m.Title, UpdatedAt: m.UpdatedAt.UnixMilli(), Running: false,
 			Blank: m.EventCount == 0, CWD: m.CWD,
 		}
 		if s.statusFn != nil {
@@ -827,20 +843,68 @@ func (s *Server) nativeSessionHistory(r *http.Request, raw json.RawMessage) nati
 	if limit <= 0 || limit > maxEventPageLimit {
 		limit = defaultEventPageLimit
 	}
-	var before uint64
-	if req.BeforeSeq != nil {
-		before = *req.BeforeSeq
-	}
-	events, hasMore, err := s.store.LoadSessionPage(r.Context(), req.SessionID, before, 0, limit)
+	events, err := s.store.LoadSession(r.Context(), req.SessionID)
 	if err != nil {
 		return nativeStoreFailure(err)
 	}
+	meta, err := s.store.GetSessionMeta(r.Context(), req.SessionID)
+	if err != nil {
+		return nativeStoreFailure(err)
+	}
+	start, end := nativeHistoryPageBounds(events, req.BeforeSeq, limit)
 	entries := make([]nativeHistoryEntry, 0, len(events))
 	projection := newNativeProjectionCursor()
+	projected := make([]nativeSessionEvent, 0, len(events))
 	for _, ev := range events {
-		entries = append(entries, nativeHistoryEntry{Event: projection.project(req.SessionID, ev)})
+		projected = append(projected, projection.project(req.SessionID, ev))
 	}
-	return nativeRPCSuccess(map[string]any{"events": entries, "hasMore": hasMore})
+	for _, event := range projected[start:end] {
+		entries = append(entries, nativeHistoryEntry{Event: event})
+	}
+	header := nativeSessionHeader{
+		Version:   0,
+		ID:        meta.ID,
+		CreatedAt: meta.CreatedAt.UnixMilli(),
+		CWD:       meta.CWD,
+	}
+	if configs, ok := s.store.(store.SessionConfigStore); ok {
+		if config, configErr := configs.GetSessionConfig(r.Context(), req.SessionID); configErr == nil {
+			header.AgentPreset = config.AgentPreset
+		}
+	}
+	return nativeRPCSuccess(map[string]any{"header": header, "events": entries, "hasMore": start > 0})
+}
+
+// nativeHistoryPageBounds mirrors DSH's message-boundary history contract.
+// The projection must be seeded by the complete ordered log before this
+// window is selected: a page may begin with an assistant chunk, a tool result,
+// or a compaction replacement whose turn/surface owner lives on an earlier
+// page. Keeping the bounds calculation separate also makes the sequence
+// cursor semantics explicit (beforeSeq is exclusive; zero selects the tail).
+func nativeHistoryPageBounds(events []session.Event, before *uint64, maxMessages int) (start, end int) {
+	end = len(events)
+	if before != nil && *before != 0 {
+		end = sort.Search(len(events), func(index int) bool {
+			return events[index].Seq >= *before
+		})
+	}
+	if end < 0 {
+		end = 0
+	}
+	if end > len(events) {
+		end = len(events)
+	}
+	for index, messages := end-1, 0; index >= 0; index-- {
+		event := events[index]
+		if event.Type == session.EventUserMessage || event.Type == session.EventAssistantMessage {
+			messages++
+		}
+		if event.Type == session.EventTurnStart && messages >= maxMessages {
+			start = index
+			break
+		}
+	}
+	return start, end
 }
 
 func (s *Server) nativeSessionCreate(r *http.Request, raw json.RawMessage) nativeRPCResult {

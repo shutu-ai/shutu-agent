@@ -55,12 +55,13 @@ func TestNativeRPCSessionHistoryAndPrompt(t *testing.T) {
 	}
 	encoded, _ = json.Marshal(response.Result.Value)
 	var history struct {
+		Header nativeSessionHeader  `json:"header"`
 		Events []nativeHistoryEntry `json:"events"`
 	}
 	if err := json.Unmarshal(encoded, &history); err != nil {
 		t.Fatal(err)
 	}
-	if len(history.Events) != 1 || history.Events[0].Event.Time != 1234 || history.Events[0].Event.Type != session.EventUserMessage {
+	if history.Header.Version != 0 || history.Header.ID != "native-session" || history.Header.CreatedAt == 0 || len(history.Events) != 1 || history.Events[0].Event.Time != 1234 || history.Events[0].Event.Type != session.EventUserMessage {
 		t.Fatalf("session.history events = %+v", history.Events)
 	}
 	var userData struct {
@@ -90,6 +91,45 @@ func TestNativeRPCSessionHistoryAndPrompt(t *testing.T) {
 	response = nativeResponse(t, rec.Body.Bytes())
 	if !response.Result.OK || gotSession != "native-session" || gotText != "send me" {
 		t.Fatalf("session.prompt response=%+v callback=(%q,%q)", response, gotSession, gotText)
+	}
+}
+
+func TestNativeSessionHistorySeedsProjectionBeforeSelectingMessagePage(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	seedSession(t, st, "native-paged", []session.Event{
+		{Seq: 0, Type: session.EventTurnStart, At: time.UnixMilli(1000), Version: session.EventVersion, Data: json.RawMessage(`{"turn":1}`)},
+		{Seq: 1, Type: session.EventUserMessage, At: time.UnixMilli(1001), Version: session.EventVersion, Data: json.RawMessage(`{"text":"first"}`)},
+		{Seq: 2, Type: session.EventAssistantMessage, At: time.UnixMilli(1002), Version: session.EventVersion, Data: json.RawMessage(`{"text":"one"}`)},
+		{Seq: 3, Type: session.EventTurnEnd, At: time.UnixMilli(1003), Version: session.EventVersion, Data: json.RawMessage(`{"turn":1}`)},
+		{Seq: 4, Type: session.EventTurnStart, At: time.UnixMilli(1004), Version: session.EventVersion, Data: json.RawMessage(`{"turn":2}`)},
+		{Seq: 5, Type: session.EventUserMessage, At: time.UnixMilli(1005), Version: session.EventVersion, Data: json.RawMessage(`{"text":"second"}`)},
+		{Seq: 6, Type: session.EventAssistantMessage, At: time.UnixMilli(1006), Version: session.EventVersion, Data: json.RawMessage(`{"text":"two"}`)},
+	})
+
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/session.history", "tok", `{"type":"client-request","rpcId":"history-page","method":"session.history","payload":{"sessionId":"native-paged","maxMessages":1}}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK {
+		t.Fatalf("session.history response = %+v", response)
+	}
+	var history struct {
+		Events  []nativeHistoryEntry `json:"events"`
+		HasMore bool                 `json:"hasMore"`
+	}
+	encoded, _ := json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &history); err != nil {
+		t.Fatal(err)
+	}
+	if len(history.Events) != 3 || history.Events[0].Event.Seq != 4 || !history.HasMore {
+		t.Fatalf("paged history = %+v", history)
+	}
+	var assistant struct {
+		Turn int `json:"turn"`
+	}
+	if err := json.Unmarshal(history.Events[2].Event.Data, &assistant); err != nil {
+		t.Fatal(err)
+	}
+	if assistant.Turn != 2 {
+		t.Fatalf("page projection turn = %d, want 2", assistant.Turn)
 	}
 }
 
