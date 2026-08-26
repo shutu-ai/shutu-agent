@@ -161,7 +161,7 @@ func (a *app) nativeClearGoal(ctx context.Context, mutation webserver.NativeGoal
 		return webserver.NativeGoalMutationResult{}, err
 	}
 	a.setGoalActivation(a.currentID, false)
-	return webserver.NativeGoalMutationResult{Cleared: true}, nil
+	return webserver.NativeGoalMutationResult{GoalID: current.ID, Revision: current.Revision + 1, Cleared: true}, nil
 }
 
 func (a *app) nativeGoalByID(ctx context.Context, id string, revision int) (plan.Goal, error) {

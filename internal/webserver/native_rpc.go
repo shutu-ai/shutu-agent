@@ -435,6 +435,7 @@ func (s *Server) registerNativeRoutes(mux *http.ServeMux) {
 		"dynamicCordisRunner/inventory", "llm.providers", "llm.models", "llm.discoverModels", "skill.list",
 		"subagent.list", "subagent.history", "subagent.prompt", "subagent.interrupt",
 		"goal.create", "goal.edit", "goal.pause", "goal.resume", "goal.complete", "goal.clear",
+		"goals/create", "goals/edit", "goals/pause", "goals/resume", "goals/complete", "goals/clear",
 	} {
 		mux.Handle("POST /api/"+method, s.requireAuth(http.HandlerFunc(s.handleNativeRPC)))
 	}
@@ -1407,6 +1408,8 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 		return s.nativeSubagentInterrupt(r, raw)
 	case "goal.create", "goal.edit", "goal.pause", "goal.resume", "goal.complete", "goal.clear":
 		return s.nativeGoalMutation(r, method, raw)
+	case "goals/create", "goals/edit", "goals/pause", "goals/resume", "goals/complete", "goals/clear":
+		return s.nativeGoalRemoteMutation(r, method, raw)
 	case "dynamicCordisRunner/syncInspectManifest":
 		return nativeRPCSuccess(nil)
 	case "dynamicCordisRunner/inventory":
@@ -2133,6 +2136,72 @@ func (s *Server) nativeSubagentInterrupt(r *http.Request, raw json.RawMessage) n
 	return nativeRPCSuccess(map[string]any{"accepted": true})
 }
 
+func nativeGoalRemotePayload(raw json.RawMessage, operation string) (json.RawMessage, error) {
+	args, err := nativeRemoteArguments(raw)
+	if err != nil || len(args) < 2 {
+		return nil, errors.New("goal request requires agent and operation arguments")
+	}
+	var agent struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(args[0], &agent); err != nil || strings.TrimSpace(agent.ID) == "" {
+		return nil, errors.New("goal agent id is required")
+	}
+	payload := map[string]any{"sessionId": strings.TrimSpace(agent.ID)}
+	if operation == "create" {
+		var request struct {
+			Objective     *string `json:"objective"`
+			MaxGoalRounds *int    `json:"maxGoalRounds"`
+		}
+		if err := json.Unmarshal(args[1], &request); err != nil {
+			return nil, err
+		}
+		payload["objective"] = request.Objective
+		payload["maxGoalRounds"] = request.MaxGoalRounds
+	} else {
+		var ref struct {
+			ID       string `json:"id"`
+			Revision int    `json:"revision"`
+		}
+		if err := json.Unmarshal(args[1], &ref); err != nil {
+			return nil, err
+		}
+		payload["ref"] = ref
+		if operation == "edit" {
+			var request struct {
+				Objective     *string `json:"objective"`
+				MaxGoalRounds *int    `json:"maxGoalRounds"`
+			}
+			if len(args) < 3 || json.Unmarshal(args[2], &request) != nil {
+				return nil, errors.New("goal edit request is invalid")
+			}
+			payload["objective"] = request.Objective
+			payload["maxGoalRounds"] = request.MaxGoalRounds
+		}
+	}
+	return json.Marshal(payload)
+}
+
+func (s *Server) nativeGoalRemoteMutation(r *http.Request, method string, raw json.RawMessage) nativeRPCResult {
+	operation := strings.TrimPrefix(method, "goals/")
+	payload, err := nativeGoalRemotePayload(raw, operation)
+	if err != nil {
+		return nativeRPCFailure("bad-request", err.Error(), nil)
+	}
+	result := s.nativeGoalMutation(r, "goal."+operation, payload)
+	if operation != "clear" || !result.OK {
+		return result
+	}
+	var value map[string]any
+	encoded, _ := json.Marshal(result.Value)
+	if json.Unmarshal(encoded, &value) == nil {
+		if ref, ok := value["ref"]; ok {
+			return nativeRPCSuccess(ref)
+		}
+	}
+	return result
+}
+
 func (s *Server) nativeGoalMutation(r *http.Request, method string, raw json.RawMessage) nativeRPCResult {
 	var req nativeGoalMutationRequest
 	if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
@@ -2179,7 +2248,11 @@ func (s *Server) nativeGoalMutation(r *http.Request, method string, raw json.Raw
 		if !result.Cleared {
 			return nativeRPCFailure("goal-mutation-failed", "goal clear handler did not confirm clearing", nil)
 		}
-		return nativeRPCSuccess(map[string]any{"cleared": true})
+		value := map[string]any{"cleared": true}
+		if result.GoalID != "" && result.Revision > 0 {
+			value["ref"] = map[string]any{"id": result.GoalID, "revision": result.Revision}
+		}
+		return nativeRPCSuccess(value)
 	}
 	if strings.TrimSpace(result.GoalID) == "" || result.Revision < 1 {
 		return nativeRPCFailure("goal-mutation-failed", "goal mutation handler returned an invalid reference", nil)

@@ -200,6 +200,30 @@ func TestNativeHostOpenPathRejectsMissingPath(t *testing.T) {
 	}
 }
 
+func TestNativeGoalsRemoteNamespaceUnwrapsDSHArguments(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+	var got NativeGoalMutation
+	srv.SetNativeGoalManager(func(_ context.Context, mutation NativeGoalMutation) (NativeGoalMutationResult, error) {
+		got = mutation
+		return NativeGoalMutationResult{GoalID: "goal-remote", Revision: 3}, nil
+	})
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/goals/create", "tok", `{"type":"client-request","rpcId":"goals","method":"goals/create","payload":{"args":[{"id":"s-remote"},{"objective":"ship it","maxGoalRounds":5}]}}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK || got.Action != "goal.create" || got.SessionID != "s-remote" || got.Objective == nil || *got.Objective != "ship it" || got.MaxGoalRounds == nil || *got.MaxGoalRounds != 5 {
+		t.Fatalf("goals/create response=%+v mutation=%+v", response, got)
+	}
+	var value struct {
+		Ref struct {
+			ID       string `json:"id"`
+			Revision int    `json:"revision"`
+		} `json:"ref"`
+	}
+	encoded, _ := json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &value); err != nil || value.Ref.ID != "goal-remote" || value.Ref.Revision != 3 {
+		t.Fatalf("goals/create value=%s", encoded)
+	}
+}
+
 func TestNativeRPCSessionHistoryAndPrompt(t *testing.T) {
 	srv, st := newTestServer(t, "tok")
 	seedSession(t, st, "native-session", []session.Event{{
