@@ -3,8 +3,10 @@ package session
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -212,6 +214,49 @@ func TestAppendSinkErrorRollsBack(t *testing.T) {
 	}
 	if len(l.Events()) != 0 {
 		t.Fatalf("log has %d events after failed persist, want 0", len(l.Events()))
+	}
+}
+
+func TestConcurrentAppendKeepsUniqueContiguousSequences(t *testing.T) {
+	const writers = 32
+	const eventsPerWriter = 16
+	l := New()
+	var mu sync.Mutex
+	seen := make(map[uint64]bool, writers*eventsPerWriter)
+	l.SetSink(func(ev Event) error {
+		mu.Lock()
+		defer mu.Unlock()
+		if seen[ev.Seq] {
+			return fmt.Errorf("duplicate seq %d", ev.Seq)
+		}
+		seen[ev.Seq] = true
+		return nil
+	})
+
+	var wg sync.WaitGroup
+	for writer := 0; writer < writers; writer++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < eventsPerWriter; i++ {
+				if _, err := l.Append(EventUserMessage, NewUserMessage("concurrent")); err != nil {
+					t.Errorf("append: %v", err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	events := l.Events()
+	if len(events) != writers*eventsPerWriter {
+		t.Fatalf("event count = %d, want %d", len(events), writers*eventsPerWriter)
+	}
+	for i, ev := range events {
+		want := uint64(i + 1)
+		if ev.Seq != want {
+			t.Fatalf("events[%d].Seq = %d, want %d", i, ev.Seq, want)
+		}
 	}
 }
 

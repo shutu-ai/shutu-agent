@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jabing/shutu-agent/internal/llm"
@@ -268,9 +269,11 @@ type Event struct {
 	Data    json.RawMessage
 }
 
-// Log is an in-memory append-only event log. It is not safe for concurrent
-// use: the agent loop is strictly serial (D5).
+// Log is an in-memory append-only event log. Appends are serialized because
+// real Web turns can receive tool/interaction callbacks from worker goroutines
+// while the main loop is committing its ordered results.
 type Log struct {
+	mu     sync.RWMutex
 	events []Event
 	seq    uint64
 	sink   func(Event) error // optional durable sink (D8), called after each append
@@ -286,6 +289,8 @@ func New() *Log {
 // back out of the in-memory log and fails the Append, so the log never drifts
 // from what was actually persisted (D1: the log is the source of truth).
 func (l *Log) SetSink(sink func(Event) error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	l.sink = sink
 }
 
@@ -294,6 +299,8 @@ func (l *Log) SetSink(sink func(Event) error) {
 // after a successful Restore the next Append continues after the last Seq.
 // Restore never invokes the sink — replaying is loading, not appending.
 func (l *Log) Restore(events []Event) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	l.events = nil
 	l.seq = 0
 	var last uint64
@@ -316,12 +323,15 @@ func (l *Log) Append(typ string, data any) (Event, error) {
 	if err != nil {
 		return Event{}, err
 	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	l.seq++
 	ev := Event{Seq: l.seq, Type: typ, At: time.Now().UTC(), Version: EventVersion, Data: raw}
 	l.events = append(l.events, ev)
 	if l.sink != nil {
 		if err := l.sink(ev); err != nil {
 			l.events = l.events[:len(l.events)-1]
+			l.seq--
 			return Event{}, fmt.Errorf("session: persist %s event: %w", typ, err)
 		}
 	}
@@ -330,6 +340,8 @@ func (l *Log) Append(typ string, data any) (Event, error) {
 
 // Events returns a snapshot copy of the current event log.
 func (l *Log) Events() []Event {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
 	out := make([]Event, len(l.events))
 	copy(out, l.events)
 	return out
@@ -338,12 +350,18 @@ func (l *Log) Events() []Event {
 // NextSeq returns the Seq the next Append will assign (current Seq + 1). M3
 // uses it to name a spill file after the tool/result event that will carry the
 // locator.
-func (l *Log) NextSeq() uint64 { return l.seq + 1 }
+func (l *Log) NextSeq() uint64 {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.seq + 1
+}
 
 // NextTurn returns the 1-based dsh turn number for the next live turn.
 // shutu historically did not persist the number on turn/start, so it is
 // reconstructed from the append-only lifecycle anchors.
 func (l *Log) NextTurn() int {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
 	turn := 1
 	for _, ev := range l.events {
 		if ev.Type == EventTurnStart {
@@ -358,7 +376,11 @@ func (l *Log) NextTurn() int {
 // fidelity records and are folded away in favor of the authoritative
 // assistant/message row that closes the step.
 func (l *Log) DeriveHistory() []llm.Message {
-	return derive(l.events)
+	l.mu.RLock()
+	events := make([]Event, len(l.events))
+	copy(events, l.events)
+	l.mu.RUnlock()
+	return derive(events)
 }
 
 func derive(events []Event) []llm.Message {
