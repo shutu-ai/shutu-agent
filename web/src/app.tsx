@@ -11,6 +11,7 @@ import './styles.css'
 
 const ROW_HEIGHT_ESTIMATE = 132
 const CONVERSATION_ROW_HEIGHT_ESTIMATE = 164
+const EMPTY_TRAJECTORY_RECORDS: readonly DshTrajectoryRecord[] = []
 const TrajectorySearchContext = createContext('')
 interface TrajectoryToolbarState {
   mode: DshTimelineMode
@@ -32,6 +33,28 @@ function useDebouncedValue<T>(value: T, delayMs: number): T {
     return () => window.clearTimeout(timer)
   }, [delayMs, value])
   return debounced
+}
+
+function useThrottledValue<T>(value: T, delayMs: number): T {
+  const [throttled, setThrottled] = useState(value)
+  const latest = useRef(value)
+  const timer = useRef<number | null>(null)
+  latest.current = value
+  useEffect(() => {
+    if (delayMs <= 0) {
+      setThrottled(value)
+      return
+    }
+    if (timer.current !== null) return
+    timer.current = window.setTimeout(() => {
+      timer.current = null
+      setThrottled(latest.current)
+    }, delayMs)
+  }, [delayMs, value])
+  useEffect(() => () => {
+    if (timer.current !== null) window.clearTimeout(timer.current)
+  }, [])
+  return throttled
 }
 
 function useMeasuredVirtualRows(keys: readonly string[], estimate: number, scrollRef: { current: HTMLDivElement | null }) {
@@ -1072,9 +1095,9 @@ function DshTimeline({ events, mode, selectedSeq, onSelectSeq, onSelectSeqs }: {
     setSelected(index)
     setSelectedRange({ start: index, end: index })
   }, [effectiveSelectedSeq, sourceSeqByIndex])
-  if (timeline === null) return null
-  const span = Math.max(1, timeline.end - timeline.start)
+  const span = timeline === null ? 1 : Math.max(1, timeline.end - timeline.start)
   const selectRange = (index: number, extend: boolean): void => {
+    if (timeline === null) return
     const anchor = dragAnchor ?? selectedRange?.start ?? index
     const nextRange = extend
       ? { start: Math.min(anchor, index), end: Math.max(anchor, index) }
@@ -1096,7 +1119,7 @@ function DshTimeline({ events, mode, selectedSeq, onSelectSeq, onSelectSeqs }: {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const pickTimelineIndex = (clientX: number): number => {
     const canvas = canvasRef.current
-    if (canvas === null || timeline.spans.length === 0) return 0
+    if (canvas === null || timeline === null || timeline.spans.length === 0) return 0
     const rect = canvas.getBoundingClientRect()
     const ratio = rect.width <= 0 ? 0 : Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
     const target = timeline.start + ratio * span
@@ -1112,7 +1135,7 @@ function DshTimeline({ events, mode, selectedSeq, onSelectSeq, onSelectSeqs }: {
   }
   const drawTimeline = useCallback((): void => {
     const canvas = canvasRef.current
-    if (canvas === null) return
+    if (canvas === null || timeline === null) return
     const rect = canvas.getBoundingClientRect()
     const width = Math.max(1, Math.floor(rect.width))
     const height = 22
@@ -1151,6 +1174,7 @@ function DshTimeline({ events, mode, selectedSeq, onSelectSeq, onSelectSeqs }: {
     observer.observe(canvas)
     return () => observer.disconnect()
   }, [drawTimeline])
+  if (timeline === null) return null
   return <section className="dsh-timeline" aria-label="Trajectory timeline">
     <div className="timeline-head"><div><strong>Timeline</strong><span>{timeline.spans.length} records</span><span className="timeline-metrics">duration {formatDurationMs(metrics.durationMs)} · idle {formatDurationMs(metrics.idleMs)}</span></div><div className="timeline-controls">{selectedRange !== null && <button type="button" className="text-button" onClick={clearSelection}>Clear selection</button>}</div></div>
     <div className="timeline-track" role="list" aria-label="Timeline events">
@@ -1730,7 +1754,10 @@ export function App({ store }: { store: WebStore }) {
     setFilesOpen(true)
   }, [])
   const selected = state.sessions.find(session => session.id === state.selectedId)
-  const trajectoryRecords = useMemo(() => projectDshTrajectoryRecords(state.events), [state.events])
+  const trajectoryRenderEvents = useThrottledValue(state.events, tab === 'trajectory' && state.sending ? 1000 : 0)
+  const trajectoryRecords = useMemo(() => trajectorySelectedSeq === null
+    ? EMPTY_TRAJECTORY_RECORDS
+    : projectDshTrajectoryRecords(trajectoryRenderEvents), [trajectoryRenderEvents, trajectorySelectedSeq])
   const selectedTrajectoryEvent = useMemo(() => trajectorySelectedSeq === null
     ? null
     : state.events.find(event => event.seq === trajectorySelectedSeq) ?? null, [state.events, trajectorySelectedSeq])
@@ -1782,7 +1809,7 @@ export function App({ store }: { store: WebStore }) {
     const searched = searchMatches.map(match => match.event)
     return tab === 'chat' ? searched.filter(isConversationEvent) : searched
   }, [searchMatches, tab])
-  const trajectoryEvents = tab === 'trajectory' ? state.events : filtered
+  const trajectoryEvents = tab === 'trajectory' ? trajectoryRenderEvents : filtered
   const commandQuery = draft.match(/^\/([^\s]*)$/)?.[1] ?? null
   const commandItems = useMemo(() => commandQuery === null ? [] : commands.filter(command => command.name.toLocaleLowerCase().includes(commandQuery.toLocaleLowerCase())).slice(0, 8), [commandQuery, commands])
 
@@ -2057,7 +2084,7 @@ export function App({ store }: { store: WebStore }) {
       <InteractionPanel store={store} sessionId={state.selectedId} onError={reportError} />
       <QueuePanel store={store} sessionId={state.selectedId} active={state.sending} onError={reportError} />
        <section className="content-panel" id="main-tabpanel" role="tabpanel" aria-labelledby={`${tab === 'chat' ? 'conversation' : tab === 'trajectory' ? 'trajectory' : 'running'}-tab`} tabIndex={0}>
-        {filesOpen && state.selectedId !== null ? <FilesPanel store={store} sessionId={state.selectedId} openPath={fileOpenPath} onClose={() => { setFilesOpen(false); setFileOpenPath(null) }} onReference={referenceFile} /> : state.authRequired ? <form className="auth-card" onSubmit={event => { event.preventDefault(); void authenticate() }}><strong>Authentication required</strong><span>Enter the bearer token configured for the Shutu web server.</span><input name="token" aria-label="Bearer token" type="password" autoComplete="current-password" value={token} onChange={event => setToken(event.target.value)} placeholder="Bearer token" /><button type="submit" disabled={token.trim() === ''}>Connect</button></form> : state.loading ? <div className="empty"><div className="spinner" />Loading session…</div> : tab === 'running' ? <RunningPanel store={store} sessionId={state.selectedId} /> : state.selectedId === null ? <div className="empty"><strong>Start a new conversation</strong><span>Select a session or send a message from the agent.</span></div> : filtered.length === 0 ? <div className="empty"><strong>{search ? 'No matching events' : 'No events yet'}</strong><span>{search ? 'Try a different search term.' : 'Events will appear here as the session runs.'}</span></div> : tab === 'trajectory' ? <div className="trajectory-layout"><div className="trajectory-main"><DshTimeline events={trajectoryEvents} onSelectSeq={selectTrajectorySeq} onSelectSeqs={selectTrajectorySeqs} /><VirtualEvents events={filtered} store={store} sessionId={state.selectedId} feedbackBySeq={feedbackBySeq} producedBySeq={producedBySeq} onFeedback={submitFeedback} onOpenFile={openFilePreview} focusSeq={focusedSeq} selectedSeq={trajectorySelectedSeq} timelineFocusSeqs={trajectoryFocusSeqs} onSelectSeq={selectTrajectorySeq} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} /></div>{selectedTrajectoryEvent !== null && <TrajectoryInspector event={selectedTrajectoryEvent} record={selectedTrajectoryRecord} records={trajectoryRecords} onRetryRequest={retryTrajectoryRequest} onCancelRequest={cancelTrajectoryRequest} onClose={() => { const seq = selectedTrajectoryEvent.seq; setTrajectorySelectedSeq(null); requestAnimationFrame(() => document.getElementById(`inspect-event-${seq}`)?.focus()) }} />}</div> : <DshConversation events={filtered} sessionId={state.selectedId} store={store} feedbackBySeq={feedbackBySeq} onFeedback={onFeedback} onCopy={copyMessage} onOpenFile={openFilePreview} onLocate={locateConversationSeq} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} />}
+        {filesOpen && state.selectedId !== null ? <FilesPanel store={store} sessionId={state.selectedId} openPath={fileOpenPath} onClose={() => { setFilesOpen(false); setFileOpenPath(null) }} onReference={referenceFile} /> : state.authRequired ? <form className="auth-card" onSubmit={event => { event.preventDefault(); void authenticate() }}><strong>Authentication required</strong><span>Enter the bearer token configured for the Shutu web server.</span><input name="token" aria-label="Bearer token" type="password" autoComplete="current-password" value={token} onChange={event => setToken(event.target.value)} placeholder="Bearer token" /><button type="submit" disabled={token.trim() === ''}>Connect</button></form> : state.loading ? <div className="empty"><div className="spinner" />Loading session…</div> : tab === 'running' ? <RunningPanel store={store} sessionId={state.selectedId} /> : state.selectedId === null ? <div className="empty"><strong>Start a new conversation</strong><span>Select a session or send a message from the agent.</span></div> : filtered.length === 0 ? <div className="empty"><strong>{search ? 'No matching events' : 'No events yet'}</strong><span>{search ? 'Try a different search term.' : 'Events will appear here as the session runs.'}</span></div> : tab === 'trajectory' ? <div className="trajectory-layout"><div className="trajectory-main"><DshTimeline events={trajectoryEvents} onSelectSeq={selectTrajectorySeq} onSelectSeqs={selectTrajectorySeqs} /><VirtualEvents events={trajectoryEvents} store={store} sessionId={state.selectedId} feedbackBySeq={feedbackBySeq} producedBySeq={producedBySeq} onFeedback={submitFeedback} onOpenFile={openFilePreview} focusSeq={focusedSeq} selectedSeq={trajectorySelectedSeq} timelineFocusSeqs={trajectoryFocusSeqs} onSelectSeq={selectTrajectorySeq} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} /></div>{selectedTrajectoryEvent !== null && <TrajectoryInspector event={selectedTrajectoryEvent} record={selectedTrajectoryRecord} records={trajectoryRecords} onRetryRequest={retryTrajectoryRequest} onCancelRequest={cancelTrajectoryRequest} onClose={() => { const seq = selectedTrajectoryEvent.seq; setTrajectorySelectedSeq(null); requestAnimationFrame(() => document.getElementById(`inspect-event-${seq}`)?.focus()) }} />}</div> : <DshConversation events={filtered} sessionId={state.selectedId} store={store} feedbackBySeq={feedbackBySeq} onFeedback={onFeedback} onCopy={copyMessage} onOpenFile={openFilePreview} onLocate={locateConversationSeq} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} />}
       </section>
       <form className="composer" onSubmit={event => { event.preventDefault(); if (state.sending && draft.trim() === '' && pendingImages.length === 0) void stopRun(); else void submit() }}><CommandMenu commands={commands} query={commandQuery ?? ''} activeIndex={commandIndex} onSelect={selectCommand} />{pendingImages.length > 0 && <div className="attachment-preview-list">{pendingImages.map(item => <div className="attachment-preview" key={item.ref.id}><img src={item.previewUrl} alt="待发送图片" /><button type="button" onClick={() => removePendingImage(item.ref.id)} aria-label="移除附件">×</button></div>)}</div>}<div className="composer-row"><label className="attach-button" aria-label="添加图片"><input type="file" name="attachments" accept="image/*" multiple disabled={state.selectedId === null || state.sending || uploading} onChange={event => { void attachFiles(event.currentTarget.files); event.currentTarget.value = '' }} />📎</label><textarea name="message" autoComplete="off" value={draft} onChange={event => handleDraftChange(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder={uploading ? '正在上传图片…' : state.sending ? 'Agent is running…' : 'Send a message…'} rows={2} /><button type="submit" disabled={state.selectedId === null || uploading || (!state.sending && draft.trim() === '' && pendingImages.length === 0)}>{state.sending ? (draft.trim() ? 'Queue' : 'Stop') : 'Send'} <span>{state.sending ? '■' : '↵'}</span></button></div></form>
     </main></TrajectoryToolbarContext.Provider></TrajectorySearchContext.Provider>
