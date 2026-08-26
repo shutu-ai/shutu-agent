@@ -142,10 +142,13 @@ type nativeSessionListItem struct {
 }
 
 type nativeSessionEvent struct {
-	Seq  uint64          `json:"seq"`
-	Type string          `json:"type"`
-	Time int64           `json:"time"`
-	Data json.RawMessage `json:"data"`
+	Seq             uint64          `json:"seq"`
+	Type            string          `json:"type"`
+	Time            int64           `json:"time"`
+	Data            json.RawMessage `json:"data"`
+	SourceEventSeqs []uint64        `json:"sourceEventSeqs,omitempty"`
+	SurfaceOp       any             `json:"surfaceOp,omitempty"`
+	Ignorable       bool            `json:"ignorable,omitempty"`
 }
 
 type nativeHistoryEntry struct {
@@ -833,8 +836,9 @@ func (s *Server) nativeSessionHistory(r *http.Request, raw json.RawMessage) nati
 		return nativeStoreFailure(err)
 	}
 	entries := make([]nativeHistoryEntry, 0, len(events))
+	projection := newNativeProjectionCursor()
 	for _, ev := range events {
-		entries = append(entries, nativeHistoryEntry{Event: nativeEvent(ev)})
+		entries = append(entries, nativeHistoryEntry{Event: projection.project(req.SessionID, ev)})
 	}
 	return nativeRPCSuccess(map[string]any{"events": entries, "hasMore": hasMore})
 }
@@ -924,14 +928,6 @@ func (s *Server) nativeWorkspaceList(r *http.Request) nativeRPCResult {
 	return nativeRPCSuccess(nativeWorkspaceListValue{Items: items})
 }
 
-func nativeEvent(ev session.Event) nativeSessionEvent {
-	data := ev.Data
-	if len(data) == 0 {
-		data = json.RawMessage(`{}`)
-	}
-	return nativeSessionEvent{Seq: ev.Seq, Type: ev.Type, Time: ev.At.UnixMilli(), Data: data}
-}
-
 func (s *Server) handleNativeMuxWebSocket(w http.ResponseWriter, r *http.Request) {
 	if s.evSrc == nil {
 		http.Error(w, "event source not wired", http.StatusNotImplemented)
@@ -981,15 +977,23 @@ func (s *Server) handleNativeMuxWebSocket(w http.ResponseWriter, r *http.Request
 		if loadErr != nil {
 			continue
 		}
+		projection := newNativeProjectionCursor()
+		var projectionMu sync.Mutex
 		lastSeq := int64(-1)
 		if len(events) > 0 {
 			lastSeq = int64(events[len(events)-1].Seq)
+		}
+		for _, ev := range events {
+			projection.project(meta.ID, ev)
 		}
 		if err := write(nativeSubscribedFrame{Type: "session/subscribed", SessionID: meta.ID, LastSeq: lastSeq}); err != nil {
 			return
 		}
 		unsubs = append(unsubs, s.evSrc(meta.ID, func(ev session.Event) {
-			_ = write(nativeSessionEventFrame{Type: "session/event", SessionID: meta.ID, Event: nativeEvent(ev)})
+			projectionMu.Lock()
+			projected := projection.project(meta.ID, ev)
+			projectionMu.Unlock()
+			_ = write(nativeSessionEventFrame{Type: "session/event", SessionID: meta.ID, Event: projected})
 		}))
 	}
 	go drainNativeWebSocket(reader, cancel)

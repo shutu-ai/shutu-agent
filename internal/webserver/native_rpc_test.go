@@ -63,6 +63,23 @@ func TestNativeRPCSessionHistoryAndPrompt(t *testing.T) {
 	if len(history.Events) != 1 || history.Events[0].Event.Time != 1234 || history.Events[0].Event.Type != session.EventUserMessage {
 		t.Fatalf("session.history events = %+v", history.Events)
 	}
+	var userData struct {
+		ID      string `json:"id"`
+		Role    string `json:"role"`
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+		Source struct {
+			Kind string `json:"kind"`
+		} `json:"source"`
+	}
+	if err := json.Unmarshal(history.Events[0].Event.Data, &userData); err != nil {
+		t.Fatal(err)
+	}
+	if userData.ID == "" || userData.Role != "user" || userData.Source.Kind != "user" || len(userData.Content) != 1 || userData.Content[0].Text != "hello native" {
+		t.Fatalf("native user message = %+v", userData)
+	}
 
 	var gotSession, gotText string
 	srv.SetMessageHandler(func(_ context.Context, sessionID, text string, _ []llm.ImageRef) error {
@@ -73,6 +90,86 @@ func TestNativeRPCSessionHistoryAndPrompt(t *testing.T) {
 	response = nativeResponse(t, rec.Body.Bytes())
 	if !response.Result.OK || gotSession != "native-session" || gotText != "send me" {
 		t.Fatalf("session.prompt response=%+v callback=(%q,%q)", response, gotSession, gotText)
+	}
+}
+
+func TestNativeProjectionUsesOneDSHShapeForReplayAndLive(t *testing.T) {
+	events := []session.Event{
+		{Seq: 1, Type: session.EventTurnStart, At: time.UnixMilli(1000), Version: session.EventVersion, Data: json.RawMessage(`{}`)},
+		{Seq: 2, Type: session.EventUserMessage, At: time.UnixMilli(1001), Version: session.EventVersion, Data: json.RawMessage(`{"text":"hello"}`)},
+		{Seq: 3, Type: session.EventAssistantMessage, At: time.UnixMilli(1002), Version: session.EventVersion, Data: json.RawMessage(`{"text":"answer","toolCalls":[{"ID":"c1","Name":"read","Arguments":"{}"}]}`)},
+		{Seq: 4, Type: session.EventToolResult, At: time.UnixMilli(1003), Version: session.EventVersion, Data: json.RawMessage(`{"turn":0,"step":0,"callId":"c1","name":"read","output":"ok"}`)},
+	}
+	replayCursor := newNativeProjectionCursor()
+	liveCursor := newNativeProjectionCursor()
+	for _, ev := range events {
+		replayed := replayCursor.project("s1", ev)
+		live := liveCursor.project("s1", ev)
+		if string(replayed.Data) != string(live.Data) || replayed.Type != live.Type || replayed.SurfaceOp != live.SurfaceOp {
+			t.Fatalf("replay/live projection differs for seq %d: replay=%s live=%s", ev.Seq, replayed.Data, live.Data)
+		}
+	}
+	assistant := replayCursor.project("s1", events[2])
+	var assistantData struct {
+		Turn    int `json:"turn"`
+		Step    int `json:"step"`
+		Message struct {
+			ID      string `json:"id"`
+			Content []struct {
+				Type string `json:"type"`
+			} `json:"content"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal(assistant.Data, &assistantData); err != nil {
+		t.Fatal(err)
+	}
+	if assistantData.Turn != 0 || assistantData.Step != 0 || assistantData.Message.ID == "" || len(assistantData.Message.Content) != 2 {
+		t.Fatalf("native assistant projection = %+v", assistantData)
+	}
+}
+
+func TestNativeProjectionFoldsSurfaceReplacementAndDiagnostics(t *testing.T) {
+	events := []session.Event{
+		{Seq: 1, Type: session.EventUserMessage, At: time.UnixMilli(1000), Version: session.EventVersion, Data: json.RawMessage(`{"text":"old"}`)},
+		{Seq: 2, Type: session.EventAssistantMessage, At: time.UnixMilli(1001), Version: session.EventVersion, Data: json.RawMessage(`{"text":"answer"}`)},
+		{Seq: 3, Type: session.EventUserMessage, At: time.UnixMilli(1002), Version: session.EventVersion, Data: json.RawMessage(`{"text":"summary","surfaceOp":{"op":"replace","start":1,"end":2}}`)},
+		{Seq: 4, Type: session.EventLLMRetry, At: time.UnixMilli(1003), Version: session.EventVersion, Data: json.RawMessage(`{"attempt":2,"maxRetries":3,"delayMs":25,"error":"temporary"}`)},
+		{Seq: 5, Type: session.EventJobStart, At: time.UnixMilli(1004), Version: session.EventVersion, Data: json.RawMessage(`{"jobId":"j1"}`)},
+	}
+	cursor := newNativeProjectionCursor()
+	projected := make([]nativeSessionEvent, 0, len(events))
+	for _, ev := range events {
+		projected = append(projected, cursor.project("s1", ev))
+	}
+	if got := projected[2].SurfaceOp; got == nil {
+		t.Fatal("compaction projection is missing surfaceOp")
+	}
+	var surface struct {
+		Op    string `json:"op"`
+		Start uint64 `json:"start"`
+		End   uint64 `json:"end"`
+	}
+	if err := json.Unmarshal(nativeJSONBytes(projected[2].SurfaceOp), &surface); err != nil {
+		t.Fatal(err)
+	}
+	if surface.Op != "replace" || surface.Start != 1 || surface.End != 2 || len(projected[2].SourceEventSeqs) != 2 {
+		t.Fatalf("surface projection = %+v, sources=%v", surface, projected[2].SourceEventSeqs)
+	}
+	var retry struct {
+		RetryID string `json:"retryId"`
+		Retry   int    `json:"retry"`
+		Failure struct {
+			Message string `json:"message"`
+		} `json:"failure"`
+	}
+	if err := json.Unmarshal(projected[3].Data, &retry); err != nil {
+		t.Fatal(err)
+	}
+	if retry.RetryID == "" || retry.Retry != 2 || retry.Failure.Message != "temporary" {
+		t.Fatalf("retry projection = %+v", retry)
+	}
+	if !projected[4].Ignorable {
+		t.Fatal("non-DSH event must be marked ignorable")
 	}
 }
 

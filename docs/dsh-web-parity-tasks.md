@@ -236,3 +236,7 @@ P34 ──> P35 部署交付
 ```
 
 P24–P35 已完成首轮实现；P34/P35 的真实环境事项与 P36-1–P36-8 的 DSH 原生 UI 接入并行推进，所有未勾选项需在对应验收证据完成后再标记完成。
+
+## P36 当前实现进度（2026-08-26）
+
+本轮完成 P36-3 的首轮原生事件投影：`session.history` 与 `events.mux` 共用 DSH `SessionEvent` 转换器，统一消息 ID、turn/step、surfaceOp/sourceEventSeqs、tool-result、retry、reasoning、图片内容与未知事件的 ignorable 标记，并补充 replay/live、compaction、retry 测试。P36-3 仍保留未勾选项：分页窗口的全局投影游标、完整 Session header/surface snapshot 以及真实原生 UI 端到端验收。
