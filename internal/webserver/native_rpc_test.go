@@ -308,6 +308,30 @@ func TestNativeProjectionFoldsDSHSubagentIdentityAndTiming(t *testing.T) {
 	}
 }
 
+func TestNativeProjectionFoldsDSHContextBreakdown(t *testing.T) {
+	events := []session.Event{
+		{Seq: 1, Type: "request/header", At: time.UnixMilli(1000), Version: session.EventVersion, Data: json.RawMessage(`{"header":{"system":"12345678","tools":[{"name":"read"}]}}`)},
+		{Seq: 2, Type: session.EventUserMessage, At: time.UnixMilli(1001), Version: session.EventVersion, Data: json.RawMessage(`{"text":"hello"}`)},
+		{Seq: 3, Type: session.EventAssistantMessage, At: time.UnixMilli(1002), Version: session.EventVersion, Data: json.RawMessage(`{"text":"ok"}`)},
+		{Seq: 4, Type: session.EventCompactionSummary, At: time.UnixMilli(1003), Version: session.EventVersion, Data: json.RawMessage(`{"shadowedRange":{"start":2,"end":3},"shadowedTokenCount":19}`)},
+		{Seq: 5, Type: session.EventAssistantMessage, At: time.UnixMilli(1004), Version: session.EventVersion, Data: json.RawMessage(`{"text":"new","surfaceOp":{"op":"replace","start":2,"end":3}}`)},
+	}
+	cursor := newNativeProjectionCursor()
+	for _, ev := range events {
+		cursor.project("context", ev)
+	}
+	value, ok := cursor.projectionBlock("", 5).Values["contextBreakdown"].(map[string]any)
+	if !ok {
+		t.Fatalf("contextBreakdown projection = %#v", cursor.projectionBlock("", 5).Values["contextBreakdown"])
+	}
+	if value["systemTokens"] != int64(6) || value["toolsTokens"] != nativeEstimateJSONTokens([]any{map[string]any{"name": "read"}})+4 {
+		t.Fatalf("contextBreakdown request envelope = %#v", value)
+	}
+	if value["messageTokens"] != int64(9) {
+		t.Fatalf("contextBreakdown replacement total = %#v, want 9", value)
+	}
+}
+
 func TestNativeProjectionRejectsMalformedDSHSubagentDescriptor(t *testing.T) {
 	cursor := newNativeProjectionCursor()
 	cursor.project("subagent", session.Event{

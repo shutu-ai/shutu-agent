@@ -8,7 +8,9 @@ package webserver
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
+	"unicode/utf16"
 
 	"github.com/jabing/shutu-agent/internal/session"
 )
@@ -29,6 +31,7 @@ type nativeProjectionCursor struct {
 	stats     nativeProjectionSessionStats
 	goal      map[string]any
 	subagent  nativeProjectionSubagentState
+	context   nativeProjectionContextBreakdown
 }
 
 func newNativeProjectionCursor() *nativeProjectionCursor {
@@ -195,9 +198,23 @@ type nativeProjectionSubagentState struct {
 	settledMs           int64
 }
 
+type nativeProjectionContextBreakdown struct {
+	systemTokens  int64
+	toolsTokens   int64
+	messageTokens int64
+	claim         *nativeProjectionContextClaim
+}
+
+type nativeProjectionContextClaim struct {
+	start  uint64
+	end    uint64
+	tokens int64
+}
+
 func (c *nativeProjectionCursor) foldProjection(ev session.Event, data map[string]any) {
 	c.foldSessionStats(ev, data)
 	c.foldSubagent(ev, data)
+	c.foldContextBreakdown(ev, data)
 	switch ev.Type {
 	case "session/title":
 		c.setProjectionValue("title", nativeEventString(data, "title", "text"))
@@ -266,6 +283,176 @@ func (c *nativeProjectionCursor) foldProjection(ev session.Event, data map[strin
 			}
 		}
 	}
+}
+
+func (c *nativeProjectionCursor) foldContextBreakdown(ev session.Event, data map[string]any) {
+	breakdown := &c.context
+	switch ev.Type {
+	case "request/header", session.EventLLMRequestStart:
+		header := data
+		if nested := nativeEventObject(data, "header"); nested != nil {
+			header = nested
+		}
+		if ev.Type == session.EventLLMRequestStart {
+			_, hasSystem := header["system"]
+			_, hasSystemPrompt := header["systemPrompt"]
+			_, hasSystemPromptSnake := header["system_prompt"]
+			_, hasTools := header["tools"]
+			if !hasSystem && !hasSystemPrompt && !hasSystemPromptSnake && !hasTools {
+				return
+			}
+		}
+		breakdown.systemTokens = 0
+		breakdown.toolsTokens = 0
+		if system := nativeEventString(header, "system", "systemPrompt", "system_prompt"); system != "" {
+			breakdown.systemTokens = nativeEstimateTextTokens(system) + 4
+		} else if _, exists := header["system"]; exists {
+			breakdown.systemTokens = 4
+		}
+		if tools := nativeEventValue(header, "tools"); tools != nil {
+			if items, ok := tools.([]any); !ok || len(items) > 0 {
+				breakdown.toolsTokens = nativeEstimateJSONTokens(tools) + 4
+			}
+		}
+		c.setProjectionValue("contextBreakdown", nativeContextBreakdownValue(breakdown))
+		return
+	case session.EventCompactionSummary, session.EventCompactionPrune:
+		if claim := nativeContextBreakdownClaim(data); claim != nil {
+			breakdown.claim = claim
+		}
+		return
+	}
+
+	if !nativeContextSurfaceEvent(ev.Type) {
+		breakdown.claim = nil
+		return
+	}
+	tokens := nativeEstimateSurfaceEventTokens(ev.Type, data)
+	if op, ok := nativeContextReplaceOp(data); ok {
+		if claim := breakdown.claim; claim != nil && claim.start == op.start && claim.end == op.end {
+			breakdown.messageTokens += tokens - claim.tokens
+		}
+		// A replacement without an adjacent shadow-price claim is neutral in
+		// DSH's bounded fold: the old range cannot be priced safely.
+	} else {
+		breakdown.messageTokens += tokens
+	}
+	breakdown.claim = nil
+	c.setProjectionValue("contextBreakdown", nativeContextBreakdownValue(breakdown))
+}
+
+func nativeContextBreakdownValue(breakdown *nativeProjectionContextBreakdown) map[string]any {
+	return map[string]any{
+		"systemTokens":  breakdown.systemTokens,
+		"toolsTokens":   breakdown.toolsTokens,
+		"messageTokens": breakdown.messageTokens,
+	}
+}
+
+func nativeContextSurfaceEvent(eventType string) bool {
+	switch eventType {
+	case session.EventUserMessage, session.EventAssistantMessage, session.EventToolResult:
+		return true
+	default:
+		return false
+	}
+}
+
+func nativeEstimateSurfaceEventTokens(eventType string, data map[string]any) int64 {
+	content := nativeSurfaceContent(data)
+	if eventType == session.EventToolResult {
+		content = nativeToolResultBlocks(data, nativeEventString(data, "output", "toolOutput", "tool_output", "error"), nativeEventBool(data, "isError", "is_error"))
+	}
+	return nativeEstimateContentTokens(content) + 4
+}
+
+func nativeSurfaceContent(data map[string]any) []any {
+	if raw := nativeEventValue(data, "content"); raw != nil {
+		if content := nativeMessageContent(raw); len(content) > 0 {
+			return content
+		}
+	}
+	content := make([]any, 0, 2)
+	if reasoning := nativeEventString(data, "reasoning"); reasoning != "" {
+		content = append(content, map[string]any{"type": "reasoning", "text": reasoning})
+	}
+	if text := nativeEventString(data, "text"); text != "" || len(content) == 0 {
+		content = append(content, map[string]any{"type": "text", "text": text})
+	}
+	for _, call := range nativeEventArray(data, "toolCalls", "tool_calls") {
+		content = append(content, map[string]any{
+			"type": "tool-call", "id": nativeEventString(call, "id", "callId"),
+			"name": nativeEventString(call, "name"), "arguments": nativeEventString(call, "arguments", "args"),
+		})
+	}
+	return content
+}
+
+func nativeEstimateContentTokens(content []any) int64 {
+	var tokens int64
+	for _, raw := range content {
+		block, ok := raw.(map[string]any)
+		if !ok {
+			tokens += nativeEstimateJSONTokens(raw) + 4
+			continue
+		}
+		switch nativeEventString(block, "type", "kind") {
+		case "text", "reasoning":
+			tokens += nativeEstimateTextTokens(nativeEventString(block, "text")) + 4
+		case "tool-call":
+			tokens += nativeEstimateTextTokens(nativeEventString(block, "name"))
+			tokens += nativeEstimateTextTokens(nativeEventString(block, "arguments", "args")) + 4
+		case "tool-result":
+			if nested := nativeEventValue(block, "content"); nested != nil {
+				tokens += nativeEstimateContentTokens(nativeMessageContent(nested)) + 4
+			} else {
+				tokens += nativeEstimateJSONTokens(block) + 4
+			}
+		default:
+			tokens += nativeEstimateJSONTokens(block) + 4
+		}
+	}
+	return tokens
+}
+
+func nativeEstimateTextTokens(value string) int64 {
+	length := int64(len(utf16.Encode([]rune(value))))
+	if length == 0 {
+		return 0
+	}
+	return (length + 3) / 4
+}
+
+func nativeEstimateJSONTokens(value any) int64 {
+	encoded, err := json.Marshal(value)
+	if err != nil || len(encoded) == 0 {
+		return 0
+	}
+	return (int64(len(utf16.Encode([]rune(string(encoded)))) + 3)) / 4
+}
+
+func nativeContextBreakdownClaim(data map[string]any) *nativeProjectionContextClaim {
+	rangeValue := nativeEventObject(data, "shadowedRange", "shadowed_range")
+	if rangeValue == nil {
+		return nil
+	}
+	start, startOK := nativeNonnegativeEventUint64(rangeValue, "start")
+	end, endOK := nativeNonnegativeEventUint64(rangeValue, "end")
+	tokens, tokensOK := nativeNonnegativeEventInt64(data, "shadowedTokenCount", "shadowed_token_count")
+	if !startOK || !endOK || !tokensOK || end < start {
+		return nil
+	}
+	return &nativeProjectionContextClaim{start: start, end: end, tokens: tokens}
+}
+
+func nativeContextReplaceOp(data map[string]any) (nativeProjectionContextClaim, bool) {
+	op := nativeEventObject(data, "surfaceOp", "surface_op")
+	if op == nil || nativeEventString(op, "op") != "replace" {
+		return nativeProjectionContextClaim{}, false
+	}
+	start, startOK := nativeNonnegativeEventUint64(op, "start")
+	end, endOK := nativeNonnegativeEventUint64(op, "end")
+	return nativeProjectionContextClaim{start: start, end: end}, startOK && endOK && end >= start
 }
 
 func (c *nativeProjectionCursor) foldSubagent(ev session.Event, data map[string]any) {
@@ -769,6 +956,9 @@ func (c *nativeProjectionCursor) projectionBlock(title string, lastSeq int64, pe
 	if _, ok := values["subagentTiming"]; !ok {
 		values["subagentTiming"] = nativeSubagentTimingValue(&c.subagent)
 	}
+	if _, ok := values["contextBreakdown"]; !ok {
+		values["contextBreakdown"] = nativeContextBreakdownValue(&c.context)
+	}
 	values["permissions"] = nativePermissionProjection(firstNonEmpty(permission...))
 	return nativeProjectionBlock{AsOfSeq: lastSeq, Values: values}
 }
@@ -1173,6 +1363,28 @@ func nativeNonnegativeEventInt64(object map[string]any, keys ...string) (int64, 
 		return number, number >= 0
 	case uint64:
 		return int64(number), number <= uint64(^uint64(0)>>1)
+	default:
+		return 0, false
+	}
+}
+
+func nativeNonnegativeEventUint64(object map[string]any, keys ...string) (uint64, bool) {
+	value := nativeEventValue(object, keys...)
+	switch number := value.(type) {
+	case float64:
+		if number < 0 || number != float64(uint64(number)) {
+			return 0, false
+		}
+		return uint64(number), true
+	case json.Number:
+		parsed, err := strconv.ParseUint(string(number), 10, 64)
+		return parsed, err == nil
+	case int:
+		return uint64(number), number >= 0
+	case int64:
+		return uint64(number), number >= 0
+	case uint64:
+		return number, true
 	default:
 		return 0, false
 	}
