@@ -777,6 +777,11 @@ func (a *app) pruneBlankCurrent(ctx context.Context) {
 
 // newSession starts a fresh session with a random id.
 func (a *app) newSession(ctx context.Context) error {
+	// Session replacement swaps the process-wide log and its durable sink. It
+	// must not race an active Web/REPL turn, whose loop holds the current log
+	// pointer while worker callbacks may still be committing events.
+	a.turnMu.Lock()
+	defer a.turnMu.Unlock()
 	id, err := newSessionID()
 	if err != nil {
 		return fmt.Errorf("pa: generate session id: %w", err)
@@ -811,6 +816,12 @@ func (a *app) newSession(ctx context.Context) error {
 
 // resumeSession loads a session's full history from the store into a new log.
 func (a *app) resumeSession(ctx context.Context, id string) error {
+	// Opening a session from another browser tab can arrive while a long turn is
+	// streaming. Wait for that turn to settle before replacing a.log; otherwise
+	// the old loop and the newly restored log can both append the same Seq to the
+	// session store through different sinks.
+	a.turnMu.Lock()
+	defer a.turnMu.Unlock()
 	events, err := a.store.LoadSession(ctx, id)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
