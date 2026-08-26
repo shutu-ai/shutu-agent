@@ -20,7 +20,7 @@
 | P33 | 可访问性与键盘交互 | P2 | 已完成 | P28、P29、P31 |
 | P34 | 性能、真实后端联调与验收 | P0 | 部分完成（保留真实大数据基线） | P25、P27、P32、P33 |
 | P35 | 生产部署与交付验证 | P2 | 部分完成（待目标环境） | P34 |
-| P36-1 | DSH 原生前端构建入口 | P0 | 进行中 | P34、P35 |
+| P36-1 | DSH 原生前端构建入口 | P0 | 部分完成（待 P36-2 bridge） | P34、P35 |
 | P36-2 | DSH Web API/RPC/WebSocket 适配层 | P0 | 未开始 | P36-1 |
 | P36-3 | DSH Session/Conversation 数据模型适配 | P0 | 未开始 | P36-2 |
 | P36-4 | DSH 原生 UI 插件与视觉替换 | P0 | 未开始 | P36-1、P36-3 |
@@ -141,14 +141,14 @@
 
 验收标准：交付包可在目标环境独立启动，核心页面、API、SSE 和错误处理均可用，并有可重复的部署步骤。
 
-### P36-1：DSH 原生前端构建入口（进行中）
+### P36-1：DSH 原生前端构建入口（部分完成）
 
-- [ ] 在 `shutu-agent` 内建立独立的 React/Cordis/Vite 原生入口，不再以当前单体 `App` 作为最终 UI 根节点。
-- [ ] 以只读方式复用 DSH client package 的 boot、module loader、uiRenderer、slot 和 plugin manifest 约定。
-- [ ] 解决依赖、构建、dist、source map 和发布包闭包，运行时不依赖 `deepseek-harness` 源目录。
+- [x] 在 `shutu-agent` 内建立独立的 React/Cordis/Vite 原生入口；`SHUTU_DSH_NATIVE=1` 时不再以当前单体 `App` 作为 UI 根节点。
+- [x] 以只读方式接入 DSH client package 的 boot、module loader、uiRenderer、slot 和 plugin manifest 入口约定；运行时 boot manifest/插件下发由 P36-2 补齐。
+- [x] 解决当前 bundle 的依赖、dist 和 source map 闭包；`npm.cmd run build:native` 可生成 native dist，运行时不读取 `deepseek-harness` 源目录。
 - [ ] 建立 DSH 版本/来源清单，确保后续 DSH 参考变化可追踪。
 
-验收标准：Shutu 前端能独立启动 DSH boot 和 Cordis plugin graph，根节点由 DSH `uiRenderer` 装载，发布 dist 自包含；`deepseek-harness` 无文件变更。
+验收标准：构建入口和 DSH boot 调用链已具备；待 P36-2 提供 `window.__ModuleLoader__`、`window.__DSH_BOOT__` 和插件 bundle 后，才能在浏览器中完成原生 UI 启动验收。
 
 ### P36-2：DSH Web API/RPC/WebSocket 适配层
 
