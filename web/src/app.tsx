@@ -1093,11 +1093,69 @@ function DshTimeline({ events, mode, selectedSeq, onSelectSeq, onSelectSeqs }: {
     onSelectSeqs?.([])
     toolbar.onClearSelection()
   }
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const pickTimelineIndex = (clientX: number): number => {
+    const canvas = canvasRef.current
+    if (canvas === null || timeline.spans.length === 0) return 0
+    const rect = canvas.getBoundingClientRect()
+    const ratio = rect.width <= 0 ? 0 : Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
+    const target = timeline.start + ratio * span
+    let low = 0
+    let high = timeline.spans.length - 1
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2)
+      if (timeline.spans[middle]!.start < target) low = middle
+      else high = middle - 1
+    }
+    const next = Math.min(low + 1, timeline.spans.length - 1)
+    return Math.abs(timeline.spans[next]!.start - target) < Math.abs(timeline.spans[low]!.start - target) ? next : low
+  }
+  const drawTimeline = useCallback((): void => {
+    const canvas = canvasRef.current
+    if (canvas === null) return
+    const rect = canvas.getBoundingClientRect()
+    const width = Math.max(1, Math.floor(rect.width))
+    const height = 22
+    const pixelRatio = window.devicePixelRatio || 1
+    canvas.width = Math.floor(width * pixelRatio)
+    canvas.height = Math.floor(height * pixelRatio)
+    const context = canvas.getContext('2d')
+    if (context === null) return
+    context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0)
+    context.clearRect(0, 0, width, height)
+    const colors = ['#7596b8', '#9de9bd', '#e6b26e']
+    for (const item of timeline.spans) {
+      const left = ((item.start - timeline.start) / span) * width
+      const right = ((item.end - timeline.start) / span) * width
+      context.fillStyle = item.isError ? '#ef7d71' : colors[item.lane] ?? '#7596b8'
+      context.globalAlpha = selectedRange !== null && (item.index < selectedRange.start || item.index > selectedRange.end) ? 0.42 : 0.88
+      context.fillRect(left, 4, Math.max(2, right - left), 14)
+    }
+    context.globalAlpha = 1
+    if (selectedRange !== null) {
+      const selectedItems = timeline.spans.filter(item => item.index >= selectedRange.start && item.index <= selectedRange.end)
+      if (selectedItems.length > 0) {
+        const left = ((selectedItems[0]!.start - timeline.start) / span) * width
+        const right = ((selectedItems[selectedItems.length - 1]!.end - timeline.start) / span) * width
+        context.strokeStyle = '#e7f8ed'
+        context.lineWidth = 2
+        context.strokeRect(left, 3, Math.max(3, right - left), 16)
+      }
+    }
+  }, [selectedRange, span, timeline])
+  useEffect(() => {
+    drawTimeline()
+    const canvas = canvasRef.current
+    if (canvas === null || typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(drawTimeline)
+    observer.observe(canvas)
+    return () => observer.disconnect()
+  }, [drawTimeline])
   return <section className="dsh-timeline" aria-label="Trajectory timeline">
     <div className="timeline-head"><div><strong>Timeline</strong><span>{timeline.spans.length} records</span><span className="timeline-metrics">duration {formatDurationMs(metrics.durationMs)} · idle {formatDurationMs(metrics.idleMs)}</span></div><div className="timeline-controls">{selectedRange !== null && <button type="button" className="text-button" onClick={clearSelection}>Clear selection</button>}</div></div>
     <div className="timeline-track" role="list" aria-label="Timeline events">
       {timeline.turnBoundaries.map(boundary => <div className="timeline-boundary" key={`${boundary.turn}-${boundary.time}`} style={{ left: `${((boundary.time - timeline.start) / span) * 100}%` }}><span>Turn {boundary.turn}</span></div>)}
-      {timeline.spans.map(item => <button key={`${item.index}-${item.start}`} className={`timeline-span lane-${item.lane} ${item.isError ? 'error' : ''} ${selectedRange !== null && item.index >= selectedRange.start && item.index <= selectedRange.end ? 'selected' : ''}`} style={{ left: `${((item.start - timeline.start) / span) * 100}%`, width: `${Math.max(1.2, ((item.end - item.start) / span) * 100)}%` }} title={item.label || item.kind} aria-label={`${item.kind} ${item.label || item.index}`} aria-pressed={selectedRange !== null && item.index >= selectedRange.start && item.index <= selectedRange.end} onPointerDown={pointer => { setDragAnchor(item.index); selectRange(item.index, pointer.shiftKey) }} onPointerEnter={() => { if (dragAnchor !== null) selectRange(item.index, true) }} onPointerUp={() => setDragAnchor(null)} onPointerCancel={() => setDragAnchor(null)} onKeyDown={keyboardEvent => { if (keyboardEvent.key === 'Escape') { keyboardEvent.preventDefault(); clearSelection() } else if (keyboardEvent.key === 'ArrowLeft' || keyboardEvent.key === 'ArrowRight') { keyboardEvent.preventDefault(); const offset = keyboardEvent.key === 'ArrowLeft' ? -1 : 1; const next = Math.max(1, Math.min(timeline.spans.length, item.index + offset)); selectRange(next, keyboardEvent.shiftKey) } }} onClick={click => selectRange(item.index, click.shiftKey)} />)}
+      <canvas ref={canvasRef} className="timeline-canvas" width={1} height={22} role="listbox" tabIndex={0} aria-label={`${timeline.spans.length} timeline records`} onPointerDown={pointer => { const index = pickTimelineIndex(pointer.clientX) + 1; setDragAnchor(index); pointer.currentTarget.setPointerCapture(pointer.pointerId); selectRange(index, pointer.shiftKey) }} onPointerMove={pointer => { if (dragAnchor !== null && pointer.currentTarget.hasPointerCapture(pointer.pointerId)) selectRange(pickTimelineIndex(pointer.clientX) + 1, true) }} onPointerUp={pointer => { if (pointer.currentTarget.hasPointerCapture(pointer.pointerId)) pointer.currentTarget.releasePointerCapture(pointer.pointerId); setDragAnchor(null) }} onPointerCancel={() => setDragAnchor(null)} onKeyDown={keyboardEvent => { if (keyboardEvent.key === 'Escape') { keyboardEvent.preventDefault(); clearSelection(); return } if (keyboardEvent.key === 'ArrowLeft' || keyboardEvent.key === 'ArrowRight') { keyboardEvent.preventDefault(); const current = selected ?? 1; const offset = keyboardEvent.key === 'ArrowLeft' ? -1 : 1; selectRange(Math.max(1, Math.min(timeline.spans.length, current + offset)), keyboardEvent.shiftKey) } }} />
     </div>
     <div className="timeline-axis"><span>{formatTimelineAxis(timeline.start, displayMode)}</span><span>{formatTimelineAxis(timeline.end, displayMode)}</span></div><div className="timeline-legend"><span><i className="lane-dot lane-0" />Model</span><span><i className="lane-dot lane-1" />Assistant</span><span><i className="lane-dot lane-2" />Tools</span>{metrics.missingTimestamps > 0 && <span className="timeline-warning" title="Some events have invalid timestamps">{metrics.missingTimestamps} missing timestamps</span>}{metrics.reversedTimestamps && <span className="timeline-warning" title="Input timestamps were normalized for timeline metrics">reversed time normalized</span>}{selected !== null && <span className="timeline-selected">{selectedRange?.start === selectedRange?.end ? `Record #${selected}` : `Records #${selectedRange?.start}–${selectedRange?.end}`}</span>}</div>
   </section>

@@ -104,6 +104,8 @@ h1 { max-width: 52vw; margin: 0; overflow: hidden; color: #f1f5fa; font-size: 20
 .timeline-head select { border: 1px solid #2a384a; border-radius: 5px; padding: 3px 6px; color: #aebdcd; background: #14202d; font-size: 10px; }
 .timeline-controls { display: flex !important; align-items: center; gap: 8px; }
 .timeline-track { position: relative; height: 22px; overflow: visible; border-radius: 5px; background: repeating-linear-gradient(90deg, #162330 0, #162330 calc(20% - 1px), #253547 20%); }
+.timeline-canvas { position: absolute; inset: 0; display: block; width: 100%; height: 22px; border-radius: 5px; cursor: crosshair; outline: none; }
+.timeline-canvas:focus-visible { outline: 2px solid #e7f8ed; outline-offset: 2px; }
 .timeline-boundary { position: absolute; z-index: 0; top: -4px; bottom: -4px; width: 1px; background: #62758a99; pointer-events: none; }
 .timeline-boundary span { position: absolute; top: -14px; left: 3px; white-space: nowrap; color: #64758a; font-size: 9px; }
 .timeline-span { position: absolute; top: 4px; height: 14px; min-width: 3px; border: 0; border-radius: 3px; opacity: .88; }
