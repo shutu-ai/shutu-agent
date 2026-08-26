@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sort"
 	"strings"
@@ -2908,54 +2909,54 @@ func (s *Server) handleNativeHostWebSocket(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		return
 	}
-	for _, meta := range metas {
-		if !meta.ArchivedAt.IsZero() {
-			continue
-		}
+	active := make(map[string]store.SessionMeta)
+	unsubs := make(map[string]func())
+	subscribe := func(meta store.SessionMeta, announce bool) error {
 		events, loadErr := s.store.LoadSession(ctx, meta.ID)
 		if loadErr != nil {
-			continue
+			return loadErr
 		}
-		parent, origin, depth := nativeSessionLineage(events)
-		added := map[string]any{
-			"type": "host/session-added", "sessionId": meta.ID, "blank": len(events) == 0,
-		}
-		if parent != "" {
-			added["parentSessionId"] = parent
-		}
-		if origin != "" {
-			added["origin"] = origin
-		}
-		if meta.CWD != "" {
-			added["cwd"] = meta.CWD
-		}
-		if err := write("host/session-added", added); err != nil {
-			return
-		}
-		if s.statusFn != nil {
-			status := s.statusFn(ctx, meta)
-			if err := write("host/session-status", map[string]any{
-				"type": "host/session-status", "sessionId": meta.ID, "running": status.State == "ongoing",
-			}); err != nil {
-				return
+		if announce {
+			if err := write("host/session-added", s.nativeHostSessionAdded(meta, events)); err != nil {
+				return err
+			}
+			if s.statusFn != nil {
+				status := s.statusFn(ctx, meta)
+				if err := write("host/session-status", map[string]any{
+					"type": "host/session-status", "sessionId": meta.ID, "running": status.State == "ongoing",
+				}); err != nil {
+					return err
+				}
 			}
 		}
+		active[meta.ID] = meta
 		if s.evSrc != nil {
 			sessionID := meta.ID
 			unsub := s.evSrc(sessionID, func(ev session.Event) {
 				running, ok := nativeHostRunningTransition(ev.Type)
-				if !ok {
-					return
+				if ok {
+					_ = write("host/session-status", map[string]any{
+						"type": "host/session-status", "sessionId": sessionID, "running": running,
+					})
 				}
-				_ = write("host/session-status", map[string]any{
-					"type": "host/session-status", "sessionId": sessionID, "running": running,
-				})
+				if message := nativeHostAgentError(ev); message != "" {
+					_ = write("host/agent-error", map[string]any{
+						"type": "host/agent-error", "sessionId": sessionID, "message": message,
+					})
+				}
 			})
 			if unsub != nil {
-				defer unsub()
+				unsubs[meta.ID] = unsub
 			}
 		}
-		_ = depth // reserved for the session-added contract's future depth field.
+		return nil
+	}
+	for _, meta := range metas {
+		if meta.ArchivedAt.IsZero() {
+			if err := subscribe(meta, true); err != nil {
+				return
+			}
+		}
 	}
 	workspaces, err := s.store.ListWorkspaces(ctx)
 	if err != nil {
@@ -2974,8 +2975,136 @@ func (s *Server) handleNativeHostWebSocket(w http.ResponseWriter, r *http.Reques
 	}); err != nil {
 		return
 	}
+	previousWorkspaces := make(map[string]nativeWorkspaceView, len(workspaceViews))
+	previousWorkspaceOrder := make([]string, 0, len(workspaceViews))
+	for _, workspace := range workspaceViews {
+		previousWorkspaces[workspace.WorkspaceID] = workspace
+		previousWorkspaceOrder = append(previousWorkspaceOrder, workspace.WorkspaceID)
+	}
+	previousArchived := append([]string{}, archived...)
+	pollDone := make(chan struct{})
+	go func() {
+		defer close(pollDone)
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				currentMetas, listErr := s.store.ListSessions(ctx)
+				if listErr != nil {
+					continue
+				}
+				currentActive := make(map[string]store.SessionMeta)
+				currentArchived := make([]string, 0)
+				for _, meta := range currentMetas {
+					if !meta.ArchivedAt.IsZero() {
+						currentArchived = append(currentArchived, meta.ID)
+						continue
+					}
+					currentActive[meta.ID] = meta
+					if _, exists := active[meta.ID]; !exists {
+						if subscribeErr := subscribe(meta, true); subscribeErr != nil {
+							continue
+						}
+					}
+				}
+				for id := range active {
+					if _, exists := currentActive[id]; !exists {
+						if unsub, subscribed := unsubs[id]; subscribed {
+							unsub()
+							delete(unsubs, id)
+						}
+						_ = write("host/session-removed", map[string]any{"type": "host/session-removed", "sessionId": id})
+					}
+				}
+				active = currentActive
+				if !reflect.DeepEqual(previousArchived, currentArchived) {
+					previousArchived = append([]string(nil), currentArchived...)
+					_ = write("host/archived-sessions-changed", map[string]any{
+						"type": "host/archived-sessions-changed", "archivedSessionIds": currentArchived,
+					})
+				}
+				currentWorkspaces, workspaceErr := s.store.ListWorkspaces(ctx)
+				if workspaceErr != nil {
+					continue
+				}
+				views, _ := nativeWorkspaceViews(currentWorkspaces, currentMetas)
+				currentWorkspaceMap := make(map[string]nativeWorkspaceView, len(views))
+				currentWorkspaceOrder := make([]string, 0, len(views))
+				for _, workspace := range views {
+					currentWorkspaceMap[workspace.WorkspaceID] = workspace
+					currentWorkspaceOrder = append(currentWorkspaceOrder, workspace.WorkspaceID)
+					previous, exists := previousWorkspaces[workspace.WorkspaceID]
+					if !exists || !reflect.DeepEqual(previous, workspace) {
+						_ = write("host/workspace-changed", map[string]any{
+							"type": "host/workspace-changed", "workspace": workspace,
+						})
+					}
+				}
+				for id := range previousWorkspaces {
+					if _, exists := currentWorkspaceMap[id]; !exists {
+						_ = write("host/workspace-removed", map[string]any{"type": "host/workspace-removed", "workspaceId": id})
+					}
+				}
+				if !reflect.DeepEqual(previousWorkspaceOrder, currentWorkspaceOrder) {
+					_ = write("host/workspace-order-changed", map[string]any{
+						"type": "host/workspace-order-changed", "workspaceIds": currentWorkspaceOrder,
+					})
+				}
+				previousWorkspaces = currentWorkspaceMap
+				previousWorkspaceOrder = currentWorkspaceOrder
+			}
+		}
+	}()
+	defer func() {
+		for _, unsub := range unsubs {
+			unsub()
+		}
+	}()
 	go drainNativeWebSocket(reader, cancel)
 	<-ctx.Done()
+	<-pollDone
+}
+
+func (s *Server) nativeHostSessionAdded(meta store.SessionMeta, events []session.Event) map[string]any {
+	parent, origin, depth := nativeSessionLineage(events)
+	added := map[string]any{
+		"type": "host/session-added", "sessionId": meta.ID, "blank": len(events) == 0,
+	}
+	if parent != "" {
+		added["parentSessionId"] = parent
+	}
+	if origin != "" {
+		added["origin"] = origin
+	}
+	if depth > 0 {
+		added["delegationDepth"] = depth
+	}
+	if meta.CWD != "" {
+		added["cwd"] = meta.CWD
+	}
+	if configs, ok := s.store.(store.SessionConfigStore); ok {
+		if cfg, err := configs.GetSessionConfig(context.Background(), meta.ID); err == nil && cfg.AgentPreset != "" {
+			added["agentPreset"] = cfg.AgentPreset
+		}
+	}
+	return added
+}
+
+func nativeHostAgentError(ev session.Event) string {
+	if ev.Type != session.EventToolResult && ev.Type != "tool/error" {
+		return ""
+	}
+	data := nativeJSONObject(ev.Data)
+	if nativeBool(data["isError"]) || nativeBool(data["is_error"]) {
+		if message := nativeEventString(data, "error", "message", "reason"); message != "" {
+			return message
+		}
+		return "tool execution failed"
+	}
+	return ""
 }
 
 func nativeHostRunningTransition(eventType string) (bool, bool) {

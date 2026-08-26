@@ -1593,6 +1593,94 @@ func TestNativeHostWebSocketSendsHostBaselineAndStatus(t *testing.T) {
 	if envelope.Method != "host/session-status" || envelope.Payload["running"] != true {
 		t.Fatalf("host status transition = %s", transition)
 	}
+	emit(session.Event{Seq: 2, Type: session.EventToolResult, At: time.UnixMilli(2002), Version: session.EventVersion, Data: json.RawMessage(`{"isError":true,"error":"tool failed"}`)})
+	errorFrame, err := readNativeTextFrame(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(errorFrame, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Method != "host/agent-error" || envelope.Payload["message"] != "tool failed" {
+		t.Fatalf("host agent error = %s", errorFrame)
+	}
+}
+
+func TestNativeHostWebSocketReconcilesSessionsAfterConnect(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	seedSession(t, st, "native-host-reconcile", nil)
+	httpServer := httptest.NewServer(srv.Handler())
+	defer httpServer.Close()
+	address := strings.TrimPrefix(httpServer.URL, "http://")
+	conn, err := net.Dial("tcp", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	request := fmt.Sprintf("GET /api/events.host HTTP/1.1\r\nHost: %s\r\nConnection: keep-alive, Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: cmVjb25jaWxlLWhvc3Q=\r\nAuthorization: Bearer tok\r\n\r\n", address)
+	if _, err := io.WriteString(conn, request); err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(conn)
+	status, err := reader.ReadString('\n')
+	if err != nil || !strings.Contains(status, "101 Switching Protocols") {
+		t.Fatalf("upgrade status = %q err=%v", status, err)
+	}
+	for {
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if strings.TrimSpace(line) == "" {
+			break
+		}
+	}
+	for range 2 {
+		if _, err := readNativeTextFrame(reader); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.CreateSession(context.Background(), "native-host-new", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	frame, err := readNativeTextFrame(reader)
+	if err != nil {
+		t.Fatal("new session frame: ", err)
+	}
+	var envelope struct {
+		Method  string         `json:"method"`
+		Payload map[string]any `json:"payload"`
+	}
+	if err := json.Unmarshal(frame, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Method != "host/session-added" || envelope.Payload["sessionId"] != "native-host-new" {
+		t.Fatalf("new session frame = %s", frame)
+	}
+	if err := st.ArchiveSession(context.Background(), "native-host-new", true); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := readNativeTextFrame(reader)
+	if err != nil {
+		t.Fatal("removed session frame: ", err)
+	}
+	if err := json.Unmarshal(removed, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Method != "host/session-removed" || envelope.Payload["sessionId"] != "native-host-new" {
+		t.Fatalf("removed session frame = %s", removed)
+	}
+	archived, err := readNativeTextFrame(reader)
+	if err != nil {
+		t.Fatal("archive frame: ", err)
+	}
+	if err := json.Unmarshal(archived, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Method != "host/archived-sessions-changed" {
+		t.Fatalf("archive frame = %s", archived)
+	}
 }
 
 func TestNativeSessionForkCopiesCompletedTurnPrefixAndMetadata(t *testing.T) {

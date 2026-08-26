@@ -33,14 +33,15 @@
 ## P36 执行任务列表（动态）
 
 - [x] P36-1.1：生成 DSH 版本、Git revision、只读来源根目录和原生插件 roster manifest。
-- [ ] P36-2.1：实现会话、工作区、设置、模型、权限、文件、附件、命令、技能、队列、审批和导出接口。
+- [x] P36-2.1：实现会话、工作区、设置、模型、权限、文件、附件、命令、技能、队列、审批和导出接口。
 - [x] P36-2.1a：接入 DSH `goal.create/edit/pause/resume/complete/clear` 原生 RPC，复用 Shutu plan/goal 引擎、事件持久化和 revision CAS。
 - [x] P36-2.1b：接入 `host.openPath` 与 `credentials.set/unset`，补齐主机 opener、凭据引用校验、环境变量只读保护和 provider key 持久化。
 - [x] P36-2.1c：接入 `settings.openDocument`，由服务端绑定配置文档并复用主机 opener，不向浏览器暴露任意路径。
 - [x] P36-2.1d：接入 `agentPreset.read/copy/openDocument/remove`，以数据目录安全存储用户 preset，并让 `session.create/select` 识别用户 preset。
-- [ ] P36-2.2：补齐 host downlink、连接状态、断线重连、续传及剩余原生接口。
+- [x] P36-2.2：补齐 host downlink、连接状态、断线重连、续传及剩余原生接口。
 - [x] P36-2.2a：host downlink 首次连接下发活动会话、session status、Workspace/archive 快照，并在 turn start/end 时推送状态变化。
 - [x] P36-2.2b：接入 `subagent.prompt/interrupt`，校验 parent/child lineage 与 continuable mode，并连接 live child inbox/cancel seam。
+- [x] P36-2.2c：host downlink 增加新建/移除 session、workspace 增删改序、归档变化和 agent-error 实时 reconciliation；断线重连重新发送完整基线。
 - [ ] P36-3.1：补齐全部 projection key，并完成生产数据规模验收。
 - [ ] P36-4.1：接入 layout、theme、brand、sidebar、workspace 和 conversation 插件。
 - [ ] P36-4.2：接入 tool、trajectory、composer、command、input trigger、reference 和 skill 插件。
