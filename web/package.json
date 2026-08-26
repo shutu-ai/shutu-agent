@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "node scripts/run-dsh-tool.mjs vite build",
+    "build": "node scripts/build-native.mjs",
     "build:native": "node scripts/build-native.mjs",
     "verify": "node scripts/verify-dist.mjs",
     "e2e": "node scripts/e2e-smoke.mjs",

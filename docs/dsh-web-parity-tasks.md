@@ -44,10 +44,10 @@
 - [x] P36-2.2c：host downlink 增加新建/移除 session、workspace 增删改序、归档变化和 agent-error 实时 reconciliation；断线重连重新发送完整基线。
 - [ ] P36-3.1：补齐全部 projection key，并完成生产数据规模验收。
 - [x] P36-3.1a：对齐 DSH 当前声明的 sessionStats/title/todos/plan/goal/tokenUsage/contextPressure/contextBreakdown/permissions/subagent/subagentTiming/sessionListMetadata 初始值与 baseline 传输。
-- [ ] P36-4.1：接入 layout、theme、brand、sidebar、workspace 和 conversation 插件。
-- [ ] P36-4.2：接入 tool、trajectory、composer、command、input trigger、reference 和 skill 插件。
-- [ ] P36-4.3：接入 subagent、jobs、model、permission、plan、goal、settings、attachment 和 question 插件。
-- [ ] P36-4.4：移除 Shutu 自定义主布局、颜色 token、组件层级和页面导航最终渲染路径。
+- [x] P36-4.1：接入 layout、theme、brand、sidebar、workspace 和 conversation 插件。
+- [x] P36-4.2：接入 tool、trajectory、composer、command、input trigger、reference 和 skill 插件。
+- [x] P36-4.3：接入 subagent、jobs、model、permission、plan、goal、settings、attachment 和 question 插件。
+- [x] P36-4.4：移除 Shutu 自定义主布局、颜色 token、组件层级和页面导航最终渲染路径。
 - [ ] P36-5.1：完成新建、切换、归档、删除、Fork 会话和 Workspace 管理。
 - [ ] P36-5.2：完成发送、重试、取消、队列、steer、审批、问题、计划和目标操作。
 - [ ] P36-5.3：完成 Tool 折叠、请求详情、Trajectory、搜索、历史分页和滚动定位。
@@ -85,7 +85,7 @@
 | P36-1 | DSH 原生前端构建入口 | P0 | 部分完成（待 P36-2 bridge） | P34、P35 |
 | P36-2 | DSH Web API/RPC/WebSocket 适配层 | P0 | 部分完成（核心 RPC/downlink） | P36-1 |
 | P36-3 | DSH Session/Conversation 数据模型适配 | P0 | 部分完成（native history/live projection） | P36-2 |
-| P36-4 | DSH 原生 UI 插件与视觉替换 | P0 | 未开始 | P36-1、P36-3 |
+| P36-4 | DSH 原生 UI 插件与视觉替换 | P0 | 已完成首轮实现 | P36-1、P36-3 |
 | P36-5 | DSH 全量交互与状态能力 | P0 | 未开始 | P36-2、P36-4 |
 | P36-6 | 视觉、响应式、键盘与无障碍验收 | P1 | 未开始 | P36-4、P36-5 |
 | P36-7 | 真实任务性能与持续流式验收 | P1 | 未开始 | P36-5、P36-6 |

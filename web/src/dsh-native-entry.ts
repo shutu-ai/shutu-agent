@@ -2,8 +2,8 @@ import { AppWebEntry } from '@deepseek-ai/dsh-client-web'
 import * as clientModules from '@deepseek-ai/dsh-client-modules/client'
 import type { DshNativePluginRegistration } from './dsh-native-plugins'
 
-/** Build-time switch for the DSH-native UI entry. The legacy Shutu shell stays
- * available until the host protocol and plugin manifest are ready. */
+/** Build-time marker retained for diagnostics; the production entry is always
+ * the DSH React/Cordis shell. */
 declare const __SHUTU_DSH_NATIVE__: boolean
 
 interface DshBootWindow extends Window {
@@ -88,7 +88,7 @@ export async function mountDshNativeApp(container: HTMLElement): Promise<void> {
   await new AppWebEntry(container).run()
 }
 
-/** Select the native entry only in an explicitly enabled native build. */
+/** Report the build marker used by the native manifest and diagnostics. */
 export function isDshNativeBuild(): boolean {
   return __SHUTU_DSH_NATIVE__
 }

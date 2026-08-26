@@ -4,10 +4,10 @@
 
 ## 当前入口
 
-`web/src/main.tsx` 保留当前 Shutu UI 作为默认模式；当构建环境设置 `SHUTU_DSH_NATIVE=1` 时，入口转到 `web/src/dsh-native-entry.ts`，调用 DSH 的 `AppWebEntry`。
+`web/src/main.tsx` 现在只挂载 `web/src/dsh-native-entry.ts` 的 DSH `AppWebEntry`；默认 `npm.cmd run build` 即生成 DSH React/Cordis 原生 UI，不再存在旧 Shutu shell 的运行时分支。
 
 ```text
-npm.cmd run build:native
+npm.cmd run build
   └─ web/src/main.tsx
       └─ mountDshNativeApp()
           └─ @deepseek-ai/dsh-client-web
@@ -52,6 +52,6 @@ Go web server 已增加 DSH Connection 的核心 wire adapter：
 - `POST /api/workspace.list`
 - `GET /api/events.mux` 和 `GET /api/events.host`（downlink-only WebSocket）
 
-所有 unary 请求使用 `client-request` / `server-response` 和 `rpcId` 回显；事件使用 DSH 的 `session/subscribed` 与 `session/event` frame。当前仍是增量适配：Host 事件推送、重连/续传、其余 RPC 方法和 DSH client plugin bundle 由后续 P36-2 及 P36-3/P36-4 完成，因此 native build 仍不作为默认生产入口。
+所有 unary 请求使用 `client-request` / `server-response` 和 `rpcId` 回显；事件使用 DSH 的 `session/subscribed` 与 `session/event` frame。Host 事件推送、重连基线、投影基线和当前 DSH client plugin bundle 已在 `shutu-agent` 内落地，且 native build 已经作为默认生产入口。
 
-Host bridge 的核心 RPC/downlink 已接入，但 manifest、插件 bundle、Host 事件推送、重连/续传和完整 RPC 仍在后续 P36-2/P36-3/P36-4 中补齐，因此 native dist 仍不作为默认生产入口。
+Host bridge、manifest、插件 bundle、Host 事件推送、重连基线和完整 RPC 已接入；后续 P36-5 及以后只继续补齐真实交互验收、性能和生产交付，不切回旧 UI。

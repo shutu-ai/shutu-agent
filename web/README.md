@@ -25,6 +25,6 @@ workspace must set the variable explicitly to its read-only DSH source tree.
 
 The Go server requires and serves the React/Cordis `web/dist` directory from
 `web_server.dist_dir` in `config.yaml`; there is no embedded legacy frontend
-fallback. The client consumes the cursor envelope from
-`GET /api/sessions/{id}/events?limit=100`, reconnects through SSE with
-`Last-Event-ID`, and de-duplicates events by `seq`.
+fallback. The native client uses DSH `client-request` / `server-response` RPC
+envelopes and the downlink-only `events.mux` / `events.host` WebSockets. Session
+history and live updates share the same projection cursor and event sequence.

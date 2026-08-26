@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const dshRoot = resolve(process.env.SHUTU_DSH_ROOT ?? resolve(webRoot, '../../deepseek-harness'))
 const vite = resolve(dshRoot, 'apps/web/node_modules/vite/bin/vite.js')
+const distIndex = resolve(webRoot, 'dist/index.html')
 const { chromium } = createRequire(import.meta.url)(resolve(dshRoot, 'apps/web/node_modules/playwright'))
 const host = '127.0.0.1'
 const port = Number(process.env.SHUTU_E2E_PORT ?? 18117)
@@ -16,62 +17,61 @@ const baseUrl = `http://${host}:${port}/`
 if (!existsSync(vite)) {
   throw new Error(`Vite is unavailable at ${vite}; set SHUTU_DSH_ROOT to a DSH checkout.`)
 }
-
-const events = [
-  { seq: 1, type: 'turn/start', version: 1, time: '2026-08-26T10:00:00Z', summary: 'turn start', details: { turn: 1 } },
-  { seq: 2, type: 'user/message', version: 1, time: '2026-08-26T10:00:01Z', summary: 'inspect repository' },
-  { seq: 3, type: 'step/start', version: 1, time: '2026-08-26T10:00:02Z', summary: 'step start' },
-  { seq: 4, type: 'assistant/chunk', version: 1, time: '2026-08-26T10:00:03Z', summary: 'stream delta' },
-  { seq: 5, type: 'tool/result', version: 1, time: '2026-08-26T10:00:04Z', summary: 'files listed', tool_name: 'glob', tool_output: 'src/app.tsx', details: { output: Array.from({ length: 20 }, (_, index) => `matched file ${index + 1}: src/components/example-${index + 1}.tsx`).join('\n') } },
-  { seq: 6, type: 'assistant/reasoning', version: 1, time: '2026-08-26T10:00:05Z', summary: 'reasoning' },
-  { seq: 7, type: 'assistant/message', version: 1, time: '2026-08-26T10:00:06Z', summary: 'Repository inspected' },
-  { seq: 8, type: 'step/end', version: 1, time: '2026-08-26T10:00:07Z', summary: 'step end' },
-  { seq: 9, type: 'turn/end', version: 1, time: '2026-08-26T10:00:08Z', summary: 'turn end' },
-  { seq: 10, type: 'turn/start', version: 1, time: '2026-08-26T10:01:00Z', summary: 'turn start', details: { turn: 2 } },
-  { seq: 11, type: 'user/message', version: 1, time: '2026-08-26T10:01:01Z', summary: 'continue' },
-  { seq: 12, type: 'assistant/message', version: 1, time: '2026-08-26T10:01:02Z', summary: 'Done' },
-  { seq: 13, type: 'assistant/message', version: 1, time: '2026-08-26T10:01:03Z', summary: 'Tool-enabled assistant' },
-  { seq: 14, type: 'tool/result', version: 1, time: '2026-08-26T10:01:04Z', summary: 'tool finished', tool_name: 'read', tool_output: 'README.md' },
-]
-
-function json(route, value) {
-  return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(value) })
+if (!existsSync(distIndex)) {
+  throw new Error(`Native dist is unavailable at ${distIndex}; run npm.cmd run build first.`)
 }
 
-async function assertVisibleRowsDoNotOverlap(page) {
-  let minimumGap = Number.NEGATIVE_INFINITY
-  for (let attempt = 0; attempt < 10; attempt += 1) {
-    const measurement = await page.locator('.virtual-row').evaluateAll(elements => {
-      const boxes = elements.map(element => {
-        const rect = element.getBoundingClientRect()
-        return { top: rect.top, bottom: rect.bottom }
-      }).sort((left, right) => left.top - right.top)
-      return { gap: boxes.slice(1).reduce((gap, box, index) => Math.min(gap, box.top - boxes[index].bottom), Number.POSITIVE_INFINITY), boxes }
-    })
-    minimumGap = measurement.gap
-    if (minimumGap >= -1) return
-    await page.waitForTimeout(50)
+function valueFor(method) {
+  switch (method) {
+    case 'host.describe':
+      return { attachedSessions: 0, canOpenPath: false, cwd: 'C:/shutu-smoke', home: '', model: 'test-model', version: 'smoke' }
+    case 'settings.describe':
+      return { hasDocument: false, namespaces: [] }
+    case 'credentials.describe':
+      return { credentials: {} }
+    case 'session.list':
+      return { items: [] }
+    case 'workspace.list':
+      return { items: [], ungroupedSessionIds: [], archivedSessionIds: [] }
+    case 'agentPreset.list':
+      return { authorable: false, hasDocument: false, presets: [] }
+    case 'llm.providers':
+      return { providers: [] }
+    case 'dynamicCordisRunner/inventory':
+      return []
+    case 'dynamicCordisRunner/syncInspectManifest':
+      return { ok: true }
+    default:
+      return {}
   }
-  assert.ok(minimumGap >= -1, `dynamic virtual rows overlap by ${Math.abs(minimumGap)}px`)
 }
 
-async function installApiMock(page) {
-  await page.route('**/api/**', async route => {
-    const url = new URL(route.request().url())
-    if (url.pathname === '/api/sessions') return json(route, [{ id: 'p18', title: 'P18 smoke fixture', blank: false, event_count: events.length, updated_at: '2026-08-26T10:01:02Z' }])
-    if (url.pathname === '/api/workspaces') return json(route, { workspaces: [], ungrouped_ids: ['p18'] })
-    if (url.pathname === '/api/config') return json(route, { model: 'test-model', llm_provider: 'test', commands: [] })
-    if (url.pathname === '/api/sessions/p18/resume') return json(route, { ok: true })
-    if (url.pathname === '/api/sessions/p18/events/stream') return route.fulfill({ status: 200, contentType: 'text/event-stream', body: 'retry: 3000\n\n' })
-    if (url.pathname === '/api/sessions/p18/events') return json(route, { events, has_more: false, first_seq: 1, last_seq: events.length })
-    if (url.pathname === '/api/sessions/p18/feedback') return json(route, [])
-    if (url.pathname === '/api/sessions/p18/queue') return json(route, [])
-    if (url.pathname === '/api/interactions') return json(route, { interactions: [] })
-    if (url.pathname === '/api/sessions/p18/config') return json(route, { provider: 'test', model: 'test-model', reasoning_effort: '' })
-    if (url.pathname === '/api/sessions/p18/context') return json(route, { used_tokens: 0, context_window: 1000, percent: 0 })
-    if (url.pathname === '/api/sessions/p18/state') return json(route, { plan_mode: false, goals: [], plans: [] })
-    return json(route, {})
+async function installNativeMock(page) {
+  const sockets = new Set()
+  await page.route('**/plugins/events', route => route.fulfill({
+    status: 200,
+    contentType: 'text/event-stream',
+    body: 'retry: 3000\n\n',
+  }))
+  await page.routeWebSocket('**/api/events.*', ws => {
+    sockets.add(new URL(ws.url()).pathname)
+    ws.onMessage(() => {})
   })
+  await page.route('**/api/**', async route => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    const body = JSON.parse(route.request().postData() ?? '{}')
+    assert.equal(body.type, 'client-request', `unexpected native request envelope for ${body.method}`)
+    return route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        type: 'server-response',
+        rpcId: body.rpcId,
+        result: { ok: true, value: valueFor(body.method) },
+      }),
+    })
+  })
+  return sockets
 }
 
 async function waitForServer() {
@@ -88,65 +88,39 @@ async function waitForServer() {
   throw new Error(`Timed out waiting for ${baseUrl}`)
 }
 
+async function waitForNativeShell(page) {
+  await page.getByRole('button', { name: '新建会话' }).first().waitFor()
+  assert.equal(await page.title(), 'DeepSeek Harness')
+  const body = await page.locator('body').innerText()
+  assert.match(body, /探索未至之境/)
+  assert.equal(await page.locator('.shutu-shell').count(), 0, 'legacy Shutu shell is still mounted')
+}
+
 async function runDesktop(browser) {
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
   const issues = []
   page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
   page.on('pageerror', error => issues.push(error.message))
-  await installApiMock(page)
+  page.on('response', response => { if (response.status() >= 400) issues.push(`http ${response.status()}: ${response.url()}`) })
+  const sockets = await installNativeMock(page)
   await page.goto(baseUrl, { waitUntil: 'domcontentloaded' })
-  await page.getByRole('tab', { name: /Trajectory/ }).waitFor()
-  assert.equal(await page.title(), 'Shutu DSH Web')
-  assert.match(await page.locator('body').innerText(), /P18 smoke fixture/)
-  await page.getByRole('tab', { name: /Trajectory/ }).click()
-  await page.getByRole('tab', { name: /Trajectory/ }).press('ArrowLeft')
-  assert.equal(await page.getByRole('tab', { name: 'Conversation' }).getAttribute('aria-selected'), 'true')
-  await page.getByRole('tab', { name: 'Conversation' }).press('ArrowRight')
-  assert.equal(await page.getByRole('tab', { name: /Trajectory/ }).getAttribute('aria-selected'), 'true')
-  const collapse = page.getByRole('button', { name: 'Collapse turns' })
-  await collapse.waitFor()
-  const timelineSpans = page.locator('.timeline-span')
-  await timelineSpans.first().click()
-  await timelineSpans.nth(2).click({ modifiers: ['Shift'] })
-  assert.ok(await page.locator('.timeline-span.selected').count() >= 3, 'timeline range selection did not retain the selected span range')
-  assert.ok(await page.locator('.virtual-row.timeline-focused').count() >= 3, 'timeline selection did not highlight trajectory rows')
-  const before = await page.locator('.virtual-row').count()
-  const toolRow = page.locator('.virtual-row').filter({ hasText: 'src/app.tsx' })
-  await toolRow.getByRole('button', { name: 'Inspect event #5' }).click()
-  const inspector = page.getByRole('complementary', { name: 'Trajectory event details' })
-  await inspector.waitFor()
-  assert.match(await inspector.innerText(), /Request details/)
-  await inspector.getByRole('tab', { name: 'Raw event' }).click()
-  assert.match(await inspector.innerText(), /"seq": 5/)
-  await inspector.getByRole('button', { name: 'Close event details' }).click()
-  await toolRow.getByRole('button', { name: 'Expand details' }).click()
-  await assertVisibleRowsDoNotOverlap(page)
-  const assistantRow = page.locator('.virtual-row').filter({ hasText: 'Tool-enabled assistant' })
-  await assistantRow.getByRole('button', { name: 'Collapse tool calls' }).click()
-  await assistantRow.getByRole('button', { name: 'Expand tool calls' }).waitFor()
-  await page.getByRole('button', { name: 'Expand tool calls' }).first().click()
-  await assistantRow.getByRole('button', { name: 'Collapse tool calls' }).waitFor()
-  await collapse.click()
-  await page.getByRole('button', { name: 'Expand turns' }).waitFor()
-  const after = await page.locator('.virtual-row').count()
-  assert.ok(after < before, `turn collapse did not reduce mounted rows: ${before} -> ${after}`)
-  const search = page.getByRole('textbox', { name: 'Search trajectory records' })
-  await search.fill('matched file 19')
-  await page.waitForTimeout(180)
-  assert.equal(await page.locator('.virtual-row').count(), 1, 'structured event details were not searchable')
-  assert.equal(await page.locator('.timeline-span').count(), 14, 'search should not truncate the full trajectory timeline')
-  await search.fill('glob')
-  await page.waitForTimeout(180)
-  assert.ok(await page.getByText('src/app.tsx', { exact: true }).count() > 0, 'trajectory search result is not visible')
-  await search.fill('')
-  await page.getByRole('tab', { name: 'Conversation' }).click()
-  await page.getByRole('button', { name: 'Inspect event #7' }).click()
-  assert.equal(await page.getByRole('tab', { name: 'Trajectory' }).getAttribute('aria-selected'), 'true', 'conversation inspect did not locate trajectory')
-  await page.getByRole('button', { name: 'Close event details' }).click()
+  await waitForNativeShell(page)
+  assert.ok(sockets.has('/api/events.mux'), 'native mux WebSocket was not opened')
+  assert.ok(sockets.has('/api/events.host'), 'native host WebSocket was not opened')
+
+  await page.getByRole('button', { name: '设置', exact: true }).click()
+  const settings = page.getByRole('dialog')
+  await settings.waitFor()
+  assert.match(await settings.innerText(), /通用设置/)
+  await settings.getByRole('button', { name: '关闭' }).click()
+  await page.getByRole('button', { name: '收起侧边栏' }).click()
+  await page.getByRole('button', { name: '打开侧边栏' }).waitFor()
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
+  assert.ok(overflow <= 1, `desktop page has horizontal overflow: ${overflow}px`)
   assert.deepEqual(issues, [])
-  await page.screenshot({ path: resolve(process.env.TEMP ?? process.env.TMP ?? '.', 'shutu-p18-desktop.png') })
+  await page.screenshot({ path: resolve(process.env.TEMP ?? process.env.TMP ?? '.', 'shutu-native-desktop.png') })
   await page.close()
-  return { before, after }
+  return { sockets: [...sockets].sort(), console: 'clean' }
 }
 
 async function runMobile(browser) {
@@ -154,17 +128,19 @@ async function runMobile(browser) {
   const issues = []
   page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
   page.on('pageerror', error => issues.push(error.message))
-  await installApiMock(page)
+  page.on('response', response => { if (response.status() >= 400) issues.push(`http ${response.status()}: ${response.url()}`) })
+  await installNativeMock(page)
   await page.goto(baseUrl, { waitUntil: 'domcontentloaded' })
-  await page.getByRole('tab', { name: /Trajectory/ }).waitFor()
+  await waitForNativeShell(page)
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
   assert.ok(overflow <= 1, `mobile page has horizontal overflow: ${overflow}px`)
   assert.deepEqual(issues, [])
-  await page.screenshot({ path: resolve(process.env.TEMP ?? process.env.TMP ?? '.', 'shutu-p18-mobile.png') })
+  await page.screenshot({ path: resolve(process.env.TEMP ?? process.env.TMP ?? '.', 'shutu-native-mobile.png') })
   await page.close()
+  return { viewport: '390x844', overflow, console: 'clean' }
 }
 
-const server = spawn(process.execPath, [vite, '--host', host, '--port', String(port)], {
+const server = spawn(process.execPath, [vite, 'preview', '--host', host, '--port', String(port)], {
   cwd: webRoot,
   stdio: 'ignore',
   windowsHide: true,
@@ -174,8 +150,8 @@ try {
   const browser = await chromium.launch({ headless: true })
   try {
     const desktop = await runDesktop(browser)
-    await runMobile(browser)
-    console.log(JSON.stringify({ browser: 'playwright', desktop, mobile: 'ok', console: 'clean' }))
+    const mobile = await runMobile(browser)
+    console.log(JSON.stringify({ browser: 'playwright', native: 'ok', desktop, mobile }))
   } finally {
     await browser.close()
   }
