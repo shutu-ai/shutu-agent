@@ -11,4 +11,12 @@ const result = spawnSync(process.execPath, [runner, 'vite', 'build'], {
 })
 
 if (result.error) throw result.error
-process.exit(result.status ?? 1)
+if ((result.status ?? 1) !== 0) process.exit(result.status ?? 1)
+
+const manifest = spawnSync(process.execPath, [resolve(webRoot, 'scripts/native-manifest.mjs')], {
+  cwd: webRoot,
+  env: { ...process.env, SHUTU_DSH_NATIVE: '1' },
+  stdio: 'inherit',
+})
+if (manifest.error) throw manifest.error
+process.exit(manifest.status ?? 1)

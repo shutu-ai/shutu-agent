@@ -67,7 +67,7 @@ export function installDshNativeBoot(
   }
   dshWindow.__ModuleLoader__ = target
   dshWindow.__DSH_BOOT__ = {
-    rev: 'shutu-native-p36-3',
+    rev: 'shutu-native-p36-4',
     entries: nativeBootEntries,
   }
 }

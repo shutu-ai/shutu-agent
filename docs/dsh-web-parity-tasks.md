@@ -30,6 +30,34 @@
 
 约束：`deepseek-harness` 仅作为只读参考，不修改其任何文件；新功能可以使用干净的新接口，不保留旧数据或旧接口兼容层。
 
+## P36 执行任务列表（动态）
+
+- [x] P36-1.1：生成 DSH 版本、Git revision、只读来源根目录和原生插件 roster manifest。
+- [ ] P36-2.1：实现会话、工作区、设置、模型、权限、文件、附件、命令、技能、队列、审批和导出接口。
+- [ ] P36-2.2：补齐 host downlink、连接状态、断线重连、续传及剩余原生接口。
+- [ ] P36-3.1：补齐全部 projection key，并完成生产数据规模验收。
+- [ ] P36-4.1：接入 layout、theme、brand、sidebar、workspace 和 conversation 插件。
+- [ ] P36-4.2：接入 tool、trajectory、composer、command、input trigger、reference 和 skill 插件。
+- [ ] P36-4.3：接入 subagent、jobs、model、permission、plan、goal、settings、attachment 和 question 插件。
+- [ ] P36-4.4：移除 Shutu 自定义主布局、颜色 token、组件层级和页面导航最终渲染路径。
+- [ ] P36-5.1：完成新建、切换、归档、删除、Fork 会话和 Workspace 管理。
+- [ ] P36-5.2：完成发送、重试、取消、队列、steer、审批、问题、计划和目标操作。
+- [ ] P36-5.3：完成 Tool 折叠、请求详情、Trajectory、搜索、历史分页和滚动定位。
+- [ ] P36-5.4：完成子代理、后台任务、技能、文件引用、附件、模型、权限、Provider 和设置。
+- [ ] P36-5.5：完成 export、feedback、错误恢复、重连和 session 状态提示。
+- [ ] P36-6.1：建立桌面/移动端、深色/浅色、空数据/加载/错误状态截图基线。
+- [ ] P36-6.2：对比布局尺寸、字体、间距、颜色、边框、滚动条、焦点和弹层行为。
+- [ ] P36-6.3：验证 Tab、快捷键、Escape、读屏语义、ARIA、焦点恢复和触控目标。
+- [ ] P36-6.4：为每个 DSH 核心页面保留截图和交互证据。
+- [ ] P36-7.1：用真实“网页版超级玛丽”长任务验证 5 万、10 万级历史记录。
+- [ ] P36-7.2：验证 reasoning/token/tool 持续流、长文本、代码块和密集工具调用。
+- [ ] P36-7.3：记录 FPS、JS heap、DOM、Long Task、事件到 UI 延迟和重连恢复时间。
+- [ ] P36-7.4：在原生 DSH UI 替换完成后重新设定并通过性能阈值。
+- [ ] P36-8.1：生成包含 DSH 原生 dist、Go 服务、协议适配层和版本元数据的自包含交付包。
+- [ ] P36-8.2：验证本机及目标 Windows/Linux 环境的启动、健康检查、API、WebSocket 和静态资源。
+- [ ] P36-8.3：验证升级、数据目录复用、回滚和失败恢复。
+- [ ] P36-8.4：完成目标环境部署记录、验收报告和回滚操作手册。
+
 ## 总览
 
 | 编号 | 任务 | 优先级 | 状态 | 依赖 |
@@ -172,7 +200,7 @@
 - [x] 在 `shutu-agent` 内建立独立的 React/Cordis/Vite 原生入口；`SHUTU_DSH_NATIVE=1` 时不再以当前单体 `App` 作为 UI 根节点。
 - [x] 以只读方式接入 DSH client package 的 boot、module loader、uiRenderer、slot 和 plugin manifest 入口约定；运行时 boot manifest/插件下发由 P36-2 补齐。
 - [x] 解决当前 bundle 的依赖、dist 和 source map 闭包；`npm.cmd run build:native` 可生成 native dist，运行时不读取 `deepseek-harness` 源目录。
-- [ ] 建立 DSH 版本/来源清单，确保后续 DSH 参考变化可追踪。
+- [x] 建立 DSH 版本/来源清单，确保后续 DSH 参考变化可追踪；native build 生成 `dist/dsh-native-manifest.json`。
 
 验收标准：构建入口和 DSH boot 调用链已具备；待 P36-2 提供 `window.__ModuleLoader__`、`window.__DSH_BOOT__` 和插件 bundle 后，才能在浏览器中完成原生 UI 启动验收。
 

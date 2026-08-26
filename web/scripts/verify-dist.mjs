@@ -29,8 +29,20 @@ const builtFiles = readdirSync(resolve(distRoot, 'assets'))
 if (!builtFiles.some(file => file.endsWith('.js'))) throw new Error('frontend dist has no JavaScript bundle')
 if (!builtFiles.some(file => file.endsWith('.css'))) throw new Error('frontend dist has no CSS bundle')
 
+const nativeManifestPath = resolve(distRoot, 'dsh-native-manifest.json')
+if (existsSync(nativeManifestPath)) {
+  const nativeManifest = JSON.parse(readFileSync(nativeManifestPath, 'utf8'))
+  if (nativeManifest.kind !== 'shutu-dsh-native' || nativeManifest.schemaVersion !== 1) {
+    throw new Error('native frontend manifest has an unsupported schema')
+  }
+  if (!Array.isArray(nativeManifest.plugins) || nativeManifest.plugins.length === 0) {
+    throw new Error('native frontend manifest has no linked plugins')
+  }
+}
+
 console.log(JSON.stringify({
   dist: relative(webRoot, distRoot),
   assets: builtFiles.length,
   index: 'ok',
+  nativeManifest: existsSync(nativeManifestPath) ? 'ok' : 'not-present',
 }))
