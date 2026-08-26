@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/jabing/shutu-agent/internal/attachment"
+	"github.com/jabing/shutu-agent/internal/interact"
 	"github.com/jabing/shutu-agent/internal/llm"
 	"github.com/jabing/shutu-agent/internal/session"
 	"github.com/jabing/shutu-agent/internal/store"
@@ -84,6 +85,66 @@ func TestNativeCommandsAcceptCompactArrayArgumentsAndOmitUnknownValue(t *testing
 	response := nativeResponse(t, rec.Body.Bytes())
 	if !response.Result.OK || response.Result.Value != nil {
 		t.Fatalf("unknown command response = %+v", response)
+	}
+}
+
+func TestNativeRespondBridgesDSHApprovalAndQuestionResponses(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+	var gotSession, gotID, gotAnswer string
+	var gotStatus interact.ApprovalStatus
+	srv.SetInteractionManager(
+		func(context.Context, string) ([]interact.Request, error) { return nil, nil },
+		func(_ context.Context, sessionID, id string, status interact.ApprovalStatus, answer string) error {
+			gotSession, gotID, gotStatus, gotAnswer = sessionID, id, status, answer
+			return nil
+		},
+	)
+	call := func(t *testing.T, body string) nativeRPCReceipt {
+		t.Helper()
+		rec := doReqBody(t, srv.Handler(), "POST", "/api/respond", "tok", body)
+		var receipt nativeRPCReceipt
+		if err := json.Unmarshal(rec.Body.Bytes(), &receipt); err != nil {
+			t.Fatalf("decode respond receipt: %v; body=%s", err, rec.Body.Bytes())
+		}
+		return receipt
+	}
+	if receipt := call(t, `{"type":"client-response","rpcId":"req-1","result":{"ok":true,"value":{"sessionId":"s1","approvalId":"req-1","outcome":"allowed-once"}}}`); !receipt.Accepted {
+		t.Fatalf("approval receipt = %+v", receipt)
+	}
+	if gotSession != "s1" || gotID != "req-1" || gotStatus != interact.StatusApproved || gotAnswer != "" {
+		t.Fatalf("approval callback = %q/%q/%q/%q", gotSession, gotID, gotStatus, gotAnswer)
+	}
+	if receipt := call(t, `{"type":"client-response","rpcId":"req-2","result":{"ok":true,"value":{"sessionId":"s2","answer":{"answers":[{"id":"mode","selected":["safe"]}]}}}}`); !receipt.Accepted {
+		t.Fatalf("question receipt = %+v", receipt)
+	}
+	if gotSession != "s2" || gotID != "req-2" || gotStatus != interact.StatusApproved || !strings.Contains(gotAnswer, `"selected":["safe"]`) {
+		t.Fatalf("question callback = %q/%q/%q/%q", gotSession, gotID, gotStatus, gotAnswer)
+	}
+	if receipt := call(t, `{"type":"client-response","rpcId":"req-3","result":{"ok":true,"value":{"sessionId":"s3","approvalId":"other","outcome":"rejected"}}}`); receipt.Accepted || receipt.Reason != "bad-response" {
+		t.Fatalf("mismatched approval receipt = %+v", receipt)
+	}
+	if receipt := call(t, `{"type":"client-response","rpcId":"req-4","result":{"ok":false,"error":{"code":"cancelled","message":"closed"}}}`); receipt.Accepted || receipt.Reason != "not-pending" {
+		t.Fatalf("failed response receipt = %+v", receipt)
+	}
+}
+
+func TestNativePendingInteractionFrameUsesDSHQuestionShape(t *testing.T) {
+	method, raw, id, kind, ok := nativePendingInteractionFrame("s1", interact.Request{
+		ID: "q-1", Questions: []interact.Question{{
+			ID: "mode", Header: "Mode", Question: "Choose?", MultiSelect: true,
+			Options: []interact.QuestionOption{{Label: "safe", Description: "No side effects"}},
+		}},
+	})
+	if !ok || method != "question/requested" || id != "q-1" || kind != "question" {
+		t.Fatalf("question frame metadata = %q/%q/%q/%v", method, id, kind, ok)
+	}
+	value, ok := raw.(map[string]any)
+	if !ok || value["sessionId"] != "s1" {
+		t.Fatalf("question frame = %#v", raw)
+	}
+	questions, ok := value["questions"].([]map[string]any)
+	if !ok || len(questions) != 1 || questions[0]["multiSelect"] != true || questions[0]["multi_select"] != nil {
+		t.Fatalf("question shape = %#v", value["questions"])
 	}
 }
 
@@ -1760,6 +1821,83 @@ func TestNativeMuxWebSocketSendsSubscriptionBaseline(t *testing.T) {
 	}
 	if projectionEnvelope.Payload.Type != "session/projection" || projectionEnvelope.Payload.Key != "plan" || projectionEnvelope.Payload.Seq != 1 {
 		t.Fatalf("live projection frame = %s", projectionFrame)
+	}
+}
+
+func TestNativeMuxWebSocketReplaysPendingApprovalAndQuestionRequests(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	seedSession(t, st, "native-interaction-ws", nil)
+	srv.SetEventSource(func(_ string, callback func(session.Event)) func() { return func() {} })
+	srv.SetInteractionManager(
+		func(_ context.Context, sessionID string) ([]interact.Request, error) {
+			if sessionID != "native-interaction-ws" {
+				return nil, nil
+			}
+			return []interact.Request{
+				{ID: "approval-1", ToolName: "bash", Prompt: "Allow bash", Status: interact.StatusPending},
+				{ID: "question-1", Status: interact.StatusPending, Questions: []interact.Question{{
+					ID: "mode", Question: "Which mode?", Options: []interact.QuestionOption{{Label: "safe"}},
+				}}},
+			}, nil
+		},
+		func(context.Context, string, string, interact.ApprovalStatus, string) error { return nil },
+	)
+	httpServer := httptest.NewServer(srv.Handler())
+	defer httpServer.Close()
+	address := strings.TrimPrefix(httpServer.URL, "http://")
+	conn, err := net.Dial("tcp", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	request := fmt.Sprintf("GET /api/events.mux HTTP/1.1\r\nHost: %s\r\nConnection: keep-alive, Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGVzdC1pbnRlcmFjdGlvbg==\r\nAuthorization: Bearer tok\r\n\r\n", address)
+	if _, err := io.WriteString(conn, request); err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(conn)
+	status, err := reader.ReadString('\n')
+	if err != nil || !strings.Contains(status, "101 Switching Protocols") {
+		t.Fatalf("upgrade status = %q, err=%v", status, err)
+	}
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.TrimSpace(line) == "" {
+			break
+		}
+	}
+	if _, err := readNativeTextFrame(reader); err != nil {
+		t.Fatal(err)
+	}
+	readRequest := func() (string, map[string]any) {
+		t.Helper()
+		frame, err := readNativeTextFrame(reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var envelope struct {
+			Type    string         `json:"type"`
+			RPCID   string         `json:"rpcId"`
+			Method  string         `json:"method"`
+			Payload map[string]any `json:"payload"`
+		}
+		if err := json.Unmarshal(frame, &envelope); err != nil {
+			t.Fatal(err)
+		}
+		if envelope.Type != nativeRPCTypeServerRequest {
+			t.Fatalf("interaction envelope = %s", frame)
+		}
+		return envelope.Method + ":" + envelope.RPCID, envelope.Payload
+	}
+	approval, approvalPayload := readRequest()
+	if !strings.HasPrefix(approval, "approval/requested:approval-1") || approvalPayload["approvalId"] != "approval-1" {
+		t.Fatalf("approval replay = %q / %#v", approval, approvalPayload)
+	}
+	question, questionPayload := readRequest()
+	if !strings.HasPrefix(question, "question/requested:question-1") || questionPayload["sessionId"] != "native-interaction-ws" {
+		t.Fatalf("question replay = %q / %#v", question, questionPayload)
 	}
 }
 

@@ -31,6 +31,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jabing/shutu-agent/internal/interact"
 	"github.com/jabing/shutu-agent/internal/llm"
 	"github.com/jabing/shutu-agent/internal/session"
 	"github.com/jabing/shutu-agent/internal/store"
@@ -397,6 +398,17 @@ type nativeEventEnvelope struct {
 	Payload any    `json:"payload"`
 }
 
+type nativeClientResponse struct {
+	Type   string          `json:"type"`
+	RPCID  string          `json:"rpcId"`
+	Result nativeRPCResult `json:"result"`
+}
+
+type nativeRPCReceipt struct {
+	Accepted bool   `json:"accepted"`
+	Reason   string `json:"reason,omitempty"`
+}
+
 type nativeSessionEventFrame struct {
 	Type      string             `json:"type"`
 	SessionID string             `json:"sessionId"`
@@ -442,6 +454,7 @@ func (s *Server) registerNativeRoutes(mux *http.ServeMux) {
 	}
 	mux.Handle("GET "+nativeMuxPath, s.requireAuth(http.HandlerFunc(s.handleNativeMuxWebSocket)))
 	mux.Handle("GET "+nativeHostPath, s.requireAuth(http.HandlerFunc(s.handleNativeHostWebSocket)))
+	mux.Handle("POST /api/respond", s.requireAuth(http.HandlerFunc(s.handleNativeRespond)))
 }
 
 func (s *Server) handleNativeRPC(w http.ResponseWriter, r *http.Request) {
@@ -465,6 +478,69 @@ func (s *Server) handleNativeRPC(w http.ResponseWriter, r *http.Request) {
 func (s *Server) writeNativeRPC(w http.ResponseWriter, rpcID string, result nativeRPCResult) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(nativeRPCResponse{Type: nativeRPCTypeResponse, RPCID: rpcID, Result: result})
+}
+
+// handleNativeRespond is the DSH client-response carrier. Approval and
+// question answers are correlated by the server-request rpcId; unlike unary
+// RPCs this endpoint returns a small carrier receipt and the final outcome is
+// broadcast on the mux stream.
+func (s *Server) handleNativeRespond(w http.ResponseWriter, r *http.Request) {
+	var response nativeClientResponse
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&response); err != nil ||
+		response.Type != "client-response" || strings.TrimSpace(response.RPCID) == "" {
+		_ = json.NewEncoder(w).Encode(nativeRPCReceipt{Accepted: false, Reason: "bad-response"})
+		return
+	}
+	if !response.Result.OK || s.resolveInteractionFn == nil {
+		_ = json.NewEncoder(w).Encode(nativeRPCReceipt{Accepted: false, Reason: "not-pending"})
+		return
+	}
+	value, ok := response.Result.Value.(map[string]any)
+	if !ok {
+		_ = json.NewEncoder(w).Encode(nativeRPCReceipt{Accepted: false, Reason: "bad-response"})
+		return
+	}
+	sessionID := nativeString(value["sessionId"])
+	if sessionID == "" {
+		_ = json.NewEncoder(w).Encode(nativeRPCReceipt{Accepted: false, Reason: "bad-response"})
+		return
+	}
+	interactionID := strings.TrimSpace(response.RPCID)
+	status := interact.StatusApproved
+	answer := ""
+	if approvalID := nativeString(value["approvalId"]); approvalID != "" {
+		if approvalID != interactionID {
+			_ = json.NewEncoder(w).Encode(nativeRPCReceipt{Accepted: false, Reason: "bad-response"})
+			return
+		}
+		switch nativeString(value["outcome"]) {
+		case "allowed-once":
+			status = interact.StatusApproved
+		case "rejected":
+			status = interact.StatusRejected
+		default:
+			_ = json.NewEncoder(w).Encode(nativeRPCReceipt{Accepted: false, Reason: "bad-response"})
+			return
+		}
+	} else {
+		// Question requests use the server-request rpcId as their logical
+		// request id and carry the structured answer in result.value.answer.
+		encoded, err := json.Marshal(value["answer"])
+		if err != nil || string(encoded) == "null" {
+			_ = json.NewEncoder(w).Encode(nativeRPCReceipt{Accepted: false, Reason: "bad-response"})
+			return
+		}
+		answer = string(encoded)
+	}
+	if err := s.resolveInteractionFn(r.Context(), sessionID, interactionID, status, answer); err != nil {
+		reason := "not-pending"
+		if !errors.Is(err, interact.ErrUnknownRequest) && !errors.Is(err, interact.ErrAlreadyResolved) {
+			reason = "resolve-failed"
+		}
+		_ = json.NewEncoder(w).Encode(nativeRPCReceipt{Accepted: false, Reason: reason})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(nativeRPCReceipt{Accepted: true})
 }
 
 func nativeRPCSuccess(value any) nativeRPCResult { return nativeRPCResult{OK: true, Value: value} }
@@ -3488,6 +3564,17 @@ func (s *Server) handleNativeMuxWebSocket(w http.ResponseWriter, r *http.Request
 	defer cancel()
 	defer conn.Close()
 	var writes sync.Mutex
+	writeWithID := func(method string, payload any, rpcID string) error {
+		body, err := json.Marshal(nativeEventEnvelope{
+			Type: nativeRPCTypeServerRequest, RPCID: rpcID, Method: method, Payload: payload,
+		})
+		if err != nil {
+			return err
+		}
+		writes.Lock()
+		defer writes.Unlock()
+		return writeNativeWebSocketText(conn, body)
+	}
 	write := func(payload any) error {
 		method := ""
 		switch frame := payload.(type) {
@@ -3498,15 +3585,49 @@ func (s *Server) handleNativeMuxWebSocket(w http.ResponseWriter, r *http.Request
 		case nativeProjectionFrame:
 			method = frame.Type
 		}
-		body, err := json.Marshal(nativeEventEnvelope{
-			Type: nativeRPCTypeServerRequest, RPCID: nativeRPCID(), Method: method, Payload: payload,
-		})
-		if err != nil {
-			return err
+		return writeWithID(method, payload, nativeRPCID())
+	}
+	interactionKinds := make(map[string]string)
+	var interactionKindsMu sync.Mutex
+	emitInteraction := func(sessionID string, ev session.Event) {
+		method, payload, id, kind, ok := nativeInteractionFrame(sessionID, ev)
+		if !ok {
+			return
 		}
-		writes.Lock()
-		defer writes.Unlock()
-		return writeNativeWebSocketText(conn, body)
+		interactionKindsMu.Lock()
+		knownKind := interactionKinds[id]
+		interactionKindsMu.Unlock()
+		if kind == "" {
+			kind = knownKind
+		}
+		if ev.Type == session.EventInteractResolve && kind == "question" {
+			method = "question/resolved"
+			payload = map[string]any{
+				"type": "question/resolved", "sessionId": sessionID,
+				"questionRpcId": id, "outcome": "answered",
+			}
+		}
+		if ev.Type == session.EventInteractCancel && kind == "question" {
+			method = "question/resolved"
+			payload = map[string]any{
+				"type": "question/resolved", "sessionId": sessionID,
+				"questionRpcId": id, "outcome": "cancelled",
+			}
+		}
+		if kind != "" {
+			interactionKindsMu.Lock()
+			interactionKinds[id] = kind
+			interactionKindsMu.Unlock()
+		}
+		if method == "" {
+			return
+		}
+		_ = writeWithID(method, payload, id)
+		if ev.Type == session.EventInteractResolve || ev.Type == session.EventInteractCancel {
+			interactionKindsMu.Lock()
+			delete(interactionKinds, id)
+			interactionKindsMu.Unlock()
+		}
 	}
 	metas, err := s.store.ListSessions(ctx)
 	if err != nil {
@@ -3538,6 +3659,23 @@ func (s *Server) handleNativeMuxWebSocket(w http.ResponseWriter, r *http.Request
 		if err := write(nativeSubscribedFrame{Type: "session/subscribed", SessionID: meta.ID, LastSeq: lastSeq}); err != nil {
 			return
 		}
+		if s.interactionFn != nil {
+			if pending, listErr := s.interactionFn(ctx, meta.ID); listErr == nil {
+				for _, item := range pending {
+					if item.Status != interact.StatusPending {
+						continue
+					}
+					method, payload, id, kind, ok := nativePendingInteractionFrame(meta.ID, item)
+					if !ok {
+						continue
+					}
+					interactionKindsMu.Lock()
+					interactionKinds[id] = kind
+					interactionKindsMu.Unlock()
+					_ = writeWithID(method, payload, id)
+				}
+			}
+		}
 		unsubs = append(unsubs, s.evSrc(meta.ID, func(ev session.Event) {
 			projectionMu.Lock()
 			projected := projection.project(meta.ID, ev)
@@ -3547,6 +3685,7 @@ func (s *Server) handleNativeMuxWebSocket(w http.ResponseWriter, r *http.Request
 			for key, value := range changes {
 				_ = write(nativeProjectionFrame{Type: "session/projection", SessionID: meta.ID, Key: key, Value: value, Seq: ev.Seq})
 			}
+			emitInteraction(meta.ID, ev)
 		}))
 	}
 	go drainNativeWebSocket(reader, cancel)
@@ -3783,6 +3922,87 @@ func nativeHostRunningTransition(eventType string) (bool, bool) {
 		return false, true
 	default:
 		return false, false
+	}
+}
+
+func nativePendingInteractionFrame(sessionID string, item interact.Request) (string, any, string, string, bool) {
+	if strings.TrimSpace(item.ID) == "" {
+		return "", nil, "", "", false
+	}
+	if len(item.Questions) > 0 {
+		questions := make([]map[string]any, 0, len(item.Questions))
+		for _, question := range item.Questions {
+			if strings.TrimSpace(question.ID) == "" || strings.TrimSpace(question.Question) == "" {
+				continue
+			}
+			entry := map[string]any{"id": question.ID, "question": question.Question}
+			if question.Detail != "" {
+				entry["detail"] = question.Detail
+			}
+			if question.Header != "" {
+				entry["header"] = question.Header
+			}
+			if question.MultiSelect {
+				entry["multiSelect"] = true
+			}
+			if len(question.Options) > 0 {
+				options := make([]map[string]string, 0, len(question.Options))
+				for _, option := range question.Options {
+					options = append(options, map[string]string{"label": option.Label, "description": option.Description})
+				}
+				entry["options"] = options
+			}
+			questions = append(questions, entry)
+		}
+		if len(questions) == 0 {
+			return "", nil, "", "", false
+		}
+		return "question/requested", map[string]any{"type": "question/requested", "sessionId": sessionID, "questions": questions}, item.ID, "question", true
+	}
+	payload := map[string]any{
+		"type": "approval/requested", "sessionId": sessionID, "approvalId": item.ID,
+		"toolName": item.ToolName,
+	}
+	if item.Prompt != "" {
+		payload["reason"] = item.Prompt
+	}
+	return "approval/requested", payload, item.ID, "approval", true
+}
+
+func nativeInteractionFrame(sessionID string, ev session.Event) (string, any, string, string, bool) {
+	switch ev.Type {
+	case session.EventInteractRequest:
+		var item interact.Request
+		if err := json.Unmarshal(ev.Data, &item); err != nil {
+			return "", nil, "", "", false
+		}
+		return nativePendingInteractionFrame(sessionID, item)
+	case session.EventInteractResolve:
+		var fact struct {
+			ID       string `json:"id"`
+			Approved bool   `json:"approved"`
+		}
+		if err := json.Unmarshal(ev.Data, &fact); err != nil || fact.ID == "" {
+			return "", nil, "", "", false
+		}
+		outcome := "rejected"
+		if fact.Approved {
+			outcome = "allowed-once"
+		}
+		return "approval/resolved", map[string]any{
+			"type": "approval/resolved", "sessionId": sessionID,
+			"approvalId": fact.ID, "outcome": outcome,
+		}, fact.ID, "", true
+	case session.EventInteractCancel:
+		var fact struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(ev.Data, &fact); err != nil || fact.ID == "" {
+			return "", nil, "", "", false
+		}
+		return "", nil, fact.ID, "", true
+	default:
+		return "", nil, "", "", false
 	}
 }
 
