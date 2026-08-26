@@ -2704,9 +2704,9 @@ func (s *Server) handleQueueUpdate(w http.ResponseWriter, r *http.Request) {
 }
 
 // maxWebImageBytes caps a single uploaded image via the web portal (P5). The
-// frontend enforces the same default (10MB); the backend fails closed so the
-// portal never writes a giant file even if the client lies.
-const maxWebImageBytes = 10 << 20
+// value matches DSH's default imageLimits.maxImageBytes (3.5 MiB); the backend
+// fails closed so the portal never writes a giant file even if the client lies.
+const maxWebImageBytes = 7 << 19
 
 // attachmentView is the POST /api/sessions/{id}/attachments response.
 type attachmentView struct {

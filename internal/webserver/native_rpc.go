@@ -131,15 +131,16 @@ type nativePromptPart struct {
 }
 
 type nativeSessionListItem struct {
-	SessionID       string `json:"sessionId"`
-	Title           string `json:"title,omitempty"`
-	UpdatedAt       int64  `json:"updatedAt"`
-	Running         bool   `json:"running"`
-	Blank           bool   `json:"blank"`
-	ParentSessionID string `json:"parentSessionId,omitempty"`
-	Origin          string `json:"origin,omitempty"`
-	CWD             string `json:"cwd,omitempty"`
-	AgentPreset     string `json:"agentPreset,omitempty"`
+	SessionID       string                 `json:"sessionId"`
+	Title           string                 `json:"title,omitempty"`
+	UpdatedAt       int64                  `json:"updatedAt"`
+	Running         bool                   `json:"running"`
+	Blank           bool                   `json:"blank"`
+	ParentSessionID string                 `json:"parentSessionId,omitempty"`
+	Origin          string                 `json:"origin,omitempty"`
+	CWD             string                 `json:"cwd,omitempty"`
+	AgentPreset     string                 `json:"agentPreset,omitempty"`
+	Projections     *nativeProjectionBlock `json:"projections,omitempty"`
 }
 
 // nativeSessionHeader is the DSH session-header projection. The SQLite
@@ -831,12 +832,53 @@ func (s *Server) nativeSessionList(r *http.Request) nativeRPCResult {
 			SessionID: m.ID, Title: m.Title, UpdatedAt: m.UpdatedAt.UnixMilli(), Running: false,
 			Blank: m.EventCount == 0, CWD: m.CWD,
 		}
+		if events, loadErr := s.store.LoadSession(r.Context(), m.ID); loadErr == nil {
+			cursor := newNativeProjectionCursor()
+			for _, ev := range events {
+				cursor.project(m.ID, ev)
+			}
+			metadata := cursor.list
+			item.Blank = metadata.blank
+			item.UpdatedAt = m.CreatedAt.UnixMilli()
+			if metadata.lastPromptAt != nil && *metadata.lastPromptAt > item.UpdatedAt {
+				item.UpdatedAt = *metadata.lastPromptAt
+			}
+			permission := ""
+			if configs, ok := s.store.(store.SessionConfigStore); ok {
+				if config, configErr := configs.GetSessionConfig(r.Context(), m.ID); configErr == nil {
+					permission = config.Permission
+				}
+			}
+			lastSeq := int64(-1)
+			if len(events) > 0 {
+				lastSeq = int64(events[len(events)-1].Seq)
+			}
+			baseline := cursor.projectionBlock(m.Title, lastSeq, permission)
+			if limits := s.nativeImageLimitsProjection(); limits != nil {
+				baseline.Values["imageLimits"] = limits
+			}
+			item.Projections = &baseline
+		}
 		if s.statusFn != nil {
 			item.Running = s.statusFn(r.Context(), m).State == "ongoing"
 		}
 		items = append(items, item)
 	}
 	return nativeRPCSuccess(map[string]any{"items": items})
+}
+
+func (s *Server) nativeImageLimitsProjection() map[string]any {
+	if s.att == nil {
+		return nil
+	}
+	return map[string]any{
+		"maxImageBytes":        maxWebImageBytes,
+		"maxImagesPerMessage":  20,
+		"maxMessageImageBytes": 100 * 1024 * 1024,
+		"maxImagePixels":       40_000_000,
+		"maxImageDimension":    2000,
+		"mediaTypes":           []any{"image/png", "image/jpeg", "image/webp", "image/gif"},
+	}
 }
 
 func (s *Server) nativeSessionHistory(r *http.Request, raw json.RawMessage) nativeRPCResult {
@@ -888,7 +930,11 @@ func (s *Server) nativeSessionHistory(r *http.Request, raw json.RawMessage) nati
 		if len(events) > 0 {
 			lastSeq = int64(events[len(events)-1].Seq)
 		}
-		value["projections"] = projection.projectionBlock(meta.Title, lastSeq, permission)
+		baseline := projection.projectionBlock(meta.Title, lastSeq, permission)
+		if limits := s.nativeImageLimitsProjection(); limits != nil {
+			baseline.Values["imageLimits"] = limits
+		}
+		value["projections"] = baseline
 	}
 	return nativeRPCSuccess(value)
 }

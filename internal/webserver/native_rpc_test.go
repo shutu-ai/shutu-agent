@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jabing/shutu-agent/internal/attachment"
 	"github.com/jabing/shutu-agent/internal/llm"
 	"github.com/jabing/shutu-agent/internal/session"
 	"github.com/jabing/shutu-agent/internal/store"
@@ -45,8 +46,12 @@ func TestNativeRPCSessionHistoryAndPrompt(t *testing.T) {
 	if err := json.Unmarshal(encoded, &list); err != nil {
 		t.Fatal(err)
 	}
-	if len(list.Items) != 1 || list.Items[0].SessionID != "native-session" || list.Items[0].Blank {
+	if len(list.Items) != 1 || list.Items[0].SessionID != "native-session" || !list.Items[0].Blank || list.Items[0].Projections == nil {
 		t.Fatalf("session.list items = %+v", list.Items)
+	}
+	metadata, ok := list.Items[0].Projections.Values["sessionListMetadata"].(map[string]any)
+	if !ok || metadata["blank"] != true || metadata["lastPromptAt"] != float64(1234) {
+		t.Fatalf("session.list projection metadata = %#v", list.Items[0].Projections.Values["sessionListMetadata"])
 	}
 
 	rec = doReqBody(t, srv.Handler(), "POST", "/api/session.history", "tok", `{"type":"client-request","rpcId":"history-1","method":"session.history","payload":{"sessionId":"native-session"}}`)
@@ -345,6 +350,55 @@ func TestNativeProjectionRejectsMalformedDSHSubagentDescriptor(t *testing.T) {
 	timing, ok := values["subagentTiming"].(map[string]any)
 	if !ok || timing["settledMs"] != int64(0) {
 		t.Fatalf("malformed subagent timing = %#v", values["subagentTiming"])
+	}
+}
+
+func TestNativeProjectionIncludesImageLimitsWhenAttachmentsEnabled(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	att, err := attachment.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.SetAttachmentStore(att)
+	seedSession(t, st, "native-image-limits", nil)
+
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/session.history", "tok", `{"type":"client-request","rpcId":"image-limits","method":"session.history","payload":{"sessionId":"native-image-limits"}}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK {
+		t.Fatalf("session.history response = %+v", response)
+	}
+	var history struct {
+		Projections nativeProjectionBlock `json:"projections"`
+	}
+	encoded, _ := json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &history); err != nil {
+		t.Fatal(err)
+	}
+	limits, ok := history.Projections.Values["imageLimits"].(map[string]any)
+	if !ok {
+		t.Fatalf("history imageLimits = %#v", history.Projections.Values["imageLimits"])
+	}
+	if limits["maxImageBytes"] != float64(maxWebImageBytes) || limits["maxImagesPerMessage"] != float64(20) || limits["maxImageDimension"] != float64(2000) {
+		t.Fatalf("history imageLimits = %#v", limits)
+	}
+
+	rec = doReqBody(t, srv.Handler(), "POST", "/api/session.list", "tok", `{"type":"client-request","rpcId":"image-list","method":"session.list","payload":{}}`)
+	response = nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK {
+		t.Fatalf("session.list response = %+v", response)
+	}
+	var list struct {
+		Items []nativeSessionListItem `json:"items"`
+	}
+	encoded, _ = json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Items) != 1 || list.Items[0].Projections == nil {
+		t.Fatalf("session.list image limits items = %+v", list.Items)
+	}
+	if _, ok := list.Items[0].Projections.Values["imageLimits"].(map[string]any); !ok {
+		t.Fatalf("session.list imageLimits = %#v", list.Items[0].Projections.Values["imageLimits"])
 	}
 }
 

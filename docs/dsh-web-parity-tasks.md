@@ -9,6 +9,7 @@
 - [x] P36-3：从 plan/goal 生命周期与会话配置折叠 DSH `goal`、`permissions` 投影；目标状态、轮次、阻塞原因和权限选择可在 history tail 恢复。
 - [x] P36-3：折叠 DSH `subagent` 与 `subagentTiming`；支持 canonical `subagent/descriptor`，并将当前 Shutu `subagent/start` 映射为可消费的 legacy identity。
 - [x] P36-3：折叠 DSH `contextBreakdown`；按 request header、surface 消息与 compaction shadow price 计算 system/tools/message token 分项，并复用于 history/live。
+- [x] P36-3：为 `session.list` 行补齐 DSH `sessionListMetadata` projection；附件服务启用时同步下发 `imageLimits`，history/list 共用同一能力声明。
 - [ ] P36-3：完整 projection baseline（所有已挂载 projection key）与生产数据规模验收仍待后续任务补齐。
 
 状态基线：P0–P23 已完成。P24–P35 已完成首轮实现；P36-1–P36-8 为“DSH 原生 UI 接入/视觉替换”新目标。未勾选项表示仍需补齐或在真实环境验收，不将未验证内容标记为完成。
@@ -250,4 +251,4 @@ P24–P35 已完成首轮实现；P34/P35 的真实环境事项与 P36-1–P36-8
 
 ## P36 当前实现进度（2026-08-26）
 
-本轮完成 P36-3 的首轮原生事件投影：`session.history` 与 `events.mux` 共用 DSH `SessionEvent` 转换器，统一消息 ID、turn/step、surfaceOp/sourceEventSeqs、tool-result、retry、reasoning、图片内容、subagent identity/timing、contextBreakdown 与未知事件的 ignorable 标记，并补充 replay/live、compaction、retry、subagent、contextBreakdown 测试。P36-3 仍保留未勾选项：分页窗口的全局投影游标、完整 Session header/surface snapshot 以及真实原生 UI 端到端验收。
+本轮完成 P36-3 的首轮原生事件投影：`session.history` 与 `events.mux` 共用 DSH `SessionEvent` 转换器，统一消息 ID、turn/step、surfaceOp/sourceEventSeqs、tool-result、retry、reasoning、图片内容、subagent identity/timing、contextBreakdown、sessionListMetadata 与未知事件的 ignorable 标记，并补充 replay/live、compaction、retry、subagent、contextBreakdown、session-list、imageLimits 测试。P36-3 仍保留未勾选项：分页窗口的全局投影游标、完整 Session header/surface snapshot 以及真实原生 UI 端到端验收。

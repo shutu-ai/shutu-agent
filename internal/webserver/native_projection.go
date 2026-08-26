@@ -32,13 +32,17 @@ type nativeProjectionCursor struct {
 	goal      map[string]any
 	subagent  nativeProjectionSubagentState
 	context   nativeProjectionContextBreakdown
+	list      nativeProjectionSessionListMetadata
 }
 
 func newNativeProjectionCursor() *nativeProjectionCursor {
 	values := make(map[string]any)
 	stats := &nativeProjectionSessionStats{}
 	values["sessionStats"] = nativeSessionStatsValue(stats)
-	return &nativeProjectionCursor{turn: -1, values: values, changed: make(map[string]any), stats: *stats}
+	return &nativeProjectionCursor{
+		turn: -1, values: values, changed: make(map[string]any), stats: *stats,
+		list: nativeProjectionSessionListMetadata{blank: true},
+	}
 }
 
 func (c *nativeProjectionCursor) project(sessionID string, ev session.Event) nativeSessionEvent {
@@ -211,10 +215,16 @@ type nativeProjectionContextClaim struct {
 	tokens int64
 }
 
+type nativeProjectionSessionListMetadata struct {
+	blank        bool
+	lastPromptAt *int64
+}
+
 func (c *nativeProjectionCursor) foldProjection(ev session.Event, data map[string]any) {
 	c.foldSessionStats(ev, data)
 	c.foldSubagent(ev, data)
 	c.foldContextBreakdown(ev, data)
+	c.foldSessionListMetadata(ev, data)
 	switch ev.Type {
 	case "session/title":
 		c.setProjectionValue("title", nativeEventString(data, "title", "text"))
@@ -283,6 +293,34 @@ func (c *nativeProjectionCursor) foldProjection(ev session.Event, data map[strin
 			}
 		}
 	}
+}
+
+func (c *nativeProjectionCursor) foldSessionListMetadata(ev session.Event, data map[string]any) {
+	if ev.Type == session.EventTurnStart {
+		c.list.blank = false
+	}
+	if ev.Type != session.EventUserMessage {
+		return
+	}
+	source := nativeEventObject(data, "source")
+	if source != nil && nativeEventString(source, "kind") != "user" {
+		return
+	}
+	now := ev.At.UnixMilli()
+	if now < 0 {
+		now = 0
+	}
+	c.list.lastPromptAt = &now
+}
+
+func nativeSessionListMetadataValue(metadata *nativeProjectionSessionListMetadata) map[string]any {
+	value := map[string]any{"blank": metadata.blank}
+	if metadata.lastPromptAt == nil {
+		value["lastPromptAt"] = nil
+	} else {
+		value["lastPromptAt"] = *metadata.lastPromptAt
+	}
+	return value
 }
 
 func (c *nativeProjectionCursor) foldContextBreakdown(ev session.Event, data map[string]any) {
@@ -958,6 +996,9 @@ func (c *nativeProjectionCursor) projectionBlock(title string, lastSeq int64, pe
 	}
 	if _, ok := values["contextBreakdown"]; !ok {
 		values["contextBreakdown"] = nativeContextBreakdownValue(&c.context)
+	}
+	if _, ok := values["sessionListMetadata"]; !ok {
+		values["sessionListMetadata"] = nativeSessionListMetadataValue(&c.list)
 	}
 	values["permissions"] = nativePermissionProjection(firstNonEmpty(permission...))
 	return nativeProjectionBlock{AsOfSeq: lastSeq, Values: values}
