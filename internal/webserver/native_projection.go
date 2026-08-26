@@ -1126,20 +1126,23 @@ func nativeUserMessageData(sessionID string, seq uint64, data map[string]any) ma
 }
 
 func (c *nativeProjectionCursor) assistantMessageData(sessionID string, seq uint64, data map[string]any) map[string]any {
-	content := make([]any, 0, 2)
-	if reasoning := nativeEventString(data, "reasoning"); reasoning != "" {
-		content = append(content, map[string]any{"type": "reasoning", "text": reasoning})
-	}
-	if text := nativeEventString(data, "text"); text != "" || len(content) == 0 {
-		content = append(content, map[string]any{"type": "text", "text": text})
-	}
-	for _, call := range nativeEventArray(data, "toolCalls", "tool_calls") {
-		content = append(content, map[string]any{
-			"type":      "tool-call",
-			"id":        nativeEventString(call, "id"),
-			"name":      nativeEventString(call, "name"),
-			"arguments": nativeEventString(call, "arguments", "args"),
-		})
+	content := nativeMessageContent(nativeEventValue(data, "content"))
+	if len(content) == 0 {
+		content = make([]any, 0, 2)
+		if reasoning := nativeEventString(data, "reasoning"); reasoning != "" {
+			content = append(content, map[string]any{"type": "reasoning", "text": reasoning})
+		}
+		if text := nativeEventString(data, "text"); text != "" || len(content) == 0 {
+			content = append(content, map[string]any{"type": "text", "text": text})
+		}
+		for _, call := range nativeEventArray(data, "toolCalls", "tool_calls") {
+			content = append(content, map[string]any{
+				"type":      "tool-call",
+				"id":        nativeEventString(call, "id", "callId"),
+				"name":      nativeEventString(call, "name"),
+				"arguments": nativeEventString(call, "arguments", "args"),
+			})
+		}
 	}
 	message := map[string]any{
 		"id":      nativeMessageID(sessionID, seq),
@@ -1204,7 +1207,7 @@ func (c *nativeProjectionCursor) toolResultData(sessionID string, seq uint64, da
 	}
 	if errorData != nil {
 		result["error"] = errorData
-	} else if forcedError {
+	} else if forcedError || nativeEventString(data, "error") != "" {
 		result["error"] = map[string]any{"name": "ToolError", "code": "TOOL_ERROR"}
 	}
 	return result
@@ -1266,25 +1269,42 @@ func nativeMessageContent(raw any) []any {
 		case "text", "reasoning":
 			result = append(result, map[string]any{"type": typ, "text": nativeEventString(object, "text")})
 		case "image":
-			image := nativeEventObject(object, "image")
+			image := nativeEventObject(object, "attachment", "image")
 			if image == nil {
 				image = object
 			}
+			attachment := map[string]any{
+				"attachmentId": nativeEventString(image, "attachmentId", "attachment_id", "id"),
+				"mediaType":    nativeEventString(image, "mediaType", "media_type"),
+				"bytes":        nativeEventNumber(image, "bytes"),
+				"width":        nativeEventNumber(image, "width"),
+				"height":       nativeEventNumber(image, "height"),
+			}
+			if name := nativeEventString(image, "name"); name != "" {
+				attachment["name"] = name
+			}
 			result = append(result, map[string]any{
-				"type": "image",
-				"attachment": map[string]any{
-					"attachmentId": nativeEventString(image, "id", "attachmentId", "attachment_id"),
-					"mediaType":    nativeEventString(image, "mediaType", "media_type"),
-					"bytes":        nativeEventNumber(image, "bytes"),
-					"width":        nativeEventNumber(image, "width"),
-					"height":       nativeEventNumber(image, "height"),
-				},
+				"type":       "image",
+				"attachment": attachment,
 			})
 		case "tool-call":
 			result = append(result, map[string]any{
 				"type": "tool-call", "id": nativeEventString(object, "id", "callId"),
 				"name": nativeEventString(object, "name"), "arguments": nativeEventString(object, "arguments", "args"),
 			})
+		case "tool-result":
+			content := nativeMessageContent(nativeEventValue(object, "content"))
+			if content == nil {
+				content = []any{}
+			}
+			result = append(result, map[string]any{
+				"type": "tool-result", "toolCallId": nativeEventString(object, "toolCallId", "tool_call_id"),
+				"content": content, "isError": nativeEventBool(object, "isError", "is_error"),
+			})
+		default:
+			// ContentBlockMap is extension-friendly. Preserve an unknown block
+			// verbatim so native plugins can render it at the client boundary.
+			result = append(result, nativeProjectionValueCopy(object))
 		}
 	}
 	return result

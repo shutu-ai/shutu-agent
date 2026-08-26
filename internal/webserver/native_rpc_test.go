@@ -263,6 +263,38 @@ func TestNativeHistoryReturnsDSHHeaderLineageAndSurfaceSnapshot(t *testing.T) {
 	}
 }
 
+func TestNativeProjectionPreservesDSHContentBlocks(t *testing.T) {
+	cursor := newNativeProjectionCursor()
+	event := cursor.project("native-content", session.Event{
+		Seq: 1, Type: session.EventAssistantMessage, At: time.UnixMilli(1000), Version: session.EventVersion,
+		Data: json.RawMessage(`{"content":[{"type":"text","text":"**bold**\n\n    return 1"},{"type":"reasoning","text":"think first"},{"type":"image","attachment":{"attachmentId":"att-1","mediaType":"image/png","bytes":12,"width":2,"height":3,"name":"screen.png"}},{"type":"tool-result","toolCallId":"call-1","content":[{"type":"text","text":"done"}],"isError":true},{"type":"vendor-card","value":{"ok":true}}]}`),
+	})
+	var projected struct {
+		Message struct {
+			Content []map[string]any `json:"content"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal(event.Data, &projected); err != nil {
+		t.Fatal(err)
+	}
+	if len(projected.Message.Content) != 5 {
+		t.Fatalf("projected content = %#v", projected.Message.Content)
+	}
+	if projected.Message.Content[0]["text"] != "**bold**\n\n    return 1" || projected.Message.Content[1]["type"] != "reasoning" {
+		t.Fatalf("markdown/reasoning blocks = %#v", projected.Message.Content[:2])
+	}
+	image, ok := projected.Message.Content[2]["attachment"].(map[string]any)
+	if !ok || image["attachmentId"] != "att-1" || image["name"] != "screen.png" {
+		t.Fatalf("image attachment block = %#v", projected.Message.Content[2])
+	}
+	if projected.Message.Content[3]["toolCallId"] != "call-1" || projected.Message.Content[3]["isError"] != true {
+		t.Fatalf("tool result block = %#v", projected.Message.Content[3])
+	}
+	if projected.Message.Content[4]["type"] != "vendor-card" {
+		t.Fatalf("extension block = %#v", projected.Message.Content[4])
+	}
+}
+
 func TestNativeProjectionFoldsSessionStatsFromLifecycleEvents(t *testing.T) {
 	events := []session.Event{
 		{Seq: 1, Type: session.EventTurnStart, At: time.UnixMilli(900), Version: session.EventVersion, Data: json.RawMessage(`{"turn":1}`)},

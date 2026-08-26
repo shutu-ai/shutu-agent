@@ -11,6 +11,7 @@
 - [x] P36-3：折叠 DSH `contextBreakdown`；按 request header、surface 消息与 compaction shadow price 计算 system/tools/message token 分项，并复用于 history/live。
 - [x] P36-3：为 `session.list` 行补齐 DSH `sessionListMetadata` projection；附件服务启用时同步下发 `imageLimits`，history/list 共用同一能力声明。
 - [x] P36-3：补齐 Session header 的 subagent lineage（parent/origin/delegationDepth），并在 history tail 返回可恢复 replacement 状态的 `surface` snapshot。
+- [x] P36-3：保真传输 DSH content blocks；统一 Markdown/code text、reasoning、image attachment、tool-result 与未知扩展 block，assistant/tool history/live 使用同一归一化结构。
 - [ ] P36-3：完整 projection baseline（所有已挂载 projection key）与生产数据规模验收仍待后续任务补齐。
 
 状态基线：P0–P23 已完成。P24–P35 已完成首轮实现；P36-1–P36-8 为“DSH 原生 UI 接入/视觉替换”新目标。未勾选项表示仍需补齐或在真实环境验收，不将未验证内容标记为完成。
@@ -179,7 +180,7 @@
 
 - [x] 将 Go 事件映射为 DSH Session header、surface、Conversation node 和 request/tool/turn 关系。
 - [x] 对齐 stable ID、seq、父子关系、分页游标、实时 frame 和 compaction 语义。
-- [ ] 对齐 Markdown、代码块、reasoning、图片、附件、Token、错误和 produced files 数据。
+- [x] 对齐 Markdown、代码块、reasoning、图片、附件、Token、错误和 produced files 数据中的消息 content block 结构；保留未知扩展 block。
 - [ ] 确保 replay、live stream 和 reconnect 使用同一份投影结果。
 
 验收标准：DSH 原生 Conversation、Tool、Trajectory 和 Inspector 组件可以直接消费 Shutu 适配后的 DSH 数据。
@@ -252,4 +253,4 @@ P24–P35 已完成首轮实现；P34/P35 的真实环境事项与 P36-1–P36-8
 
 ## P36 当前实现进度（2026-08-26）
 
-本轮完成 P36-3 的首轮原生事件投影：`session.history` 与 `events.mux` 共用 DSH `SessionEvent` 转换器，统一消息 ID、turn/step、surfaceOp/sourceEventSeqs、tool-result、retry、reasoning、图片内容、subagent identity/timing、contextBreakdown、sessionListMetadata、Session header lineage、surface snapshot 与未知事件的 ignorable 标记，并补充 replay/live、compaction、retry、subagent、contextBreakdown、session-list、imageLimits、header/surface 测试。P36-3 仍保留未勾选项：分页窗口的全局投影游标、真实原生 UI 端到端验收。
+本轮完成 P36-3 的首轮原生事件投影：`session.history` 与 `events.mux` 共用 DSH `SessionEvent` 转换器，统一消息 ID、turn/step、surfaceOp/sourceEventSeqs、tool-result、retry、Markdown/code text、reasoning、图片 attachment、未知 content block、subagent identity/timing、contextBreakdown、sessionListMetadata、Session header lineage、surface snapshot 与未知事件的 ignorable 标记，并补充 replay/live、compaction、retry、subagent、contextBreakdown、session-list、imageLimits、header/surface、content block 测试。P36-3 仍保留未勾选项：分页窗口的全局投影游标、真实原生 UI 端到端验收。
