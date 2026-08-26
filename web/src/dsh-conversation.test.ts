@@ -48,4 +48,27 @@ describe('DSH conversation carrier', () => {
     expect(snapshot.nodes[1]).toMatchObject({ kind: 'assistant', requestId: 'request:r-1', images: [{ id: 'img-1' }] })
     expect(snapshot.nodes[2]).toMatchObject({ kind: 'tool-result', requestId: 'request:r-1', callId: 'c-1' })
   })
+
+  it('uses trajectory event ids and keeps assistant/tool relationships explicit', () => {
+    const snapshot = projectDshConversation([
+      event(1, 'llm/request_start', 'request', { details: { request_id: 'r-2' } }),
+      event(2, 'assistant/message', 'I will inspect the file', { reasoning: 'Selecting the safest tool.' }),
+      event(3, 'tool/call', 'read_file', { tool_name: 'read_file', tool_args: '{"path":"a"}', call_id: 'c-2' }),
+      event(4, 'tool/result', 'ok', { tool_name: 'read_file', tool_output: 'contents', call_id: 'c-2' }),
+    ])
+
+    expect(snapshot.chat.order).toEqual(['event:2:v1', 'event:4:v1'])
+    expect(snapshot.nodes[0]).toMatchObject({
+      id: 'event:2:v1',
+      kind: 'assistant',
+      toolCalls: [{ id: 'c-2', name: 'read_file', argsRaw: '{"path":"a"}' }],
+    })
+    expect(snapshot.nodes[1]).toMatchObject({ id: 'event:4:v1', assistantId: 'event:2:v1', call: { name: 'read_file' } })
+    expect(snapshot.chat.nodes.get('event:2:v1')).toBe(snapshot.nodes[0])
+  })
+
+  it('keeps empty message nodes addressable', () => {
+    const snapshot = projectDshConversation([event(1, 'user/message', '')])
+    expect(snapshot.nodes[0]).toMatchObject({ id: 'event:1:v1', kind: 'user', text: '' })
+  })
 })

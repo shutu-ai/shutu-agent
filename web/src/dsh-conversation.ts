@@ -11,6 +11,7 @@ export type DshConversationNode =
   | DshUnknownNode
 
 export interface DshUserNode {
+  readonly id: string
   readonly kind: 'user'
   readonly seq: number
   readonly time: number
@@ -18,12 +19,14 @@ export interface DshUserNode {
 }
 
 export interface DshAssistantNode {
+  readonly id: string
   readonly kind: 'assistant'
   readonly seq: number
   readonly time: number
   readonly turn: number
   readonly step: number
   readonly blocks: readonly { kind: 'text' | 'reasoning'; text: string }[]
+  readonly toolCalls?: readonly { id: string; name: string; argsRaw: string }[]
   readonly images?: readonly ImageView[]
   readonly requestId?: string
   readonly usage?: unknown
@@ -32,6 +35,7 @@ export interface DshAssistantNode {
 }
 
 export interface DshToolResultNode {
+  readonly id: string
   readonly kind: 'tool-result'
   readonly seq: number
   readonly time: number
@@ -40,9 +44,11 @@ export interface DshToolResultNode {
   readonly content: string
   readonly isError: boolean
   readonly requestId: string | null
+  readonly assistantId?: string
 }
 
 export interface DshToolRunningNode {
+  readonly id: string
   readonly kind: 'tool-running'
   readonly seq: number
   readonly time: number
@@ -50,9 +56,11 @@ export interface DshToolRunningNode {
   readonly name: string
   readonly argsRaw: string
   readonly requestId: string | null
+  readonly assistantId?: string
 }
 
 export interface DshContextNode {
+  readonly id: string
   readonly kind: 'context'
   readonly seq: number
   readonly time: number
@@ -61,6 +69,7 @@ export interface DshContextNode {
 }
 
 export interface DshCompactionNode {
+  readonly id: string
   readonly kind: 'compaction'
   readonly seq: number
   readonly time: number
@@ -69,6 +78,7 @@ export interface DshCompactionNode {
 }
 
 export interface DshUnknownNode {
+  readonly id: string
   readonly kind: 'unknown'
   readonly seq: number
   readonly time: number
@@ -101,12 +111,14 @@ export interface DshConversationSnapshot {
 }
 
 interface CallState {
+  readonly id: string
   readonly callId: string
   readonly seq: number
   readonly name: string
   readonly argsRaw: string
   readonly time: number
   readonly requestId: string | null
+  readonly assistantId: string | null
 }
 
 function objectDetails(event: EventView): Record<string, unknown> {
@@ -136,8 +148,12 @@ function timeOf(event: EventView): number {
   return Number.isFinite(value) ? value : 0
 }
 
+function eventId(event: EventView): string {
+  return `event:${event.seq}:v${event.version}`
+}
+
 function nodeKey(node: DshConversationNode): string {
-  return `${node.kind}:${node.seq}`
+  return node.id
 }
 
 /**
@@ -154,10 +170,24 @@ export function projectDshConversation(events: readonly EventView[], sessionId =
   const turnEnds = new Map<number, number>()
   let currentTurn = 0
   let currentRequestId: string | null = null
+  let currentAssistantId: string | null = null
+  const nodeIndexById = new Map<string, number>()
 
   const add = (node: DshConversationNode): void => {
     nodes.push(node)
     nodeMap.set(nodeKey(node), node)
+    nodeIndexById.set(node.id, nodes.length - 1)
+  }
+
+  const attachToolCall = (assistantId: string | null, call: { id: string; name: string; argsRaw: string }): void => {
+    if (assistantId === null) return
+    const assistant = nodeMap.get(assistantId)
+    const index = nodeIndexById.get(assistantId)
+    if (assistant?.kind !== 'assistant' || index === undefined) return
+    if (assistant.toolCalls?.some(existing => existing.id === call.id)) return
+    const updated = { ...assistant, toolCalls: [...(assistant.toolCalls ?? []), call] }
+    nodes[index] = updated
+    nodeMap.set(assistantId, updated)
   }
 
   for (const event of events) {
@@ -185,9 +215,9 @@ export function projectDshConversation(events: readonly EventView[], sessionId =
     }
     if (event.type === 'user/message') {
       if (event.context_message) {
-        add({ kind: 'context', seq: event.seq, time, text: textOf(event), source: event.context_source || stringOf(event, 'source') || 'context' })
+        add({ id: eventId(event), kind: 'context', seq: event.seq, time, text: textOf(event), source: event.context_source || stringOf(event, 'source') || 'context' })
       } else {
-        add({ kind: 'user', seq: event.seq, time, text: textOf(event) })
+        add({ id: eventId(event), kind: 'user', seq: event.seq, time, text: textOf(event) })
       }
       continue
     }
@@ -198,8 +228,10 @@ export function projectDshConversation(events: readonly EventView[], sessionId =
       if (event.summary) blocks.push({ kind: 'text', text: event.summary })
       const provider = typeof details.provider === 'string' ? details.provider : undefined
       const model = typeof details.model === 'string' ? details.model : undefined
+      const assistantId = eventId(event)
+      currentAssistantId = assistantId
       add({
-        kind: 'assistant', seq: event.seq, time, turn: numberOf(event, 'turn') ?? currentTurn,
+        id: assistantId, kind: 'assistant', seq: event.seq, time, turn: numberOf(event, 'turn') ?? currentTurn,
         step: numberOf(event, 'step') ?? 0, blocks,
         ...(event.images && event.images.length > 0 ? { images: event.images } : {}),
         ...(currentRequestId !== null ? { requestId: currentRequestId } : {}),
@@ -211,7 +243,10 @@ export function projectDshConversation(events: readonly EventView[], sessionId =
     }
     if (event.type === 'tool/call' || event.type === 'tool/start') {
       const callId = event.call_id || `call:${event.seq}`
-      calls.set(callId, { callId, seq: event.seq, name: event.tool_name || event.summary, argsRaw: event.tool_args || '', time, requestId: currentRequestId })
+      const assistantId = currentAssistantId
+      const call = { id: callId, name: event.tool_name || event.summary, argsRaw: event.tool_args || '' }
+      attachToolCall(assistantId, call)
+      calls.set(callId, { ...call, callId, seq: event.seq, time, requestId: currentRequestId, assistantId })
       continue
     }
     if (event.type === 'tool/result' || event.type === 'tool/error') {
@@ -219,26 +254,27 @@ export function projectDshConversation(events: readonly EventView[], sessionId =
       const call = calls.get(callId)
       calls.delete(callId)
       add({
-        kind: 'tool-result', seq: event.seq, time, callId,
+        id: eventId(event), kind: 'tool-result', seq: event.seq, time, callId,
         call: call === undefined ? null : { name: call.name, argsRaw: call.argsRaw },
         content: textOf(event), isError: event.type === 'tool/error', requestId: call?.requestId ?? currentRequestId,
+        ...(call?.assistantId ? { assistantId: call.assistantId } : {}),
       })
       continue
     }
     if (event.type === 'compaction/summary') {
       add({
-        kind: 'compaction', seq: event.seq, time, summary: event.compaction_summary || event.summary,
+        id: eventId(event), kind: 'compaction', seq: event.seq, time, summary: event.compaction_summary || event.summary,
         shadowedTokenCount: event.compaction_tokens ?? numberOf(event, 'shadowedTokens') ?? null,
       })
       continue
     }
     if (event.type === 'assistant/chunk' || event.type === 'assistant/reasoning' || event.type.startsWith('llm/')) continue
     if (event.type === 'step/start' || event.type === 'step/end') continue
-    add({ kind: 'unknown', seq: event.seq, time, type: event.type, text: textOf(event) })
+    add({ id: eventId(event), kind: 'unknown', seq: event.seq, time, type: event.type, text: textOf(event) })
   }
 
   for (const call of calls.values()) {
-    add({ kind: 'tool-running', seq: call.seq, time: call.time, callId: call.callId, name: call.name, argsRaw: call.argsRaw, requestId: call.requestId })
+    add({ id: call.id, kind: 'tool-running', seq: call.seq, time: call.time, callId: call.callId, name: call.name, argsRaw: call.argsRaw, requestId: call.requestId, ...(call.assistantId ? { assistantId: call.assistantId } : {}) })
   }
   nodes.sort((left, right) => left.seq - right.seq)
 

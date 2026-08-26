@@ -134,6 +134,10 @@ h1 { max-width: 52vw; margin: 0; overflow: hidden; color: #f1f5fa; font-size: 20
 .conversation-node { contain-intrinsic-size: 154px; }
 .conversation-node-head { display: flex; gap: 8px; padding: 0 8px 4px; color: #6f8095; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; }
 .conversation-node-head span:last-child { margin-left: auto; color: #536277; font-variant-numeric: tabular-nums; }
+.conversation-tool-calls { display: grid; gap: 6px; max-width: 920px; margin-top: 9px; border-top: 1px solid #243244; padding-top: 8px; color: #9de9bd; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; }
+.conversation-tool-call { border: 1px solid #2a4050; border-radius: 6px; padding: 6px 8px; color: #d0dbe6; background: #0b111a; text-transform: none; letter-spacing: normal; }
+.conversation-tool-call span, .conversation-tool-call strong { color: #b3c3d2; font-size: 10px; }
+.conversation-tool-call pre { max-height: 140px; margin-top: 5px; color: #b9c8da; }
 .conversation-node.user .event-line { background: #6bb6e8; }
 .conversation-node.assistant .event-line { background: #9de9bd; }
 .conversation-node.tool-result .event-line { background: #e6b26e; }
@@ -325,6 +329,9 @@ body[data-theme="light"] .session-title, body[data-theme="light"] .event-label, 
 body[data-theme="light"] .session-copy small, body[data-theme="light"] .status-line, body[data-theme="light"] .timeline-head, body[data-theme="light"] .timeline-legend, body[data-theme="light"] .event-head, body[data-theme="light"] .conversation-node-head { color: #708197; }
 body[data-theme="light"] .event-card, body[data-theme="light"] .dsh-timeline, body[data-theme="light"] .dsh-conversation-header, body[data-theme="light"] .auth-card { border-color: #d9e2eb; background: #ffffff; }
 body[data-theme="light"] .event-text, body[data-theme="light"] .composer textarea { color: #394d62; }
+body[data-theme="light"] .conversation-tool-calls { border-color: #d9e2eb; color: #2d7052; }
+body[data-theme="light"] .conversation-tool-call { border-color: #d4e0e8; color: #394d62; background: #f5f8fb; }
+body[data-theme="light"] .conversation-tool-call span, body[data-theme="light"] .conversation-tool-call strong { color: #365a73; }
 body[data-theme="light"] .settings-page { color: #203042; background: #f4f7fb; }
 body[data-theme="light"] .settings-panel { border-color: #d9e2eb; background: #ffffff; box-shadow: 0 24px 70px #a4b6c633; }
 body[data-theme="light"] .settings-theme-toggle, body[data-theme="light"] .model-card, body[data-theme="light"] .appearance-options button { border-color: #d9e2eb; background: #f7f9fc; }
