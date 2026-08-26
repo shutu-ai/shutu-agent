@@ -89,6 +89,8 @@ type Server struct {
 	nativeSubagentPromptFn    func(ctx context.Context, childSessionID, text string) error
 	nativeSubagentInterruptFn func(childSessionID, reason string) error
 	nativeGoalMutationFn      func(ctx context.Context, mutation NativeGoalMutation) (NativeGoalMutationResult, error)
+	nativeCredentialSetFn     func(ctx context.Context, ref, value string) error
+	nativeCredentialUnsetFn   func(ctx context.Context, ref string) error
 
 	// statusFn is the dsh-session-status alignment: it computes the live state
 	// (warning/ongoing/done/idle + labels + running-subagent count) for one
@@ -563,6 +565,16 @@ type NativeGoalMutationResult struct {
 // native routes explicitly unsupported.
 func (s *Server) SetNativeGoalManager(fn func(context.Context, NativeGoalMutation) (NativeGoalMutationResult, error)) {
 	s.nativeGoalMutationFn = fn
+}
+
+// SetNativeCredentialManager wires the value-bearing credential mutations.
+// The server never stores or returns credential values itself.
+func (s *Server) SetNativeCredentialManager(
+	set func(ctx context.Context, ref, value string) error,
+	unset func(ctx context.Context, ref string) error,
+) {
+	s.nativeCredentialSetFn = set
+	s.nativeCredentialUnsetFn = unset
 }
 
 // SetSessionManager wires the session new/resume API (POST /api/sessions and

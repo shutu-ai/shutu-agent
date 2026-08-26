@@ -337,7 +337,8 @@ func (s *Server) registerNativeRoutes(mux *http.ServeMux) {
 		"workspace.list", "workspace.create", "workspace.rename", "workspace.delete",
 		"workspace.insertBefore", "workspace.insertSessionBefore", "workspace.archiveSession",
 		"agentPreset.list", "agentPreset.select", "settings.describe",
-		"settings.mutate", "settings.update", "settings.replace", "credentials.describe", "dynamicCordisRunner/syncInspectManifest",
+		"settings.mutate", "settings.update", "settings.replace", "credentials.describe", "credentials.set", "credentials.unset", "dynamicCordisRunner/syncInspectManifest",
+		"host.openPath",
 		"dynamicCordisRunner/inventory", "llm.providers", "llm.models", "llm.discoverModels", "skill.list",
 		"subagent.list", "subagent.history", "subagent.prompt", "subagent.interrupt",
 		"goal.create", "goal.edit", "goal.pause", "goal.resume", "goal.complete", "goal.clear",
@@ -721,8 +722,8 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 			"version":          "shutu-agent",
 			"cwd":              s.defaultWorkdir,
 			"attachedSessions": attached,
-			"home":             "",
-			"canOpenPath":      false,
+			"home":             nativeHomeDirectory(),
+			"canOpenPath":      nativeCanOpenPath(),
 		}
 		if cfg := s.cfgFn; cfg != nil {
 			view := cfg()
@@ -751,6 +752,14 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 			return failure
 		}
 		return s.nativeHostCreateDirectory(req.Path, req.Name)
+	case "host.openPath":
+		var req struct {
+			Path string `json:"path"`
+		}
+		if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
+			return failure
+		}
+		return s.nativeHostOpenPath(r, req.Path)
 	case "host.pickDirectory":
 		return s.nativeHostPickDirectory(r)
 	case "session.list":
@@ -907,25 +916,84 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 		if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
 			return failure
 		}
+		if len(req.Refs) > 64 {
+			return nativeRPCFailure("bad-request", "refs must contain at most 64 entries", nil)
+		}
 		credentials := make(map[string]any, len(req.Refs))
 		providers := []map[string]any{}
 		if s.cfgFn != nil {
 			providers = nativeConfigProviderMaps(s.cfgFn()["providers"])
 		}
 		for _, ref := range req.Refs {
+			if !nativeCredentialRefValid(ref) {
+				return nativeRPCFailure("bad-request", "credential ref must be a valid environment variable name", map[string]any{"ref": ref})
+			}
 			configured := false
+			source := ""
+			writable := true
+			if value := os.Getenv(ref); value != "" {
+				configured = true
+				source = "env"
+				writable = false
+			}
 			for _, provider := range providers {
 				if nativeString(provider["env_var"]) == ref {
-					configured = nativeBool(provider["configured"])
+					if !configured {
+						configured = nativeBool(provider["configured"])
+						if configured {
+							source = "file"
+						}
+					}
 					break
 				}
 			}
-			// Never return a secret. The configured bit is a non-sensitive
-			// capability hint already exposed by the existing sanitized config
-			// view, allowing DSH to render the correct provider row state.
-			credentials[ref] = map[string]any{"configured": configured, "writable": true}
+			// Never return a secret. An environment value is a read-only layer;
+			// advertising it as writable would make a credentials.set appear to
+			// succeed while the effective value remains unchanged.
+			view := map[string]any{"configured": configured, "writable": writable}
+			if source != "" {
+				view["source"] = source
+			}
+			credentials[ref] = view
 		}
 		return nativeRPCSuccess(map[string]any{"credentials": credentials})
+	case "credentials.set":
+		var req struct {
+			Ref   string `json:"ref"`
+			Value string `json:"value"`
+		}
+		if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
+			return failure
+		}
+		req.Ref = strings.TrimSpace(req.Ref)
+		if !nativeCredentialRefValid(req.Ref) || req.Value == "" {
+			return nativeRPCFailure("bad-request", "ref must be a valid credential name and value is required", nil)
+		}
+		if s.nativeCredentialSetFn == nil {
+			return nativeRPCFailure("not-supported", "credential set handler not wired", nil)
+		}
+		if err := s.nativeCredentialSetFn(r.Context(), req.Ref, req.Value); err != nil {
+			return nativeRPCFailure("credential-rejected", err.Error(), map[string]any{"ref": req.Ref})
+		}
+		return nativeRPCSuccess(map[string]any{})
+	case "credentials.unset":
+		var req struct {
+			Ref string `json:"ref"`
+		}
+		if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
+			return failure
+		}
+		req.Ref = strings.TrimSpace(req.Ref)
+		if !nativeCredentialRefValid(req.Ref) {
+			return nativeRPCFailure("bad-request", "ref must be a valid credential name", nil)
+		}
+		if s.nativeCredentialUnsetFn == nil {
+			return nativeRPCFailure("not-supported", "credential unset handler not wired", nil)
+		}
+		if err := s.nativeCredentialUnsetFn(r.Context(), req.Ref); err != nil {
+			return nativeRPCFailure("credential-rejected", err.Error(), map[string]any{"ref": req.Ref})
+		}
+		return nativeRPCSuccess(map[string]any{})
 	case "llm.providers":
 		providers := []map[string]any{}
 		if s.cfgFn != nil {
@@ -984,6 +1052,23 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 		return nativeRPCSuccess([]any{})
 	default:
 		return nativeRPCFailure("not-supported", "native RPC method is not implemented", map[string]any{"method": method})
+	}
+}
+
+func nativeHomeDirectory() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Clean(home)
+}
+
+func nativeCanOpenPath() bool {
+	switch runtime.GOOS {
+	case "windows", "darwin", "linux", "freebsd", "openbsd", "netbsd":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -1089,6 +1174,45 @@ func (s *Server) nativeHostCreateDirectory(rawPath, name string) nativeRPCResult
 		return nativeRPCFailure("directory-create-failed", fmt.Sprintf("cannot create %q: %v", target, err), map[string]any{"path": target})
 	}
 	return nativeRPCSuccess(map[string]any{"path": filepath.Clean(target)})
+}
+
+func (s *Server) nativeHostOpenPath(r *http.Request, rawPath string) nativeRPCResult {
+	path, err := s.nativeDirectoryPath(rawPath, false)
+	if err != nil {
+		return nativeRPCFailure("directory-unreadable", err.Error(), map[string]any{"path": strings.TrimSpace(rawPath)})
+	}
+	if _, err := os.Stat(path); err != nil {
+		return nativeRPCFailure("directory-unreadable", fmt.Sprintf("cannot open %q: %v", path, err), map[string]any{"path": path})
+	}
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.CommandContext(r.Context(), "explorer.exe", path)
+	case "darwin":
+		cmd = exec.CommandContext(r.Context(), "open", path)
+	default:
+		cmd = exec.CommandContext(r.Context(), "xdg-open", path)
+	}
+	if err := cmd.Start(); err != nil {
+		return nativeRPCFailure("open-path-failed", fmt.Sprintf("cannot open %q: %v", path, err), map[string]any{"path": path})
+	}
+	// The desktop opener owns the child process. Waiting here would turn a
+	// successful hand-off into a long-running RPC and would block the native UI.
+	return nativeRPCSuccess(map[string]any{"opened": true})
+}
+
+func nativeCredentialRefValid(ref string) bool {
+	if ref == "" || len(ref) > 256 {
+		return false
+	}
+	for i := 0; i < len(ref); i++ {
+		c := ref[i]
+		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_' || (i > 0 && c >= '0' && c <= '9') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func (s *Server) nativeDirectoryPath(rawPath string, useDefault bool) (string, error) {

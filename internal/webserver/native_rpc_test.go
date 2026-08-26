@@ -93,6 +93,44 @@ func TestNativeGoalMutationsRejectMalformedReferencesAndEdits(t *testing.T) {
 	}
 }
 
+func TestNativeCredentialMutationsValidateRefsAndNeverReturnValues(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+	var setRef, setValue, unsetRef string
+	srv.SetNativeCredentialManager(func(_ context.Context, ref, value string) error {
+		setRef, setValue = ref, value
+		return nil
+	}, func(_ context.Context, ref string) error {
+		unsetRef = ref
+		return nil
+	})
+	call := func(t *testing.T, method, payload string) nativeRPCResponse {
+		t.Helper()
+		rec := doReqBody(t, srv.Handler(), "POST", "/api/"+method, "tok", fmt.Sprintf(`{"type":"client-request","rpcId":"credential","method":"%s","payload":%s}`, method, payload))
+		return nativeResponse(t, rec.Body.Bytes())
+	}
+	if response := call(t, "credentials.set", `{"ref":"TEST_API_KEY","value":"secret-value"}`); !response.Result.OK || setRef != "TEST_API_KEY" || setValue != "secret-value" {
+		t.Fatalf("credentials.set response=%+v callback=(%q,%q)", response, setRef, setValue)
+	}
+	if response := call(t, "credentials.unset", `{"ref":"TEST_API_KEY"}`); !response.Result.OK || unsetRef != "TEST_API_KEY" {
+		t.Fatalf("credentials.unset response=%+v callback=%q", response, unsetRef)
+	}
+	if response := call(t, "credentials.set", `{"ref":"bad-name","value":"secret"}`); response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "bad-request" {
+		t.Fatalf("invalid credentials.set response=%+v", response)
+	}
+	if response := call(t, "credentials.set", `{"ref":"TEST_API_KEY","value":""}`); response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "bad-request" {
+		t.Fatalf("empty credentials.set response=%+v", response)
+	}
+}
+
+func TestNativeHostOpenPathRejectsMissingPath(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/host.openPath", "tok", `{"type":"client-request","rpcId":"open","method":"host.openPath","payload":{"path":"C:\\does-not-exist-shutu-native"}}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "directory-unreadable" {
+		t.Fatalf("host.openPath response=%+v", response)
+	}
+}
+
 func TestNativeRPCSessionHistoryAndPrompt(t *testing.T) {
 	srv, st := newTestServer(t, "tok")
 	seedSession(t, st, "native-session", []session.Event{{
