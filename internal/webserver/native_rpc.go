@@ -276,7 +276,7 @@ func (s *Server) registerNativeRoutes(mux *http.ServeMux) {
 		"session.list", "session.search", "session.create",
 		"session.history", "session.rename", "session.prompt", "session.cancel", "session.attachment",
 		"session.models",
-		"workspace.list", "agentPreset.list", "settings.describe",
+		"workspace.list", "agentPreset.list", "agentPreset.select", "settings.describe",
 		"settings.mutate", "credentials.describe", "dynamicCordisRunner/syncInspectManifest",
 		"dynamicCordisRunner/inventory", "llm.providers", "llm.models",
 	} {
@@ -741,12 +741,9 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 	case "workspace.list":
 		return s.nativeWorkspaceList(r)
 	case "agentPreset.list":
-		// Shutu does not persist DSH Agent Preset documents yet. Returning the
-		// protocol's empty catalog keeps the native settings surface usable and
-		// makes the capability boundary explicit to the client.
-		return nativeRPCSuccess(map[string]any{
-			"presets": []any{}, "authorable": false, "hasDocument": false,
-		})
+		return s.nativeAgentPresetList()
+	case "agentPreset.select":
+		return s.nativeAgentPresetSelect(r, raw)
 	case "settings.describe":
 		return s.nativeSettingsDescribe()
 	case "settings.mutate":
@@ -1018,6 +1015,79 @@ func (s *Server) nativeLLMModels() nativeRPCResult {
 		groups = append(groups, map[string]any{"id": id, "name": name, "models": items})
 	}
 	return nativeRPCSuccess(map[string]any{"groups": groups, "failures": []any{}})
+}
+
+func (s *Server) nativeAgentPresetList() nativeRPCResult {
+	defaultPreset := "standard"
+	if s.cfgFn != nil {
+		if mode := nativeString(s.cfgFn()["mode"]); nativeAgentPresetKnown(mode) {
+			defaultPreset = mode
+		}
+	}
+	presets := []any{
+		map[string]any{
+			"id": "minimal", "trust": "system", "isDefault": defaultPreset == "minimal",
+			"name": "Minimal", "description": "基础只读能力、Shell 与文件编辑",
+		},
+		map[string]any{
+			"id": "standard", "trust": "system", "isDefault": defaultPreset == "standard",
+			"name": "Standard", "description": "标准 Shutu 能力集合",
+		},
+		map[string]any{
+			"id": "code", "trust": "system", "isDefault": defaultPreset == "code",
+			"name": "Code", "description": "标准能力加程序化 Code Mode",
+		},
+	}
+	return nativeRPCSuccess(map[string]any{
+		"presets": presets, "authorable": false, "hasDocument": false,
+	})
+}
+
+func nativeAgentPresetKnown(preset string) bool {
+	switch preset {
+	case "minimal", "standard", "code":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) nativeAgentPresetSelect(r *http.Request, raw json.RawMessage) nativeRPCResult {
+	var req struct {
+		SessionID   string `json:"sessionId"`
+		AgentPreset string `json:"agentPreset"`
+	}
+	if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
+		return failure
+	}
+	req.SessionID = strings.TrimSpace(req.SessionID)
+	req.AgentPreset = strings.TrimSpace(req.AgentPreset)
+	if req.SessionID == "" || req.AgentPreset == "" {
+		return nativeRPCFailure("bad-request", "sessionId and agentPreset are required", nil)
+	}
+	if !nativeAgentPresetKnown(req.AgentPreset) {
+		return nativeRPCFailure("agent-preset-invalid", "agent preset is not available", map[string]any{"agentPreset": req.AgentPreset})
+	}
+	configs, ok := s.store.(store.SessionConfigStore)
+	if !ok {
+		return nativeRPCFailure("not-supported", "session configuration store is not wired", nil)
+	}
+	events, err := s.store.LoadSession(r.Context(), req.SessionID)
+	if err != nil {
+		return nativeStoreFailure(err)
+	}
+	if len(events) != 0 {
+		return nativeRPCFailure("agent-preset-locked", "agent preset can only change on a blank session", map[string]any{"sessionId": req.SessionID})
+	}
+	config, err := configs.GetSessionConfig(r.Context(), req.SessionID)
+	if err != nil {
+		return nativeStoreFailure(err)
+	}
+	config.AgentPreset = req.AgentPreset
+	if err := configs.SetSessionConfig(r.Context(), req.SessionID, config); err != nil {
+		return nativeRPCFailure("agent-preset-select-failed", err.Error(), nil)
+	}
+	return nativeRPCSuccess(map[string]any{"agentPreset": req.AgentPreset})
 }
 
 func (s *Server) nativeSessionModels(r *http.Request, raw json.RawMessage) nativeRPCResult {
@@ -1366,6 +1436,10 @@ func (s *Server) nativeSessionCreate(r *http.Request, raw json.RawMessage) nativ
 	if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
 		return failure
 	}
+	req.AgentPreset = strings.TrimSpace(req.AgentPreset)
+	if req.AgentPreset != "" && !nativeAgentPresetKnown(req.AgentPreset) {
+		return nativeRPCFailure("agent-preset-invalid", "agent preset is not available", map[string]any{"agentPreset": req.AgentPreset})
+	}
 	id, err := s.sessFn(r.Context(), "new", req.SessionID)
 	if err != nil {
 		return nativeRPCFailure("session-create-failed", err.Error(), nil)
@@ -1383,6 +1457,15 @@ func (s *Server) nativeSessionCreate(r *http.Request, raw json.RawMessage) nativ
 			if err := headers.SetSessionCWD(r.Context(), id, req.CWD); err != nil {
 				return nativeRPCFailure("session-create-failed", err.Error(), nil)
 			}
+		}
+	}
+	if req.AgentPreset != "" {
+		configs, ok := s.store.(store.SessionConfigStore)
+		if !ok {
+			return nativeRPCFailure("session-create-failed", "session configuration store is not wired", nil)
+		}
+		if err := configs.SetSessionConfig(r.Context(), id, store.SessionConfig{AgentPreset: req.AgentPreset}); err != nil {
+			return nativeRPCFailure("session-create-failed", err.Error(), nil)
 		}
 	}
 	return nativeRPCSuccess(map[string]any{"sessionId": id})

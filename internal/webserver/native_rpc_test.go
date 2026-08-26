@@ -543,6 +543,105 @@ func TestNativeSessionModelsUsesStandardSessionMethod(t *testing.T) {
 	}
 }
 
+func TestNativeAgentPresetsListSelectAndLock(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	srv.SetConfigProvider(func() map[string]any { return map[string]any{"mode": "code"} })
+
+	call := func(id, method string, payload any) nativeRPCResponse {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{
+			"type": "client-request", "rpcId": id, "method": method, "payload": payload,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := doReqBody(t, srv.Handler(), "POST", "/api/"+method, "tok", string(body))
+		return nativeResponse(t, rec.Body.Bytes())
+	}
+
+	response := call("presets-list", "agentPreset.list", map[string]any{})
+	if !response.Result.OK {
+		t.Fatalf("agentPreset.list response = %+v", response)
+	}
+	var roster struct {
+		Presets     []map[string]any `json:"presets"`
+		Authorable  bool             `json:"authorable"`
+		HasDocument bool             `json:"hasDocument"`
+	}
+	encoded, _ := json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &roster); err != nil {
+		t.Fatal(err)
+	}
+	if len(roster.Presets) != 3 || roster.Authorable || roster.HasDocument {
+		t.Fatalf("agent preset roster = %+v", roster)
+	}
+	for _, preset := range roster.Presets {
+		if preset["id"] == "code" && preset["isDefault"] != true {
+			t.Fatalf("code preset default flag = %#v", preset["isDefault"])
+		}
+	}
+
+	if err := st.CreateSession(context.Background(), "blank-preset", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetSessionConfig(context.Background(), "blank-preset", store.SessionConfig{Provider: "openai", Model: "gpt-4o"}); err != nil {
+		t.Fatal(err)
+	}
+	response = call("preset-select", "agentPreset.select", map[string]any{"sessionId": "blank-preset", "agentPreset": "minimal"})
+	if !response.Result.OK {
+		t.Fatalf("agentPreset.select response = %+v", response)
+	}
+	config, err := st.GetSessionConfig(context.Background(), "blank-preset")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.AgentPreset != "minimal" || config.Provider != "openai" || config.Model != "gpt-4o" {
+		t.Fatalf("selected session config = %+v", config)
+	}
+
+	seedSession(t, st, "locked-preset", []session.Event{{
+		Seq: 1, Type: session.EventUserMessage, At: time.UnixMilli(1001), Version: session.EventVersion,
+		Data: json.RawMessage(`{"text":"already used"}`),
+	}})
+	response = call("preset-locked", "agentPreset.select", map[string]any{"sessionId": "locked-preset", "agentPreset": "code"})
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "agent-preset-locked" {
+		t.Fatalf("locked agent preset response = %+v", response)
+	}
+	response = call("preset-invalid", "agentPreset.select", map[string]any{"sessionId": "blank-preset", "agentPreset": "unknown"})
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "agent-preset-invalid" {
+		t.Fatalf("invalid agent preset response = %+v", response)
+	}
+}
+
+func TestNativeSessionCreatePersistsAgentPreset(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	srv.SetSessionManager(func(ctx context.Context, action, requestedID string) (string, error) {
+		if action != "new" {
+			t.Fatalf("session action = %q, want new", action)
+		}
+		id := requestedID
+		if id == "" {
+			id = "created-preset"
+		}
+		if err := st.CreateSession(ctx, id, time.Now()); err != nil {
+			return "", err
+		}
+		return id, nil
+	})
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/session.create", "tok", `{"type":"client-request","rpcId":"create-preset","method":"session.create","payload":{"sessionId":"created-preset","agentPreset":"code"}}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK {
+		t.Fatalf("session.create response = %+v", response)
+	}
+	config, err := st.GetSessionConfig(context.Background(), "created-preset")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.AgentPreset != "code" {
+		t.Fatalf("created session config = %+v", config)
+	}
+}
+
 func TestNativeHostDirectoryBrowseAndCreate(t *testing.T) {
 	srv, _ := newTestServer(t, "tok")
 	root := t.TempDir()
