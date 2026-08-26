@@ -75,6 +75,7 @@ func (a *app) registerSubagent() error {
 		}
 	}
 	st := subagent.NewSubagentTools(rt, a.cfg.Subagent.MaxDepth, func() string { return a.currentID }, onEvent)
+	a.subagentTools = st
 	for _, t := range []tools.Tool{
 		st.Spawn(),
 		st.Status(),

@@ -629,11 +629,12 @@ type app struct {
 	// attachStore is the M8-3 image-attachment store (dispatch-m8-3 搂4): created
 	// by registerAttachments only when llm.multimodal.enabled; nil when disabled
 	// (D10) 鈥?/attach then errors.
-	attachStore *attachment.Store
-	currentID   string
-	log         *session.Log
-	jobs        *jobs.Local      // nil when jobs disabled (D10)
-	subagents   subagent.Runtime // nil when subagent disabled (D10)
+	attachStore   *attachment.Store
+	currentID     string
+	log           *session.Log
+	jobs          *jobs.Local             // nil when jobs disabled (D10)
+	subagents     subagent.Runtime        // nil when subagent disabled (D10)
+	subagentTools *subagent.SubagentTools // live browser-addressed child seam
 
 	compaction compaction.Engine // nil when compaction disabled (D10)
 	skills     skill.Registry    // nil when skill disabled (D10)

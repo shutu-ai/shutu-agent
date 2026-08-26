@@ -1767,6 +1767,73 @@ func TestNativeSubagentHistoryEnforcesParentLineageAndReusesProjection(t *testin
 	}
 }
 
+func TestNativeSubagentPromptAndInterruptRequireLineageAndWireLiveRuntime(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	seedSession(t, st, "parent-control", nil)
+	seedSession(t, st, "child-control", []session.Event{
+		{Seq: 1, Type: session.EventSubagentStart, At: time.UnixMilli(1001), Version: session.EventVersion, Data: json.RawMessage(`{"parentSession":"parent-control","depth":1}`)},
+	})
+	var prompted struct {
+		ID   string
+		Text string
+	}
+	var interrupted string
+	srv.SetNativeSubagentManager(
+		func(_ context.Context, childID, text string) error {
+			prompted.ID, prompted.Text = childID, text
+			return nil
+		},
+		func(childID, _ string) error {
+			interrupted = childID
+			return nil
+		},
+	)
+	call := func(id, method string, payload map[string]any) nativeRPCResponse {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{"type": "client-request", "rpcId": id, "method": method, "payload": payload})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := doReqBody(t, srv.Handler(), "POST", "/api/"+method, "tok", string(body))
+		return nativeResponse(t, rec.Body.Bytes())
+	}
+	prompt := call("subagent-prompt", "subagent.prompt", map[string]any{
+		"parentSessionId": "parent-control", "childSessionId": "child-control", "mode": "continuable",
+		"content": []map[string]any{{"type": "text", "text": "follow up"}},
+	})
+	if !prompt.Result.OK || prompted.ID != "child-control" || prompted.Text != "follow up" {
+		t.Fatalf("subagent prompt = %+v, callback = %+v", prompt, prompted)
+	}
+	var receipt map[string]any
+	encoded, _ := json.Marshal(prompt.Result.Value)
+	if err := json.Unmarshal(encoded, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	if receipt["messageId"] == "" {
+		t.Fatalf("subagent prompt receipt = %#v", receipt)
+	}
+	interrupt := call("subagent-interrupt", "subagent.interrupt", map[string]any{
+		"parentSessionId": "parent-control", "childSessionId": "child-control", "mode": "continuable",
+	})
+	if !interrupt.Result.OK || interrupted != "child-control" {
+		t.Fatalf("subagent interrupt = %+v, callback child = %q", interrupt, interrupted)
+	}
+	wrongParent := call("subagent-prompt-wrong-parent", "subagent.prompt", map[string]any{
+		"parentSessionId": "other-parent", "childSessionId": "child-control", "mode": "continuable",
+		"content": []map[string]any{{"type": "text", "text": "must reject"}},
+	})
+	if wrongParent.Result.OK || wrongParent.Result.Error == nil || wrongParent.Result.Error.Code != "subagent-parent-not-found" {
+		t.Fatalf("wrong parent prompt = %+v", wrongParent)
+	}
+	badMode := call("subagent-prompt-bad-mode", "subagent.prompt", map[string]any{
+		"parentSessionId": "parent-control", "childSessionId": "child-control", "mode": "one-shot",
+		"content": []map[string]any{{"type": "text", "text": "must reject"}},
+	})
+	if badMode.Result.OK || badMode.Result.Error == nil || badMode.Result.Error.Code != "bad-request" {
+		t.Fatalf("bad mode prompt = %+v", badMode)
+	}
+}
+
 func readNativeTextFrame(reader *bufio.Reader) ([]byte, error) {
 	first, err := reader.ReadByte()
 	if err != nil {

@@ -161,6 +161,16 @@ func (a *app) registerWebServer() error {
 	// panels. Each provider returns sanitized views (id/status/timestamps only);
 	// a disabled capability answers an empty list, never an error.
 	srv.SetSubagentProvider(a.webSubagents)
+	if a.subagentTools != nil {
+		srv.SetNativeSubagentManager(
+			func(ctx context.Context, childSessionID, text string) error {
+				return a.subagentTools.SendTo(ctx, childSessionID, text)
+			},
+			func(childSessionID, reason string) error {
+				return a.subagentTools.InterruptTo(childSessionID, reason)
+			},
+		)
+	}
 	srv.SetJobsProvider(a.webJobs)
 	// M10 P5 (ADR D-WEB2-I): wire the image-attachment store when multimodal is
 	// enabled (registerAttachments created it); otherwise the attachment APIs

@@ -257,6 +257,20 @@ type nativeSubagentHistoryRequest struct {
 	MaxMessages     int     `json:"maxMessages"`
 }
 
+type nativeSubagentPromptRequest struct {
+	ParentSessionID string             `json:"parentSessionId"`
+	ChildSessionID  string             `json:"childSessionId"`
+	Mode            string             `json:"mode"`
+	Content         []nativePromptPart `json:"content"`
+	ClientTimeZone  string             `json:"clientTimeZone"`
+}
+
+type nativeSubagentInterruptRequest struct {
+	ParentSessionID string `json:"parentSessionId"`
+	ChildSessionID  string `json:"childSessionId"`
+	Mode            string `json:"mode"`
+}
+
 type nativeSessionSearchRequest struct {
 	Query string `json:"query"`
 }
@@ -313,7 +327,7 @@ func (s *Server) registerNativeRoutes(mux *http.ServeMux) {
 		"agentPreset.list", "agentPreset.select", "settings.describe",
 		"settings.mutate", "settings.update", "settings.replace", "credentials.describe", "dynamicCordisRunner/syncInspectManifest",
 		"dynamicCordisRunner/inventory", "llm.providers", "llm.models", "llm.discoverModels", "skill.list",
-		"subagent.list", "subagent.history",
+		"subagent.list", "subagent.history", "subagent.prompt", "subagent.interrupt",
 	} {
 		mux.Handle("POST /api/"+method, s.requireAuth(http.HandlerFunc(s.handleNativeRPC)))
 	}
@@ -945,6 +959,10 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 		return s.nativeSubagentList(r, raw)
 	case "subagent.history":
 		return s.nativeSubagentHistory(r, raw)
+	case "subagent.prompt":
+		return s.nativeSubagentPrompt(r, raw)
+	case "subagent.interrupt":
+		return s.nativeSubagentInterrupt(r, raw)
 	case "dynamicCordisRunner/syncInspectManifest":
 		return nativeRPCSuccess(nil)
 	case "dynamicCordisRunner/inventory":
@@ -1332,6 +1350,89 @@ func (s *Server) nativeSubagentHistory(r *http.Request, raw json.RawMessage) nat
 		return nativeRPCFailure("internal", err.Error(), nil)
 	}
 	return s.nativeSessionHistory(r, childRaw)
+}
+
+func (s *Server) authorizeNativeSubagent(ctx context.Context, parentID, childID, mode string) (nativeRPCResult, bool) {
+	if parentID == "" || childID == "" || mode == "" {
+		return nativeRPCFailure("bad-request", "parentSessionId, childSessionId, and mode are required", nil), false
+	}
+	if mode != "continuable" {
+		return nativeRPCFailure("bad-request", "mode must be continuable for this operation", nil), false
+	}
+	if _, err := s.store.LoadSession(ctx, parentID); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nativeRPCFailure("subagent-parent-not-found", "parent session not found", map[string]any{"parentSessionId": parentID}), false
+		}
+		return nativeRPCFailure("internal", err.Error(), nil), false
+	}
+	events, err := s.store.LoadSession(ctx, childID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nativeRPCFailure("subagent-not-found", "subagent session not found", map[string]any{"childSessionId": childID}), false
+		}
+		return nativeRPCFailure("internal", err.Error(), nil), false
+	}
+	parent, _, _ := nativeSessionLineage(events)
+	if parent != parentID {
+		return nativeRPCFailure("subagent-unauthorized", "subagent does not belong to the requested parent", map[string]any{
+			"parentSessionId": parentID, "childSessionId": childID,
+		}), false
+	}
+	return nativeRPCResult{}, true
+}
+
+func (s *Server) nativeSubagentPrompt(r *http.Request, raw json.RawMessage) nativeRPCResult {
+	var req nativeSubagentPromptRequest
+	if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
+		return failure
+	}
+	req.ParentSessionID = strings.TrimSpace(req.ParentSessionID)
+	req.ChildSessionID = strings.TrimSpace(req.ChildSessionID)
+	req.Mode = strings.TrimSpace(req.Mode)
+	if failure, ok := s.authorizeNativeSubagent(r.Context(), req.ParentSessionID, req.ChildSessionID, req.Mode); !ok {
+		return failure
+	}
+	var text string
+	for _, part := range req.Content {
+		switch part.Type {
+		case "text":
+			text += part.Text
+		case "image":
+			return nativeRPCFailure("not-supported", "native subagent image prompt is not wired", nil)
+		default:
+			return nativeRPCFailure("bad-request", "unsupported subagent prompt content type", nil)
+		}
+	}
+	if strings.TrimSpace(text) == "" {
+		return nativeRPCFailure("bad-request", "subagent prompt text content is required", nil)
+	}
+	if s.nativeSubagentPromptFn == nil {
+		return nativeRPCFailure("not-supported", "subagent prompt handler not wired", nil)
+	}
+	if err := s.nativeSubagentPromptFn(r.Context(), req.ChildSessionID, text); err != nil {
+		return nativeRPCFailure("subagent-prompt-failed", err.Error(), nil)
+	}
+	return nativeRPCSuccess(map[string]any{"messageId": nativeRPCID()})
+}
+
+func (s *Server) nativeSubagentInterrupt(r *http.Request, raw json.RawMessage) nativeRPCResult {
+	var req nativeSubagentInterruptRequest
+	if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
+		return failure
+	}
+	req.ParentSessionID = strings.TrimSpace(req.ParentSessionID)
+	req.ChildSessionID = strings.TrimSpace(req.ChildSessionID)
+	req.Mode = strings.TrimSpace(req.Mode)
+	if failure, ok := s.authorizeNativeSubagent(r.Context(), req.ParentSessionID, req.ChildSessionID, req.Mode); !ok {
+		return failure
+	}
+	if s.nativeSubagentInterruptFn == nil {
+		return nativeRPCFailure("not-supported", "subagent interrupt handler not wired", nil)
+	}
+	if err := s.nativeSubagentInterruptFn(req.ChildSessionID, "native subagent interrupt"); err != nil {
+		return nativeRPCFailure("subagent-interrupt-failed", err.Error(), nil)
+	}
+	return nativeRPCSuccess(map[string]any{"accepted": true})
 }
 
 func (s *Server) nativeAgentPresetList() nativeRPCResult {

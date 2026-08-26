@@ -118,6 +118,33 @@ func (t *SubagentTools) Report() SubagentReportTool { return SubagentReportTool{
 // Resume returns the persisted-child cold-resume tool.
 func (t *SubagentTools) Resume() SubagentResumeTool { return SubagentResumeTool{t: t} }
 
+// SendTo queues one browser-originated follow-up for a live continuable child.
+// The web adapter uses this method after it has performed the durable parent
+// lineage check; the tool bundle remains the owner of the live Run reference.
+func (t *SubagentTools) SendTo(ctx context.Context, childID, message string) error {
+	info, _, _ := t.lookup(childID)
+	if info == nil {
+		return fmt.Errorf("subagent: unknown subagent %q", childID)
+	}
+	if info.run.Send == nil {
+		return fmt.Errorf("%w: %s", ErrNotContinuable, childID)
+	}
+	return info.run.Send(ctx, message)
+}
+
+// InterruptTo cancels one browser-addressed child turn. The web adapter
+// performs parent/mode authorization before calling this process-local seam.
+func (t *SubagentTools) InterruptTo(childID, reason string) error {
+	info, _, _ := t.lookup(childID)
+	if info == nil {
+		return fmt.Errorf("subagent: unknown subagent %q", childID)
+	}
+	if info.run.Cancel == nil {
+		return fmt.Errorf("subagent: cancel is unavailable for %q", childID)
+	}
+	return info.run.Cancel(reason)
+}
+
 // callerSession returns the active session id (the delegating session for a
 // spawn and the parent filter for subagent_list); "" when no owner provider is
 // installed.

@@ -36,6 +36,7 @@
 - [ ] P36-2.1：实现会话、工作区、设置、模型、权限、文件、附件、命令、技能、队列、审批和导出接口。
 - [ ] P36-2.2：补齐 host downlink、连接状态、断线重连、续传及剩余原生接口。
 - [x] P36-2.2a：host downlink 首次连接下发活动会话、session status、Workspace/archive 快照，并在 turn start/end 时推送状态变化。
+- [x] P36-2.2b：接入 `subagent.prompt/interrupt`，校验 parent/child lineage 与 continuable mode，并连接 live child inbox/cancel seam。
 - [ ] P36-3.1：补齐全部 projection key，并完成生产数据规模验收。
 - [ ] P36-4.1：接入 layout、theme、brand、sidebar、workspace 和 conversation 插件。
 - [ ] P36-4.2：接入 tool、trajectory、composer、command、input trigger、reference 和 skill 插件。

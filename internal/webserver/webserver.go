@@ -85,7 +85,9 @@ type Server struct {
 	// nativeQueueUpdateFn accepts the DSH action vocabulary. The legacy queue
 	// callback above intentionally remains text/action-only for the REST API;
 	// this seam carries the native edit payload without weakening that API.
-	nativeQueueUpdateFn func(ctx context.Context, sessionID, itemID, action, text string) error
+	nativeQueueUpdateFn       func(ctx context.Context, sessionID, itemID, action, text string) error
+	nativeSubagentPromptFn    func(ctx context.Context, childSessionID, text string) error
+	nativeSubagentInterruptFn func(childSessionID, reason string) error
 
 	// statusFn is the dsh-session-status alignment: it computes the live state
 	// (warning/ongoing/done/idle + labels + running-subagent count) for one
@@ -523,6 +525,16 @@ func (s *Server) SetQueueManager(
 // for the edit action; remove and steer receive an empty string.
 func (s *Server) SetNativeQueueUpdater(fn func(ctx context.Context, sessionID, itemID, action, text string) error) {
 	s.nativeQueueUpdateFn = fn
+}
+
+// SetNativeSubagentManager wires the live child inbox and cancellation seams
+// used by DSH's subagent.prompt and subagent.interrupt RPCs.
+func (s *Server) SetNativeSubagentManager(
+	prompt func(ctx context.Context, childSessionID, text string) error,
+	interrupt func(childSessionID, reason string) error,
+) {
+	s.nativeSubagentPromptFn = prompt
+	s.nativeSubagentInterruptFn = interrupt
 }
 
 // SetSessionManager wires the session new/resume API (POST /api/sessions and
