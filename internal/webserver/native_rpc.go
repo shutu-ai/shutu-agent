@@ -27,12 +27,38 @@ import (
 )
 
 const (
-	nativeRPCTypeRequest  = "client-request"
-	nativeRPCTypeResponse = "server-response"
-	nativeMuxPath         = "/api/events.mux"
-	nativeHostPath        = "/api/events.host"
-	webSocketGUID         = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+	nativeRPCTypeRequest       = "client-request"
+	nativeRPCTypeResponse      = "server-response"
+	nativeRPCTypeServerRequest = "server-request"
+	nativeMuxPath              = "/api/events.mux"
+	nativeHostPath             = "/api/events.host"
+	webSocketGUID              = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+	nativeSettingsOnboarding   = "ui-onboarding"
 )
+
+var nativeSettingsSchema = map[string]any{
+	"uid": 0,
+	"refs": map[string]any{
+		"0": map[string]any{"uid": 0, "type": "any", "meta": map[string]any{}},
+	},
+}
+
+type nativeSettingsDocument struct {
+	Value    map[string]any
+	Revision int
+}
+
+type nativeSettingsPathOp struct {
+	Op    string   `json:"op"`
+	Path  []string `json:"path"`
+	Value any      `json:"value"`
+}
+
+type nativeSettingsViewRequest struct {
+	Namespace string                 `json:"ns"`
+	Ops       []nativeSettingsPathOp `json:"ops"`
+	Expected  *int                   `json:"expectedRevision"`
+}
 
 type nativeRPCRequest struct {
 	Type    string          `json:"type"`
@@ -134,7 +160,9 @@ type nativeWorkspaceListValue struct {
 }
 
 type nativeEventEnvelope struct {
+	Type    string `json:"type"`
 	RPCID   string `json:"rpcId"`
+	Method  string `json:"method"`
 	Payload any    `json:"payload"`
 }
 
@@ -154,7 +182,9 @@ func (s *Server) registerNativeRoutes(mux *http.ServeMux) {
 	for _, method := range []string{
 		"host.describe", "session.list", "session.search", "session.create",
 		"session.history", "session.rename", "session.prompt", "session.cancel",
-		"workspace.list",
+		"workspace.list", "agentPreset.list", "settings.describe",
+		"settings.mutate", "credentials.describe", "dynamicCordisRunner/syncInspectManifest",
+		"dynamicCordisRunner/inventory", "llm.providers", "llm.models",
 	} {
 		mux.Handle("POST /api/"+method, s.requireAuth(http.HandlerFunc(s.handleNativeRPC)))
 	}
@@ -199,6 +229,126 @@ func nativeDecode(raw json.RawMessage, value any) nativeRPCResult {
 		return nativeRPCFailure("bad-request", "payload is invalid JSON", map[string]any{"message": err.Error()})
 	}
 	return nativeRPCResult{}
+}
+
+func (s *Server) nativeSettingsDescribe() nativeRPCResult {
+	s.nativeSettingsMu.Lock()
+	defer s.nativeSettingsMu.Unlock()
+	document := s.nativeSettings[nativeSettingsOnboarding]
+	return nativeRPCSuccess(map[string]any{
+		"writable":    true,
+		"hasDocument": true,
+		"namespaces":  []any{s.nativeSettingsView(nativeSettingsOnboarding, document)},
+	})
+}
+
+func (s *Server) nativeSettingsMutate(raw json.RawMessage) nativeRPCResult {
+	var req nativeSettingsViewRequest
+	if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
+		return failure
+	}
+	if strings.TrimSpace(req.Namespace) == "" {
+		return nativeRPCFailure("bad-request", "ns is required", nil)
+	}
+	if req.Namespace != nativeSettingsOnboarding {
+		return nativeRPCFailure("not-found", "native settings namespace is not registered", map[string]any{"ns": req.Namespace})
+	}
+
+	s.nativeSettingsMu.Lock()
+	defer s.nativeSettingsMu.Unlock()
+	document := s.nativeSettings[req.Namespace]
+	if document.Value == nil {
+		document.Value = map[string]any{}
+	}
+	if req.Expected != nil && *req.Expected != document.Revision {
+		return nativeRPCFailure("settings-conflict", "settings changed since it was read", map[string]any{
+			"expectedRevision": *req.Expected,
+			"actualRevision":   document.Revision,
+		})
+	}
+	for _, op := range req.Ops {
+		if err := applyNativeSettingsOp(&document.Value, op); err != nil {
+			return nativeRPCFailure("settings-rejected", err.Error(), nil)
+		}
+	}
+	if len(req.Ops) > 0 {
+		document.Revision++
+	}
+	s.nativeSettings[req.Namespace] = document
+	return nativeRPCSuccess(s.nativeSettingsView(req.Namespace, document))
+}
+
+func (s *Server) nativeSettingsView(namespace string, document nativeSettingsDocument) map[string]any {
+	value := cloneNativeSettingsMap(document.Value)
+	return map[string]any{
+		"ns":       namespace,
+		"schema":   cloneNativeSettingsValue(nativeSettingsSchema),
+		"value":    value,
+		"user":     cloneNativeSettingsMap(document.Value),
+		"applies":  "live",
+		"secrets":  []any{},
+		"revision": document.Revision,
+	}
+}
+
+func applyNativeSettingsOp(root *map[string]any, op nativeSettingsPathOp) error {
+	if op.Op != "set" && op.Op != "unset" {
+		return fmt.Errorf("unsupported settings operation %q", op.Op)
+	}
+	if len(op.Path) == 0 {
+		if op.Op == "unset" {
+			*root = map[string]any{}
+			return nil
+		}
+		value, ok := op.Value.(map[string]any)
+		if !ok {
+			return errors.New("setting the section root requires an object")
+		}
+		*root = cloneNativeSettingsMap(value)
+		return nil
+	}
+	current := *root
+	for _, key := range op.Path[:len(op.Path)-1] {
+		child, ok := current[key].(map[string]any)
+		if !ok {
+			child = map[string]any{}
+			current[key] = child
+		}
+		current = child
+	}
+	leaf := op.Path[len(op.Path)-1]
+	if op.Op == "unset" {
+		delete(current, leaf)
+	} else {
+		current[leaf] = cloneNativeSettingsValue(op.Value)
+	}
+	return nil
+}
+
+func cloneNativeSettingsMap(source map[string]any) map[string]any {
+	if source == nil {
+		return map[string]any{}
+	}
+	cloned := make(map[string]any, len(source))
+	for key, value := range source {
+		cloned[key] = cloneNativeSettingsValue(value)
+	}
+	return cloned
+}
+
+func cloneNativeSettingsValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return cloneNativeSettingsMap(typed)
+	case []any:
+		cloned := make([]any, len(typed))
+		for index, item := range typed {
+			cloned[index] = cloneNativeSettingsValue(item)
+		}
+		return cloned
+	default:
+		return value
+	}
 }
 
 func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawMessage) nativeRPCResult {
@@ -281,6 +431,58 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 		return nativeRPCSuccess(map[string]any{"accepted": true})
 	case "workspace.list":
 		return s.nativeWorkspaceList(r)
+	case "agentPreset.list":
+		// Shutu does not persist DSH Agent Preset documents yet. Returning the
+		// protocol's empty catalog keeps the native settings surface usable and
+		// makes the capability boundary explicit to the client.
+		return nativeRPCSuccess(map[string]any{
+			"presets": []any{}, "authorable": false, "hasDocument": false,
+		})
+	case "settings.describe":
+		return s.nativeSettingsDescribe()
+	case "settings.mutate":
+		return s.nativeSettingsMutate(raw)
+	case "credentials.describe":
+		var req struct {
+			Refs []string `json:"refs"`
+		}
+		if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
+			return failure
+		}
+		credentials := make(map[string]any, len(req.Refs))
+		for _, ref := range req.Refs {
+			// Never return a secret or infer configuration from process
+			// environment here. The DSH UI can still render the credential
+			// boundary and will report it as unavailable/read-only.
+			credentials[ref] = map[string]any{"configured": false, "writable": false}
+		}
+		return nativeRPCSuccess(map[string]any{"credentials": credentials})
+	case "llm.providers":
+		provider := "deepseek-official"
+		displayName := "DeepSeek"
+		if cfg := s.cfgFn; cfg != nil {
+			view := cfg()
+			if configured, ok := view["provider"].(string); ok && strings.TrimSpace(configured) != "" {
+				provider = configured
+				displayName = configured
+			}
+		}
+		return nativeRPCSuccess(map[string]any{"providers": []any{
+			map[string]any{
+				"provider": provider, "displayName": displayName,
+				"settingsNs": "llm-deepseek", "settingsPath": []string{},
+				"active": true,
+			},
+		}})
+	case "llm.models":
+		// The native model catalog is intentionally empty until the live
+		// provider adapter is exposed through the clean DSH RPC surface. The
+		// response shape still lets Models render its empty/loading state.
+		return nativeRPCSuccess(map[string]any{"groups": []any{}, "failures": []any{}})
+	case "dynamicCordisRunner/syncInspectManifest":
+		return nativeRPCSuccess(nil)
+	case "dynamicCordisRunner/inventory":
+		return nativeRPCSuccess([]any{})
 	default:
 		return nativeRPCFailure("not-supported", "native RPC method is not implemented", map[string]any{"method": method})
 	}
@@ -449,7 +651,16 @@ func (s *Server) handleNativeMuxWebSocket(w http.ResponseWriter, r *http.Request
 	defer conn.Close()
 	var writes sync.Mutex
 	write := func(payload any) error {
-		body, err := json.Marshal(nativeEventEnvelope{RPCID: nativeRPCID(), Payload: payload})
+		method := ""
+		switch frame := payload.(type) {
+		case nativeSubscribedFrame:
+			method = frame.Type
+		case nativeSessionEventFrame:
+			method = frame.Type
+		}
+		body, err := json.Marshal(nativeEventEnvelope{
+			Type: nativeRPCTypeServerRequest, RPCID: nativeRPCID(), Method: method, Payload: payload,
+		})
 		if err != nil {
 			return err
 		}

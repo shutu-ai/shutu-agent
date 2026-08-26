@@ -1,5 +1,6 @@
 import { AppWebEntry } from '@deepseek-ai/dsh-client-web'
 import * as clientModules from '@deepseek-ai/dsh-client-modules/client'
+import type { DshNativePluginRegistration } from './dsh-native-plugins'
 
 /** Build-time switch for the DSH-native UI entry. The legacy Shutu shell stays
  * available until the host protocol and plugin manifest are ready. */
@@ -20,9 +21,28 @@ interface DshModuleLoaderTarget {
 const dshModulesID = '@deepseek-ai/dsh-client-modules'
 
 /** Install the inline bootstrap seam used by the native build. */
-export function installDshNativeBoot(windowObject: Window = window): void {
+export function installDshNativeBoot(
+  windowObject: Window = window,
+  plugins: readonly DshNativePluginRegistration[] = [],
+): void {
   const dshWindow = windowObject as DshBootWindow
   if (dshWindow.__ModuleLoader__ !== undefined && dshWindow.__DSH_BOOT__ !== undefined) return
+
+  const nativeBootEntries = [
+    { id: dshModulesID, url: '', rev: 'inline', external: [], inject: [], immediately: true },
+    ...plugins.map(({ id, module }) => ({
+      id,
+      url: '',
+      rev: 'inline',
+      // The modules are already linked into the shell, so no network arrival
+      // is needed. Keep the declared Cordis dependencies in the graph for
+      // parity and diagnostics while Loader resolves the module objects
+      // locally.
+      external: [],
+      inject: module.inject === undefined ? [] : [...module.inject],
+      immediately: true,
+    })),
+  ]
 
   const target: DshModuleLoaderTarget = {
     mode: 'queue',
@@ -39,10 +59,16 @@ export function installDshNativeBoot(windowObject: Window = window): void {
       )
     },
   }
+  for (const { id, module } of plugins) {
+    target.pendingQueue.push({
+      id,
+      factory: () => module as unknown as Record<string, unknown>,
+    })
+  }
   dshWindow.__ModuleLoader__ = target
   dshWindow.__DSH_BOOT__ = {
-    rev: 'shutu-native-p36-2',
-    entries: [{ id: dshModulesID, url: '', rev: 'inline', immediately: true }],
+    rev: 'shutu-native-p36-3',
+    entries: nativeBootEntries,
   }
 }
 
@@ -54,7 +80,8 @@ export function hasDshNativeBoot(windowObject: Window = window): boolean {
 
 /** Mount the DSH Cordis/plugin UI once the host boot contract is present. */
 export async function mountDshNativeApp(container: HTMLElement): Promise<void> {
-  installDshNativeBoot()
+  const { DSH_NATIVE_PLUGINS } = await import('virtual:shutu-dsh-native-plugins')
+  installDshNativeBoot(window, DSH_NATIVE_PLUGINS)
   if (!hasDshNativeBoot()) {
     throw new Error('shutu web: DSH native boot contract is unavailable; configure the DSH host bridge first')
   }

@@ -29,6 +29,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jabing/shutu-agent/internal/attachment"
@@ -63,6 +64,14 @@ type Server struct {
 	// value falls back to the server process cwd.
 	defaultWorkdir string
 	srv            *http.Server
+
+	// nativeSettings is the small settings document owned by the DSH native
+	// adapter. It currently carries the native onboarding acknowledgement. The
+	// document is intentionally process-local until Shutu's persistent settings
+	// model is folded into the native API; this keeps the native contract real
+	// without coupling it to the legacy REST settings surface.
+	nativeSettingsMu sync.Mutex
+	nativeSettings   map[string]nativeSettingsDocument
 
 	// M10 W1 interactive wiring (ADR D-WEB2-A/B/C): the optional handlers the
 	// composition root injects after New. All three are nil until a Setter is
@@ -339,6 +348,9 @@ func New(st store.Store, token, addr string) (*Server, error) {
 		tokenHash: sha256.Sum256([]byte(token)),
 		authOn:    token != "",
 		addr:      addr,
+		nativeSettings: map[string]nativeSettingsDocument{
+			nativeSettingsOnboarding: {Value: map[string]any{}},
+		},
 	}
 	// The React shell (login view + frontend assets) is public so a fresh
 	// browser can load the page and present the token form (D-WEB-2): it holds
@@ -428,6 +440,11 @@ func New(st store.Store, token, addr string) (*Server, error) {
 	// M10 W4 (ADR D-WEB2-H): the read-only subagent and background-job panels.
 	mux.Handle("GET /api/subagents", s.requireAuth(http.HandlerFunc(s.handleSubagents)))
 	mux.Handle("GET /api/jobs", s.requireAuth(http.HandlerFunc(s.handleJobs)))
+	// DSH client-hmr opens this public development channel on every native
+	// page. Shutu's production dist has no hot-rebuild publisher, but returning
+	// a valid idle SSE stream prevents the native UI from treating the missing
+	// optional channel as a transport failure.
+	mux.Handle("GET /plugins/events", http.HandlerFunc(s.handlePluginEvents))
 	// DSH native Connection transport: unary client-request RPC plus the two
 	// downlink-only WebSocket streams. The existing REST routes remain intact.
 	s.registerNativeRoutes(mux)
@@ -437,6 +454,20 @@ func New(st store.Store, token, addr string) (*Server, error) {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	return s, nil
+}
+
+func (s *Server) handlePluginEvents(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "event stream unsupported", http.StatusInternalServerError)
+		return
+	}
+	_, _ = io.WriteString(w, ": native hmr channel idle\n\n")
+	flusher.Flush()
+	<-r.Context().Done()
 }
 
 // Handler returns the authenticated HTTP handler (for httptest).
