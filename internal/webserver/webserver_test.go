@@ -6,6 +6,7 @@
 package webserver
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -112,6 +113,57 @@ func TestSessionExportHeadMatchesDownloadHeadersWithoutBody(t *testing.T) {
 	get := doReq(t, srv.Handler(), http.MethodGet, "/api/session.export?sessionId=export-head", "tok")
 	if get.Code != http.StatusOK || get.Body.Len() == 0 || get.Header().Get("Content-Length") != rec.Header().Get("Content-Length") {
 		t.Fatalf("GET export = %d body=%d headers=%#v", get.Code, get.Body.Len(), get.Header())
+	}
+}
+
+func TestSessionExportIncludesDescendantLineage(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	seedSession(t, st, "root", []session.Event{{
+		Seq: 1, Type: session.EventUserMessage, At: time.UnixMilli(1000), Version: session.EventVersion,
+		Data: json.RawMessage(`{"text":"root"}`),
+	}})
+	seedSession(t, st, "child", []session.Event{{
+		Seq: 1, Type: session.EventSubagentStart, At: time.UnixMilli(1001), Version: session.EventVersion,
+		Data: json.RawMessage(`{"id":"child","parentSession":"root","depth":1}`),
+	}, {
+		Seq: 2, Type: session.EventAssistantMessage, At: time.UnixMilli(1002), Version: session.EventVersion,
+		Data: json.RawMessage(`{"text":"child"}`),
+	}})
+	seedSession(t, st, "grandchild", []session.Event{{
+		Seq: 1, Type: session.EventSubagentStart, At: time.UnixMilli(1003), Version: session.EventVersion,
+		Data: json.RawMessage(`{"id":"grandchild","parentSession":"child","depth":2}`),
+	}})
+
+	rec := doReq(t, srv.Handler(), http.MethodGet, "/api/session.export?sessionId=root&includeDescendants=true", "tok")
+	if rec.Code != http.StatusOK || rec.Header().Get("Content-Disposition") != `attachment; filename="dsh-session-root.zip"` {
+		t.Fatalf("descendant export = %d headers=%#v", rec.Code, rec.Header())
+	}
+	archive, err := zip.NewReader(bytes.NewReader(rec.Body.Bytes()), int64(rec.Body.Len()))
+	if err != nil {
+		t.Fatalf("read descendant export: %v", err)
+	}
+	if len(archive.File) != 3 {
+		t.Fatalf("archive entries = %d, want 3", len(archive.File))
+	}
+	wantNames := []string{"session/events.jsonl", "subagents/child/events.jsonl", "subagents/grandchild/events.jsonl"}
+	for index, want := range wantNames {
+		if archive.File[index].Name != want {
+			t.Fatalf("archive entry %d = %q, want %q", index, archive.File[index].Name, want)
+		}
+	}
+	childReader, err := archive.File[1].Open()
+	if err != nil {
+		t.Fatalf("open child export: %v", err)
+	}
+	childData, err := io.ReadAll(childReader)
+	_ = childReader.Close()
+	if err != nil || !bytes.Contains(childData, []byte(`"text":"child"`)) {
+		t.Fatalf("child export data = %s, err=%v", childData, err)
+	}
+
+	bad := doReq(t, srv.Handler(), http.MethodHead, "/api/session.export?sessionId=root&includeDescendants=maybe", "tok")
+	if bad.Code != http.StatusBadRequest {
+		t.Fatalf("invalid includeDescendants status = %d, want 400", bad.Code)
 	}
 }
 

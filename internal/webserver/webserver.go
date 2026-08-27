@@ -1572,16 +1572,23 @@ func (s *Server) loadEventWindow(ctx context.Context, id string, before, after u
 	return s.store.LoadSessionPage(ctx, id, before, after, limit)
 }
 
-// handleSessionExport serves a portable ZIP containing the current session's
-// append-only events. It accepts dsh's sessionId/includeDescendants query
-// shape; Shutu currently exports the selected session only.
+// handleSessionExport serves a portable ZIP containing the selected session's
+// append-only events. includeDescendants follows the persisted subagent
+// lineage and writes each descendant under its own stable archive directory,
+// matching the DSH export contract without making the browser understand the
+// storage layout.
 func (s *Server) handleSessionExport(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.URL.Query().Get("sessionId"))
 	if id == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "sessionId is required"})
 		return
 	}
-	events, err := s.store.LoadSession(r.Context(), id)
+	includeDescendants, err := exportIncludeDescendants(r.URL.Query().Get("includeDescendants"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	ids, err := s.sessionExportIDs(r.Context(), id, includeDescendants)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
@@ -1592,25 +1599,29 @@ func (s *Server) handleSessionExport(w http.ResponseWriter, r *http.Request) {
 	}
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
-	entry, err := zw.Create(path.Join("session", "events.jsonl"))
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
-	}
-	for _, ev := range events {
-		row := struct {
-			Seq     uint64          `json:"seq"`
-			Type    string          `json:"type"`
-			Version int             `json:"version"`
-			At      time.Time       `json:"at"`
-			Data    json.RawMessage `json:"data"`
-		}{ev.Seq, ev.Type, ev.Version, ev.At, ev.Data}
-		raw, marshalErr := json.Marshal(row)
-		if marshalErr != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": marshalErr.Error()})
+	for index, sessionID := range ids {
+		events, loadErr := s.store.LoadSession(r.Context(), sessionID)
+		if loadErr != nil {
+			_ = zw.Close()
+			if errors.Is(loadErr, store.ErrNotFound) {
+				writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
+				return
+			}
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": loadErr.Error()})
 			return
 		}
-		if _, writeErr := entry.Write(append(raw, '\n')); writeErr != nil {
+		entryPath := path.Join("session", "events.jsonl")
+		if index > 0 {
+			entryPath = path.Join("subagents", safeExportSessionID(sessionID), "events.jsonl")
+		}
+		entry, createErr := zw.Create(entryPath)
+		if createErr != nil {
+			_ = zw.Close()
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": createErr.Error()})
+			return
+		}
+		if writeErr := writeSessionExportEvents(entry, events); writeErr != nil {
+			_ = zw.Close()
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": writeErr.Error()})
 			return
 		}
@@ -1619,12 +1630,7 @@ func (s *Server) handleSessionExport(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	filename := "shutu-session-" + strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
-			return r
-		}
-		return '_'
-	}, id) + ".zip"
+	filename := "dsh-session-" + safeExportSessionID(id) + ".zip"
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 	w.Header().Set("Content-Length", strconv.Itoa(buf.Len()))
@@ -1633,6 +1639,95 @@ func (s *Server) handleSessionExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, _ = w.Write(buf.Bytes())
+}
+
+func exportIncludeDescendants(raw string) (bool, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false, nil
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, fmt.Errorf("includeDescendants must be a boolean")
+	}
+	return value, nil
+}
+
+func safeExportSessionID(id string) string {
+	return strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			return r
+		}
+		return '_'
+	}, id)
+}
+
+func writeSessionExportEvents(w io.Writer, events []session.Event) error {
+	for _, ev := range events {
+		row := struct {
+			Seq     uint64          `json:"seq"`
+			Type    string          `json:"type"`
+			Version int             `json:"version"`
+			At      time.Time       `json:"at"`
+			Data    json.RawMessage `json:"data"`
+		}{ev.Seq, ev.Type, ev.Version, ev.At, ev.Data}
+		raw, err := json.Marshal(row)
+		if err != nil {
+			return err
+		}
+		if _, err := w.Write(append(raw, '\n')); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// sessionExportIDs returns the root first, then descendants in stable ID
+// order. Lineage is read from the durable subagent/start event rather than
+// inferred from titles or workspace membership.
+func (s *Server) sessionExportIDs(ctx context.Context, root string, includeDescendants bool) ([]string, error) {
+	if _, err := s.store.GetSessionMeta(ctx, root); err != nil {
+		return nil, err
+	}
+	if !includeDescendants {
+		return []string{root}, nil
+	}
+	metas, err := s.store.ListSessions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	children := make(map[string][]string)
+	for _, meta := range metas {
+		if meta.ID == root {
+			continue
+		}
+		events, loadErr := s.store.LoadSession(ctx, meta.ID)
+		if loadErr != nil {
+			return nil, loadErr
+		}
+		parent, _, _ := nativeSessionLineage(events)
+		if parent != "" {
+			children[parent] = append(children[parent], meta.ID)
+		}
+	}
+	for parent := range children {
+		sort.Strings(children[parent])
+	}
+	ids := []string{root}
+	seen := map[string]bool{root: true}
+	var appendDescendants func(string)
+	appendDescendants = func(parent string) {
+		for _, child := range children[parent] {
+			if seen[child] {
+				continue
+			}
+			seen[child] = true
+			ids = append(ids, child)
+			appendDescendants(child)
+		}
+	}
+	appendDescendants(root)
+	return ids, nil
 }
 
 func (s *Server) feedbackStore(w http.ResponseWriter) (store.MessageFeedbackStore, bool) {

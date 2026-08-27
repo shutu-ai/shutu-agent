@@ -63,6 +63,7 @@
 - [x] P36-5.5b：`session.cancel` 对无活动 turn 幂等返回 accepted，对未知会话返回结构化 `session-not-found`。
 - [x] P36-5.5c：native mux 重连重新下发 session、pending interaction、queue 和 active jobs 基线；队列 mutation 后向现有订阅推送全量快照。
 - [x] P36-5.5d：补齐 DSH `HEAD /api/session.export` 预检，返回与 ZIP 下载一致的类型、文件名和长度且不发送响应体。
+- [x] P36-5.5e：`session.export` 支持 `includeDescendants`，按持久化 subagent lineage 将根会话及后代稳定写入 DSH ZIP 路径，并拒绝非法布尔参数。
 - [ ] P36-6.1：建立桌面/移动端、深色/浅色、空数据/加载/错误状态截图基线。
 - [x] P36-6.1a：通过 Playwright 保存原生 DSH 空数据桌面/移动基线截图；截图目录支持 `SHUTU_E2E_ARTIFACT_DIR`，本轮命令与结果记录在 `docs/dsh-web-parity-acceptance.md`。
 - [ ] P36-6.2：对比布局尺寸、字体、间距、颜色、边框、滚动条、焦点和弹层行为。
