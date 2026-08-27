@@ -106,6 +106,7 @@
 - [x] P36-7.3d：native performance fixture 支持可控持续 mux 下行（`SHUTU_PERF_CONTINUOUS_SECONDS`），5 秒窗口收到 46 帧且保持 61 FPS 采样、DOM 887、控制台错误 0；真实任务持续增长仍待目标环境。
 - [x] P36-7.3e：native `session.prompt` 改为 admission RPC；handler 阻塞模型/工具 turn 时仍立即返回 accepted，实际生命周期继续通过 mux 下行，且请求取消不会取消已接收的 turn。
 - [x] P36-7.3f：native `session.list` 使用 sessions 事件计数列与 256 条 tail projection，不再为侧边栏刷新全量重放会话；105,953 条真实历史实测返回约 245ms。
+- [x] P36-7.3g：真实 turn 运行中仍可读取 native `session.list`（返回 `running:true`）；事件计数/尾部 projection 优化后实测约 462ms，且持续采样得到真实 event→UI 延迟 320–347ms。
 - [x] P36-7.3b：100,000 条 fixture 记录 native DSH FPS/heap/DOM/Long Task 与控制台错误：61 帧窗口、heap 56→44MiB、DOM 821、Long Task 1,374ms、错误 0；持续增长与重连恢复仍待补齐。
 - [x] P36-7.3a：Playwright Chromium 对真实 75,950 条会话完成约 32.2 秒原生观测：heap 36→43MiB、最大 DOM 554、Trajectory 16 行、Long Task 1,788ms、控制台错误 0；持续增长和重连恢复仍待补齐。
 - [ ] P36-7.4：在原生 DSH UI 替换完成后重新设定并通过性能阈值。
