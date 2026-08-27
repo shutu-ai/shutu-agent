@@ -122,4 +122,6 @@ The real-task harness now accepts `SHUTU_REAL_TASK_PROMPT` and dispatches `sessi
 
 ## P36-7.1 / P36-7.2 / P36-7.3 Native 100k fixture evidence (2026-08-27)
 
+`SHUTU_PERF_CONTINUOUS_SECONDS=5 npm.cmd run performance` passed with a controlled native mux stream injected after connection: `continuousFrames=46`, the settled sample kept `61` frames, `DOM=887`, and zero browser errors. The injected events are a transport/rendering fixture, not a production Super Mario stream, so real continuous history growth, event-to-UI latency and reconnect recovery remain open.
+
 `SHUTU_PERF_EVENTS=100000 npm.cmd run performance` passed against the native dist. The dense fixture includes reasoning deltas, token usage, two tool call/result pairs, long text and TypeScript code blocks. The native Trajectory loaded a tail page in `2,353ms`, issued a `beforeSeq` request for earlier history, exposed logical row count `33` with `32` mounted rows, maximum DOM `821`, heap `56MiB` at first sample and `44MiB` after settling, `61` frames in the sample window, `1,374ms` cumulative Long Tasks and zero console errors. This is synthetic fixture evidence; real 100k history, continuous growth, event-to-UI latency and reconnect recovery remain open.

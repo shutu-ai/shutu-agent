@@ -14,6 +14,7 @@ const host = '127.0.0.1'
 const port = Number(process.env.SHUTU_PERF_PORT ?? 18118)
 const baseUrl = `http://${host}:${port}/`
 const eventCount = Number(process.env.SHUTU_PERF_EVENTS ?? 10_000)
+const continuousSeconds = Number(process.env.SHUTU_PERF_CONTINUOUS_SECONDS ?? 0)
 
 if (!existsSync(vite)) throw new Error(`Vite is unavailable at ${vite}; set SHUTU_DSH_ROOT to a DSH checkout.`)
 if (!existsSync(distIndex)) throw new Error(`Native dist is unavailable at ${distIndex}; run npm.cmd run build first.`)
@@ -132,8 +133,35 @@ async function waitForServer() {
 async function installNativeMock(page) {
   const sockets = new Set()
   const requests = []
+  let continuousFrames = 0
   await page.route('**/plugins/events', route => route.fulfill({ status: 200, contentType: 'text/event-stream', body: 'retry: 3000\n\n' }))
-  await page.routeWebSocket('**/api/events.*', ws => { sockets.add(new URL(ws.url()).pathname); ws.onMessage(() => {}) })
+  await page.routeWebSocket('**/api/events.*', ws => {
+    const pathname = new URL(ws.url()).pathname
+    sockets.add(pathname)
+    ws.onMessage(() => {})
+    if (pathname !== '/api/events.mux' || !Number.isFinite(continuousSeconds) || continuousSeconds <= 0) return
+    let liveSeq = events.length
+    let tick = 0
+    const deadline = Date.now() + continuousSeconds * 1_000
+    const timer = setInterval(() => {
+      if (Date.now() >= deadline) {
+        clearInterval(timer)
+        return
+      }
+      tick += 1
+      liveSeq += 1
+      continuousFrames += 1
+      ws.send(JSON.stringify({
+        type: 'server-request', rpcId: `perf-live-${tick}`, method: 'session/event',
+        payload: {
+          type: 'session/event', sessionId: 'perf', event: {
+            seq: liveSeq, type: 'session/title', time: Date.now(),
+            data: { title: `Native performance live ${tick}` },
+          },
+        },
+      }))
+    }, 100)
+  })
   await page.route('**/api/**', async route => {
     if (route.request().method() !== 'POST') return route.fallback()
     const body = JSON.parse(route.request().postData() ?? '{}')
@@ -142,7 +170,7 @@ async function installNativeMock(page) {
     const value = body.method === 'session.history' ? historyPage(body.payload) : valueFor(body.method, body)
     return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ type: 'server-response', rpcId: body.rpcId, result: { ok: true, value } }) })
   })
-  return { sockets, requests }
+  return { sockets, requests, get continuousFrames() { return continuousFrames } }
 }
 
 async function sample(page) {
@@ -173,7 +201,8 @@ try {
   const browser = await chromium.launch({ headless: true, args: ['--enable-precise-memory-info'] })
   try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
-    const { sockets, requests } = await installNativeMock(page)
+    const fixture = await installNativeMock(page)
+    const { sockets, requests } = fixture
     const errors = []
     page.on('console', message => { if (message.type() === 'error') errors.push(message.text()) })
     page.on('pageerror', error => errors.push(error.message))
@@ -273,7 +302,10 @@ try {
     await page.waitForTimeout(1_000)
     const second = await sample(page)
     assert.deepEqual(errors, [], `native performance fixture emitted browser errors: ${errors.join('; ')}`)
-    console.log(JSON.stringify({ browser: 'playwright-chromium', transport: 'native-rpc+downlink-websocket', eventCount: events.length, loadMs: Math.round(loadMs), first, second, sockets: [...sockets].sort(), consoleErrors: errors }))
+    if (continuousSeconds > 0) {
+      assert.ok(fixture.continuousFrames > 0, 'native mux continuous fixture did not deliver any event frames')
+    }
+    console.log(JSON.stringify({ browser: 'playwright-chromium', transport: 'native-rpc+downlink-websocket', eventCount: events.length, continuousSeconds, continuousFrames: fixture.continuousFrames, loadMs: Math.round(loadMs), first, second, sockets: [...sockets].sort(), consoleErrors: errors }))
     await page.close()
   } finally { await browser.close() }
 } finally { server.kill() }
