@@ -81,14 +81,16 @@ async function selectSession(page, summary) {
   await page.getByRole('button', { name: /Search sessions|搜索会话/ }).click({ force: true })
   const search = page.getByPlaceholder(/Search sessions\.\.\.|搜索会话…/)
   await search.fill(term)
-  const hitText = page.getByText(term.slice(0, Math.min(term.length, 32)), { exact: false }).last()
-  await hitText.waitFor({ state: 'visible', timeout: 15_000 })
-  const hit = hitText.locator('xpath=ancestor::button[@role="treeitem"]')
+  // Search result snippets can be localized or contain replacement glyphs;
+  // the native command palette's treeitem is the stable DSH selection seam.
+  const hit = page.locator('[role="tree"]').last().getByRole('treeitem').first()
+  await hit.waitFor({ state: 'visible', timeout: 15_000 })
   // The DSH command palette keeps a pointer-blocking backdrop over the
   // result list while keyboard focus remains in the search field. Dispatching
   // the semantic treeitem click mirrors the keyboard/selection path without
   // depending on backdrop geometry in headless Chromium.
   await hit.dispatchEvent('click')
+  await search.press('Escape')
 }
 
 async function installBrowserMetrics(page) {
