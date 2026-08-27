@@ -76,8 +76,11 @@
 - [ ] P36-6.4：为每个 DSH 核心页面保留截图和交互证据。
 - [ ] P36-7.1：用真实“网页版超级玛丽”长任务验证 5 万、10 万级历史记录。
 - [x] P36-7.1a：在当前真实服务的超级玛丽会话上完成原生 DSH 75,950 条历史加载基线；100,000 条与持续增长窗口仍待目标环境。
+- [x] P36-7.1b：native DSH Chromium fixture 完成 100,000 条密集历史基线，加载约 2.35s、逻辑行 33、实际挂载 32 行、DOM 821、heap 峰值 56MiB；合成数据不替代真实 100k 任务。
 - [ ] P36-7.2：验证 reasoning/token/tool 持续流、长文本、代码块和密集工具调用。
+- [x] P36-7.2a：100,000 条 fixture 覆盖 reasoning、token usage、tool call/result、长文本和 TypeScript code block，并通过原生 Trajectory 展示与分页验证。
 - [ ] P36-7.3：记录 FPS、JS heap、DOM、Long Task、事件到 UI 延迟和重连恢复时间。
+- [x] P36-7.3b：100,000 条 fixture 记录 native DSH FPS/heap/DOM/Long Task 与控制台错误：61 帧窗口、heap 56→44MiB、DOM 821、Long Task 1,374ms、错误 0；持续增长与重连恢复仍待补齐。
 - [x] P36-7.3a：Playwright Chromium 对真实 75,950 条会话完成约 32.2 秒原生观测：heap 36→43MiB、最大 DOM 554、Trajectory 16 行、Long Task 1,788ms、控制台错误 0；持续增长和重连恢复仍待补齐。
 - [ ] P36-7.4：在原生 DSH UI 替换完成后重新设定并通过性能阈值。
 - [ ] P36-8.1：生成包含 DSH 原生 dist、Go 服务、协议适配层和版本元数据的自包含交付包。
