@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1935,7 +1936,10 @@ func TestNativeMuxWebSocketSendsSubscriptionBaseline(t *testing.T) {
 	srv, st := newTestServer(t, "tok")
 	seedSession(t, st, "native-ws", nil)
 	queueItems := []QueueItem{{ID: "q-1", Text: "queued prompt", Placement: "queued"}}
+	var queueCalls atomic.Int32
+	var jobCalls atomic.Int32
 	srv.SetQueueManager(func(context.Context, string) ([]QueueItem, error) {
+		queueCalls.Add(1)
 		return queueItems, nil
 	}, func(_ context.Context, _ string, text string) (QueueItem, error) {
 		item := QueueItem{ID: "q-2", Text: text, Placement: "queued"}
@@ -1943,6 +1947,7 @@ func TestNativeMuxWebSocketSendsSubscriptionBaseline(t *testing.T) {
 		return item, nil
 	}, nil)
 	srv.SetJobsProvider(func(context.Context, string) ([]map[string]any, error) {
+		jobCalls.Add(1)
 		return []map[string]any{{
 			"id": "job-1", "kind": "bash", "label": "build", "status": "running",
 			"started_at": time.UnixMilli(1234).UTC(),
@@ -2068,6 +2073,8 @@ func TestNativeMuxWebSocketSendsSubscriptionBaseline(t *testing.T) {
 	if queueUpdateEnvelope.Payload.Type != "session/queue" || len(queueUpdateEnvelope.Payload.Items) != 2 {
 		t.Fatalf("queue update frame = %s", queueUpdateFrame)
 	}
+	queueCallsBeforeEvent := queueCalls.Load()
+	jobCallsBeforeEvent := jobCalls.Load()
 	emit(session.Event{Seq: 1, Type: session.EventPlanMode, At: time.UnixMilli(2001), Version: session.EventVersion, Data: json.RawMessage(`{"active":true}`)})
 	var eventFrame []byte
 	for {
@@ -2106,6 +2113,12 @@ func TestNativeMuxWebSocketSendsSubscriptionBaseline(t *testing.T) {
 	}
 	if projectionEnvelope.Payload.Type != "session/projection" || projectionEnvelope.Payload.Key != "plan" || projectionEnvelope.Payload.Seq != 1 {
 		t.Fatalf("live projection frame = %s", projectionFrame)
+	}
+	if got := queueCalls.Load(); got != queueCallsBeforeEvent {
+		t.Fatalf("queue provider called for unrelated plan event: before=%d after=%d", queueCallsBeforeEvent, got)
+	}
+	if got := jobCalls.Load(); got != jobCallsBeforeEvent {
+		t.Fatalf("job provider called for unrelated plan event: before=%d after=%d", jobCallsBeforeEvent, got)
 	}
 }
 

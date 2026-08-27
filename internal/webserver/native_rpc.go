@@ -3691,6 +3691,19 @@ func (s *Server) handleNativeMuxWebSocket(w http.ResponseWriter, r *http.Request
 			interactionKindsMu.Unlock()
 		}
 	}
+	// Queue snapshots are refreshed by notifyNativeMux after the queue RPC
+	// mutates the queue. Job snapshots are refreshed by the durable job/*
+	// lifecycle events below. Do not resend either control-plane snapshot for
+	// every assistant chunk: a dense stream can otherwise turn one text delta
+	// into several redundant WebSocket frames and React state updates.
+	eventNeedsControlSnapshots := func(ev session.Event) bool {
+		switch ev.Type {
+		case session.EventJobStart, session.EventJobStatus, session.EventJobDone:
+			return true
+		default:
+			return false
+		}
+	}
 	metas, err := s.store.ListSessions(ctx)
 	if err != nil {
 		return
@@ -3776,7 +3789,9 @@ func (s *Server) handleNativeMuxWebSocket(w http.ResponseWriter, r *http.Request
 				_ = write(nativeProjectionFrame{Type: "session/projection", SessionID: meta.ID, Key: key, Value: value, Seq: ev.Seq})
 			}
 			emitInteraction(meta.ID, ev)
-			emitSnapshots()
+			if eventNeedsControlSnapshots(ev) {
+				emitSnapshots()
+			}
 		}))
 	}
 	go drainNativeWebSocket(reader, cancel)
