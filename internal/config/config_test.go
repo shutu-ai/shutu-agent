@@ -423,6 +423,10 @@ func TestLoadCompactionDefaultsWhenAbsent(t *testing.T) {
 	if cfg.Compaction.MaxChars != 0 {
 		t.Errorf("compaction.max_chars = %d, want 0 (engine default)", cfg.Compaction.MaxChars)
 	}
+	if cfg.Compaction.SummaryInputTokens != DefaultCompactionSummaryInputTokens {
+		t.Errorf("compaction.summary_input_tokens = %d, want default %d",
+			cfg.Compaction.SummaryInputTokens, DefaultCompactionSummaryInputTokens)
+	}
 	// The whitelist is the full default-on set (all capability tools):
 	// compaction adds no tools of its own.
 	want := defaultOnWhitelist()
@@ -437,7 +441,7 @@ func TestLoadCompactionDefaultsWhenAbsent(t *testing.T) {
 // max_chars stays 0 (engine default) (dispatch-m5c-2a §2).
 func TestLoadCompactionParsesSectionAndFallsBack(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte("compaction:\n  enabled: true\n  token_threshold: 50000\n  retain_turns: 12\n  max_chars: 2000\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("compaction:\n  enabled: true\n  token_threshold: 50000\n  retain_turns: 12\n  summary_input_tokens: 9000\n  max_chars: 2000\n"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	cfg, err := Load(path)
@@ -456,11 +460,14 @@ func TestLoadCompactionParsesSectionAndFallsBack(t *testing.T) {
 	if cfg.Compaction.MaxChars != 2000 {
 		t.Errorf("compaction.max_chars = %d, want 2000", cfg.Compaction.MaxChars)
 	}
+	if cfg.Compaction.SummaryInputTokens != 9000 {
+		t.Errorf("compaction.summary_input_tokens = %d, want 9000", cfg.Compaction.SummaryInputTokens)
+	}
 
 	// Non-positive (including negative) thresholds fall back to defaults;
 	// max_chars stays 0.
 	path2 := filepath.Join(t.TempDir(), "config2.yaml")
-	if err := os.WriteFile(path2, []byte("compaction:\n  enabled: true\n  token_threshold: 0\n  retain_turns: -3\n  max_chars: 0\n"), 0o600); err != nil {
+	if err := os.WriteFile(path2, []byte("compaction:\n  enabled: true\n  token_threshold: 0\n  retain_turns: -3\n  summary_input_tokens: -1\n  max_chars: 0\n"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	cfg2, err := Load(path2)
@@ -477,6 +484,10 @@ func TestLoadCompactionParsesSectionAndFallsBack(t *testing.T) {
 	}
 	if cfg2.Compaction.MaxChars != 0 {
 		t.Errorf("compaction.max_chars = %d, want 0 (engine default)", cfg2.Compaction.MaxChars)
+	}
+	if cfg2.Compaction.SummaryInputTokens != DefaultCompactionSummaryInputTokens {
+		t.Errorf("compaction.summary_input_tokens -1 = %d, want default %d",
+			cfg2.Compaction.SummaryInputTokens, DefaultCompactionSummaryInputTokens)
 	}
 }
 

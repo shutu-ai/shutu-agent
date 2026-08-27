@@ -187,6 +187,7 @@ func (a *app) registerCompaction() error {
 		TokenThreshold:        a.cfg.Compaction.TokenThreshold,
 		RetainTurns:           a.cfg.Compaction.RetainTurns,
 		RetainTokens:          a.cfg.Compaction.RetainTokens,
+		SummaryInputTokens:    a.cfg.Compaction.SummaryInputTokens,
 		FrameSummary:          true,
 		RequireSmallerSummary: true,
 	})

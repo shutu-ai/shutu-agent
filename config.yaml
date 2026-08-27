@@ -175,6 +175,9 @@ compaction:
   # dsh-style token tail budget. When positive it takes precedence over
   # retain_turns; 0 keeps the legacy turn-based fallback.
   retain_tokens: 0
+  # Conversation token budget for each summary-model request. Larger prefixes
+  # are reduced in bounded intermediate chunks; 0/absent => 12000.
+  summary_input_tokens: 12000
   # Upper bound on the generated summary; 0/absent ⇒ the engine default.
   max_chars: 0
 

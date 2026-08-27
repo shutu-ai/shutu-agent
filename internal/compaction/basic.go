@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jabing/shutu-agent/internal/llm"
 	"github.com/jabing/shutu-agent/internal/session"
@@ -49,7 +50,21 @@ type BasicOpts struct {
 	// RequireSmallerSummary rejects a checkpoint whose framed summary is not
 	// strictly smaller than the surface it replaces.
 	RequireSmallerSummary bool
+	// SummaryInputTokens bounds the conversation portion of each summarizer
+	// request. When the shadowed prefix is larger, it is summarized in balanced
+	// chunks and the intermediate summaries are reduced recursively. <= 0 uses
+	// the production default; this keeps restored, high-density sessions from
+	// sending one unbounded request to the provider.
+	SummaryInputTokens int
 }
+
+const (
+	// defaultSummaryInputTokens leaves room for the compaction instruction and
+	// the provider's response while keeping each request well below common
+	// context windows. It is a request bound, not a persistence limit.
+	defaultSummaryInputTokens = 12000
+	maxSummaryReductionDepth  = 8
+)
 
 // defaultTokenEstimate is the zero-dependency token proxy: ~4 bytes per token,
 // a common tokenizer rule of thumb (CJK underestimates slightly at ≈3
@@ -69,6 +84,9 @@ type BasicEngine struct {
 // NewBasic returns a BasicEngine with the given options (a nil Tokenizer uses
 // the built-in estimate).
 func NewBasic(opts BasicOpts) *BasicEngine {
+	if opts.SummaryInputTokens <= 0 {
+		opts.SummaryInputTokens = defaultSummaryInputTokens
+	}
 	est := opts.Tokenizer
 	if est == nil {
 		est = defaultTokenEstimate
@@ -357,6 +375,82 @@ Rules:
 // LLM (the same internal/llm interface the loop uses; the whole answer is
 // failure is returned as an error — fail-open is the wiring's decision.
 func (e *BasicEngine) summarize(ctx context.Context, msgs []llm.Message) (string, error) {
+	return e.summarizeBounded(ctx, msgs, 0)
+}
+
+// summarizeBounded prevents a restored high-density session from turning one
+// pressure check into an unbounded provider request. Chunks are formed at
+// message/tool-result boundaries, summarized independently, then recursively
+// reduced until the intermediate summaries fit one request. The operation is
+// intentionally model-backed: unlike pruning, it does not silently discard
+// old context. Only the final summary is persisted by doCompact.
+func (e *BasicEngine) summarizeBounded(ctx context.Context, msgs []llm.Message, depth int) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if len(msgs) == 0 {
+		return "", errors.New("compaction: no messages to summarize")
+	}
+	if e.summaryInputTokensFor(msgs) <= e.summaryInputBudget() {
+		return e.summarizeDirect(ctx, msgs)
+	}
+	if depth >= maxSummaryReductionDepth {
+		return "", fmt.Errorf("compaction: summary reduction exceeded depth %d", maxSummaryReductionDepth)
+	}
+	chunks := e.splitSummaryChunks(msgs)
+	if len(chunks) <= 1 {
+		// A single oversized message (usually a tool result) cannot be split
+		// without breaking the provider's role/tool shape. splitSummaryChunks
+		// has already bounded that temporary copy, so summarize the bounded
+		// message instead of sending the original oversized payload.
+		if len(chunks) == 1 && e.summaryInputTokensFor(chunks[0]) <= e.summaryInputBudget() {
+			return e.summarizeDirect(ctx, chunks[0])
+		}
+		return "", fmt.Errorf("compaction: unable to split summary input below %d tokens", e.summaryInputBudget())
+	}
+	partials := make([]llm.Message, 0, len(chunks))
+	for i, chunk := range chunks {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		part, err := e.summarizeBounded(ctx, chunk, depth+1)
+		if err != nil {
+			return "", fmt.Errorf("compaction: summarize chunk %d/%d: %w", i+1, len(chunks), err)
+		}
+		if strings.TrimSpace(part) != "" {
+			partials = append(partials, llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text(part)}})
+		}
+	}
+	if len(partials) == 0 {
+		return "", errors.New("compaction: all summary chunks were empty")
+	}
+	// A provider is normally expected to return a concise checkpoint, but a
+	// misconfigured model or a deterministic test double may echo a long body.
+	// Bound only this transient reduction input so recursion always converges;
+	// the final persisted summary is still validated by doCompact.
+	if e.summaryInputTokensFor(partials) > e.summaryInputBudget() {
+		remaining := e.summaryInputBudget()
+		for i := range partials {
+			if remaining <= 0 {
+				partials = partials[:i]
+				break
+			}
+			left := len(partials) - i
+			allocation := remaining / left
+			if allocation <= 0 {
+				allocation = 1
+			}
+			text := e.limitSummaryText(partials[i].Text(), allocation)
+			partials[i].SetText(text)
+			remaining -= e.est(text)
+		}
+	}
+	return e.summarizeBounded(ctx, partials, depth+1)
+}
+
+// summarizeDirect performs exactly one provider request. The compaction
+// directive remains the final user message, matching the DSH wire contract.
+func (e *BasicEngine) summarizeDirect(ctx context.Context, msgs []llm.Message) (string, error) {
 	if e.opts.LLM == nil {
 		return "", errors.New("compaction: llm required for summary")
 	}
@@ -384,6 +478,151 @@ func (e *BasicEngine) summarize(ctx context.Context, msgs []llm.Message) (string
 		}
 	}
 	return strings.TrimSpace(b.String()), nil
+}
+
+func (e *BasicEngine) summaryInputBudget() int {
+	if e.opts.SummaryInputTokens > 0 {
+		return e.opts.SummaryInputTokens
+	}
+	return defaultSummaryInputTokens
+}
+
+func (e *BasicEngine) summaryTokens(m llm.Message) int {
+	total := e.est(m.ToolCallID)
+	for _, block := range m.Content {
+		total += e.est(block.Text)
+	}
+	for _, call := range m.ToolCalls {
+		total += e.est(call.Name) + e.est(call.Arguments)
+	}
+	return total
+}
+
+func (e *BasicEngine) summaryInputTokensFor(msgs []llm.Message) int {
+	total := 0
+	for _, msg := range msgs {
+		total += e.summaryTokens(msg)
+	}
+	return total
+}
+
+func (e *BasicEngine) splitSummaryChunks(msgs []llm.Message) [][]llm.Message {
+	limit := e.summaryInputBudget()
+	chunks := make([][]llm.Message, 0)
+	current := make([]llm.Message, 0)
+	currentTokens := 0
+	flush := func() {
+		if len(current) > 0 {
+			chunks = append(chunks, current)
+			current = make([]llm.Message, 0)
+			currentTokens = 0
+		}
+	}
+	for i := 0; i < len(msgs); {
+		end := i + 1
+		// Keep an assistant tool call and its immediate results together. This
+		// avoids making a provider request start with an orphan tool message.
+		if len(msgs[i].ToolCalls) > 0 {
+			ids := make(map[string]bool, len(msgs[i].ToolCalls))
+			for _, call := range msgs[i].ToolCalls {
+				ids[call.ID] = true
+			}
+			for end < len(msgs) && msgs[end].Role == llm.RoleTool && ids[msgs[end].ToolCallID] {
+				end++
+			}
+		}
+		group := msgs[i:end]
+		groupTokens := e.summaryInputTokensFor(group)
+		if len(current) > 0 && currentTokens+groupTokens > limit {
+			flush()
+		}
+		if groupTokens > limit {
+			// A single giant tool result or message still must not escape the
+			// bound. Keep the group shape and bound each message to the remaining
+			// budget; this is only summarizer input, never persisted history.
+			if len(current) > 0 {
+				flush()
+			}
+			bounded := make([]llm.Message, 0, len(group))
+			remaining := limit
+			for _, msg := range group {
+				if remaining <= 0 {
+					break
+				}
+				clamped := e.boundSummaryMessage(msg, remaining)
+				if e.summaryTokens(clamped) > 0 {
+					bounded = append(bounded, clamped)
+					remaining -= e.summaryTokens(clamped)
+				}
+			}
+			if len(bounded) > 0 {
+				chunks = append(chunks, bounded)
+			}
+			i = end
+			continue
+		}
+		current = append(current, group...)
+		currentTokens += groupTokens
+		i = end
+	}
+	flush()
+	return chunks
+}
+
+func (e *BasicEngine) boundSummaryMessage(msg llm.Message, budget int) llm.Message {
+	if budget <= 0 {
+		return llm.Message{Role: msg.Role}
+	}
+	out := msg
+	out.Content = make([]llm.ContentBlock, len(msg.Content))
+	remaining := budget
+	for i, block := range msg.Content {
+		out.Content[i] = block
+		if block.Text == "" || remaining <= 0 {
+			out.Content[i].Text = ""
+			continue
+		}
+		out.Content[i].Text = e.limitSummaryText(block.Text, remaining)
+		remaining -= e.est(out.Content[i].Text)
+	}
+	out.ToolCalls = append([]llm.ToolCall(nil), msg.ToolCalls...)
+	for i := range out.ToolCalls {
+		if remaining <= 0 {
+			out.ToolCalls[i].Name = ""
+			out.ToolCalls[i].Arguments = ""
+			continue
+		}
+		out.ToolCalls[i].Name = e.limitSummaryText(out.ToolCalls[i].Name, remaining)
+		remaining -= e.est(out.ToolCalls[i].Name)
+		out.ToolCalls[i].Arguments = e.limitSummaryText(out.ToolCalls[i].Arguments, remaining)
+		remaining -= e.est(out.ToolCalls[i].Arguments)
+	}
+	return out
+}
+
+func (e *BasicEngine) limitSummaryText(text string, budget int) string {
+	if budget <= 0 || text == "" {
+		return ""
+	}
+	if e.est(text) <= budget {
+		return text
+	}
+	runes := []rune(text)
+	lo, hi := 0, len(runes)
+	for lo < hi {
+		mid := lo + (hi-lo+1)/2
+		candidate := string(runes[:mid])
+		if e.est(candidate) <= budget {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	result := string(runes[:lo])
+	if !utf8.ValidString(result) {
+		return ""
+	}
+	return result
 }
 
 const (

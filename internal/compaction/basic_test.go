@@ -157,6 +157,73 @@ func TestCompactIfNeededTriggersOnPressure(t *testing.T) {
 	}
 }
 
+func TestCompactNowBoundsLargeSummaryRequests(t *testing.T) {
+	var pairs []any
+	for i := 0; i < 6; i++ {
+		pairs = append(pairs,
+			session.EventUserMessage, session.NewUserMessage(strings.Repeat("u", 16)),
+			session.EventAssistantMessage, session.NewAssistantMessage(strings.Repeat("a", 16), nil, "stop"),
+		)
+	}
+	sess := buildSession(t, pairs...)
+	model := &fakeLLM{text: "checkpoint"}
+	eng := NewBasic(BasicOpts{
+		Tokenizer:          byteTokens,
+		LLM:                model,
+		Model:              "m",
+		RetainTurns:        1,
+		SummaryInputTokens: 20,
+	})
+	if _, err := eng.CompactNow(context.Background(), sess); err != nil {
+		t.Fatalf("CompactNow: %v", err)
+	}
+	if len(model.reqs) < 2 {
+		t.Fatalf("requests = %d, want staged summary requests", len(model.reqs))
+	}
+	for i, req := range model.reqs {
+		if len(req.Messages) == 0 {
+			t.Fatalf("request %d has no messages", i)
+		}
+		conversation := req.Messages[:len(req.Messages)-1] // final item is the DSH directive
+		tokens := 0
+		for _, msg := range conversation {
+			tokens += len(msg.ToolCallID)
+			for _, block := range msg.Content {
+				tokens += len(block.Text)
+			}
+			for _, call := range msg.ToolCalls {
+				tokens += len(call.Name) + len(call.Arguments)
+			}
+		}
+		if tokens > 20 {
+			t.Fatalf("request %d conversation tokens = %d, want <= 20: %+v", i, tokens, conversation)
+		}
+	}
+}
+
+func TestCompactNowBoundsSingleOversizedMessage(t *testing.T) {
+	sess := threeTurnSession(t)
+	model := &fakeLLM{text: "checkpoint"}
+	eng := NewBasic(BasicOpts{
+		Tokenizer:          byteTokens,
+		LLM:                model,
+		Model:              "m",
+		RetainTurns:        1,
+		SummaryInputTokens: 1,
+	})
+	if _, err := eng.CompactNow(context.Background(), sess); err != nil {
+		t.Fatalf("CompactNow: %v", err)
+	}
+	if len(model.reqs) == 0 {
+		t.Fatal("expected a bounded summary request")
+	}
+	for _, msg := range model.reqs[0].Messages[:len(model.reqs[0].Messages)-1] {
+		if got := len(msg.Text()); got > 1 {
+			t.Fatalf("oversized message text = %d bytes, want <= 1", got)
+		}
+	}
+}
+
 func TestCompactIfNeededContextOverflowForces(t *testing.T) {
 	sess := threeTurnSession(t)
 	llm := &fakeLLM{text: "S"}

@@ -92,6 +92,7 @@ func (f *acpFactory) NewSession(ctx context.Context, cwd string) (acp.Session, e
 			TokenThreshold:        threshold,
 			RetainTurns:           f.app.cfg.Compaction.RetainTurns,
 			RetainTokens:          f.app.cfg.Compaction.RetainTokens,
+			SummaryInputTokens:    f.app.cfg.Compaction.SummaryInputTokens,
 			FrameSummary:          true,
 			RequireSmallerSummary: true,
 		})

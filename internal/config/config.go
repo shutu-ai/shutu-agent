@@ -50,6 +50,9 @@ const (
 	// or 0 for the engine to fall back on).
 	DefaultCompactionTokenThreshold = 32000
 	DefaultCompactionRetainTurns    = 8
+	// DefaultCompactionSummaryInputTokens bounds each model request used to
+	// summarize a large shadowed prefix.
+	DefaultCompactionSummaryInputTokens = 12000
 
 	// M5d-2 skill defaults (dispatch-m5d-2 §2): the injected catalog is
 	// bounded to 500 chars when skill.catalog_max_chars is absent or
@@ -495,6 +498,10 @@ type CompactionConfig struct {
 	// (the wiring passes BasicEngine's default, or 0 for the engine to fall
 	// back on).
 	MaxChars int `yaml:"max_chars"`
+	// SummaryInputTokens bounds the conversation portion of each summarizer
+	// request; <= 0 means the safe default. Oversized prefixes are reduced in
+	// bounded intermediate chunks.
+	SummaryInputTokens int `yaml:"summary_input_tokens"`
 }
 
 // SkillConfig is the skill policy (dispatch-m5d-2 §2 / ADR
@@ -953,6 +960,9 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Compaction.RetainTurns <= 0 {
 		cfg.Compaction.RetainTurns = DefaultCompactionRetainTurns
+	}
+	if cfg.Compaction.SummaryInputTokens <= 0 {
+		cfg.Compaction.SummaryInputTokens = DefaultCompactionSummaryInputTokens
 	}
 	// M5d-2 skill defaults: the sample config enables this capability; the catalog is bounded to
 	// 500 chars and the returned skill body to 8000 chars. Enabling skill
