@@ -21,6 +21,7 @@ type nativeProjectionCursor struct {
 	provider          string
 	model             string
 	requestID         string
+	requestHeaderSeen bool
 	surface           []uint64
 	surfaceGeneration int
 	values            map[string]any
@@ -92,11 +93,16 @@ func (c *nativeProjectionCursor) project(sessionID string, ev session.Event) nat
 		c.provider = nativeEventString(data, "provider")
 		c.model = nativeEventString(data, "model")
 		c.requestID = nativeEventString(data, "requestId", "request_id")
-		projectedType = "request/context"
-		projectedData = map[string]any{
-			"provider": c.provider,
-			"model":    c.model,
+		reason := "initial"
+		if c.requestHeaderSeen {
+			reason = "update"
 		}
+		projectedType = "request/header"
+		projectedData = map[string]any{
+			"header": nativeLLMRequestHeader(data),
+			"reason": reason,
+		}
+		c.requestHeaderSeen = true
 		if contextWindow := nativeEventNumber(data, "contextWindow", "context_window"); contextWindow > 0 {
 			projectedData["contextWindow"] = contextWindow
 		}
@@ -348,13 +354,7 @@ func (c *nativeProjectionCursor) foldContextBreakdown(ev session.Event, data map
 			header = nested
 		}
 		if ev.Type == session.EventLLMRequestStart {
-			_, hasSystem := header["system"]
-			_, hasSystemPrompt := header["systemPrompt"]
-			_, hasSystemPromptSnake := header["system_prompt"]
-			_, hasTools := header["tools"]
-			if !hasSystem && !hasSystemPrompt && !hasSystemPromptSnake && !hasTools {
-				return
-			}
+			header = nativeLLMRequestHeader(data)
 		}
 		breakdown.systemTokens = 0
 		breakdown.toolsTokens = 0
@@ -1137,6 +1137,42 @@ func nativeUserMessageData(sessionID string, seq uint64, data map[string]any) ma
 		"role":    "user",
 		"content": content,
 		"source":  source,
+	}
+}
+
+// nativeLLMRequestHeader converts Shutu's private request-start detail into
+// the DSH request/header event consumed by Trajectory. DSH deliberately keeps
+// the model-visible system prompt and complete tool catalog on this event so
+// the first trajectory cell can be rendered as SYSTEM: Initial System Prompt,
+// followed by the actual user/message cell.
+func nativeLLMRequestHeader(data map[string]any) map[string]any {
+	system := ""
+	for _, message := range nativeEventArray(data, "messages") {
+		if nativeEventString(message, "role") != "system" {
+			continue
+		}
+		if text := nativeEventString(message, "text"); text != "" {
+			if system != "" {
+				system += "\n"
+			}
+			system += text
+		}
+	}
+	tools := nativeEventValue(data, "tools")
+	if tools == nil {
+		tools = []any{}
+	}
+	config := map[string]any{
+		"provider": nativeEventString(data, "provider"),
+		"model":    nativeEventString(data, "model"),
+	}
+	if effort := nativeEventString(data, "reasoningEffort", "reasoning_effort"); effort != "" {
+		config["reasoningEffort"] = effort
+	}
+	return map[string]any{
+		"config": config,
+		"system": system,
+		"tools":  tools,
 	}
 }
 

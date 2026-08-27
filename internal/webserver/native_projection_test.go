@@ -92,3 +92,47 @@ func TestNativeProjectionKeepsImplicitTurnStartAlignedWithToolEvents(t *testing.
 		}
 	}
 }
+
+func TestNativeProjectionConvertsRequestStartToDSHRequestHeader(t *testing.T) {
+	cursor := newNativeProjectionCursor()
+	projected := cursor.project("request-header", session.Event{
+		Seq: 7, Type: session.EventLLMRequestStart, At: time.UnixMilli(1007), Version: session.EventVersion,
+		Data: json.RawMessage(`{"requestId":"turn:1:step:1","provider":"deepseek-official","model":"deepseek-v4-flash","reasoningEffort":"high","messages":[{"role":"system","text":"Initial System Prompt"},{"role":"user","text":"hi"}],"tools":[{"name":"read","description":"Read files","parameters":{"type":"object"}}]}`),
+	})
+	if projected.Type != "request/header" {
+		t.Fatalf("projected request type = %q, want request/header", projected.Type)
+	}
+	var data struct {
+		Header struct {
+			Config map[string]any   `json:"config"`
+			System string           `json:"system"`
+			Tools  []map[string]any `json:"tools"`
+		} `json:"header"`
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(projected.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data.Reason != "initial" || data.Header.System != "Initial System Prompt" {
+		t.Fatalf("request header prompt = %+v", data)
+	}
+	if data.Header.Config["provider"] != "deepseek-official" || data.Header.Config["model"] != "deepseek-v4-flash" || data.Header.Config["reasoningEffort"] != "high" {
+		t.Fatalf("request header config = %+v", data.Header.Config)
+	}
+	if len(data.Header.Tools) != 1 || data.Header.Tools[0]["name"] != "read" {
+		t.Fatalf("request header tools = %+v", data.Header.Tools)
+	}
+	updated := cursor.project("request-header", session.Event{
+		Seq: 8, Type: session.EventLLMRequestStart, At: time.UnixMilli(1008), Version: session.EventVersion,
+		Data: json.RawMessage(`{"provider":"deepseek-official","model":"deepseek-v4-flash","messages":[{"role":"system","text":"Updated Prompt"}],"tools":[]}`),
+	})
+	var updatedData struct {
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(updated.Data, &updatedData); err != nil {
+		t.Fatal(err)
+	}
+	if updatedData.Reason != "update" {
+		t.Fatalf("subsequent request header reason = %q, want update", updatedData.Reason)
+	}
+}
