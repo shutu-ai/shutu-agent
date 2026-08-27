@@ -2566,6 +2566,11 @@ func TestNativeHostWebSocketReconcilesSessionsAfterConnect(t *testing.T) {
 
 func TestNativeSessionForkCopiesCompletedTurnPrefixAndMetadata(t *testing.T) {
 	srv, st := newTestServer(t, "tok")
+	forkAdded := make(chan string, 2)
+	removeForkListener := srv.subscribeNativeMuxSessionAdded(func(sessionID string) {
+		forkAdded <- sessionID
+	})
+	defer removeForkListener()
 	workspacePath := t.TempDir()
 	if err := st.CreateWorkspaceWithPath(context.Background(), "fork-workspace", "Fork workspace", workspacePath); err != nil {
 		t.Fatal(err)
@@ -2618,6 +2623,14 @@ func TestNativeSessionForkCopiesCompletedTurnPrefixAndMetadata(t *testing.T) {
 	}
 	if value.SessionID == "" || value.SessionID == "fork-source" {
 		t.Fatalf("fork session id = %q", value.SessionID)
+	}
+	select {
+	case addedID := <-forkAdded:
+		if addedID != value.SessionID {
+			t.Fatalf("native fork notification = %q, want %q", addedID, value.SessionID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("native fork did not notify the native mux")
 	}
 	cloned, err := st.LoadSession(ctx, value.SessionID)
 	if err != nil {

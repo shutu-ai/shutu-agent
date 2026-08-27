@@ -2383,6 +2383,7 @@ func (s *Server) handleSessionFork(w http.ResponseWriter, r *http.Request) {
 			_ = scs.SetSessionConfig(r.Context(), forkID, cfg)
 		}
 	}
+	s.notifyNativeMuxSessionAdded(forkID)
 	writeJSON(w, http.StatusOK, map[string]any{"id": forkID})
 }
 

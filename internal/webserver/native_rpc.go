@@ -3197,6 +3197,9 @@ func (s *Server) nativeSessionFork(r *http.Request, raw json.RawMessage) nativeR
 			}
 		}
 	}
+	// A fork is a new live session as well. Attach it to every resident native
+	// mux before returning so the first follow-up prompt is not missed.
+	s.notifyNativeMuxSessionAdded(forkID)
 	return nativeRPCSuccess(map[string]any{"sessionId": forkID})
 }
 
