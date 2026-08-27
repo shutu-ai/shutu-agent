@@ -380,3 +380,4 @@ P24–P35 已完成首轮实现；P34/P35 的真实环境事项与 P36-1–P36-8
 ## P36 incremental acceptance slices
 
 - [x] P36-4a: `verify-dist.mjs` now requires the complete native DSH client roster plus Typert, Cordis runner, UI Cordis, export, and native Remote bridge entries; a release dist with a partial plugin graph fails verification.
+- [x] P36-8.2e: `npm.cmd run release` completed with 973 modules transformed, 40 native plugins in the manifest, dist verification passed, 45 frontend tests passed, and the full Playwright DSH interaction matrix passed; formal target-host evidence remains open.
