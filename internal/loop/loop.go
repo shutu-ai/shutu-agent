@@ -20,10 +20,6 @@ import (
 	"github.com/jabing/shutu-agent/internal/tools"
 )
 
-// maxSteps bounds the number of tool-call steps in one turn, so a misbehaving
-// model cannot loop forever.
-const maxSteps = 10
-
 // maxInjectorChars bounds the total context text a single pre-step injector may
 // contribute to one step (ADR 2026-08-18-m5-agent-core.md
 // 总体决策: pre_step.max_chars_per_injector, default 4000). Over-budget context
@@ -140,7 +136,9 @@ func maxParallelToolCalls(value int) int {
 }
 
 // Run executes one turn for the given user input. It appends user/message,
-// then runs steps until the model stops requesting tools or maxSteps is hit.
+// then runs steps until the model stops requesting tools. There is no
+// arbitrary fixed step count; context, model/token budgets, and provider
+// errors remain the termination mechanisms, matching DSH's turn boundary.
 // The supplied context cancels the current step (design.md §4).
 func (l *Loop) Run(ctx context.Context, userText string) (runErr error) {
 	turnNumber := l.log.NextTurn()
@@ -162,7 +160,7 @@ func (l *Loop) Run(ctx context.Context, userText string) (runErr error) {
 	if _, err := l.log.Append(session.EventUserMessage, session.NewUserMessage(userText)); err != nil {
 		return err
 	}
-	for step := 0; step < maxSteps; step++ {
+	for step := 0; ; step++ {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("loop: cancelled: %w", err)
 		}
@@ -197,7 +195,6 @@ func (l *Loop) Run(ctx context.Context, userText string) (runErr error) {
 			return nil
 		}
 	}
-	return fmt.Errorf("loop: exceeded %d steps per turn", maxSteps)
 }
 
 // effectiveInjectors returns the ordered pre-step injector list for one turn.

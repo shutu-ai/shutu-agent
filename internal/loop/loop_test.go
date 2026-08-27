@@ -485,24 +485,26 @@ func TestRunCancelContext(t *testing.T) {
 	}
 }
 
-func TestRunMaxSteps(t *testing.T) {
-	// A model that never stops calling tools must hit the step cap.
+func TestRunAllowsMoreThanTenSteps(t *testing.T) {
+	// DSH does not impose a fixed ten-step turn cap. A model may continue
+	// requesting tools until it returns a normal completion or is cancelled.
 	var steps [][]llm.StreamEvent
-	for i := 0; i < maxSteps+1; i++ {
+	for i := 0; i < 11; i++ {
 		steps = append(steps, []llm.StreamEvent{{
 			Kind: llm.StreamFinish, FinishReason: "tool_calls",
 			ToolCalls: []llm.ToolCall{{ID: "c", Name: "get_time", Arguments: "{}"}},
 		}})
 	}
+	steps = append(steps, []llm.StreamEvent{{Kind: llm.StreamTextDelta, Text: "done"}, {Kind: llm.StreamFinish, FinishReason: "stop"}})
 	model := &scriptedLLM{steps: steps}
 	loop, _, _ := newTestLoop(t, model)
 
 	err := loop.Run(context.Background(), "loop")
-	if err == nil {
-		t.Fatal("expected max-steps error")
+	if err != nil {
+		t.Fatalf("run should continue past ten steps: %v", err)
 	}
-	if !strings.Contains(err.Error(), "steps") {
-		t.Fatalf("error = %v", err)
+	if len(model.calls) != 12 {
+		t.Fatalf("model calls = %d, want 12 (11 tool steps plus completion)", len(model.calls))
 	}
 }
 
