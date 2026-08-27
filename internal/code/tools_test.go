@@ -186,13 +186,23 @@ func TestCodeRunToolTruncated(t *testing.T) {
 // omits cwd, DefaultCwd is used as the sandbox working directory.
 func TestCodeRunToolDefaults(t *testing.T) {
 	_, ct, _ := newCodeToolsWithEvents(t)
-	ct.DefaultCwd = testCwd(t)
+	staticCwd := testCwd(t)
+	ct.DefaultCwd = staticCwd
+	dynamicCwd := testCwd(t)
+	called := 0
+	ct.DefaultCwdFunc = func() string {
+		called++
+		return dynamicCwd
+	}
 	out, err := ct.Run().Execute(context.Background(), json.RawMessage(`{"lang":"sh","code":`+jsonString(printCwdCommand())+`}`))
 	if err != nil {
 		t.Fatalf("run_code: %v", err)
 	}
-	if !samePath(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(out), "[stdout]")), ct.DefaultCwd) {
-		t.Fatalf("run_code cwd = %q, want %q (DefaultCwd applied)", strings.TrimSpace(out), ct.DefaultCwd)
+	if !samePath(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(out), "[stdout]")), dynamicCwd) {
+		t.Fatalf("run_code cwd = %q, want %q (DefaultCwdFunc applied)", strings.TrimSpace(out), dynamicCwd)
+	}
+	if called != 1 {
+		t.Fatalf("DefaultCwdFunc calls = %d, want 1", called)
 	}
 }
 

@@ -182,7 +182,7 @@ func TestRuntimeContextUsesDshOrderAndSource(t *testing.T) {
 	if err := json.Unmarshal(log.Events()[3].Data, &catalogSource); err != nil {
 		t.Fatalf("catalog event: %v", err)
 	}
-	if runtimeSource.Source == nil || runtimeSource.Source.Kind != "plugin" || runtimeSource.Source.Plugin != "@deepseek-ai/dsh-system-prompt" {
+	if runtimeSource.Source == nil || runtimeSource.Source.Kind != "plugin" || runtimeSource.Source.Plugin != "@shutu-ai/dsh-system-prompt" {
 		t.Fatalf("runtime source = %+v", runtimeSource.Source)
 	}
 	if catalogSource.Source == nil || catalogSource.Source.Kind != "skill-catalog" {

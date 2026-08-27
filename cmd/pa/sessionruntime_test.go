@@ -112,10 +112,11 @@ func TestApplySessionRuntime(t *testing.T) {
 		return id
 	}
 
-	// 1. A bare session (no override) falls back to the globals and swaps nothing.
+	// 1. A bare session (no override) falls back to the globals and receives a
+	// per-turn prompt clone so DSH model/cwd variables cannot leak across sessions.
 	mustSession("s-global", "", "", "", "", "")
 	rt, restore := a.applySessionRuntime("s-global")
-	if rt.model != "global-model" || rt.provider != "" || rt.effort != "high" || rt.prompt != a.prompt {
+	if rt.model != "global-model" || rt.provider != "" || rt.effort != "high" || rt.prompt == a.prompt {
 		t.Fatalf("global session runtime = (%q, %q, %q, %p), want (global-model, '', high, %p)", rt.model, rt.provider, rt.effort, rt.prompt, a.prompt)
 	}
 	restore()

@@ -141,9 +141,13 @@ h1 { max-width: 52vw; margin: 0; overflow: hidden; color: #f1f5fa; font-size: 20
 .conversation-node-head { display: flex; gap: 8px; padding: 0 8px 4px; color: #6f8095; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; }
 .conversation-node-head span:last-child { margin-left: auto; color: #536277; font-variant-numeric: tabular-nums; }
 .conversation-tool-calls { display: grid; gap: 6px; max-width: 920px; margin-top: 9px; border-top: 1px solid #243244; padding-top: 8px; color: #9de9bd; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; }
+.conversation-tool-call-group { display: grid; gap: 6px; }
 .conversation-tool-call { border: 1px solid #2a4050; border-radius: 6px; padding: 6px 8px; color: #d0dbe6; background: #0b111a; text-transform: none; letter-spacing: normal; }
+.conversation-tool-call-id { color: #b3c3d2; font-size: 10px; }
 .conversation-tool-call span, .conversation-tool-call strong { color: #b3c3d2; font-size: 10px; }
 .conversation-tool-call pre { max-height: 140px; margin-top: 5px; color: #b9c8da; }
+.ptc-call-stack { display: grid; gap: 7px; margin-top: 8px; }
+.ptc-code { margin: 0; max-height: 260px; }
 .conversation-node.user .event-line { background: #6bb6e8; }
 .conversation-node.assistant .event-line { background: #9de9bd; }
 .conversation-node.tool-result .event-line { background: #e6b26e; }

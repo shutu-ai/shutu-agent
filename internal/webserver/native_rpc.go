@@ -48,6 +48,8 @@ const (
 	nativeSettingsOnboarding   = "ui-onboarding"
 	nativeSettingsDeepSeek     = "llm-deepseek"
 	nativeSettingsPiAI         = "llm-pi-ai"
+	nativeSettingsAgentPresets = "agent-presets"
+	nativeWelcomeNoticeVersion = "2026-08-13.1"
 	nativeDirectoryMaxEntries  = 1000
 	nativeSessionListTailLimit = 256
 )
@@ -65,6 +67,15 @@ type nativeSettingsDocument struct {
 }
 
 func nativeSettingsSchemaFor(namespace string) map[string]any {
+	if namespace == nativeSettingsAgentPresets {
+		return map[string]any{
+			"uid": 0,
+			"refs": map[string]any{
+				"0": map[string]any{"uid": 0, "type": "object", "meta": map[string]any{"default": map[string]any{"default": "standard"}}, "dict": map[string]any{"default": 1}},
+				"1": map[string]any{"uid": 1, "type": "string", "meta": map[string]any{}},
+			},
+		}
+	}
 	if namespace != nativeSettingsPiAI {
 		return cloneNativeSettingsValue(nativeSettingsSchema).(map[string]any)
 	}
@@ -133,7 +144,7 @@ type nativeRPCResult struct {
 type nativeRPCError struct {
 	Code    string         `json:"code"`
 	Message string         `json:"message"`
-	Details map[string]any `json:"details,omitempty"`
+	Details map[string]any `json:"details"`
 }
 
 type nativePromptPart struct {
@@ -548,6 +559,9 @@ func (s *Server) handleNativeRespond(w http.ResponseWriter, r *http.Request) {
 func nativeRPCSuccess(value any) nativeRPCResult { return nativeRPCResult{OK: true, Value: value} }
 
 func nativeRPCFailure(code, message string, details map[string]any) nativeRPCResult {
+	if details == nil {
+		details = map[string]any{}
+	}
 	return nativeRPCResult{OK: false, Error: &nativeRPCError{Code: code, Message: message, Details: details}}
 }
 
@@ -780,14 +794,14 @@ func nativePluginInventory() nativeRPCResult {
 	}
 	entries := make([]any, 0, len(packages)+4)
 	for _, name := range packages {
-		id := "@deepseek-ai/dsh-client-" + name
+		id := "@shutu-ai/dsh-client-" + name
 		entries = append(entries, map[string]any{"entryId": id, "moduleName": id, "enabled": true, "fiberPhase": "active"})
 	}
 	for _, item := range []struct{ id, module string }{
-		{"@deepseek-ai/dsh-typert-registry", "@deepseek-ai/dsh-typert-registry"},
-		{"@deepseek-ai/dsh-cordis-client-runner", "@deepseek-ai/dsh-cordis-client-runner"},
-		{"@deepseek-ai/dsh-client-ui-cordis", "@deepseek-ai/dsh-client-ui-cordis"},
-		{"@deepseek-ai/dsh-session-log-export", "@deepseek-ai/dsh-session-log-export"},
+		{"@shutu-ai/dsh-typert-registry", "@shutu-ai/dsh-typert-registry"},
+		{"@shutu-ai/dsh-cordis-client-runner", "@shutu-ai/dsh-cordis-client-runner"},
+		{"@shutu-ai/dsh-client-ui-cordis", "@shutu-ai/dsh-client-ui-cordis"},
+		{"@shutu-ai/dsh-session-log-export", "@shutu-ai/dsh-session-log-export"},
 	} {
 		entries = append(entries, map[string]any{"entryId": item.id, "moduleName": item.module, "enabled": true, "fiberPhase": "active"})
 	}
@@ -824,6 +838,9 @@ func (s *Server) nativeSettingsApply(namespace string, ops []nativeSettingsPathO
 	if namespace == "" {
 		return nativeRPCFailure("bad-request", "ns is required", nil)
 	}
+	if namespace == nativeSettingsAgentPresets {
+		return s.nativeAgentPresetSettingsApply(ops, expected)
+	}
 	if !nativeSettingsNamespace(namespace) {
 		return nativeRPCFailure("not-found", "native settings namespace is not registered", map[string]any{"ns": namespace})
 	}
@@ -837,13 +854,14 @@ func (s *Server) nativeSettingsApply(namespace string, ops []nativeSettingsPathO
 	}
 	if expected != nil && *expected != document.Revision {
 		return nativeRPCFailure("settings-conflict", "settings changed since it was read", map[string]any{
-			"expectedRevision": *expected,
-			"actualRevision":   document.Revision,
+			"ns":       namespace,
+			"expected": *expected,
+			"actual":   document.Revision,
 		})
 	}
 	for _, op := range ops {
 		if err := applyNativeSettingsOp(&document.Value, op); err != nil {
-			return nativeRPCFailure("settings-rejected", err.Error(), nil)
+			return nativeRPCFailure("settings-rejected", err.Error(), map[string]any{"ns": namespace})
 		}
 	}
 	if len(ops) > 0 {
@@ -864,6 +882,53 @@ func (s *Server) nativeSettingsView(namespace string, document nativeSettingsDoc
 		"secrets":  []any{},
 		"revision": document.Revision,
 	}
+}
+
+// nativeAgentPresetSettingsApply is the DSH settings-provider bridge for the
+// agent-presets namespace. The browser writes only the deployment default;
+// the durable setting remains the single source used when the process starts.
+func (s *Server) nativeAgentPresetSettingsApply(ops []nativeSettingsPathOp, expected *int) nativeRPCResult {
+	s.nativeSettingsMu.Lock()
+	defer s.nativeSettingsMu.Unlock()
+	s.ensureNativeSettingsFromConfigLocked()
+	document := s.nativeSettings[nativeSettingsAgentPresets]
+	if document.Value == nil {
+		document.Value = map[string]any{}
+	}
+	if expected != nil && *expected != document.Revision {
+		return nativeRPCFailure("settings-conflict", "settings changed since it was read", map[string]any{
+			"ns": nativeSettingsAgentPresets, "expected": *expected, "actual": document.Revision,
+		})
+	}
+	next := cloneNativeSettingsMap(document.Value)
+	for _, op := range ops {
+		if err := applyNativeSettingsOp(&next, op); err != nil {
+			return nativeRPCFailure("settings-rejected", err.Error(), map[string]any{"ns": nativeSettingsAgentPresets})
+		}
+	}
+	defaultPreset, ok := next["default"].(string)
+	if !ok || strings.TrimSpace(defaultPreset) == "" {
+		return nativeRPCFailure("settings-rejected", "agent-presets.default must be a non-empty preset id", map[string]any{"ns": nativeSettingsAgentPresets})
+	}
+	defaultPreset = strings.TrimSpace(defaultPreset)
+	if !s.nativeAgentPresetAvailable(context.Background(), defaultPreset) {
+		return nativeRPCFailure("agent-preset-invalid", "agent preset is not available", map[string]any{
+			"agentPreset": defaultPreset, "reason": "preset is not available",
+		})
+	}
+	if err := s.store.SetSetting(context.Background(), "agent_preset", defaultPreset); err != nil {
+		return nativeRPCFailure("settings-rejected", err.Error(), map[string]any{"ns": nativeSettingsAgentPresets})
+	}
+	if setter, ok := s.nativeAgentPresetManager.(interface{ SetDefault(string) }); ok {
+		setter.SetDefault(defaultPreset)
+	}
+	document.Value = next
+	document.Value["default"] = defaultPreset
+	if len(ops) > 0 {
+		document.Revision++
+	}
+	s.nativeSettings[nativeSettingsAgentPresets] = document
+	return nativeRPCSuccess(s.nativeSettingsView(nativeSettingsAgentPresets, document))
 }
 
 func applyNativeSettingsOp(root *map[string]any, op nativeSettingsPathOp) error {
@@ -965,10 +1030,21 @@ func (s *Server) ensureNativeSettingsFromConfigLocked() {
 			Value: map[string]any{"providers": profiles},
 		}
 	}
+	if _, exists := s.nativeSettings[nativeSettingsAgentPresets]; !exists {
+		defaultPreset := "standard"
+		if s.cfgFn != nil {
+			if mode := nativeString(s.cfgFn()["mode"]); nativeAgentPresetKnown(mode) {
+				defaultPreset = mode
+			}
+		}
+		s.nativeSettings[nativeSettingsAgentPresets] = nativeSettingsDocument{
+			Value: map[string]any{"default": defaultPreset},
+		}
+	}
 }
 
 func nativeSettingsNamespace(namespace string) bool {
-	return namespace == nativeSettingsOnboarding || namespace == nativeSettingsDeepSeek || namespace == nativeSettingsPiAI
+	return namespace == nativeSettingsOnboarding || namespace == nativeSettingsDeepSeek || namespace == nativeSettingsPiAI || namespace == nativeSettingsAgentPresets
 }
 
 func nativeCopyProviderProfile(profile map[string]any, provider map[string]any) {
@@ -2490,6 +2566,29 @@ func (s *Server) nativeAgentPresetAvailable(ctx context.Context, preset string) 
 	return false
 }
 
+func (s *Server) nativeAgentPresetDefault(ctx context.Context) string {
+	if s.nativeAgentPresetManager != nil {
+		if catalog, err := s.nativeAgentPresetManager.List(ctx); err == nil {
+			for _, entry := range catalog.Presets {
+				if entry.IsDefault && entry.Broken == "" {
+					return entry.ID
+				}
+			}
+			for _, entry := range catalog.Presets {
+				if entry.Broken == "" && entry.ID != "" {
+					return entry.ID
+				}
+			}
+		}
+	}
+	if s.cfgFn != nil {
+		if mode := nativeString(s.cfgFn()["mode"]); nativeAgentPresetKnown(mode) {
+			return mode
+		}
+	}
+	return "standard"
+}
+
 func nativeAgentPresetKnown(preset string) bool {
 	switch preset {
 	case "minimal", "standard", "code":
@@ -2513,7 +2612,9 @@ func (s *Server) nativeAgentPresetSelect(r *http.Request, raw json.RawMessage) n
 		return nativeRPCFailure("bad-request", "sessionId and agentPreset are required", nil)
 	}
 	if !s.nativeAgentPresetAvailable(r.Context(), req.AgentPreset) {
-		return nativeRPCFailure("agent-preset-invalid", "agent preset is not available", map[string]any{"agentPreset": req.AgentPreset})
+		return nativeRPCFailure("agent-preset-invalid", "agent preset is not available", map[string]any{
+			"agentPreset": req.AgentPreset, "reason": "preset is not available",
+		})
 	}
 	configs, ok := s.store.(store.SessionConfigStore)
 	if !ok {
@@ -2524,7 +2625,9 @@ func (s *Server) nativeAgentPresetSelect(r *http.Request, raw json.RawMessage) n
 		return nativeStoreFailure(err)
 	}
 	if len(events) != 0 {
-		return nativeRPCFailure("agent-preset-locked", "agent preset can only change on a blank session", map[string]any{"sessionId": req.SessionID})
+		return nativeRPCFailure("agent-preset-locked", "agent preset can only change on a blank session", map[string]any{
+			"sessionId": req.SessionID, "agentPreset": req.AgentPreset,
+		})
 	}
 	config, err := configs.GetSessionConfig(r.Context(), req.SessionID)
 	if err != nil {
@@ -2532,7 +2635,7 @@ func (s *Server) nativeAgentPresetSelect(r *http.Request, raw json.RawMessage) n
 	}
 	config.AgentPreset = req.AgentPreset
 	if err := configs.SetSessionConfig(r.Context(), req.SessionID, config); err != nil {
-		return nativeRPCFailure("agent-preset-select-failed", err.Error(), nil)
+		return nativeRPCFailure("internal", "failed to persist selected agent preset: "+err.Error(), nil)
 	}
 	return nativeRPCSuccess(map[string]any{"agentPreset": req.AgentPreset})
 }
@@ -2677,6 +2780,10 @@ func (s *Server) nativeSessionModels(r *http.Request, raw json.RawMessage) nativ
 			provider = nativeString(view["provider"])
 		}
 		model = nativeString(view["model"])
+		effort = nativeString(view["reasoning_effort"])
+		if effort == "" {
+			effort = nativeString(view["reasoningEffort"])
+		}
 	}
 	if configs, ok := s.store.(store.SessionConfigStore); ok {
 		if config, configErr := configs.GetSessionConfig(r.Context(), req.SessionID); configErr == nil {
@@ -2686,7 +2793,9 @@ func (s *Server) nativeSessionModels(r *http.Request, raw json.RawMessage) nativ
 			if config.Model != "" {
 				model = config.Model
 			}
-			effort = config.ReasoningEffort
+			if config.ReasoningEffort != "" {
+				effort = config.ReasoningEffort
+			}
 		}
 	}
 	current := map[string]any{"provider": provider, "model": model}
@@ -2726,6 +2835,12 @@ func (s *Server) nativeSessionSelectModel(r *http.Request, raw json.RawMessage) 
 	config.ReasoningEffort = req.ReasoningEffort
 	if err := configs.UpdateSessionConfig(r.Context(), req.SessionID, config.Provider, config.Model, config.ReasoningEffort, config.Permission); err != nil {
 		return nativeRPCFailure("model-select-failed", err.Error(), nil)
+	}
+	if s.nativeDefaultModelFn != nil {
+		// DSH treats a successful session selection as the default for the next
+		// session as well. The session override above remains authoritative for
+		// the current session and its future history.
+		s.nativeDefaultModelFn(r.Context(), req.Provider, req.Model, req.ReasoningEffort)
 	}
 	selected := map[string]any{"provider": req.Provider, "model": req.Model}
 	if req.ReasoningEffort != "" {
@@ -3085,8 +3200,13 @@ func (s *Server) nativeSessionCreate(r *http.Request, raw json.RawMessage) nativ
 		return failure
 	}
 	req.AgentPreset = strings.TrimSpace(req.AgentPreset)
+	if req.AgentPreset == "" {
+		req.AgentPreset = s.nativeAgentPresetDefault(r.Context())
+	}
 	if req.AgentPreset != "" && !s.nativeAgentPresetAvailable(r.Context(), req.AgentPreset) {
-		return nativeRPCFailure("agent-preset-invalid", "agent preset is not available", map[string]any{"agentPreset": req.AgentPreset})
+		return nativeRPCFailure("agent-preset-invalid", "agent preset is not available", map[string]any{
+			"agentPreset": req.AgentPreset, "reason": "preset is not available",
+		})
 	}
 	id, err := s.sessFn(r.Context(), "new", req.SessionID)
 	if err != nil {
@@ -3120,7 +3240,11 @@ func (s *Server) nativeSessionCreate(r *http.Request, raw json.RawMessage) nativ
 	// Publish the new address before returning so its live event subscription is
 	// installed before the client can submit the first prompt.
 	s.notifyNativeMuxSessionAdded(id)
-	return nativeRPCSuccess(map[string]any{"sessionId": id})
+	value := map[string]any{"sessionId": id}
+	if req.AgentPreset != "" {
+		value["agentPreset"] = req.AgentPreset
+	}
+	return nativeRPCSuccess(value)
 }
 
 // nativeSessionFork clones a completed-turn prefix into a new session. DSH's

@@ -95,6 +95,13 @@ func main() {
 		cfg.Mode = v
 		config.ApplyModePreset(&cfg)
 	}
+	// DSH's model picker saves the accepted provider/model/effort as the
+	// shared Agent default. Apply it before the provider registry is built so
+	// new sessions and the Web model catalog see the same selection after a
+	// restart. A session-specific selection still wins during turn setup.
+	if selection, ok := parsePersistedModelSelection(settings[defaultModelSettingKey]); ok {
+		applyModelSelectionToConfig(&cfg, selection)
+	}
 	// The General-settings "default terminal" row picks the shell (dsh
 	// Powershell / Git Bash / WSL). Any non-"off" choice enables the terminal
 	// and maps to the platform shell executable; minimal keeps its forced
@@ -912,7 +919,7 @@ func (a *app) newLoop() *loop.Loop {
 	return a.buildLoop(
 		func(delta string) { fmt.Print(delta) },
 		func(err error) { fmt.Fprintln(os.Stderr, "\n[stream error]", err) },
-		"", a.cfg.Model, a.cfg.ReasoningEffort, a.cfg.Mode, a.prompt,
+		a.currentID, "", a.cfg.Model, a.cfg.ReasoningEffort, a.cfg.Mode, a.prompt,
 	)
 }
 
@@ -921,7 +928,7 @@ func (a *app) newLoop() *loop.Loop {
 // the SSE event flow (each chunk is already persisted by the loop), so nothing
 // may be printed to the REPL's stdout/stderr during a web turn.
 func (a *app) newLoopWeb() *loop.Loop {
-	return a.buildLoop(func(string) {}, func(error) {}, "", a.cfg.Model, a.cfg.ReasoningEffort, a.cfg.Mode, a.prompt)
+	return a.buildLoop(func(string) {}, func(error) {}, a.currentID, "", a.cfg.Model, a.cfg.ReasoningEffort, a.cfg.Mode, a.prompt)
 }
 
 // newLoopFor builds a Loop bound to the current session log using the resolved
@@ -934,10 +941,10 @@ func (a *app) newLoopFor(rt sessionRuntime, interactive bool) *loop.Loop {
 		return a.buildLoop(
 			func(delta string) { fmt.Print(delta) },
 			func(err error) { fmt.Fprintln(os.Stderr, "\n[stream error]", err) },
-			rt.provider, rt.model, rt.effort, rt.mode, rt.prompt,
+			rt.sessionID, rt.provider, rt.model, rt.effort, rt.mode, rt.prompt,
 		)
 	}
-	return a.buildLoop(func(string) {}, func(error) {}, rt.provider, rt.model, rt.effort, rt.mode, rt.prompt)
+	return a.buildLoop(func(string) {}, func(error) {}, rt.sessionID, rt.provider, rt.model, rt.effort, rt.mode, rt.prompt)
 }
 
 // buildLoop assembles a Loop bound to the current session log. onText/onError
@@ -949,12 +956,12 @@ func (a *app) newLoopFor(rt sessionRuntime, interactive bool) *loop.Loop {
 // tool surface (loop.Config.ToolSpecs). pb overrides the system prompt when a
 // per-session mode is active. effort is the thinking-effort selection ("" keeps
 // the provider default).
-func (a *app) buildLoop(onText func(string), onError func(error), provider, model, effort, mode string, pb *prompt.Builder) *loop.Loop {
+func (a *app) buildLoop(onText func(string), onError func(error), sessionID, provider, model, effort, mode string, pb *prompt.Builder) *loop.Loop {
 	if provider == "" {
 		provider = a.cfg.LLM.Provider
 	}
 	if model == "" {
-		model = a.cfg.Model
+		model = llmProviderModel(a.cfg, provider)
 	}
 	if pb == nil {
 		pb = a.prompt
@@ -972,7 +979,12 @@ func (a *app) buildLoop(onText func(string), onError func(error), provider, mode
 		Model:           model,
 		Provider:        provider,
 		ReasoningEffort: effort,
-		RuntimeContext:  a.runtimeContext,
+		// Bind the runtime snapshot to the session selected for this turn. The
+		// loop's injector callback also receives userText, not a session id, so
+		// capturing the id here avoids falling back to the process-global currentID.
+		RuntimeContext: func(ctx context.Context, _ string) []llm.Message {
+			return a.runtimeContextFor(ctx, sessionID)
+		},
 		// M5c-2b: the "compaction" pre-step injector (auto token-pressure
 		// compaction) is appended when compaction is enabled; it runs after the
 		// (D4 — the turn/step structure is unchanged).
@@ -989,11 +1001,12 @@ func (a *app) buildLoop(onText func(string), onError func(error), provider, mode
 // falls back to the globals (dsh ModelSelection: provider+model+effort are one
 // selection; the mode defaults to the deployment preset).
 type sessionRuntime struct {
-	provider string
-	model    string
-	effort   string
-	mode     string
-	prompt   *prompt.Builder
+	sessionID string
+	provider  string
+	model     string
+	effort    string
+	mode      string
+	prompt    *prompt.Builder
 }
 
 // applySessionRuntime resolves one session's per-turn provider/model/effort /
@@ -1003,7 +1016,14 @@ type sessionRuntime struct {
 // restore func reinstates the base policy. Fail-open: any store or builder
 // error falls back to the globals.
 func (a *app) applySessionRuntime(id string) (sessionRuntime, func()) {
-	rt := sessionRuntime{model: a.cfg.Model, effort: a.cfg.ReasoningEffort, prompt: a.prompt}
+	provider := a.cfg.LLM.Provider
+	rt := sessionRuntime{
+		sessionID: id,
+		provider:  provider,
+		model:     llmProviderModel(a.cfg, provider),
+		effort:    a.cfg.ReasoningEffort,
+		prompt:    a.prompt,
+	}
 	perm := ""
 	mode := a.cfg.Mode
 	if scs, ok := a.store.(store.SessionConfigStore); ok && id != "" {
@@ -1029,6 +1049,13 @@ func (a *app) applySessionRuntime(id string) (sessionRuntime, func()) {
 	if a.agentPresets != nil && !nativeAgentPresetKnown(mode) {
 		toolMode = a.agentPresets.Mode(mode)
 	}
+	// DSH persona sections resolve model and working-directory placeholders at
+	// prompt render time. Clone per turn so one shared base builder remains safe
+	// while sessions use different model/workspace selections.
+	rt.prompt = rt.prompt.Clone().SetVariables(map[string]string{
+		"model": rt.model,
+		"cwd":   a.sessionCWDFor(id),
+	})
 	if a.log != nil && session.FoldPlanMode(a.log.Events()) {
 		rt.prompt = rt.prompt.Clone().Add(prompt.Section{Name: "plan-mode", Order: 900, Text: planModeSection})
 	}
@@ -1161,16 +1188,30 @@ func (a *app) promptFor(mode string) *prompt.Builder {
 // share one loop; at most one Run at a time). interactive=false suppresses the
 // stdout stream (the web renders from the SSE event stream instead 鈥?chunk 宸?// 钀藉簱).
 func (a *app) runTurn(ctx context.Context, text string, interactive bool) error {
+	return a.runTurnFor(ctx, a.currentID, text, interactive)
+}
+
+// runTurnFor executes a turn for an explicit session. The session is activated
+// while turnMu is held, so the log, runtime prompt, tool owner and workspace
+// snapshot all refer to the same session even when Web requests arrive for
+// different sessions concurrently.
+func (a *app) runTurnFor(ctx context.Context, sessionID, text string, interactive bool) error {
 	a.turnMu.Lock()
 	defer a.turnMu.Unlock()
+	if sessionID != "" && sessionID != a.currentID {
+		if err := a.resumeSession(ctx, sessionID); err != nil {
+			return err
+		}
+	}
+	activeID := a.currentID
 	// Publish the running session so the sidebar status dot reflects the live
 	// turn; cleared when the turn settles (the deferred store runs before the
 	// unlock, so a concurrent list read sees the fully-settled session).
 	defer a.runningSession.Store("")
-	a.runningSession.Store(a.currentID)
+	a.runningSession.Store(activeID)
 	// Phase 2: resolve the session's per-turn model / mode prompt / permission
 	// tier and swap the registry policy for the duration of the turn.
-	rt, restore := a.applySessionRuntime(a.currentID)
+	rt, restore := a.applySessionRuntime(activeID)
 	defer restore()
 	if interactive {
 		return a.newLoopFor(rt, true).Run(ctx, text)

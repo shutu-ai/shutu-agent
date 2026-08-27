@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/jabing/shutu-agent/internal/config"
 	"github.com/jabing/shutu-agent/internal/prompt"
@@ -33,6 +34,7 @@ type nativeAgentPresetMetadata struct {
 type nativeAgentPresetStore struct {
 	root          string
 	promptsDir    string
+	defaultMu     sync.RWMutex
 	defaultPreset string
 }
 
@@ -61,10 +63,13 @@ func newNativeAgentPresetStore(dataDir, promptsDir, defaultPreset string) *nativ
 }
 
 func (p *nativeAgentPresetStore) List(context.Context) (webserver.NativeAgentPresetCatalog, error) {
+	p.defaultMu.RLock()
+	defaultPreset := p.defaultPreset
+	p.defaultMu.RUnlock()
 	entries := []webserver.NativeAgentPreset{
-		{ID: config.ModeMinimal, Trust: "system", IsDefault: p.defaultPreset == config.ModeMinimal, Name: "Minimal", Description: "Basic read, shell, and file capabilities."},
-		{ID: config.ModeStandard, Trust: "system", IsDefault: p.defaultPreset == config.ModeStandard, Name: "Standard", Description: "The standard Shutu capability set."},
-		{ID: config.ModeCode, Trust: "system", IsDefault: p.defaultPreset == config.ModeCode, Name: "Code", Description: "Standard capabilities with programmatic Code Mode."},
+		{ID: config.ModeMinimal, Trust: "system", IsDefault: defaultPreset == config.ModeMinimal, Name: "Minimal", Description: "Basic read, shell, and file capabilities."},
+		{ID: config.ModeStandard, Trust: "system", IsDefault: defaultPreset == config.ModeStandard, Name: "Standard", Description: "The standard Shutu capability set."},
+		{ID: config.ModeCode, Trust: "system", IsDefault: defaultPreset == config.ModeCode, Name: "Code", Description: "Standard capabilities with programmatic Code Mode."},
 	}
 	items, err := os.ReadDir(p.root)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -89,6 +94,15 @@ func (p *nativeAgentPresetStore) List(context.Context) (webserver.NativeAgentPre
 	return webserver.NativeAgentPresetCatalog{
 		Presets: entries, Authorable: true, HasDocument: nativeAgentPresetOpenSupported(),
 	}, nil
+}
+
+// SetDefault updates the in-process roster after the native settings provider
+// has persisted the deployment default. It is intentionally small: session
+// creation reads this value, while existing sessions retain their preset.
+func (p *nativeAgentPresetStore) SetDefault(id string) {
+	p.defaultMu.Lock()
+	p.defaultPreset = id
+	p.defaultMu.Unlock()
 }
 
 func (p *nativeAgentPresetStore) Read(_ context.Context, id string) (webserver.NativeAgentPresetDetails, error) {

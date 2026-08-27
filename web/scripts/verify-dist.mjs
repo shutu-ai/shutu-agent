@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 const webRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const distRoot = resolve(webRoot, process.argv[2] ?? 'dist')
 const indexPath = resolve(distRoot, 'index.html')
+const dshPackage = (name) => `@shutu-ai/${name}`
 
 if (!existsSync(indexPath)) throw new Error(`frontend dist is missing ${indexPath}`)
 
@@ -47,13 +48,13 @@ if (existsSync(nativeManifestPath)) {
     'ui-settings-models', 'ui-settings-plugin-inventory', 'ui-settings-plugins',
     'ui-sidebar', 'ui-skill', 'ui-subagent', 'ui-theme', 'ui-tool', 'ui-trajectory',
     'ui-user-questions', 'ui-workflow-run', 'ui-workspace',
-  ].map(name => `@deepseek-ai/dsh-client-${name}`)
+  ].map(name => dshPackage(`dsh-client-${name}`))
   requiredNativePlugins.push(
-    '@deepseek-ai/dsh-typert-registry',
-    '@deepseek-ai/dsh-cordis-client-runner',
-    '@deepseek-ai/dsh-client-ui-cordis',
-    '@deepseek-ai/dsh-session-log-export',
-    '@deepseek-ai/dsh-api-remotes',
+    dshPackage('dsh-typert-registry'),
+    dshPackage('dsh-cordis-client-runner'),
+    dshPackage('dsh-client-ui-cordis'),
+    dshPackage('dsh-session-log-export'),
+    dshPackage('dsh-api-remotes'),
   )
   const linked = new Set(nativeManifest.plugins.map(plugin => plugin?.id))
   const missing = requiredNativePlugins.filter(id => !linked.has(id))

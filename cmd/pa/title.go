@@ -11,7 +11,7 @@ import (
 	"github.com/jabing/shutu-agent/internal/session"
 )
 
-// session-title alignment with @deepseek-ai/dsh-session-title (full alignment,
+// session-title alignment with @shutu-ai/dsh-session-title (full alignment,
 // including the first-prompt model provider): after the first eligible human
 // message, a deterministic fallback (first words) is stored immediately and an
 // asynchronous model call frames a cleaner title, which replaces the fallback

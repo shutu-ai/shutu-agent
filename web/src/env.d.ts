@@ -10,7 +10,7 @@ declare module 'virtual:shutu-dsh-native-plugins' {
   }[]
 }
 
-declare module '@deepseek-ai/cordis' {
+declare module '@shutu-ai/cordis' {
   export class Context {
     readonly reflect: { provide(name: string, value: unknown): void }
     get(name: string): unknown

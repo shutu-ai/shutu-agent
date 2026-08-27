@@ -127,6 +127,23 @@ func TestBuildAppendsToolCatalog(t *testing.T) {
 	}
 }
 
+func TestBuildRendersDSHVariablesWithoutMutatingSections(t *testing.T) {
+	b := New("You are powered by {{model}} in {{cwd}}.")
+	b.SetVariables(map[string]string{"model": "deepseek-v4-flash", "cwd": `C:\work`})
+
+	if got := b.Build(); got != `You are powered by deepseek-v4-flash in C:\work.` {
+		t.Fatalf("rendered prompt = %q", got)
+	}
+
+	clone := b.Clone().SetVariables(map[string]string{"model": "other", "cwd": "/tmp"})
+	if got := clone.Build(); got != "You are powered by other in /tmp." {
+		t.Fatalf("clone rendered prompt = %q", got)
+	}
+	if got := b.Build(); got != `You are powered by deepseek-v4-flash in C:\work.` {
+		t.Fatalf("original builder mutated by clone = %q", got)
+	}
+}
+
 // TestBuildToolCatalogEmptyProvider verifies no catalog when the provider
 // returns no tools.
 func TestBuildToolCatalogEmptyProvider(t *testing.T) {

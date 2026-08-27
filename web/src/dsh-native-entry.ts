@@ -1,5 +1,5 @@
-import { AppWebEntry } from '@deepseek-ai/dsh-client-web'
-import * as clientModules from '@deepseek-ai/dsh-client-modules/client'
+import { AppWebEntry } from '@shutu-ai/dsh-client-web'
+import * as clientModules from '@shutu-ai/dsh-client-modules/client'
 import type { DshNativePluginRegistration } from './dsh-native-plugins'
 
 /** Build-time marker retained for diagnostics; the production entry is always
@@ -18,7 +18,150 @@ interface DshModuleLoaderTarget {
   create(options: { boot: unknown; staticModules: Record<string, unknown> }): unknown
 }
 
-const dshModulesID = '@deepseek-ai/dsh-client-modules'
+const dshModulesID = '@shutu-ai/dsh-client-modules'
+const shutuLogoBlackPath = '/logo-b.png'
+const shutuLogoWhitePath = '/logo-w.png'
+const shutuHeroHeadline = '智行未至之境'
+const dshHeroHeadline = '探索未至之境'
+const shutuHeroHeadlineEnglish = 'Beyond the Known'
+const dshHeroHeadlineEnglish = 'Into the Unknown'
+
+const shutuLogoStyle = `
+  [data-slot="sidebar.brand.mark"] img[data-shutu-dsh-logo],
+  [data-slot="conversation.hero.brand.mark"] img[data-shutu-dsh-logo] {
+    display: block;
+    object-fit: contain;
+    object-position: center;
+  }
+  [data-slot="sidebar.brand.mark"] img[data-shutu-dsh-logo] {
+    width: 24px;
+    height: 24px;
+  }
+  [data-slot="conversation.hero.brand.mark"] img[data-shutu-dsh-logo] {
+    width: 42px;
+    height: 42px;
+  }
+  [data-slot="sidebar.brand.name"] [data-shutu-brand-name] {
+    align-items: center;
+    color: currentColor;
+    display: inline-flex;
+    font-size: 15px;
+    font-weight: 650;
+    gap: 5px;
+    letter-spacing: -0.02em;
+    line-height: 1;
+    white-space: nowrap;
+  }
+  [data-slot="sidebar.brand.name"] [data-shutu-brand-badge] {
+    background: #181818;
+    border-radius: 4px;
+    color: #ffffff;
+    font-size: 9px;
+    font-weight: 750;
+    letter-spacing: 0.04em;
+    line-height: 1;
+    padding: 3px 4px 2px;
+  }
+`
+
+function getDshThemeLogoPath(documentObject: Document): string {
+  const colorScheme = documentObject.documentElement.style.colorScheme
+    || documentObject.defaultView?.getComputedStyle(documentObject.documentElement).colorScheme
+    || ''
+  return colorScheme.includes('dark') ? shutuLogoWhitePath : shutuLogoBlackPath
+}
+
+function createShutuLogo(documentObject: Document, src: string): HTMLImageElement {
+  const image = documentObject.createElement('img')
+  image.src = src
+  image.alt = ''
+  image.setAttribute('aria-hidden', 'true')
+  image.setAttribute('data-shutu-dsh-logo', 'true')
+  return image
+}
+
+/** Replace DSH's inline fish/wordmark with Shutu's theme-aware branding. */
+export function installDshNativeLogoBridge(documentObject: Document = document): () => void {
+  const style = documentObject.createElement('style')
+  style.setAttribute('data-shutu-dsh-logo-style', 'true')
+  style.textContent = shutuLogoStyle
+  documentObject.head.append(style)
+
+  const apply = (): void => {
+    const logoPath = getDshThemeLogoPath(documentObject)
+    for (const slot of documentObject.querySelectorAll<HTMLElement>(
+      '[data-slot="sidebar.brand.mark"], [data-slot="conversation.hero.brand.mark"]',
+    )) {
+      let image = slot.querySelector<HTMLImageElement>('img[data-shutu-dsh-logo]')
+      if (image === null) {
+        image = createShutuLogo(documentObject, logoPath)
+        slot.replaceChildren(image)
+      } else if (image.src !== new URL(logoPath, documentObject.baseURI).href) {
+        image.src = logoPath
+      }
+
+      if (!slot.matches('[data-slot="conversation.hero.brand.mark"]')) continue
+      const headline = slot.parentElement?.parentElement
+      const markParent = slot.parentElement
+      if (headline === null || headline === undefined || markParent === null) continue
+      if (markParent instanceof HTMLElement) {
+        markParent.style.display = 'inline-flex'
+        markParent.style.alignItems = 'center'
+        markParent.style.justifyContent = 'center'
+        markParent.style.width = '42px'
+        markParent.style.height = '42px'
+        markParent.style.flex = '0 0 42px'
+      }
+      const headlineText = [...headline.children].find(element => {
+        const text = element.textContent?.trim()
+        return element !== markParent && (text === dshHeroHeadline || text === dshHeroHeadlineEnglish)
+      })
+      if (headlineText instanceof HTMLElement) {
+        headlineText.textContent = headlineText.textContent?.trim() === dshHeroHeadlineEnglish
+          ? shutuHeroHeadlineEnglish
+          : shutuHeroHeadline
+        headlineText.setAttribute('data-shutu-hero-headline', 'true')
+      }
+    }
+
+    for (const slot of documentObject.querySelectorAll<HTMLElement>('[data-slot="sidebar.brand.name"]')) {
+      let label = slot.querySelector<HTMLElement>('[data-shutu-brand-name]')
+      if (label === null) {
+        label = documentObject.createElement('span')
+        label.setAttribute('data-shutu-brand-name', 'true')
+        slot.replaceChildren(label)
+      }
+      const existingBadge = label.querySelector<HTMLElement>('[data-shutu-brand-badge]')
+      const isDarkTheme = logoPath === shutuLogoWhitePath
+      if (existingBadge !== null) {
+        existingBadge.style.backgroundColor = isDarkTheme ? '#ffffff' : '#181818'
+        existingBadge.style.color = isDarkTheme ? '#181818' : '#ffffff'
+        continue
+      }
+      const brandText = documentObject.createElement('span')
+      brandText.textContent = 'SHUTU-AI'
+      const badge = documentObject.createElement('span')
+      badge.textContent = 'AGENT'
+      badge.setAttribute('data-shutu-brand-badge', 'true')
+      badge.style.backgroundColor = isDarkTheme ? '#ffffff' : '#181818'
+      badge.style.color = isDarkTheme ? '#181818' : '#ffffff'
+      label.replaceChildren(brandText, badge)
+    }
+  }
+
+  apply()
+  const observer = new MutationObserver(apply)
+  observer.observe(documentObject.documentElement, {
+    attributes: true,
+    attributeFilter: ['class', 'data-theme', 'style'],
+    childList: true,
+    subtree: true,
+  })
+  return () => {
+    observer.disconnect()
+    style.remove()
+  }
+}
 
 /** Install the inline bootstrap seam used by the native build. */
 export function installDshNativeBoot(
@@ -67,7 +210,7 @@ export function installDshNativeBoot(
   }
   dshWindow.__ModuleLoader__ = target
   dshWindow.__DSH_BOOT__ = {
-    rev: 'shutu-native-p36-4',
+    rev: 'shutu-native-namespace-v1',
     entries: nativeBootEntries,
   }
 }
@@ -86,6 +229,7 @@ export async function mountDshNativeApp(container: HTMLElement): Promise<void> {
     throw new Error('shutu web: DSH native boot contract is unavailable; configure the DSH host bridge first')
   }
   installDshNativeAccessibilityBridge()
+  installDshNativeLogoBridge()
   await new AppWebEntry(container).run()
 }
 

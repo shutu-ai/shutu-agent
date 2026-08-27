@@ -897,6 +897,32 @@ function RichText({ text, query = '' }: { text: string; query?: string }) {
   })}</div>
 }
 
+function ptcCodeFromArgs(toolName: string | undefined, argsRaw: string | undefined): string | null {
+  if (toolName !== 'run_code' || argsRaw === undefined || argsRaw.trim() === '') return null
+  try {
+    const value: unknown = JSON.parse(argsRaw)
+    if (value !== null && typeof value === 'object' && 'code' in value && typeof value.code === 'string' && value.code.trim() !== '') return value.code
+  } catch {
+    // Keep the normal raw tool-call block when a provider emits malformed JSON.
+  }
+  return null
+}
+
+function PtcToolCallContent({ name, argsRaw, conversation = false }: { name: string; argsRaw: string; conversation?: boolean }) {
+  const code = ptcCodeFromArgs(name, argsRaw)
+  if (code === null) {
+    return conversation
+      ? <div className="conversation-tool-call"><strong>{name} input</strong><pre>{argsRaw || 'No arguments'}</pre></div>
+      : <div className="code-block"><span>Input</span><pre>{argsRaw}</pre></div>
+  }
+  return <div className="ptc-call-stack">
+    <pre className="rich-code ptc-code" data-language="code"><code>{code}</code></pre>
+    {conversation
+      ? <div className="conversation-tool-call"><strong>Tool call</strong><span>{name}</span><pre>{argsRaw}</pre></div>
+      : <div className="code-block"><span>Tool call</span><pre>{argsRaw}</pre></div>}
+  </div>
+}
+
 function EventCard({ event, store, sessionId, feedback, producedPaths = [], onFeedback, onCopy, onRetry, onFork, onOpenFile, toolCallsAction, onInspect, textOverride, additionalContent }: { event: EventView; store: WebStore; sessionId: string; feedback?: FeedbackView; producedPaths?: readonly string[]; onFeedback: (seq: number, rating: 'positive' | 'negative') => void; onCopy?: (text: string) => void; onRetry?: (text: string) => void; onFork?: () => void; onOpenFile?: (path: string) => void; toolCallsAction?: { label: string; onClick: () => void }; onInspect?: () => void; textOverride?: string; additionalContent?: ReactNode }) {
   const [expanded, setExpanded] = useState(false)
   const text = textOverride ?? (event.tool_output || event.reasoning || event.summary || event.compaction_summary || (event.type.endsWith('/message') ? 'Empty message' : 'No content'))
@@ -925,7 +951,9 @@ function EventCard({ event, store, sessionId, feedback, producedPaths = [], onFe
         {(event.type === 'assistant/message' || event.type === 'user/message') && <div className="event-actions message-actions" aria-label="Message actions"><button type="button" onClick={() => onCopy ? onCopy(text) : void navigator.clipboard?.writeText(text)}>Copy</button>{event.type === 'assistant/message' && <><button type="button" onClick={() => onRetry ? onRetry(text) : void store.send(text)}>Retry</button><button type="button" onClick={() => onFork ? onFork() : void store.forkSession(sessionId)}>Fork</button></>}</div>}
         {event.images && event.images.length > 0 && <EventImages store={store} sessionId={sessionId} images={event.images} />}
         {event.type === 'assistant/message' && <ProducedFiles paths={producedPaths} onOpenFile={onOpenFile} />}
-        {event.tool_args && <div className="code-block"><span>Input</span><pre>{event.tool_args}</pre></div>}
+        {event.tool_args && (event.type === 'tool/call' || event.type === 'tool/start')
+          ? <PtcToolCallContent name={event.tool_name || ''} argsRaw={event.tool_args} />
+          : event.tool_args && <div className="code-block"><span>Input</span><pre>{event.tool_args}</pre></div>}
         {tokenUsage !== undefined && <span className="token-chip">Tokens {detailText(tokenUsage)}</span>}
         {hasExtra && <button type="button" className="text-button" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>{expanded ? 'Collapse details' : 'Expand details'}</button>}
         {expanded && entries.length > 0 && <div className="details-grid">
@@ -1275,9 +1303,9 @@ function DshConversation({ events, sessionId, store, feedbackBySeq, producedBySe
           ? node.blocks.map(block => `${block.kind === 'reasoning' ? 'Reasoning' : 'Answer'}\n${block.text}`).join('\n\n')
           : undefined
         const additionalContent = node.kind === 'assistant' && node.toolCalls && node.toolCalls.length > 0
-          ? <div className="conversation-tool-calls"><strong>Tool calls</strong>{node.toolCalls.map(call => <div className="conversation-tool-call" key={call.id}><span>{call.name} · {call.id}</span><pre>{call.argsRaw || 'No arguments'}</pre></div>)}</div>
+          ? <div className="conversation-tool-calls"><strong>Tool calls</strong>{node.toolCalls.map(call => <div className="conversation-tool-call-group" key={call.id}><span className="conversation-tool-call-id">{call.name} · {call.id}</span><PtcToolCallContent name={call.name} argsRaw={call.argsRaw || ''} conversation /></div>)}</div>
           : node.kind === 'tool-result' && node.call !== null
-            ? <div className="conversation-tool-call"><strong>{node.call.name} input</strong><pre>{node.call.argsRaw || 'No arguments'}</pre></div>
+            ? <PtcToolCallContent name={node.call.name} argsRaw={node.call.argsRaw || ''} conversation />
             : undefined
         return <section className={`conversation-node conversation-virtual-row ${node.kind}`} data-virtual-row-key={key} key={key} role="listitem" ref={element => measureRow(key, element)} style={{ transform: `translateY(${offsets[start + index] ?? 0}px)` }}>
           <div className="conversation-node-head"><span>{conversationNodeLabel(node)}</span><span>{nodeRequestId && `request ${nodeRequestId} · `}#{node.seq}</span></div>

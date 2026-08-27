@@ -62,9 +62,13 @@ type CodeTools struct {
 	// override it. Set by the composition root.
 	DefaultMaxOutput int
 	// DefaultCwd is the sandbox working directory used when the model omits
-	// cwd (code.sandbox_dir; empty ⇒ the provider default <project>/.sandbox).
-	// Set by the composition root.
+	// cwd when no resolver is installed (code.sandbox_dir; empty ⇒ the provider
+	// default <project>/.sandbox). Set by the composition root.
 	DefaultCwd string
+	// DefaultCwdFunc resolves the default execution directory at call time. The
+	// composition root uses this to bind run_code to the active session workspace
+	// while preserving an explicit cwd override from the model.
+	DefaultCwdFunc func() string
 }
 
 // NewCodeTools returns the run_code tool bundle bound to an Engine. onEvent,
@@ -165,6 +169,9 @@ func (t CodeRunTool) Execute(ctx context.Context, args any) (string, error) {
 	}
 	if req.Cwd == "" {
 		req.Cwd = t.t.DefaultCwd
+		if t.t.DefaultCwdFunc != nil {
+			req.Cwd = t.t.DefaultCwdFunc()
+		}
 	}
 	res, err := t.t.e.Run(ctx, req)
 	if err != nil {

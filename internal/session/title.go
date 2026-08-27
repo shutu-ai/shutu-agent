@@ -1,5 +1,5 @@
 // Title utilities: deterministic session-title fallback and strict
-// normalization, aligned with @deepseek-ai/dsh-session-title semantics
+// normalization, aligned with @shutu-ai/dsh-session-title semantics
 // (packages/session/session-title/src/normalize.ts). A title is always one
 // trimmed line: terminal control sequences and deceptive invisible controls are
 // removed, whitespace is collapsed, and the result is truncated to a UTF-8 byte

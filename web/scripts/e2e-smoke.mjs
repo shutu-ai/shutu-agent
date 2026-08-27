@@ -523,7 +523,7 @@ async function waitForCondition(check, timeoutMs = 15_000) {
 
 async function waitForNativeShell(page, allowLoaded = false) {
   await page.locator('button').first().waitFor()
-  assert.match(await page.title(), /DeepSeek Harness|DSH Local Build/)
+  assert.match(await page.title(), /SHUTU-AI|DSH Local Build/)
   assert.equal(await page.locator('.shutu-shell').count(), 0, 'legacy Shutu shell is still mounted')
   if (!allowLoaded) {
     const newSession = page.getByRole('button', { name: /新建会话|新会话|New session/i }).first()
@@ -670,7 +670,7 @@ async function runVisualGeometryMatrix(browser) {
     await installNativeMock(page, { seedSession: true, lifecycle: true, errorControls: true })
     await page.goto(baseUrl, { waitUntil: 'domcontentloaded' })
     await page.getByRole('button', { name: '鏂板缓浼氳瘽' }).first().waitFor()
-    assert.equal(await page.title(), 'DeepSeek Harness')
+    assert.equal(await page.title(), 'SHUTU-AI')
     assert.equal(await page.locator('.shutu-shell').count(), 0, 'legacy Shutu shell is still mounted')
     const search = page.locator('button[aria-label="Search sessions"], button[aria-label="Search"], button[aria-label="搜索会话"], button[aria-label="鎼滅储浼氳瘽"], button[aria-label="鎼滅储"]').first()
     await search.click()

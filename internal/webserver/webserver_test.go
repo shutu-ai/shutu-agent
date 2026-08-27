@@ -2213,7 +2213,7 @@ func TestEventViewHidesInternalContextMessages(t *testing.T) {
 	if events[1].Summary != "上下文注入 skill-catalog" || events[1].ContextSource != "skill-catalog" {
 		t.Fatalf("skill catalog context event = %+v", events[1])
 	}
-	if events[2].Summary != "上下文注入 @deepseek-ai/dsh-system-prompt" || events[2].ContextSource != "@deepseek-ai/dsh-system-prompt" {
+	if events[2].Summary != "上下文注入 @shutu-ai/dsh-system-prompt" || events[2].ContextSource != "@shutu-ai/dsh-system-prompt" {
 		t.Fatalf("runtime context event = %+v", events[2])
 	}
 	if events[3].Summary != "上下文注入 skill-invocation" || events[3].ContextSource != "skill-invocation" {

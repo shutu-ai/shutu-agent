@@ -252,7 +252,7 @@ func (l *Loop) appendContextMessage(injectorName string, message llm.Message) er
 func contextSource(injectorName string) (kind, plugin string) {
 	switch injectorName {
 	case "runtime-context":
-		return "plugin", "@deepseek-ai/dsh-system-prompt"
+		return "plugin", "@shutu-ai/dsh-system-prompt"
 	case "skill":
 		return "skill-catalog", ""
 	default:

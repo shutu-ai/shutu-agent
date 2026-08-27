@@ -6,6 +6,21 @@ import type { Plugin } from 'vite'
 const local = (relative: string): string => fileURLToPath(new URL(relative, import.meta.url))
 const dshRoot = resolve(process.env.SHUTU_DSH_ROOT ?? local('../../deepseek-harness'))
 const dsh = (relative: string): string => resolve(dshRoot, relative)
+const SHUTU_PACKAGE_SCOPE = '@shutu-ai'
+const DSH_REFERENCE_PACKAGE_SCOPE = '@deepseek-ai'
+
+function publicDshPackage(name: string): string {
+  return `${SHUTU_PACKAGE_SCOPE}/${name}`
+}
+
+/** Map the read-only DSH package namespace to the Shutu public namespace. */
+function referenceDshPackage(source: string): string | undefined {
+  if (source.startsWith(`${SHUTU_PACKAGE_SCOPE}/`)) {
+    return `${DSH_REFERENCE_PACKAGE_SCOPE}/${source.slice(SHUTU_PACKAGE_SCOPE.length + 1)}`
+  }
+  if (source.startsWith(`${DSH_REFERENCE_PACKAGE_SCOPE}/`)) return source
+  return undefined
+}
 
 const NATIVE_CLIENT_PACKAGE_DIRS = [
   'connection', 'hmr', 'locale', 'runtime', 'ui-agent-preset', 'ui-attachment',
@@ -20,13 +35,13 @@ const NATIVE_CLIENT_PACKAGE_DIRS = [
 ] as const
 
 const NATIVE_CLIENT_PACKAGE_IDS = NATIVE_CLIENT_PACKAGE_DIRS.map(dir =>
-  `@deepseek-ai/dsh-client-${dir}`)
+  publicDshPackage(`dsh-client-${dir}`))
 const NATIVE_EXTRA_PLUGIN_SPECS = [
-  ['typert/registry', '@deepseek-ai/dsh-typert-registry'],
-  ['extensions/cordis-client-runner', '@deepseek-ai/dsh-cordis-client-runner'],
-  ['extensions/ui-cordis', '@deepseek-ai/dsh-client-ui-cordis'],
-  ['session-query/session-log-export', '@deepseek-ai/dsh-session-log-export'],
-  ['__local-native-remote', '@deepseek-ai/dsh-api-remotes'],
+  ['typert/registry', publicDshPackage('dsh-typert-registry')],
+  ['extensions/cordis-client-runner', publicDshPackage('dsh-cordis-client-runner')],
+  ['extensions/ui-cordis', publicDshPackage('dsh-client-ui-cordis')],
+  ['session-query/session-log-export', publicDshPackage('dsh-session-log-export')],
+  ['__local-native-remote', publicDshPackage('dsh-api-remotes')],
 ] as const
 
 const NATIVE_PLUGIN_SPECS = [
@@ -106,8 +121,9 @@ function nativeDshSourceResolver(): Plugin {
     name: 'shutu-native-dsh-source-resolver',
     enforce: 'pre',
     resolveId(source) {
-      if (!source.startsWith('@deepseek-ai/')) return undefined
-      const parts = source.split('/')
+      const referenceSource = referenceDshPackage(source)
+      if (referenceSource === undefined) return undefined
+      const parts = referenceSource.split('/')
       const packageName = parts.slice(0, 2).join('/')
       const packageInfo = packages.get(packageName)
       if (packageInfo === undefined) return undefined
@@ -136,15 +152,15 @@ export default {
   resolve: {
     alias: [
       { find: /^node:module$/, replacement: dsh('apps/web/src/node-module-stub.ts') },
-      { find: '@deepseek-ai/cordis', replacement: dsh('vendor/cordis/src/index.ts') },
-      { find: '@deepseek-ai/cosmokit', replacement: dsh('vendor/cosmokit/src/index.ts') },
-      { find: '@deepseek-ai/dsh-client-web', replacement: dsh('packages/client/web/src/index.ts') },
-      { find: '@deepseek-ai/dsh-client-modules/client', replacement: dsh('packages/client/modules/src/client/index.ts') },
-      { find: '@deepseek-ai/dsh-client-ui-renderer/client', replacement: dsh('packages/client/ui-renderer/src/client/index.ts') },
-      { find: '@deepseek-ai/dsh-client-ui-slots', replacement: dsh('packages/client/ui-slots/src/index.ts') },
-      { find: '@deepseek-ai/dsh-client-ui-primitives', replacement: dsh('packages/client/ui-primitives/src/index.ts') },
-      { find: '@deepseek-ai/dsh-client-runtime/client', replacement: dsh('packages/client/runtime/src/client/index.ts') },
-      { find: '@deepseek-ai/cordis-plugin-loader', replacement: dsh('vendor/loader/src/index.ts') },
+      { find: publicDshPackage('cordis'), replacement: dsh('vendor/cordis/src/index.ts') },
+      { find: publicDshPackage('cosmokit'), replacement: dsh('vendor/cosmokit/src/index.ts') },
+      { find: publicDshPackage('dsh-client-web'), replacement: dsh('packages/client/web/src/index.ts') },
+      { find: publicDshPackage('dsh-client-modules/client'), replacement: dsh('packages/client/modules/src/client/index.ts') },
+      { find: publicDshPackage('dsh-client-ui-renderer/client'), replacement: dsh('packages/client/ui-renderer/src/client/index.ts') },
+      { find: publicDshPackage('dsh-client-ui-slots'), replacement: dsh('packages/client/ui-slots/src/index.ts') },
+      { find: publicDshPackage('dsh-client-ui-primitives'), replacement: dsh('packages/client/ui-primitives/src/index.ts') },
+      { find: publicDshPackage('dsh-client-runtime/client'), replacement: dsh('packages/client/runtime/src/client/index.ts') },
+      { find: publicDshPackage('cordis-plugin-loader'), replacement: dsh('vendor/loader/src/index.ts') },
       { find: '@shutu-dsh/trajectory', replacement: dsh('packages/client/ui-trajectory/src/client/timeline.ts') },
       { find: '@standard-schema/spec', replacement: dsh('apps/web/node_modules/@standard-schema/spec') },
       { find: 'react', replacement: dsh('apps/web/node_modules/react') },
@@ -163,7 +179,7 @@ export default {
     'process.env': JSON.stringify({
       NODE_ENV: 'production',
       DSH_CLIENT_BUILD_PROFILE: 'official',
-      DSH_CLIENT_TITLE: 'DeepSeek Harness',
+      DSH_CLIENT_TITLE: 'SHUTU-AI',
       DSH_CLIENT_COMMIT_HASH: 'shutu-native',
     }),
     'process.versions.node': '"0.0.0"',

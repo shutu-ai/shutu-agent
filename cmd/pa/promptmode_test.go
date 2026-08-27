@@ -72,7 +72,7 @@ func TestBuildPromptCode(t *testing.T) {
 	}
 	got := b.Build()
 	pi := strings.Index(got, "You are the code-mode agent persona.")
-	ci := strings.Index(got, "程序化操作")
+	ci := strings.Index(got, "`run_code` is the only tool you can call directly")
 	if pi < 0 {
 		t.Fatalf("code prompt missing prompts_dir persona: %q", got)
 	}

@@ -29,6 +29,7 @@ type Section struct {
 type Builder struct {
 	sections []Section
 	tools    func() []llm.ToolSchema
+	vars     map[string]string
 }
 
 // New returns a Builder with a single persona section. It exists for M1
@@ -45,6 +46,18 @@ func NewBuilder() *Builder {
 // FromSections returns a Builder assembled from the given sections.
 func FromSections(sections []Section) *Builder {
 	return &Builder{sections: append([]Section(nil), sections...)}
+}
+
+// SetVariables installs the small prompt-template environment used by the
+// DSH-compatible persona sections. Variables are rendered at Build time so a
+// shared prompt definition can be reused by sessions with different models or
+// working directories. Unknown placeholders are intentionally preserved.
+func (b *Builder) SetVariables(vars map[string]string) *Builder {
+	b.vars = make(map[string]string, len(vars))
+	for key, value := range vars {
+		b.vars[key] = value
+	}
+	return b
 }
 
 // Add appends a section, or replaces an existing section with the same Name.
@@ -85,7 +98,11 @@ func (b *Builder) Clone() *Builder {
 	if b == nil {
 		return NewBuilder()
 	}
-	return &Builder{sections: append([]Section(nil), b.sections...), tools: b.tools}
+	vars := make(map[string]string, len(b.vars))
+	for key, value := range b.vars {
+		vars[key] = value
+	}
+	return &Builder{sections: append([]Section(nil), b.sections...), tools: b.tools, vars: vars}
 }
 
 // Build renders the system prompt: sections ordered by Order then Name, empty
@@ -102,7 +119,7 @@ func (b *Builder) Build() string {
 	})
 	var parts []string
 	for _, s := range ordered {
-		if text := strings.TrimSpace(s.Text); text != "" {
+		if text := strings.TrimSpace(renderVariables(s.Text, b.vars)); text != "" {
 			parts = append(parts, text)
 		}
 	}
@@ -112,6 +129,13 @@ func (b *Builder) Build() string {
 		}
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+func renderVariables(text string, vars map[string]string) string {
+	for key, value := range vars {
+		text = strings.ReplaceAll(text, "{{"+key+"}}", value)
+	}
+	return text
 }
 
 // LoadDir reads prompt sections from dir. Each file named "NNN-name.md" (a

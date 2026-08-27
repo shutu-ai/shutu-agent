@@ -291,7 +291,7 @@ div.composerStack.composerHero   /* 列内 flex 居中；padding-bottom:32；wid
                     z-index:-1；宽 = 100%*1051/776（贴卡缩放） */
   div.HeroShell.root
     div.headline   /* 26/32 500；grid 34px auto auto; gap10; 居中 */
-      span.fishHitbox > FishLogo(34x25) + span.headlineText "探索未至之境" + span.previewBadge "预览版"
+      span.fishHitbox > FishLogo(34x25) + span.headlineText "智行未至之境" + span.previewBadge "预览版"
       （previewBadge：mono 12/18 500, r24, 1px 边, business-tertiary 底, bluish 文字）
     div.body（占位，输入卡在此之下）
   div.heroWorkspaceRow   /* padding-left:20; margin-top:4 */
@@ -598,7 +598,7 @@ div.root  /* display:block; text-align:center; max-width:748; padding:4 (clearan
 - 访问模式：`访问模式，当前：{name}`；Full access 确认：`确认启用 Full access？` `启用 Full access 后…（长说明见源码）` `我已了解风险，并愿意继续` `取消` `启用 Full access`
 
 **空态引导**
-- 主标题：`探索未至之境`；角标：`预览版`；工作区：`选择工作区`
+- 主标题：`智行未至之境`；角标：`预览版`；工作区：`选择工作区`
 
 **顶部**
 - 页签：`对话`；面包屑 aria：`会话层级`

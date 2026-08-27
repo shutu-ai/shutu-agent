@@ -187,6 +187,7 @@ func (a *app) registerWebServer() error {
 	srv.SetModelSwitcher(func(ctx context.Context, provider, model, effort string) error {
 		return a.webSwitchModel(ctx, provider, model, effort)
 	})
+	srv.SetNativeDefaultModelSaver(a.saveNativeDefaultModel)
 	// M11 (增加提供方 / 增加自定义提供方): wire the provider-management API. A
 	// "save" of a built-in provider stores only the API-key override (custom:false);
 	// a "save" of a custom provider (custom:true) persists the full profile + key;
@@ -623,7 +624,7 @@ func (a *app) webMessage(ctx context.Context, sessionID, text string, images []l
 	turnCtx, cancel := context.WithCancel(turnBase)
 	a.setTurnCancel(cancel)
 	defer func() { a.clearTurnCancel(); cancel() }()
-	if err := a.runTurn(turnCtx, text, false); err != nil {
+	if err := a.runTurnFor(turnCtx, sessionID, text, false); err != nil {
 		return err
 	}
 	// Keep Web and REPL turn completion identical: persist long-term memories
@@ -1231,7 +1232,7 @@ func (a *app) contextWindowOf(sessionID string) int {
 		provider = a.cfg.LLM.Provider
 	}
 	if model == "" {
-		model = a.cfg.Model
+		model = llmProviderModel(a.cfg, provider)
 	}
 	if model == "" {
 		return 0
@@ -1272,6 +1273,45 @@ func (a *app) directoryContextWindow(provider, model string) int {
 		}
 	}
 	return 0
+}
+
+// persistDefaultModelSelection stores the shared DSH Agent default. The
+// native picker calls this after its session override is accepted; the legacy
+// model endpoint uses it too so both Web surfaces have one behavior.
+func (a *app) persistDefaultModelSelection(ctx context.Context, provider, model, effort string) {
+	if a.store == nil {
+		return
+	}
+	raw, err := encodePersistedModelSelection(provider, model, effort)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pa: encode default model selection: %v\n", err)
+		return
+	}
+	persistCtx := ctx
+	if a.baseCtx != nil {
+		persistCtx = a.baseCtx
+	}
+	if err := a.store.SetSetting(persistCtx, defaultModelSettingKey, raw); err != nil {
+		// DSH keeps the accepted session selection when its settings write fails;
+		// report the failure without turning a valid model switch into a false
+		// selection error.
+		fmt.Fprintf(os.Stderr, "pa: persist default model selection: %v\n", err)
+	}
+}
+
+// saveNativeDefaultModel applies and persists a native DSH model selection for
+// sessions created afterwards. The current session has already received its
+// own durable override in nativeSessionSelectModel.
+func (a *app) saveNativeDefaultModel(ctx context.Context, provider, model, effort string) {
+	a.turnMu.Lock()
+	defer a.turnMu.Unlock()
+	selection := persistedModelSelection{
+		Provider:        strings.TrimSpace(provider),
+		Model:           strings.TrimSpace(model),
+		ReasoningEffort: strings.TrimSpace(effort),
+	}
+	applyModelSelectionToConfig(&a.cfg, selection)
+	a.persistDefaultModelSelection(ctx, selection.Provider, selection.Model, selection.ReasoningEffort)
 }
 
 // setTurnCancel registers the web turn's cancel func for the running turn.
@@ -1863,9 +1903,10 @@ func validProviderRoute(id string) bool {
 // rebuilds the selected LLM provider — no restart. It runs under turnMu (D5
 // serial: no turn is in flight while the selection swaps) and registerLLM
 // publishes the new pointer under llmMu, so the very next message (buildLoop
-// re-wires every turn) talks to the new provider. The change is runtime-only:
-// config.yaml stays the source of truth for the next launch. Fail-closed: on
-// error the previous selection is fully restored.
+// re-wires every turn) talks to the new provider. The accepted selection is
+// also stored in the durable settings table as the shared default; config.yaml
+// remains the base configuration. Fail-closed: on error the previous selection
+// is fully restored.
 func (a *app) webSwitchModel(ctx context.Context, provider, model, effort string) error {
 	a.turnMu.Lock()
 	defer a.turnMu.Unlock()
@@ -1921,6 +1962,7 @@ func (a *app) webSwitchModel(ctx context.Context, provider, model, effort string
 	if a.compaction != nil {
 		_ = a.registerCompaction()
 	}
+	a.persistDefaultModelSelection(ctx, a.cfg.LLM.Provider, llmProviderModel(a.cfg, a.cfg.LLM.Provider), a.cfg.ReasoningEffort)
 	return nil
 }
 

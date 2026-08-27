@@ -36,8 +36,12 @@ func (a *app) defaultWorkdir() string {
 // workspace path wins over legacy/stale cwd values, matching dsh's invariant
 // that tools use the workspace directory attached to the session.
 func (a *app) sessionCWD() string {
-	if a.store != nil && a.currentID != "" {
-		if meta, err := a.store.GetSessionMeta(context.Background(), a.currentID); err == nil {
+	return a.sessionCWDFor(a.currentID)
+}
+
+func (a *app) sessionCWDFor(sessionID string) string {
+	if a.store != nil && sessionID != "" {
+		if meta, err := a.store.GetSessionMeta(context.Background(), sessionID); err == nil {
 			if meta.WorkspaceID != "" {
 				if workspaces, listErr := a.store.ListWorkspaces(context.Background()); listErr == nil {
 					for _, ws := range workspaces {
@@ -59,11 +63,18 @@ func (a *app) sessionCWD() string {
 	return a.defaultWorkdir()
 }
 
-// runtimeContext is the model-facing workspace snapshot. It follows dsh's
-// durable user-context shape and is intentionally explicit about authority:
-// relative paths and "current directory" refer to this session workspace.
-func (a *app) runtimeContext(_ context.Context, _ string) []llm.Message {
-	cwd := filepath.Clean(a.sessionCWD())
+// runtimeContext is the model-facing workspace snapshot for the active session.
+// It remains as a small compatibility wrapper for callers outside the turn
+// builder; loops created for a specific session use runtimeContextFor instead.
+func (a *app) runtimeContext(ctx context.Context, _ string) []llm.Message {
+	return a.runtimeContextFor(ctx, a.currentID)
+}
+
+// runtimeContextFor resolves the workspace from the explicit session id. A
+// turn must never derive its authoritative cwd from the process-global current
+// session because Web requests can target different sessions.
+func (a *app) runtimeContextFor(_ context.Context, sessionID string) []llm.Message {
+	cwd := filepath.Clean(a.sessionCWDFor(sessionID))
 	if cwd == "." || cwd == "" {
 		return nil
 	}

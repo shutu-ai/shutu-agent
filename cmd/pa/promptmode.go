@@ -1,9 +1,8 @@
 // promptmode.go — 模式预设的提示词组装 (ADR 2026-08-20-mode-presets.md
 // D-MODE-3): standard 用 prompts_dir 目录加载 (现状); minimal 用固定 persona
 // (对齐 dsh minimal complete:true — 单 section, 不追加其他提示文本);
-// code (PTC) 在 standard 基础上注入「程序化操作 (Code Mode)」段, 提示模型
-// 优先用 run_code 把多步操作写成一段程序一次执行 (D-MODE-4 诚实近似: 无 TS
-// SDK, 行为层偏好). 工具目录由调用方 SetTools 安装, 这里不碰.
+// code (PTC) 在 standard 基础上注入 DSH Code Mode 的调用边界和工作目录规则。
+// 工具目录由调用方 SetTools 安装, 这里不碰.
 package main
 
 import (
@@ -13,22 +12,16 @@ import (
 
 // minimalPersona is the minimal preset's fixed persona (D-MODE-3): 固定、完整、
 // 自包含, 不依赖 prompts_dir.
-const minimalPersona = `You are an AI agent powered by SHUTU AI.
-You are a minimal personal agent (mode: minimal).
+const minimalPersona = `You are a helpful software engineer assistant.`
 
-You operate with exactly two tool families and nothing else:
-- PowerShell command execution: pwsh (each call runs in a fresh pwsh process — no state persists between calls; pass workdir instead of cd)
-- file editing: read / write / list / edit
-
-Do not attempt tools outside these. Keep responses brief and factual.`
-
-// codeModeSection is the PTC preset's programmatic-operation section
-// (D-MODE-4): 提示模型把可批量的多步操作合并进一次 run_code 程序.
-const codeModeSection = `## 程序化操作（Code Mode）
-当一次任务包含多个可批量的文件/命令操作时, 优先用 run_code 沙箱把它们写进
-一段程序一次执行（如遍历文件批量处理、循环调用、组合读取+写入），而不是逐个
-工具往返。仅当操作无法程序化、或单次操作依赖前一次的人工可观察结果时才逐个
-调用工具。`
+// codeModeSection is the PTC preset's DSH-aligned direct-call rule. Shutu's
+// current run_code substrate executes a shell program (rather than DSH's
+// generated TypeScript SDK), so the prompt states that contract explicitly and
+// prevents the model from inventing direct shell tool names or cwd semantics.
+const codeModeSection = "## Code Mode (PTC)\n" +
+	"`run_code` is the only tool you can call directly in Code Mode. Do not call `shell`, `sh`, `pwsh`, or any other native tool directly; if a programmatic operation is needed, put it in the `run_code` call.\n\n" +
+	"`run_code` executes one non-interactive shell program in the current session workspace unless an explicit `cwd` is supplied. Its required arguments are `lang` (currently \"sh\") and `code`; `timeout` and `cwd` are optional. Use the command's output as the source of truth for the current directory. For a current-directory question, run `pwd`/`cd` in `run_code` and report that result without guessing from the process or sandbox directory.\n\n" +
+	"Use `run_code` for batched operations and keep the program focused. A non-zero exit code or timeout is a normal tool result that should be inspected and, when safe, corrected in a follow-up call."
 
 const planModeSection = `## Plan mode
 The user has entered planning mode. Focus on understanding the request, exploring the

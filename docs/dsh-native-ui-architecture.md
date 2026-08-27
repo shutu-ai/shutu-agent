@@ -10,7 +10,7 @@
 npm.cmd run build
   └─ web/src/main.tsx
       └─ mountDshNativeApp()
-          └─ @deepseek-ai/dsh-client-web
+          └─ @shutu-ai/dsh-client-web
               └─ AppWebEntry
                   └─ Cordis Loader → uiRenderer → root slot
 ```

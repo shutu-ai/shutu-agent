@@ -6,6 +6,8 @@ import { spawnSync } from 'node:child_process'
 const webRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const dshRoot = resolve(process.env.SHUTU_DSH_ROOT ?? resolve(webRoot, '../../deepseek-harness'))
 const outputPath = resolve(webRoot, 'dist/dsh-native-manifest.json')
+const packageScope = '@shutu-ai'
+const dshPackage = (name) => `${packageScope}/${name}`
 
 const clientPackageDirs = [
   'connection', 'hmr', 'locale', 'runtime', 'ui-agent-preset', 'ui-attachment',
@@ -19,10 +21,10 @@ const clientPackageDirs = [
 ]
 
 const extraPackages = [
-  ['typert/registry', '@deepseek-ai/dsh-typert-registry'],
-  ['extensions/cordis-client-runner', '@deepseek-ai/dsh-cordis-client-runner'],
-  ['extensions/ui-cordis', '@deepseek-ai/dsh-client-ui-cordis'],
-  ['session-query/session-log-export', '@deepseek-ai/dsh-session-log-export'],
+  ['typert/registry', dshPackage('dsh-typert-registry')],
+  ['extensions/cordis-client-runner', dshPackage('dsh-cordis-client-runner')],
+  ['extensions/ui-cordis', dshPackage('dsh-client-ui-cordis')],
+  ['session-query/session-log-export', dshPackage('dsh-session-log-export')],
 ]
 
 function readJSON(path) {
@@ -41,19 +43,19 @@ if (!existsSync(rootManifestPath)) throw new Error(`DSH source manifest is missi
 const rootManifest = readJSON(rootManifestPath)
 
 const plugins = clientPackageDirs.map((dir) => ({
-  id: `@deepseek-ai/dsh-client-${dir}`,
+  id: dshPackage(`dsh-client-${dir}`),
   source: `deepseek-harness/packages/client/${dir}/src/client/index.ts`,
 }))
 for (const [relative, id] of extraPackages) {
   plugins.push({ id, source: `deepseek-harness/packages/${relative}/src/client/index.ts` })
 }
-plugins.push({ id: '@deepseek-ai/dsh-api-remotes', source: 'shutu-agent/web/src/dsh-native-remote.ts' })
+plugins.push({ id: dshPackage('dsh-api-remotes'), source: 'shutu-agent/web/src/dsh-native-remote.ts' })
 
 const manifest = {
   schemaVersion: 1,
   kind: 'shutu-dsh-native',
   profile: 'official',
-  buildRevision: 'shutu-native-p36-4',
+  buildRevision: 'shutu-native-namespace-v1',
   dsh: {
     version: rootManifest.version ?? null,
     packageManager: rootManifest.packageManager ?? null,

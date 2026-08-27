@@ -1292,8 +1292,12 @@ func TestNativeAgentPresetAuthoringRPCs(t *testing.T) {
 
 func TestNativeSessionSelectModelPersistsAndProjectsSelection(t *testing.T) {
 	srv, st := newTestServer(t, "tok")
+	var defaultProvider, defaultModel, defaultEffort string
+	srv.SetNativeDefaultModelSaver(func(_ context.Context, provider, model, effort string) {
+		defaultProvider, defaultModel, defaultEffort = provider, model, effort
+	})
 	srv.SetConfigProvider(func() map[string]any {
-		return map[string]any{"provider": "deepseek-official", "model": "deepseek-chat"}
+		return map[string]any{"provider": "deepseek-official", "model": "deepseek-chat", "reasoning_effort": "low"}
 	})
 	if err := st.CreateSession(context.Background(), "select-model", time.Now()); err != nil {
 		t.Fatal(err)
@@ -1332,6 +1336,9 @@ func TestNativeSessionSelectModelPersistsAndProjectsSelection(t *testing.T) {
 	}
 	if config.Provider != "openai" || config.Model != "gpt-4o" || config.ReasoningEffort != "high" {
 		t.Fatalf("persisted model config = %+v", config)
+	}
+	if defaultProvider != "openai" || defaultModel != "gpt-4o" || defaultEffort != "high" {
+		t.Fatalf("shared default model selection = %q/%q/%q", defaultProvider, defaultModel, defaultEffort)
 	}
 
 	response = call("models-after-select", "session.models", map[string]any{"sessionId": "select-model"})
@@ -1873,6 +1880,9 @@ func TestNativeSettingsDescribeAndMutate(t *testing.T) {
 	}
 	if len(described.Namespaces) != 1 || described.Namespaces[0]["ns"] != nativeSettingsOnboarding {
 		t.Fatalf("settings namespaces = %+v", described.Namespaces)
+	}
+	if described.Namespaces[0]["value"].(map[string]any)["welcomeNoticeVersion"] != nativeWelcomeNoticeVersion {
+		t.Fatalf("welcome notice acknowledgement = %+v", described.Namespaces[0]["value"])
 	}
 
 	rec = doReqBody(t, srv.Handler(), "POST", "/api/settings.mutate", "tok", `{"type":"client-request","rpcId":"settings-2","method":"settings.mutate","payload":{"ns":"ui-onboarding","ops":[{"op":"set","path":["welcomeNoticeVersion"],"value":"2026-08-13.1"}]}}`)
@@ -2802,6 +2812,54 @@ func TestNativeSettingsUpdateReplaceAndLLMDiscovery(t *testing.T) {
 	}
 	if len(discovered.Models) != 1 || discovered.Models[0]["id"] != "gpt-4o" || discovered.Models[0]["contextWindow"] != float64(128000) || discovered.Models[0]["maxTokens"] != float64(16384) {
 		t.Fatalf("discovered models = %#v", discovered.Models)
+	}
+}
+
+func TestNativeAgentPresetDefaultSettingsUpdate(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	call := func(id string, preset string, expected *int) nativeRPCResponse {
+		t.Helper()
+		payload := map[string]any{
+			"ns": "agent-presets", "patch": map[string]any{"default": preset},
+		}
+		if expected != nil {
+			payload["expectedRevision"] = *expected
+		}
+		body, err := json.Marshal(map[string]any{
+			"type": "client-request", "rpcId": id, "method": "settings.update", "payload": payload,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := doReqBody(t, srv.Handler(), "POST", "/api/settings.update", "tok", string(body))
+		return nativeResponse(t, rec.Body.Bytes())
+	}
+
+	response := call("agent-preset-minimal", "minimal", nil)
+	if !response.Result.OK {
+		t.Fatalf("minimal default update response = %+v", response)
+	}
+	var view map[string]any
+	encoded, _ := json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &view); err != nil {
+		t.Fatal(err)
+	}
+	if view["ns"] != "agent-presets" || view["revision"] != float64(1) || view["value"].(map[string]any)["default"] != "minimal" {
+		t.Fatalf("minimal default view = %#v", view)
+	}
+	settings, err := st.GetSettings(context.Background())
+	if err != nil || settings["agent_preset"] != "minimal" {
+		t.Fatalf("persisted agent preset = %#v, err=%v", settings, err)
+	}
+
+	response = call("agent-preset-code", "code", nil)
+	if !response.Result.OK {
+		t.Fatalf("code default update response = %+v", response)
+	}
+	staleRevision := 0
+	response = call("agent-preset-stale", "minimal", &staleRevision)
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "settings-conflict" {
+		t.Fatalf("stale agent preset update response = %+v", response)
 	}
 }
 

@@ -44,6 +44,11 @@ func (a *app) registerCode() error {
 	ct.DefaultTimeout = a.cfg.Code.Timeout.Duration
 	ct.DefaultMaxOutput = a.cfg.Code.MaxOutput
 	ct.DefaultCwd = a.cfg.Code.SandboxDir
+	// DSH starts tools in the workspace attached to the current session. Keep
+	// an explicit model-provided cwd as an override, but resolve the omitted cwd
+	// against the active session at execution time rather than process cwd or a
+	// single startup sandbox.
+	ct.DefaultCwdFunc = func() string { return a.sessionCWD() }
 	if err := a.reg.Register(ct.Run()); err != nil {
 		return fmt.Errorf("pa: register run_code: %w", err)
 	}

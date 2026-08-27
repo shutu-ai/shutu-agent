@@ -66,10 +66,10 @@ type Server struct {
 	srv            *http.Server
 
 	// nativeSettings is the small settings document owned by the DSH native
-	// adapter. It currently carries the native onboarding acknowledgement. The
-	// document is intentionally process-local until Shutu's persistent settings
-	// model is folded into the native API; this keeps the native contract real
-	// without coupling it to the legacy REST settings surface.
+	// adapter. It carries the onboarding acknowledgement and the agent-preset
+	// default; the latter is mirrored into the persistent settings table by the
+	// native settings bridge without coupling the native API to the legacy REST
+	// settings surface.
 	nativeSettingsMu sync.Mutex
 	nativeSettings   map[string]nativeSettingsDocument
 
@@ -149,6 +149,9 @@ type Server struct {
 	// reasoning-effort, rebuilds the selected LLM provider and answers the new
 	// config state. nil (the default) makes the API answer 501.
 	setModelFn func(ctx context.Context, provider, model, effort string) error
+	// nativeDefaultModelFn receives accepted native DSH model selections so the
+	// composition root can persist the shared Agent default for later sessions.
+	nativeDefaultModelFn func(ctx context.Context, provider, model, effort string)
 
 	// M11 (增加提供方 / 增加自定义提供方, dsh-synced): the provider-management
 	// dispatcher. setProviderFn handles POST /api/config/provider (save a
@@ -313,6 +316,14 @@ func (s *Server) SetModelSwitcher(fn func(ctx context.Context, provider, model, 
 	s.setModelFn = fn
 }
 
+// SetNativeDefaultModelSaver wires DSH's shared Agent-default model behavior
+// for the native session.selectModel RPC. The current session remains owned by
+// its session config; this callback only updates the default used by sessions
+// created afterwards.
+func (s *Server) SetNativeDefaultModelSaver(fn func(ctx context.Context, provider, model, effort string)) {
+	s.nativeDefaultModelFn = fn
+}
+
 // SetProviderManager wires the M11 provider-management API (POST /api/config/
 // provider to save an API-key override or a custom provider, DELETE
 // /api/config/provider to remove a custom provider). Called by the composition
@@ -368,7 +379,12 @@ func New(st store.Store, token, addr string) (*Server, error) {
 		authOn:    token != "",
 		addr:      addr,
 		nativeSettings: map[string]nativeSettingsDocument{
-			nativeSettingsOnboarding: {Value: map[string]any{}},
+			// Shutu is not the DSH developer-preview distribution. Mark the
+			// DSH product welcome notice as acknowledged so the native UI opens
+			// directly on the application instead of showing that declaration.
+			nativeSettingsOnboarding: {Value: map[string]any{
+				"welcomeNoticeVersion": nativeWelcomeNoticeVersion,
+			}},
 		},
 	}
 	// The React shell (login view + frontend assets) is public so a fresh
@@ -1371,7 +1387,7 @@ func isInternalContextMessage(ev session.Event) bool {
 		return false
 	}
 	if d.Source != nil && (d.Source.Kind == "skill-catalog" ||
-		(d.Source.Kind == "plugin" && d.Source.Plugin == "@deepseek-ai/dsh-system-prompt")) {
+		(d.Source.Kind == "plugin" && d.Source.Plugin == "@shutu-ai/dsh-system-prompt")) {
 		return true
 	}
 	return strings.HasPrefix(d.Text, "<system-reminder>\n") ||
@@ -1404,7 +1420,7 @@ func internalContextSource(ev session.Event) string {
 	// metadata was added.
 	switch {
 	case strings.HasPrefix(d.Text, "Current runtime context."):
-		return "@deepseek-ai/dsh-system-prompt"
+		return "@shutu-ai/dsh-system-prompt"
 	case strings.HasPrefix(d.Text, "<system-reminder>\n"):
 		return "skill-catalog"
 	case strings.HasPrefix(d.Text, "<skill_content name=\""):
