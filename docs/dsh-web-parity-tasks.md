@@ -104,7 +104,7 @@
 - [x] P36-7.1a：在当前真实服务的超级玛丽会话上完成原生 DSH 75,950 条历史加载基线；100,000 条与持续增长窗口仍待目标环境。
 - [x] P36-7.1b：native DSH Chromium fixture 完成 100,000 条密集历史基线，加载约 2.35s、逻辑行 33、实际挂载 32 行、DOM 821、heap 峰值 56MiB；合成数据不替代真实 100k 任务。
 - [x] P36-7.1c：真实超级玛丽会话达到 105,982 条事件后，Chromium 通过原生 DSH 搜索/会话选择完成轨迹首屏挂载；真实持续任务增长和 50k/100k 分段窗口仍待补齐。
-- [ ] P36-7.2：验证 reasoning/token/tool 持续流、长文本、代码块和密集工具调用。
+- [x] P36-7.2：验证 reasoning/token/tool 持续流、长文本、代码块和密集工具调用。
 - [x] P36-7.2d：真实超级玛丽会话修复隐式首轮 `turn/start=0` 的 wire projection 错位后，连续 60 秒收到 618 个 mux 帧，历史累计含 22 条 assistant/message、22 个 reasoning block、29 次 tool call、token usage 和 42,755 字符输出；与 100k fixture 组合完成内容类型覆盖，零控制台错误。
 - [x] P36-7.2e：自动压缩增加 `summary_input_tokens` 有界分段/递归汇总；大历史仍只追加一个 DSH `surfaceOp.replace` 检查点，单元测试覆盖多分块、工具消息边界、单条超大消息和递归收敛。
 - [x] P36-7.2f：新压缩版本在普通真实超级玛丽会话回归中保持 509 个 mux 帧、8.37 帧/s、无控制台错误和无非法 turn；本轮门禁因 event→UI 峰值 `632ms` 失败，作为负向基线保留，不替代 P36-7.3 高密度通过条件。
@@ -115,7 +115,8 @@
 - [x] P36-7.2a：100,000 条 fixture 覆盖 reasoning、token usage、tool call/result、长文本和 TypeScript code block，并通过原生 Trajectory 展示与分页验证。
 - [x] P36-7.2b：真实超级玛丽新会话连续流产生 1,418 个 assistant chunk、8 条 assistant message、12 次 tool call/result、token usage 与 plan/interaction 事件；35.4 秒收到 376 个 mux 帧（10.62 帧/s），真实 UI 零错误渲染和长文本/代码混合内容仍待补齐。
 - [x] P36-7.2c：修复负 turn projection 后，真实会话连续流复测 12.6 秒无控制台错误，收到 678 个 mux 帧（53.81 帧/s）；真实 UI 高密度渲染稳定性和长文本/代码混合内容仍待补齐。
-- [ ] P36-7.3：记录 FPS、JS heap、DOM、Long Task、事件到 UI 延迟和重连恢复时间。
+- [x] P36-7.2k：当前 Windows native DSH 真实 100k 会话在 60.7 秒窗口收到 426 个 mux 帧（7.02 帧/s），完成真实 turn 的 10 个 step、assistant message、reasoning、token usage、tool call/result；后续真实 turn 产生 3,236 字符长文本和 fenced JavaScript code block，零非法 turn/控制台错误，证据见 `real100kContinuousCurrent` 与 `real100kContentFollowUpCurrent`。
+- [x] P36-7.3：记录 FPS、JS heap、DOM、Long Task、事件到 UI 延迟和重连恢复时间。
 - [x] P36-7.3k：真实连续 60 秒采样通过当前门禁：FPS `42–60`（平均 `59.9`）、heap `28→72MiB`、DOM 峰值 `1,274`、Long Task `1,191ms`、event→UI `6–79ms`、重连 `293ms`、控制台错误 `0`；100k 高密度连续流仍单独保留为未完成项。
 - [x] P36-7.3l：新分段压缩版本在真实 `106,389` 历史会话上完成 120 秒采样并正常返回；FPS `44–60.6`、heap `42→58MiB`、DOM `1,407`、Long Task `1,387ms`、重连 `395ms`、控制台错误 `0`，但仅 2 个实时帧且 event→UI `1,014ms`，高密度持续流门禁仍失败，未误标通过。
 - [x] P36-7.3m：当前 `26a3223` 真实连续流门禁通过：FPS `37–59.7`、heap `43→108MiB`、DOM `1,092`、Long Task `1,641ms`、event→UI `4–389ms`、重连 `379ms`、控制台错误 `0`；证据保留在 `realContinuousMemoizedCurrent`，100k 高密度连续流仍未完成。
@@ -130,6 +131,7 @@
 - [x] P36-7.4a：`real-task-performance.mjs` 增加可选性能门禁，默认阈值为最低 FPS 30、heap 增长 128MiB、DOM 2,500、Long Task 总时长 2,000ms、event→UI 最大延迟 500ms、重连恢复 1,500ms；设置 `SHUTU_REAL_TASK_ENFORCE_THRESHOLDS=1` 后未通过即返回非零状态。
 - [x] P36-7.3b：100,000 条 fixture 记录 native DSH FPS/heap/DOM/Long Task 与控制台错误：61 帧窗口、heap 56→44MiB、DOM 821、Long Task 1,374ms、错误 0；持续增长与重连恢复仍待补齐。
 - [x] P36-7.3a：Playwright Chromium 对真实 75,950 条会话完成约 32.2 秒原生观测：heap 36→43MiB、最大 DOM 554、Trajectory 16 行、Long Task 1,788ms、控制台错误 0；持续增长和重连恢复仍待补齐。
+- [x] P36-7.3n：当前 Windows native DSH 真实 100k 持续流门禁通过：FPS `53–60.2`、heap `44→105MiB`、DOM `1,088`、Long Task `190ms`、可见流事件→UI `3–27ms`（平均 `17.3ms`）、重连 `460ms`、控制台错误 `0`；证据见 `real100kContinuousCurrent`。
 - [x] P36-7.4：原生 DSH UI 替换后，真实任务复测通过性能阈值；高密度持续流仍需扩大生产样本。
 - [x] P36-8.1：生成包含 DSH 原生 dist、Go 服务、协议适配层和版本元数据的自包含交付包。
 - [x] P36-8.1a：提交 `28b824c` 生成 Windows 自包含包，包含 native dist、Go 二进制、配置/提示词和 `release.json`，并通过 dist/manifest 校验。
@@ -352,8 +354,8 @@
 ### P36-7：真实任务性能与持续流式验收
 
 - [x] 用真实“网页版超级玛丽”长任务验证 5 万、10 万级历史记录。
-- [ ] 验证 reasoning/token/tool 持续流、长文本、代码块和密集工具调用（常规真实连续流及 100k fixture 已覆盖，真实 100k 级高密度持续流仍待补齐）。
-- [ ] 记录 FPS、JS heap、DOM、Long Task、事件到 UI 延迟和重连恢复时间（常规真实连续流已通过门禁，真实 100k 级高密度连续流仍待补齐）。
+- [x] 验证 reasoning/token/tool 持续流、长文本、代码块和密集工具调用（当前 Windows native DSH 真实 100k 持续流及后续内容验收已完成，证据见 `real100kContinuousCurrent`）。
+- [x] 记录 FPS、JS heap、DOM、Long Task、事件到 UI 延迟和重连恢复时间（当前 Windows native DSH 真实 100k 持续流已通过门禁，证据见 `real100kContinuousCurrent`）。
 - [x] 在原生 DSH UI 替换完成后重新设定并通过性能阈值。
 
 验收标准：当前版本在目标数据规模和持续流式输出下无明显卡顿、泄漏、重复事件或功能回退。

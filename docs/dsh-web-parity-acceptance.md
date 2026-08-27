@@ -422,6 +422,25 @@ upgrades returned `200/101` as expected, and the service stopped cleanly. This
 updates the local Linux-like evidence only; it does not close the formal target
 Linux host item.
 
+## P36-7.2 / P36-7.3 current real 100k continuous stream (2026-08-27)
+
+After fixing the repeated skill-catalog snapshot scan, the current Windows
+native service (`0f4568f`) was observed against the real
+`P36 Real 100k Super Mario High Density` session at 110,072 historical events.
+The 60.7-second native DSH run accepted the prompt in 7ms and received 426
+stream frames (`110076..110501`, 7.02/s). The completed real turn contained 10
+steps, 10 assistant messages, 10 tool calls/results, reasoning and token usage;
+a follow-up real turn produced a 3,236-character assistant response with one
+fenced JavaScript code block. No invalid turns or console errors were observed.
+
+The current performance sample passed its enforced gate: FPS `53–60.2`, heap
+`44→105MiB`, DOM peak `1,088`, Long Tasks `190ms` total, visible stream event→UI
+latency `3–27ms` (average `17.3ms`), and reconnect recovery `460ms`. The
+sampler now closes both sides of its routed reconnect WebSocket; this removed
+the stale-upstream duplicate-start noise from the earlier measurement. Full
+machine-readable evidence is in `real100kContinuousCurrent` and
+`real100kContentFollowUpCurrent`.
+
 ## P36-6.3 Cross-engine accessibility evidence (2026-08-27)
 
 Playwright Firefox and WebKit binaries were installed in the user-level browser cache and the full native accessibility fixture was rerun alongside Chromium. Desktop `1280x900` and mobile `390x844` passed in all three engines: two Conversation/Trajectory tabs exposed valid selection state and panel labels, visible controls had accessible names, Settings focus trapping passed for Tab/Shift+Tab, Escape restored the trigger focus, touch-target counts were reported, and console errors were zero. Real screen-reader speech output remains the only P36-6.3 evidence not executable in this environment.

@@ -255,6 +255,10 @@ if (reconnect.requested) {
     if (reconnect.connections === 1) {
       setTimeout(() => {
         reconnect.closedAt = Date.now()
+        // Close both halves of the routed connection. Closing only the page
+        // side leaves the upstream subscription alive and can contaminate a
+        // reconnect measurement with a stale server-side listener.
+        upstream.close(1011, 'real performance reconnect probe')
         websocket.close(1011, 'real performance reconnect probe')
       }, reconnectAfterMs)
     }
