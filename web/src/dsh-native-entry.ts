@@ -96,16 +96,39 @@ export async function mountDshNativeApp(container: HTMLElement): Promise<void> {
  * contract without changing the read-only DSH source tree.
  */
 export function installDshNativeAccessibilityBridge(documentObject: Document = document): () => void {
+  let lastDialogTrigger: HTMLButtonElement | null = null
+  let dialogWasMounted = false
+  const rememberDialogTrigger = (event: MouseEvent): void => {
+    const target = event.target
+    if (!(target instanceof Element)) return
+    const trigger = target.closest<HTMLButtonElement>('button[aria-haspopup="dialog"]')
+    if (trigger !== null) lastDialogTrigger = trigger
+  }
   const apply = (): void => {
     for (const button of documentObject.querySelectorAll<HTMLButtonElement>('button[aria-haspopup="dialog"]')) {
       if (button.getAttribute('aria-label')?.trim() || button.textContent?.trim()) continue
       button.setAttribute('aria-label', 'Settings')
     }
+    const dialogMounted = documentObject.querySelector('[role="dialog"]') !== null
+    if (dialogMounted) {
+      dialogWasMounted = true
+      return
+    }
+    if (!dialogWasMounted || lastDialogTrigger === null || !lastDialogTrigger.isConnected) return
+    dialogWasMounted = false
+    const trigger = lastDialogTrigger
+    requestAnimationFrame(() => {
+      if (trigger.isConnected) trigger.focus()
+    })
   }
   apply()
   const observer = new MutationObserver(apply)
   observer.observe(documentObject.body, { childList: true, subtree: true })
-  return () => observer.disconnect()
+  documentObject.addEventListener('click', rememberDialogTrigger, true)
+  return () => {
+    observer.disconnect()
+    documentObject.removeEventListener('click', rememberDialogTrigger, true)
+  }
 }
 
 /** Report the build marker used by the native manifest and diagnostics. */
