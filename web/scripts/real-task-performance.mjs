@@ -143,12 +143,6 @@ async function sampleBrowser(page) {
   })
 }
 
-async function nativeTail() {
-  const value = await nativeRPC('session.list')
-  const item = value.items?.find(entry => entry.sessionId === sessionId)
-  return { count: item?.projections?.asOfSeq ?? 0, type: null, time: null }
-}
-
 const browser = await chromium.launch({ headless: true, args: ['--enable-precise-memory-info'] })
 const page = await browser.newPage({ viewport: { width: 1440, height: 960 } })
 const consoleErrors = []
@@ -174,6 +168,7 @@ page.on('pageerror', error => consoleErrors.push(error.message))
 try {
   await page.goto(`${baseUrl}/`, { waitUntil: 'domcontentloaded', timeout: 60_000 })
   const summary = await sessionSummary()
+  const baselineSeq = summary.projections?.asOfSeq ?? 0
   const tabs = page.getByRole('tab', { name: /Trajectory|轨迹/ })
   if (!skipSelection) await selectSession(page, summary)
   await tabs.waitFor({ timeout: 60_000 })
@@ -193,7 +188,11 @@ try {
   const startedAt = Date.now()
   while (Date.now() - startedAt < durationSeconds * 1000) {
     await new Promise(resolvePromise => setTimeout(resolvePromise, 1_000))
-    const [browserSample, tail] = await Promise.all([sampleBrowser(page), nativeTail()])
+    // Do not poll session.list while a real model turn is running. The host
+    // may serialize native RPC handlers behind the prompt; the mux event
+    // sequence is already the authoritative live tail for this sampler.
+    const [browserSample] = await Promise.all([sampleBrowser(page)])
+    const tail = { count: stream.lastEventSeq ?? baselineSeq, type: null, time: null }
     const uiMutationAt = browserSample.mutationAt
     const completed = stream.pending.filter(event => uiMutationAt >= event.receivedAt)
     if (completed.length > 0) {
