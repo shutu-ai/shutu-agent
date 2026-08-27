@@ -55,6 +55,11 @@ async function installNativeMock(page, options = {}) {
   const socketConnections = new Map()
   const requests = []
   const queueUpdates = []
+  const goalActions = []
+  let goalState = options.goalControls === true ? {
+    id: 'goal-1', revision: 1, objective: 'Ship the fixture', phase: 'active', maxGoalRounds: 4,
+    createdAt: 1_700_000_000_000, updatedAt: 1_700_000_000_000,
+  } : null
   let queueItems = (options.queueItems ?? []).map(item => ({
     id: item.id,
     placement: item.placement ?? 'queued',
@@ -75,6 +80,11 @@ async function installNativeMock(page, options = {}) {
   const sendQueueSnapshot = () => {
     sendMux('queue-snapshot', 'session/queue', {
       type: 'session/queue', sessionId: 'search-fixture', items: queueItems,
+    })
+  }
+  const sendProjection = (key, value, seq = 1) => {
+    sendMux(`${key}-projection`, 'session/projection', {
+      type: 'session/projection', sessionId: 'search-fixture', key, value, seq,
     })
   }
   await page.route('**/plugins/events', route => route.fulfill({
@@ -123,6 +133,56 @@ async function installNativeMock(page, options = {}) {
     }
     assert.equal(body.type, 'client-request', `unexpected native request envelope for ${body.method}`)
     requests.push(body.method)
+    if (options.goalControls === true && body.method.startsWith('goals/')) {
+      const operation = body.method.slice('goals/'.length)
+      goalActions.push({ operation, payload: body.payload })
+      if (goalState !== null) {
+        if (operation === 'edit') {
+          const args = body.payload?.args
+          const request = Array.isArray(args) ? args[2] : undefined
+          const objective = request?.objective
+          if (typeof objective === 'string') goalState = { ...goalState, objective, revision: goalState.revision + 1 }
+        } else if (operation === 'pause') {
+          goalState = { ...goalState, phase: 'paused', revision: goalState.revision + 1 }
+        } else if (operation === 'resume') {
+          goalState = { ...goalState, phase: 'active', revision: goalState.revision + 1 }
+        } else if (operation === 'clear') {
+          goalState = null
+        }
+      }
+      sendProjection('goal', goalState === null ? null : { goal: goalState, roundsStarted: 0, createdAt: goalState.createdAt, updatedAt: goalState.updatedAt }, goalState?.revision ?? 10)
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          type: 'server-response', rpcId: body.rpcId,
+          result: { ok: true, value: goalState === null ? { ref: { id: 'goal-1', revision: 99 } } : goalState },
+        }),
+      })
+    }
+    if (options.goalControls === true && body.method === 'commands/execute') {
+      const args = body.payload?.args
+      const line = Array.isArray(args) ? args[1] : body.payload?.line
+      if (line === '/plan off') sendProjection('plan', { active: false, pending: false }, 2)
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          type: 'server-response', rpcId: body.rpcId,
+          result: { ok: true, value: { commandId: 'command-fixture', result: { kind: 'success' } } },
+        }),
+      })
+    }
+    if (options.goalControls === true && body.method === 'session.cancel') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          type: 'server-response', rpcId: body.rpcId,
+          result: { ok: true, value: { accepted: true } },
+        }),
+      })
+    }
     if (options.queueControls && body.method === 'session.updateQueue') {
       const action = body.payload?.action ?? {}
       const itemId = body.payload?.itemId
@@ -211,7 +271,16 @@ async function installNativeMock(page, options = {}) {
           result: { ok: true, value: {
             header: { version: 0, id: 'search-fixture', createdAt: Date.now(), cwd: 'C:/shutu-search' },
             events: [], hasMore: false, surface: { nodes: [], replacements: [] },
-            projections: { asOfSeq: 0, values: { title: 'Search fixture', sessionListMetadata: { blank: false } } },
+            projections: {
+              asOfSeq: 0,
+              values: {
+                title: 'Search fixture', sessionListMetadata: { blank: false },
+                ...(options.goalControls === true ? {
+                  goal: { goal: goalState, roundsStarted: 0, createdAt: goalState.createdAt, updatedAt: goalState.updatedAt },
+                  plan: { active: false, pending: false },
+                } : {}),
+              },
+            },
           } },
         }),
       })
@@ -267,6 +336,7 @@ async function installNativeMock(page, options = {}) {
   })
   return {
     sockets, socketConnections, requests, queueUpdates, sendMux, sendQueueSnapshot,
+    goalActions, sendProjection,
     get interactionStage() { return interactionStage },
     setInteractionStage: value => { interactionStage = value },
   }
@@ -577,6 +647,72 @@ async function runQueueControls(browser) {
   }
 }
 
+async function runCancelPlanGoalControls(browser) {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+  const issues = []
+  page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
+  page.on('pageerror', error => issues.push(error.message))
+  page.on('response', response => { if (response.status() >= 400) issues.push(`http ${response.status()}: ${response.url()}`) })
+  const fixture = await installNativeMock(page, { seedSession: true, lifecycle: true, goalControls: true, runningSession: true })
+  await page.goto(baseUrl, { waitUntil: 'domcontentloaded' })
+  await waitForNativeShell(page)
+  const search = page.locator('button[aria-label="Search sessions"], button[aria-label="Search"], button[aria-label="搜索会话"], button[aria-label="搜索"]').first()
+  await search.click()
+  const input = page.locator('input[placeholder]').first()
+  await input.fill('fixture')
+  const result = page.locator('[role="tree"]').last().getByRole('treeitem').first()
+  await result.waitFor({ timeout: 15_000 })
+  await result.click()
+  await input.press('Escape')
+  await page.getByText('Search fixture', { exact: true }).last().waitFor({ timeout: 15_000 })
+
+  const stop = page.getByRole('button', { name: /Stop generating|停止生成/ }).first()
+  await stop.waitFor({ timeout: 15_000 })
+  await stop.click()
+  await waitForCondition(() => fixture.requests.includes('session.cancel'))
+
+  fixture.sendProjection('goal', { goal: goalStateForFixture(), roundsStarted: 0, createdAt: 1_700_000_000_000, updatedAt: 1_700_000_000_000 }, 1)
+  fixture.sendProjection('plan', { active: true, pending: false }, 1)
+  const goalBar = page.locator('[data-goal-bar]')
+  await page.waitForTimeout(250)
+  await goalBar.waitFor({ timeout: 15_000 })
+  await page.getByText('Ship the fixture', { exact: true }).waitFor({ timeout: 15_000 })
+  const planChip = page.getByRole('button', { name: /Plan mode on|plan mode 已开启/ })
+  await planChip.waitFor({ timeout: 15_000 })
+  await planChip.click()
+  await waitForCondition(() => fixture.requests.includes('commands/execute'))
+  await planChip.waitFor({ state: 'detached', timeout: 15_000 })
+
+  await goalBar.getByRole('button', { name: /Edit goal|编辑目标/ }).click()
+  const goalInput = goalBar.getByRole('textbox', { name: /Goal objective|目标内容/ })
+  await goalInput.fill('Ship the edited fixture')
+  await goalBar.getByRole('button', { name: /Save goal|保存目标/ }).click()
+  await waitForCondition(() => fixture.goalActions.some(action => action.operation === 'edit'))
+  await page.getByText('Ship the edited fixture', { exact: true }).waitFor({ timeout: 15_000 })
+
+  await goalBar.getByRole('button', { name: /Pause goal|暂停目标/ }).click()
+  await waitForCondition(() => fixture.goalActions.some(action => action.operation === 'pause'))
+  await goalBar.getByRole('button', { name: /Resume goal|恢复目标/ }).waitFor({ timeout: 15_000 })
+  await goalBar.getByRole('button', { name: /Resume goal|恢复目标/ }).click()
+  await waitForCondition(() => fixture.goalActions.some(action => action.operation === 'resume'))
+  await goalBar.getByRole('button', { name: /Clear goal|清除目标/ }).click()
+  await waitForCondition(() => fixture.goalActions.some(action => action.operation === 'clear'))
+  await goalBar.waitFor({ state: 'detached', timeout: 15_000 })
+  assert.deepEqual(issues, [])
+  await page.close()
+  return {
+    cancel: true, planExit: true,
+    goalActions: fixture.goalActions.map(action => action.operation), console: 'clean',
+  }
+}
+
+function goalStateForFixture() {
+  return {
+    id: 'goal-1', revision: 1, objective: 'Ship the fixture', phase: 'active', maxGoalRounds: 4,
+    createdAt: 1_700_000_000_000, updatedAt: 1_700_000_000_000,
+  }
+}
+
 async function runMobile(browser) {
   const page = await browser.newPage({ viewport: { width: 390, height: 844 } })
   const issues = []
@@ -621,8 +757,9 @@ try {
     const sessionLifecycle = await runSessionLifecycle(browser)
     const interactionControls = await runInteractionControls(browser)
     const queueControls = await runQueueControls(browser)
+    const cancelPlanGoalControls = await runCancelPlanGoalControls(browser)
     const mobile = await runMobile(browser)
-    console.log(JSON.stringify({ browser: 'playwright', native: 'ok', desktop, reconnectDesktop, darkDesktop, loadingDesktop, searchErrorRecovery, sessionLifecycle, interactionControls, queueControls, mobile }))
+    console.log(JSON.stringify({ browser: 'playwright', native: 'ok', desktop, reconnectDesktop, darkDesktop, loadingDesktop, searchErrorRecovery, sessionLifecycle, interactionControls, queueControls, cancelPlanGoalControls, mobile }))
   } finally {
     await browser.close()
   }
