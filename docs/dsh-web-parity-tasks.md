@@ -102,6 +102,7 @@
 - [ ] P36-7.1：用真实“网页版超级玛丽”长任务验证 5 万、10 万级历史记录。
 - [x] P36-7.1a：在当前真实服务的超级玛丽会话上完成原生 DSH 75,950 条历史加载基线；100,000 条与持续增长窗口仍待目标环境。
 - [x] P36-7.1b：native DSH Chromium fixture 完成 100,000 条密集历史基线，加载约 2.35s、逻辑行 33、实际挂载 32 行、DOM 821、heap 峰值 56MiB；合成数据不替代真实 100k 任务。
+- [x] P36-7.1c：真实超级玛丽会话达到 105,982 条事件后，Chromium 通过原生 DSH 搜索/会话选择完成轨迹首屏挂载；真实持续任务增长和 50k/100k 分段窗口仍待补齐。
 - [ ] P36-7.2：验证 reasoning/token/tool 持续流、长文本、代码块和密集工具调用。
 - [x] P36-7.2a：100,000 条 fixture 覆盖 reasoning、token usage、tool call/result、长文本和 TypeScript code block，并通过原生 Trajectory 展示与分页验证。
 - [ ] P36-7.3：记录 FPS、JS heap、DOM、Long Task、事件到 UI 延迟和重连恢复时间。
@@ -110,6 +111,7 @@
 - [x] P36-7.3e：native `session.prompt` 改为 admission RPC；handler 阻塞模型/工具 turn 时仍立即返回 accepted，实际生命周期继续通过 mux 下行，且请求取消不会取消已接收的 turn。
 - [x] P36-7.3f：native `session.list` 使用 sessions 事件计数列与 256 条 tail projection，不再为侧边栏刷新全量重放会话；105,953 条真实历史实测返回约 245ms。
 - [x] P36-7.3g：真实 turn 运行中仍可读取 native `session.list`（返回 `running:true`）；事件计数/尾部 projection 优化后实测约 462ms，且持续采样得到真实 event→UI 延迟 320–347ms。
+- [x] P36-7.3h：为 native `session.history` 增加 4,096 条原始事件传输上限，避免单条超长 streamed message 使首屏 JSON/Trajectory 挂载失控；真实 105,982 事件会话完成 25 秒 Chromium 观察，FPS 60.8、DOM 657、heap 28→36MiB。
 - [x] P36-7.3b：100,000 条 fixture 记录 native DSH FPS/heap/DOM/Long Task 与控制台错误：61 帧窗口、heap 56→44MiB、DOM 821、Long Task 1,374ms、错误 0；持续增长与重连恢复仍待补齐。
 - [x] P36-7.3a：Playwright Chromium 对真实 75,950 条会话完成约 32.2 秒原生观测：heap 36→43MiB、最大 DOM 554、Trajectory 16 行、Long Task 1,788ms、控制台错误 0；持续增长和重连恢复仍待补齐。
 - [ ] P36-7.4：在原生 DSH UI 替换完成后重新设定并通过性能阈值。
