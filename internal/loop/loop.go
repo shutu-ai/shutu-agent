@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/jabing/shutu-agent/internal/llm"
@@ -28,6 +29,16 @@ const maxSteps = 10
 // 总体决策: pre_step.max_chars_per_injector, default 4000). Over-budget context
 // is truncated UTF-8-safely (fail-open: it can never block the answer).
 const maxInjectorChars = 4000
+
+// Streamed deltas are durable fidelity records, but persisting every provider
+// token makes a dense response spend most of its time crossing the store and
+// WebSocket boundaries. Aggregate adjacent deltas for at most one frame-sized
+// window while keeping the final assistant/message authoritative and keeping
+// the interactive onText callback immediate.
+const (
+	streamChunkFlushInterval = 50 * time.Millisecond
+	streamChunkMaxBytes      = 8 * 1024
+)
 
 // PreStepInjector is one registered pre-step context injector.
 // -m5-agent-core.md 总体决策: the unified pre-step injection extension point that
@@ -435,15 +446,61 @@ func (l *Loop) step(ctx context.Context, turnNumber, stepNumber int) (done bool,
 	var calls []llm.ToolCall
 	var finishReason string
 	var usage llm.TokenUsage
+	var pendingChunk strings.Builder
+	var pendingChunkKind string
+	var pendingChunkAt time.Time
+	flushPendingChunk := func() error {
+		if pendingChunk.Len() == 0 {
+			return nil
+		}
+		var payload any
+		if pendingChunkKind == session.EventAssistantReasoning {
+			payload = session.NewAssistantReasoning(pendingChunk.String())
+		} else {
+			payload = session.NewAssistantChunk(pendingChunk.String())
+		}
+		if _, err := l.log.Append(pendingChunkKind, payload); err != nil {
+			return err
+		}
+		pendingChunk.Reset()
+		pendingChunkKind = ""
+		pendingChunkAt = time.Time{}
+		return nil
+	}
+	queueStreamChunk := func(kind, value string) error {
+		if value == "" {
+			return nil
+		}
+		if pendingChunkKind != "" && pendingChunkKind != kind {
+			if err := flushPendingChunk(); err != nil {
+				return err
+			}
+		}
+		if pendingChunk.Len() == 0 {
+			pendingChunkAt = time.Now()
+			pendingChunkKind = kind
+		}
+		pendingChunk.WriteString(value)
+		if pendingChunk.Len() >= streamChunkMaxBytes || time.Since(pendingChunkAt) >= streamChunkFlushInterval {
+			return flushPendingChunk()
+		}
+		return nil
+	}
 	for {
 		ev, err := reader.Next()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
+				if err := flushPendingChunk(); err != nil {
+					return false, err
+				}
 				break
 			}
 			// Keep a durable assistant anchor when a stream was interrupted
 			// after producing content. Without this row DeriveHistory would
 			// discard the already logged chunk/reasoning rows on resume.
+			if err := flushPendingChunk(); err != nil {
+				return false, err
+			}
 			if text.Len() > 0 || reasoning != "" {
 				if _, aerr := l.log.Append(session.EventAssistantMessage,
 					session.NewInterruptedAssistantMessage(text.String(), calls, reasoning)); aerr != nil {
@@ -464,7 +521,7 @@ func (l *Loop) step(ctx context.Context, turnNumber, stepNumber int) (done bool,
 			if l.onText != nil {
 				l.onText(ev.Text)
 			}
-			if _, err := l.log.Append(session.EventAssistantChunk, session.NewAssistantChunk(ev.Text)); err != nil {
+			if err := queueStreamChunk(session.EventAssistantChunk, ev.Text); err != nil {
 				return false, err
 			}
 		case llm.StreamReasoningDelta:
@@ -473,7 +530,7 @@ func (l *Loop) step(ctx context.Context, turnNumber, stepNumber int) (done bool,
 			// place; DeriveHistory folds these rows away in favor of the
 			// joined reasoning on the closing assistant/message.
 			reasoning += ev.Text
-			if _, err := l.log.Append(session.EventAssistantReasoning, session.NewAssistantReasoning(ev.Text)); err != nil {
+			if err := queueStreamChunk(session.EventAssistantReasoning, ev.Text); err != nil {
 				return false, err
 			}
 		case llm.StreamFinish:
@@ -482,6 +539,9 @@ func (l *Loop) step(ctx context.Context, turnNumber, stepNumber int) (done bool,
 			reasoning = ev.Reasoning // accumulated by the reader (M8)
 			usage = ev.Usage
 		}
+	}
+	if err := flushPendingChunk(); err != nil {
+		return false, err
 	}
 
 	if _, err := l.log.Append(session.EventAssistantMessage, session.NewAssistantMessageWithUsage(text.String(), calls, finishReason, reasoning, usage)); err != nil {

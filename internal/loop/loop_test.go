@@ -84,8 +84,8 @@ func TestRunSimpleAnswerNoTools(t *testing.T) {
 	}
 
 	events := log.Events()
-	if len(events) != 8 {
-		t.Fatalf("events = %d, want 8 (turn, user, step, chunks, assistant, step, turn)", len(events))
+	if len(events) != 7 {
+		t.Fatalf("events = %d, want 7 (turn, user, step, aggregated chunk, assistant, step, turn)", len(events))
 	}
 	types := []string{}
 	for _, ev := range events {
@@ -96,7 +96,6 @@ func TestRunSimpleAnswerNoTools(t *testing.T) {
 		session.EventUserMessage,
 		session.EventStepStart,
 		session.EventAssistantChunk,
-		session.EventAssistantChunk,
 		session.EventAssistantMessage,
 		session.EventStepEnd,
 		session.EventTurnEnd,
@@ -105,6 +104,12 @@ func TestRunSimpleAnswerNoTools(t *testing.T) {
 		if types[i] != want[i] {
 			t.Fatalf("event %d = %q, want %q (all: %v)", i, types[i], want[i], types)
 		}
+	}
+	var chunk struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(events[3].Data, &chunk); err != nil || chunk.Text != "Hi there" {
+		t.Fatalf("aggregated chunk = %s, want Hi there", events[3].Data)
 	}
 	// The model must receive the user message inside a system-prefixed request.
 	if len(model.calls) != 1 {
