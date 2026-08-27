@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import { dirname, resolve } from 'node:path'
 import { spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -15,6 +15,8 @@ const port = Number(process.env.SHUTU_PERF_PORT ?? 18118)
 const baseUrl = `http://${host}:${port}/`
 const eventCount = Number(process.env.SHUTU_PERF_EVENTS ?? 10_000)
 const continuousSeconds = Number(process.env.SHUTU_PERF_CONTINUOUS_SECONDS ?? 0)
+const artifactDirectory = process.env.SHUTU_PERF_ARTIFACT_DIR === undefined ? null : resolve(process.env.SHUTU_PERF_ARTIFACT_DIR)
+if (artifactDirectory !== null) mkdirSync(artifactDirectory, { recursive: true })
 
 if (!existsSync(vite)) throw new Error(`Vite is unavailable at ${vite}; set SHUTU_DSH_ROOT to a DSH checkout.`)
 if (!existsSync(distIndex)) throw new Error(`Native dist is unavailable at ${distIndex}; run npm.cmd run build first.`)
@@ -218,7 +220,9 @@ try {
     await page.getByPlaceholder(/Search sessions\.\.\.|搜索会话…/).fill('tool result 777')
     const results = page.getByRole('tree', { name: /Search results|搜索结果/ }).getByRole('treeitem')
     await results.first().waitFor({ timeout: 60_000 })
+    if (artifactDirectory !== null) await page.screenshot({ path: resolve(artifactDirectory, 'shutu-native-core-search.png') })
     await results.first().dispatchEvent('click')
+    if (artifactDirectory !== null) await page.screenshot({ path: resolve(artifactDirectory, 'shutu-native-core-chat.png') })
     // Exercise the loaded conversation's native message actions before
     // switching to Trajectory. The feedback controller intentionally loads
     // lazily on focus, so this proves the browser reaches the DSH Remote
@@ -232,7 +236,7 @@ try {
     const feedbackNote = page.getByRole('textbox', { name: /Feedback note|反馈说明/ })
     await feedbackNote.fill('native fixture note')
     await page.getByRole('button', { name: /^(?:Save|保存)$/ }).click()
-    await page.getByText('native fixture note', { exact: true }).waitFor({ timeout: 15_000 })
+    await page.getByRole('button', { name: 'native fixture note', exact: true }).waitFor({ timeout: 15_000 })
     await rated.click()
     await page.getByRole('button', { name: /Good response|有帮助|好的回答/ }).first().waitFor({ timeout: 15_000 })
     assert.ok(requests.some(request => request.method === 'messageFeedback/list'), 'native feedback did not load its list')
@@ -263,6 +267,7 @@ try {
     const trajectory = page.locator('[data-trajectory-scroll]')
     await trajectory.waitFor({ timeout: 60_000 })
     await page.locator('[data-trajectory-scroll] table[data-scroll-ready="true"]').waitFor({ timeout: 60_000 })
+    if (artifactDirectory !== null) await page.screenshot({ path: resolve(artifactDirectory, 'shutu-native-core-trajectory.png') })
     const initialRowCount = Number(await page.locator('[data-trajectory-scroll] table').getAttribute('aria-rowcount'))
     const requestBoundary = page.locator('[data-trajectory-scroll] button[data-request-run-index]').first()
     await requestBoundary.waitFor({ timeout: 15_000 })
@@ -270,6 +275,7 @@ try {
     const details = page.getByRole('complementary', { name: /Event details/ })
     await details.waitFor({ timeout: 15_000 })
     assert.match(await details.innerText(), /Request #|Summary/)
+    if (artifactDirectory !== null) await page.screenshot({ path: resolve(artifactDirectory, 'shutu-native-core-inspector.png') })
     const turnsControl = page.getByRole('button', { name: /turns/i }).first()
     await turnsControl.click()
     await page.locator('[data-trajectory-scroll] tr[data-collapsed-summary="turn"]').first().waitFor({ timeout: 15_000 })

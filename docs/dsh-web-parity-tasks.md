@@ -91,6 +91,7 @@
 - [x] P36-6.3c：host-owned accessibility bridge 为 DSH 原生 `role=dialog` 增加打开时首控件聚焦及 Tab/Shift+Tab 循环，3 项 jsdom 单测与 Playwright 桌面/移动 smoke 均通过。
 - [x] P36-6.3d：Playwright 已加载会话桌面/移动矩阵验证 Conversation/Trajectory 命名控件、tabpanel 语义、设置弹层首焦点、Tab/Shift+Tab 环回、Escape 焦点恢复及零控制台错误。
 - [ ] P36-6.4：为每个 DSH 核心页面保留截图和交互证据。
+- [x] P36-6.4a：密集 native Chromium fixture 保存 Search、Conversation、Trajectory 和 Inspector 核心页面截图，并通过真实交互路径验证搜索、消息反馈、分支、轨迹和请求详情。
 - [ ] P36-7.1：用真实“网页版超级玛丽”长任务验证 5 万、10 万级历史记录。
 - [x] P36-7.1a：在当前真实服务的超级玛丽会话上完成原生 DSH 75,950 条历史加载基线；100,000 条与持续增长窗口仍待目标环境。
 - [x] P36-7.1b：native DSH Chromium fixture 完成 100,000 条密集历史基线，加载约 2.35s、逻辑行 33、实际挂载 32 行、DOM 821、heap 峰值 56MiB；合成数据不替代真实 100k 任务。
