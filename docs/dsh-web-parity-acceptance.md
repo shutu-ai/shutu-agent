@@ -124,6 +124,8 @@ The native Playwright geometry matrix passed for desktop `1280x900` and mobile `
 
 The native accessibility bridge now moves focus into the first dialog control when a `role=dialog` opens, traps Tab/Shift+Tab within its focusable controls, and restores focus to the trigger after removal. `npm.cmd run test -- dsh-native-entry.test.ts` passed three jsdom tests and the full `npm.cmd run e2e` smoke passed; the desktop Settings flow closes with Escape and returns focus to the Settings trigger. Screen-reader announcement coverage and the full multi-browser matrix remain open.
 
+The loaded-session accessibility matrix passed for desktop `1280x900` and mobile `390x844`: each exposed four named short navigation controls, ten settings-dialog focusable controls, and tabpanel labels were present where panels were exposed. Shift+Tab from the first control wrapped to the last, Tab wrapped back, Escape closed the dialog, and both viewports remained free of browser errors. DSH's compact mobile icon controls remain recorded in the geometry evidence rather than being resized by the host.
+
 The same native smoke now injects one rejected `session.search` response, observes the DSH "content search unavailable" status, clears it with Escape, and confirms the next search succeeds with no browser errors. This is fixture-level error recovery evidence; host-backed failure recovery and broader session lifecycle acceptance remain open.
 
 ## P36-7.1 / P36-7.3 Native real-session baseline (2026-08-27)

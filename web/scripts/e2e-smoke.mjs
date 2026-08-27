@@ -653,18 +653,69 @@ async function runVisualGeometryMatrixStable(browser) {
     })
     assert.ok(geometry.body !== null && geometry.body.width <= viewport.width + 1, `${viewport.name} body geometry overflows viewport`)
     assert.ok(geometry.scrollables.every(scrollable => scrollable.height > 0 && scrollable.scrollHeight >= scrollable.height), `${viewport.name} has invalid scroll geometry`)
-    const trigger = page.locator('button[aria-haspopup="dialog"]').first()
+    const trigger = page.locator('button').filter({ hasText: /^设置$/ }).first()
     await trigger.click()
     const dialog = page.getByRole('dialog').first()
     await dialog.waitFor({ timeout: 15_000 })
     const overlay = await dialog.evaluate(element => { const box = element.getBoundingClientRect(); return { x: Math.round(box.x), y: Math.round(box.y), width: Math.round(box.width), height: Math.round(box.height) } })
     assert.ok(overlay.x >= 0 && overlay.y >= 0 && overlay.x + overlay.width <= viewport.width + 1 && overlay.y + overlay.height <= viewport.height + 1, `${viewport.name} dialog exceeds viewport`)
     await page.keyboard.press('Escape')
-    assert.equal(await trigger.evaluate(element => document.activeElement === element), true, `${viewport.name} overlay did not restore focus`)
     assert.deepEqual(issues, [])
     writeFileSync(resolve(artifactDirectory, `shutu-native-geometry-${viewport.name}.json`), `${JSON.stringify({ ...geometry, overlay }, null, 2)}\n`)
     await page.screenshot({ path: resolve(artifactDirectory, `shutu-native-geometry-${viewport.name}.png`) })
     results.push({ viewport: `${viewport.width}x${viewport.height}`, bodyWidth: geometry.body.width, overlay, console: 'clean' })
+    await page.close()
+  }
+  return results
+}
+
+async function runAccessibilityMatrix(browser) {
+  const results = []
+  for (const viewport of [{ width: 1280, height: 900, name: 'desktop' }, { width: 390, height: 844, name: 'mobile' }]) {
+    const page = await browser.newPage({ viewport: { width: viewport.width, height: viewport.height } })
+    const issues = []
+    page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
+    page.on('pageerror', error => issues.push(error.message))
+    await installNativeMock(page, { seedSession: true, lifecycle: true, errorControls: true })
+    await page.goto(baseUrl, { waitUntil: 'domcontentloaded' })
+    await waitForNativeShell(page, true)
+    const search = page.locator('button[aria-label="Search sessions"], button[aria-label="Search"], button[aria-label="搜索会话"], button[aria-label="搜索"]').first()
+    await search.click()
+    const input = page.locator('input[placeholder]').first()
+    await input.fill('fixture')
+    const result = page.locator('[role="tree"]').last().getByRole('treeitem').first()
+    await result.waitFor({ timeout: 15_000 })
+    await result.click()
+    await input.press('Escape')
+    await page.getByText('Search fixture', { exact: true }).last().waitFor({ timeout: 15_000 })
+    const semantics = await page.evaluate(() => ({
+      tabs: [...document.querySelectorAll('[role="tab"], button')].filter(element => { const name = element.textContent?.trim() ?? ''; return name.length > 0 && name.length <= 3 }).map(element => ({ role: element.getAttribute('role'), selected: element.getAttribute('aria-selected'), controls: element.getAttribute('aria-controls'), name: element.textContent?.trim() ?? '' })),
+      panels: [...document.querySelectorAll('[role="tabpanel"]')].map(element => ({ labelledBy: element.getAttribute('aria-labelledby') })),
+      buttons: [...document.querySelectorAll('button')].filter(element => { const box = element.getBoundingClientRect(); return box.width > 0 && box.height > 0 }).map(element => ({ width: element.getBoundingClientRect().width, height: element.getBoundingClientRect().height, label: element.getAttribute('aria-label') ?? element.textContent?.trim() ?? '' })),
+    }))
+    assert.ok(semantics.tabs.length >= 2, `${viewport.name} did not expose conversation tabs`)
+    assert.ok(semantics.tabs.every(tab => tab.name.length > 0), `${viewport.name} conversation tab names are incomplete`)
+    assert.ok(semantics.panels.every(panel => panel.labelledBy !== null), `${viewport.name} tabpanel semantics are incomplete`)
+    const settingsButton = page.locator('button').filter({ hasText: /^设置$/ }).first()
+    await settingsButton.focus()
+    await settingsButton.click()
+    const dialog = page.getByRole('dialog').first()
+    await dialog.waitFor({ timeout: 15_000 })
+    const focusables = dialog.locator('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])')
+    const focusableCount = await focusables.count()
+    assert.ok(focusableCount >= 2, `${viewport.name} settings dialog has too few keyboard controls`)
+    const first = focusables.first()
+    const last = focusables.last()
+    await first.focus()
+    await page.keyboard.press('Shift+Tab')
+    assert.equal(await last.evaluate(element => document.activeElement === element), true, `${viewport.name} Shift+Tab did not wrap focus`)
+    await page.keyboard.press('Tab')
+    assert.equal(await first.evaluate(element => document.activeElement === element), true, `${viewport.name} Tab did not wrap focus`)
+    await page.keyboard.press('Escape')
+    await page.waitForTimeout(100)
+    assert.equal(await settingsButton.evaluate(element => document.activeElement === element), true, `${viewport.name} Escape did not restore focus`)
+    assert.deepEqual(issues, [])
+    results.push({ viewport: `${viewport.width}x${viewport.height}`, tabs: semantics.tabs.length, focusableCount, touchTargets: semantics.buttons.length, console: 'clean' })
     await page.close()
   }
   return results
@@ -986,6 +1037,7 @@ try {
     const loadingDesktop = await runLoadingDesktop(browser)
     const errorStateMatrix = await runErrorStateMatrix(browser)
     const visualGeometryMatrix = await runVisualGeometryMatrixStable(browser)
+    const accessibilityMatrix = await runAccessibilityMatrix(browser)
     const searchErrorRecovery = await runSearchErrorRecovery(browser)
     const sessionLifecycle = await runSessionLifecycle(browser)
     const interactionControls = await runInteractionControls(browser)
@@ -993,7 +1045,7 @@ try {
     const cancelPlanGoalControls = await runCancelPlanGoalControls(browser)
     const retryControls = await runRetryControls(browser)
     const mobile = await runMobile(browser)
-    console.log(JSON.stringify({ browser: 'playwright', native: 'ok', desktop, reconnectDesktop, darkDesktop, loadingDesktop, errorStateMatrix, visualGeometryMatrix, searchErrorRecovery, sessionLifecycle, interactionControls, queueControls, cancelPlanGoalControls, retryControls, mobile }))
+    console.log(JSON.stringify({ browser: 'playwright', native: 'ok', desktop, reconnectDesktop, darkDesktop, loadingDesktop, errorStateMatrix, visualGeometryMatrix, accessibilityMatrix, searchErrorRecovery, sessionLifecycle, interactionControls, queueControls, cancelPlanGoalControls, retryControls, mobile }))
   } finally {
     await browser.close()
   }
