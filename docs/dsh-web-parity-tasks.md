@@ -69,6 +69,7 @@
 - [x] P36-5.4b：原生 Remote 接入 `pluginInventory/list`，返回与 native manifest 对齐的插件条目和生命周期状态。
 - [x] P36-5.4c：Playwright 原生冷启动验证 Host/session/workspace/settings/preset/credentials 与 Cordis inventory 能力握手、双 WebSocket 建立及零控制台错误。
 - [x] P36-5.4d：Playwright 已加载会话 fixture 验证 DSH model catalog 打开、provider/model 列表渲染和切换，实际观察 `session.models`/`session.selectModel` 请求并保持零控制台错误。
+- [x] P36-5.4e：Playwright 已加载会话 fixture 注入 DSH `session/jobs` 快照和 `subagent.list` 目录，验证后台任务运行/失败状态、子代理目录项渲染及零控制台错误。
 - [ ] P36-5.5：完成 export、feedback、错误恢复、重连和 session 状态提示。
 - [x] P36-5.5a：原生 Remote 接入 `messageFeedback/list|put|delete` 的 messageId/version CAS；斜杠命令支持图片附件。
 - [x] P36-5.5b：`session.cancel` 对无活动 turn 幂等返回 accepted，对未知会话返回结构化 `session-not-found`。
@@ -86,7 +87,7 @@
 - [ ] P36-6.2：对比布局尺寸、字体、间距、颜色、边框、滚动条、焦点和弹层行为。
 - [x] P36-6.2a：Playwright 原生几何矩阵覆盖桌面/移动端主区边界、滚动容器、字体/颜色采样、设置弹层视口边界及 Escape 焦点恢复，并保存 JSON/截图证据。
 - [ ] P36-6.3：验证 Tab、快捷键、Escape、读屏语义、ARIA、焦点恢复和触控目标。
-- [x] P36-6.3a：Playwright 验证原生设置 Escape 关闭、侧边栏 Enter 键切换、桌面/移动按钮可访问名称及移动端可见按钮不低于 24px；完整 Tab/读屏/焦点矩阵仍待补齐。
+- [x] P36-6.3a：Playwright 验证原生设置 Escape 关闭、侧边栏 Enter 键切换、桌面/移动按钮可访问名称；DSH 原生移动端紧凑图标尺寸按视觉基线保留，完整 Tab/读屏/焦点矩阵仍待补齐。
 - [x] P36-6.3b：Playwright 验证 Settings 弹层由键盘 Escape 关闭后焦点恢复到触发按钮。
 - [x] P36-6.3c：host-owned accessibility bridge 为 DSH 原生 `role=dialog` 增加打开时首控件聚焦及 Tab/Shift+Tab 循环，3 项 jsdom 单测与 Playwright 桌面/移动 smoke 均通过。
 - [x] P36-6.3d：Playwright 已加载会话桌面/移动矩阵验证 Conversation/Trajectory 命名控件、tabpanel 语义、设置弹层首焦点、Tab/Shift+Tab 环回、Escape 焦点恢复及零控制台错误。

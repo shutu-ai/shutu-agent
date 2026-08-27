@@ -73,6 +73,16 @@ async function installNativeMock(page, options = {}) {
   let searchFailuresRemaining = options.searchFailures ?? 0
   let muxSocket = null
   let interactionStage = 'idle'
+  const extendedJobs = [
+    { id: 'job-running', kind: 'bash', label: 'npm run build', status: 'running', startedAt: 1_700_000_000_000 },
+    { id: 'job-failed', kind: 'pty-send', label: 'collect diagnostics', status: 'failed', detail: 'exit code: 3', startedAt: 1_700_000_000_000, finishedAt: 1_700_000_003_000 },
+  ]
+  const extendedSubagents = {
+    parentAvailable: true,
+    entries: [
+      { kind: 'child', id: 'child-fixture', mode: 'continuable', label: 'Renderer worker', activity: 'running', hasChildren: false },
+    ],
+  }
   const retryEvents = [
     { seq: 1, type: 'turn/start', time: 1_700_000_000_001, data: { turn: 1 } },
     { seq: 2, type: 'step/start', time: 1_700_000_000_002, data: { turn: 1, step: 1 } },
@@ -102,6 +112,9 @@ async function installNativeMock(page, options = {}) {
     sendMux('queue-snapshot', 'session/queue', {
       type: 'session/queue', sessionId: 'search-fixture', items: queueItems,
     })
+  }
+  const sendJobsSnapshot = () => {
+    sendMux('jobs-snapshot', 'session/jobs', { type: 'session/jobs', sessionId: 'search-fixture', jobs: extendedJobs })
   }
   const sendProjection = (key, value, seq = 1) => {
     sendMux(`${key}-projection`, 'session/projection', {
@@ -290,6 +303,34 @@ async function installNativeMock(page, options = {}) {
         }),
       })
     }
+    if (options.extendedCapabilities && body.method === 'subagent.list') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ type: 'server-response', rpcId: body.rpcId, result: { ok: true, value: extendedSubagents } }),
+      })
+    }
+    if (options.extendedCapabilities && body.method === 'skill.list') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ type: 'server-response', rpcId: body.rpcId, result: { ok: true, value: { skills: [{ name: 'fixture-skill', description: 'Native fixture skill', userInvocable: true, modelInvocable: true }] } } }),
+      })
+    }
+    if (options.extendedCapabilities && body.method === 'fileReferences/list') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ type: 'server-response', rpcId: body.rpcId, result: { ok: true, value: [{ path: 'src/main.ts', kind: 'file' }, { path: 'src', kind: 'directory' }] } }),
+      })
+    }
+    if (options.extendedCapabilities && body.method === 'sessionReferenceResolver/candidates') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ type: 'server-response', rpcId: body.rpcId, result: { ok: true, value: [{ sessionId: 'search-fixture', label: 'Search fixture', cwd: 'C:/shutu-search', createdAt: 1_700_000_000_000, mention: '@[Search fixture](dsh-session:c2VhcmNoLWZpeHR1cmU)' }] } }),
+      })
+    }
     if (options.capabilityControls && body.method === 'session.models') {
       return route.fulfill({
         status: 200,
@@ -384,7 +425,7 @@ async function installNativeMock(page, options = {}) {
     })
   })
   return {
-    sockets, socketConnections, requests, queueUpdates, sendMux, sendQueueSnapshot,
+    sockets, socketConnections, requests, queueUpdates, sendMux, sendQueueSnapshot, sendJobsSnapshot,
     goalActions, sendProjection, sendRetryStarted,
     get interactionStage() { return interactionStage },
     setInteractionStage: value => { interactionStage = value },
@@ -771,6 +812,49 @@ async function runCapabilityMatrix(browser) {
   return { modelCatalog: true, modelSelection: true, console: 'clean' }
 }
 
+async function runExtendedCapabilityMatrix(browser) {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+  const issues = []
+  page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
+  page.on('pageerror', error => issues.push(error.message))
+  page.on('response', response => { if (response.status() >= 400) issues.push(`http ${response.status()}: ${response.url()}`) })
+  const { requests, sendJobsSnapshot } = await installNativeMock(page, { seedSession: true, lifecycle: true, extendedCapabilities: true })
+  await page.goto(baseUrl, { waitUntil: 'domcontentloaded' })
+  await waitForNativeShell(page, true)
+  const search = page.locator('button[aria-label="Search sessions"], button[aria-label="Search"], button[aria-label="搜索会话"], button[aria-label="搜索"]').first()
+  await search.click()
+  const input = page.locator('input[placeholder]').first()
+  await input.fill('fixture')
+  const result = page.locator('[role="tree"]').last().getByRole('treeitem').first()
+  await result.waitFor({ timeout: 15_000 })
+  await result.click()
+  await input.press('Escape')
+  await page.getByText('Search fixture', { exact: true }).last().waitFor({ timeout: 15_000 })
+
+  // Jobs are a real DSH whole-set mux frame, not a host-side substitute.
+  sendJobsSnapshot()
+  const jobs = page.locator('button[aria-label*="job"], button[aria-label*="Job"], button[aria-label*="任务"], button[aria-label*="作业"]').first()
+  await jobs.waitFor({ timeout: 15_000 })
+  await jobs.click()
+  const jobMenu = page.locator('ul[aria-label]').filter({ hasText: 'npm run build' }).first()
+  await jobMenu.waitFor({ timeout: 15_000 })
+  assert.match(await jobMenu.innerText(), /npm run build/)
+  assert.match(await jobMenu.innerText(), /collect diagnostics/)
+  await page.keyboard.press('Escape')
+
+  // Selecting a session hydrates the DSH subagent catalog through subagent.list.
+  const subagents = page.locator('button[aria-haspopup="tree"]').first()
+  await subagents.waitFor({ timeout: 15_000 })
+  await subagents.click()
+  const tree = page.getByRole('tree').last()
+  await tree.getByRole('treeitem', { name: /Renderer worker/ }).waitFor({ timeout: 15_000 })
+  assert.match(await tree.innerText(), /Renderer worker/)
+  assert.ok(requests.includes('subagent.list'), 'native subagent catalog did not request subagent.list')
+  assert.deepEqual(issues, [])
+  await page.close()
+  return { jobs: true, subagents: true, console: 'clean' }
+}
+
 async function runSearchErrorRecovery(browser) {
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
   const issues = []
@@ -1089,6 +1173,7 @@ try {
     const visualGeometryMatrix = await runVisualGeometryMatrixStable(browser)
     const accessibilityMatrix = await runAccessibilityMatrix(browser)
     const capabilityMatrix = await runCapabilityMatrix(browser)
+    const extendedCapabilityMatrix = await runExtendedCapabilityMatrix(browser)
     const searchErrorRecovery = await runSearchErrorRecovery(browser)
     const sessionLifecycle = await runSessionLifecycle(browser)
     const interactionControls = await runInteractionControls(browser)
@@ -1096,7 +1181,7 @@ try {
     const cancelPlanGoalControls = await runCancelPlanGoalControls(browser)
     const retryControls = await runRetryControls(browser)
     const mobile = await runMobile(browser)
-    console.log(JSON.stringify({ browser: 'playwright', native: 'ok', desktop, reconnectDesktop, darkDesktop, loadingDesktop, errorStateMatrix, visualGeometryMatrix, accessibilityMatrix, capabilityMatrix, searchErrorRecovery, sessionLifecycle, interactionControls, queueControls, cancelPlanGoalControls, retryControls, mobile }))
+    console.log(JSON.stringify({ browser: 'playwright', native: 'ok', desktop, reconnectDesktop, darkDesktop, loadingDesktop, errorStateMatrix, visualGeometryMatrix, accessibilityMatrix, capabilityMatrix, extendedCapabilityMatrix, searchErrorRecovery, sessionLifecycle, interactionControls, queueControls, cancelPlanGoalControls, retryControls, mobile }))
   } finally {
     await browser.close()
   }

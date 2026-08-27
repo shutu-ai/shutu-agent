@@ -104,6 +104,8 @@ With `SHUTU_PERF_ARTIFACT_DIR=../docs/evidence/dsh-native-2026-08-27`, the same 
 
 The loaded capability fixture returned a DSH-shaped two-model catalog. Playwright opened the native model menu, drilled into the provider group, selected the alternate model, and observed both `session.models` and `session.selectModel` requests with zero browser errors. This closes fixture-level model catalog/selection evidence; subagent, jobs, skills, file references, attachments, permissions, providers and settings content still require dedicated loaded/host-backed coverage.
 
+The loaded capability fixture now also injects a DSH `session/jobs` whole-set snapshot and serves a `subagent.list` catalog. Playwright opened the jobs list and verified running/failed rows, opened the subagent tree and verified the `Renderer worker` entry, and observed the native `subagent.list` request with zero browser errors. Skills, file references, attachments, permissions, Provider and settings content remain open for dedicated loaded/host-backed coverage.
+
 ## P36-5.5 Native export media evidence (2026-08-27)
 
 `go test ./internal/webserver -run 'TestSessionExport(HeadMatchesDownloadHeadersWithoutBody|IncludesDescendantLineage|IncludesDeduplicatedMedia)$' -count=1` passed. Root and descendant logs are exported together with one deduplicated image payload under `media/<attachmentId>.png`; missing or unavailable attachment storage fails the export before the response is sent.
