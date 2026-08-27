@@ -7,7 +7,6 @@ import (
 	"os"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/jabing/shutu-agent/internal/config"
 	"github.com/jabing/shutu-agent/internal/llm"
@@ -62,7 +61,7 @@ func makeSubagentApp(enabled bool) *app {
 // run them (in production config.applyDefaults + PolicyFromConfig do this).
 func subagentPolicy() tools.Policy {
 	return tools.Policy{
-		Enabled:     []string{"subagent_spawn", "subagent_status", "subagent_cancel", "subagent_list"},
+		Enabled:     []string{"subagent", "subagent_fork", "send_message", "interrupt_agent"},
 		Timeout:     0, // no per-tool deadline in tests
 		OutputLimit: 0,
 	}
@@ -105,12 +104,7 @@ func TestRegisterSubagentDisabledRegistersNothing(t *testing.T) {
 	}
 }
 
-// TestRegisterSubagentEnabledRegistersAndLogsEvents verifies the enabled path:
-// the runtime is created, all four subagent_* tools are registered, D7 rejects
-// bad arguments at the Execute gate, a valid subagent_spawn returns the child
-// id and logs subagent/start, and observing the settled child through
-// subagent_status logs subagent/end exactly once (D3 wiring on the serial tool
-// path).
+// TestRegisterSubagentEnabledRegistersAndLogsEvents verifies the DSH surface.
 func TestRegisterSubagentEnabledRegistersAndLogsEvents(t *testing.T) {
 	app := makeSubagentApp(true)
 	app.reg.SetPolicy(subagentPolicy())
@@ -126,7 +120,7 @@ func TestRegisterSubagentEnabledRegistersAndLogsEvents(t *testing.T) {
 	for _, s := range specs {
 		names = append(names, s.Name)
 	}
-	for _, want := range []string{"subagent_spawn", "subagent_status", "subagent_cancel", "subagent_list"} {
+	for _, want := range []string{"subagent", "subagent_fork", "send_message", "interrupt_agent"} {
 		if !containsStr(names, want) {
 			t.Fatalf("registered tools %v lack %q", names, want)
 		}
@@ -137,11 +131,11 @@ func TestRegisterSubagentEnabledRegistersAndLogsEvents(t *testing.T) {
 		name string
 		args string
 	}{
-		{"subagent_spawn", `{}`},                       // missing required prompt
-		{"subagent_spawn", `{"prompt":"x","extra":1}`}, // additional properties rejected
-		{"subagent_status", `{}`},                      // missing required id
-		{"subagent_status", `{"id":123}`},              // id must be a string
-		{"subagent_cancel", `{"id":false}`},            // wrong id type
+		{"subagent", `{}`},                       // missing required prompt
+		{"subagent", `{"prompt":"x","extra":1}`}, // additional properties rejected
+		{"send_message", `{}`},                    // missing required id/message
+		{"send_message", `{"id":123,"message":"x"}`}, // id must be a string
+		{"interrupt_agent", `{"id":false}`},     // wrong id type
 	} {
 		if _, err := app.reg.Execute(context.Background(), tc.name, json.RawMessage(tc.args)); err == nil {
 			t.Errorf("%s with args %s must be rejected (D7)", tc.name, tc.args)
@@ -149,32 +143,20 @@ func TestRegisterSubagentEnabledRegistersAndLogsEvents(t *testing.T) {
 	}
 
 	// A valid spawn flows through the registry and returns the child id.
-	res, err := app.reg.Execute(context.Background(), "subagent_spawn", json.RawMessage(`{"prompt":"do research","label":"researcher"}`))
+	res, err := app.reg.Execute(context.Background(), "subagent", json.RawMessage(`{"prompt":"do research","label":"researcher"}`))
 	if err != nil {
-		t.Fatalf("subagent_spawn via registry: %v", err)
+		t.Fatalf("subagent via registry: %v", err)
 	}
 	if !strings.Contains(res.Output, "started subagent spawn-1") {
-		t.Fatalf("subagent_spawn output = %q, want started subagent spawn-1", res.Output)
+		t.Fatalf("subagent output = %q, want started subagent spawn-1", res.Output)
 	}
 	if !hasEvent(app.log, session.EventSubagentStart) {
 		t.Fatal("subagent/start event missing from the session log after subagent_spawn")
 	}
 
-	// Observe the settled child: subagent_status returns the result and
-	// subagent/end lands in the log exactly once.
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		status, err := app.reg.Execute(context.Background(), "subagent_status", json.RawMessage(`{"id":"spawn-1"}`))
-		if err == nil && strings.Contains(status.Output, "settled") {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("child did not settle within 5s")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	if got := countEvent(app.log, session.EventSubagentEnd); got != 1 {
-		t.Fatalf("subagent/end count = %d, want exactly 1", got)
+	// The fork alias is also available and retains the same execution contract.
+	if _, err := app.reg.Execute(context.Background(), "subagent_fork", json.RawMessage(`{"prompt":"forked"}`)); err != nil {
+		t.Fatalf("subagent_fork via registry: %v", err)
 	}
 }
 

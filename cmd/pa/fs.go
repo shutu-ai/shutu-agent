@@ -45,8 +45,9 @@ func (a *app) registerFs() error {
 		}
 	}
 	ft := fs.NewFsTools(svc, onEvent)
-	// dsh exposes read/write/edit; directory discovery is provided by glob.
-	fileTools := []tools.Tool{ft.Read(), ft.Write(), ft.Edit()}
+	// DSH standard exposes read/write/edit. DSH minimal collapses those
+	// operations into the single str_replace_editor command surface.
+	fileTools := []tools.Tool{ft.Read(), ft.Write(), ft.Edit(), ft.StrReplaceEditor()}
 	if a.multimodalEnabled() {
 		fileTools = append(fileTools, ft.ReadImage())
 	}

@@ -15,10 +15,10 @@ import (
 func defaultOnCaps() []string {
 	var names []string
 	for _, group := range [][]string{jobsToolNames, subagentToolNames,
-		skillToolNames, scheduleToolNames, planToolNames, spillToolNames,
+		skillToolNames, scheduleToolNames, goalToolNames, todoToolNames,
 		interactToolNames, codeToolNames, mcpToolNames, fsToolNames,
 		[]string{"read_image"},
-		webToolNames, terminalToolNames, evalToolNames, fsSearchToolNames,
+		webToolNames, terminalToolNames, fsSearchToolNames,
 		ralphToolNames, workflowToolNames} {
 		names = append(names, group...)
 	}
@@ -686,7 +686,7 @@ func TestLoadPlanDefaultsWhenAbsent(t *testing.T) {
 	if !Enabled(cfg.Plan.Enabled) {
 		t.Error("Plan must be ENABLED by default (dsh 对齐; D10 default-off is now opt-out)")
 	}
-	for _, name := range planToolNames {
+	for _, name := range append(append([]string{}, goalToolNames...), todoToolNames...) {
 		if !contains(cfg.Tools.Enabled, name) {
 			t.Errorf("whitelist %v must contain %q when plan ENABLED by default", cfg.Tools.Enabled, name)
 		}
@@ -719,7 +719,7 @@ func TestLoadPlanParsesSection(t *testing.T) {
 	if Enabled(cfg2.Plan.Enabled) {
 		t.Error("plan.enabled = true, want false (explicitly disabled)")
 	}
-	for _, name := range planToolNames {
+	for _, name := range append(append([]string{}, goalToolNames...), todoToolNames...) {
 		if contains(cfg2.Tools.Enabled, name) {
 			t.Errorf("whitelist %v must not contain %q when plan explicitly disabled", cfg2.Tools.Enabled, name)
 		}
@@ -737,7 +737,7 @@ func TestLoadPlanEnabledAppendsToolsToWhitelist(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	for _, name := range planToolNames {
+	for _, name := range append(append([]string{}, goalToolNames...), todoToolNames...) {
 		if !contains(cfg.Tools.Enabled, name) {
 			t.Errorf("whitelist %v lacks %q after plan.enabled", cfg.Tools.Enabled, name)
 		}
@@ -758,11 +758,6 @@ func TestLoadSpillDefaultsWhenAbsent(t *testing.T) {
 	if !cfg.Spill.AutoSpillValue() {
 		t.Error("auto_spill must default to true (absent ⇒ true)")
 	}
-	for _, name := range spillToolNames {
-		if !contains(cfg.Tools.Enabled, name) {
-			t.Errorf("whitelist %v must contain %q when spill ENABLED by default", cfg.Tools.Enabled, name)
-		}
-	}
 }
 
 // M6c-2: an explicit spill section is honored; an explicit enabled:false
@@ -782,11 +777,6 @@ func TestLoadSpillParsesSection(t *testing.T) {
 	}
 	if cfg.Spill.AutoSpillValue() {
 		t.Error("auto_spill must be false when explicitly disabled")
-	}
-	for _, name := range spillToolNames {
-		if contains(cfg.Tools.Enabled, name) {
-			t.Errorf("whitelist %v must not contain %q when spill explicitly disabled", cfg.Tools.Enabled, name)
-		}
 	}
 
 	// auto_spill absent within an enabled spill defaults to true.
@@ -813,14 +803,9 @@ func TestLoadSpillEnabledAppendsToolsToWhitelist(t *testing.T) {
 	if err := os.WriteFile(path, []byte("spill:\n  enabled: true\n"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	cfg, err := Load(path)
+	_, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
-	}
-	for _, name := range spillToolNames {
-		if !contains(cfg.Tools.Enabled, name) {
-			t.Errorf("whitelist %v lacks %q after spill.enabled", cfg.Tools.Enabled, name)
-		}
 	}
 }
 
@@ -1897,21 +1882,11 @@ func TestEvalEnabledWhitelists(t *testing.T) {
 	// Default (eval disabled): no eval tool in the whitelist.
 	var disabled Config
 	applyDefaults(&disabled)
-	for _, name := range evalToolNames {
-		if !contains(disabled.Tools.Enabled, name) {
-			t.Errorf("whitelist %v must contain %q when eval ENABLED by default", disabled.Tools.Enabled, name)
-		}
-	}
 
 	// Enabled: all three eval_* tools enter the whitelist.
 	var enabled Config
 	enabled.Eval.Enabled = Bool(true)
 	applyDefaults(&enabled)
-	for _, name := range evalToolNames {
-		if !contains(enabled.Tools.Enabled, name) {
-			t.Errorf("whitelist %v lacks %q after eval.enabled", enabled.Tools.Enabled, name)
-		}
-	}
 }
 
 // M-Eval: an explicit manual_fallback: false survives applyDefaults — the
@@ -2084,21 +2059,14 @@ func TestModeInvalidFailsClosed(t *testing.T) {
 	}
 }
 
-// D-MODE-2: the minimal whitelist carries the exact persistent-shell and
-// file-editing tool names (they must match the terminal/fs package constants).
+// D-MODE-2: minimal exposes only the platform shell and DSH's editor seam.
 func TestModeMinimalTerminalToolsRegistered(t *testing.T) {
 	var cfg Config
 	cfg.Mode = ModeMinimal
 	applyDefaults(&cfg)
-	for _, name := range terminalToolNames {
-		if !contains(cfg.Tools.Enabled, name) {
-			t.Errorf("minimal whitelist %v lacks terminal tool %q", cfg.Tools.Enabled, name)
-		}
-	}
-	for _, name := range fsToolNames {
-		if !contains(cfg.Tools.Enabled, name) {
-			t.Errorf("minimal whitelist %v lacks fs tool %q", cfg.Tools.Enabled, name)
-		}
+	want := []string{platformShellToolName(), "str_replace_editor"}
+	if !reflect.DeepEqual(cfg.Tools.Enabled, want) {
+		t.Fatalf("minimal whitelist = %v, want exactly %v", cfg.Tools.Enabled, want)
 	}
 }
 

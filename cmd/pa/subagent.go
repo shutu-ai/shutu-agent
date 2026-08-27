@@ -48,7 +48,7 @@ func (a *app) registerSubagent() error {
 	// Register one provider per enabled config entry; a failed registration
 	// (e.g. a duplicate name) fails closed — no silent fallback. The config
 	// key "claude_code" registers under the tool-facing provider name
-	// "claude-code" (the subagent_spawn provider enum), which also selects the
+	// "claude-code" (the subagent provider enum), which also selects the
 	// `claude -p` headless args preset in NewExternalProvider.
 	for name, ep := range a.cfg.Subagent.ExternalProviders {
 		if !ep.Enabled {
@@ -74,17 +74,13 @@ func (a *app) registerSubagent() error {
 			fmt.Fprintln(os.Stderr, "pa: "+typ+" event:", err)
 		}
 	}
-	st := subagent.NewSubagentTools(rt, a.cfg.Subagent.MaxDepth, func() string { return a.currentID }, onEvent)
+	st := subagent.NewSubagentToolsWithContinuable(rt, a.cfg.Subagent.MaxDepth, func() string { return a.currentID }, onEvent, true)
 	a.subagentTools = st
 	for _, t := range []tools.Tool{
 		st.Spawn(),
-		st.Status(),
-		st.Cancel(),
-		st.List(),
+		st.Fork(),
 		st.Send(),
 		st.Interrupt(),
-		st.Report(),
-		st.Resume(),
 	} {
 		if err := a.reg.Register(t); err != nil {
 			return fmt.Errorf("pa: register %s: %w", t.Name(), err)

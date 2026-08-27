@@ -157,11 +157,11 @@ func TestApplySessionRuntime(t *testing.T) {
 	}
 	_ = rt
 
-	// 5. readonly permission narrows the whitelist to the read-only tools.
+	// 5. readonly permission narrows the whitelist to the DSH read-only tools.
 	mustSession("s-ro", "", "", "", "", "readonly")
 	_, restore = a.applySessionRuntime("s-ro")
-	if _, err := a.reg.Execute(ctx, "get_time", json.RawMessage("{}")); err == nil {
-		t.Fatalf("readonly tier must not expose non-dsh get_time")
+	if _, err := a.reg.Execute(ctx, "get_time", json.RawMessage("{}")); err != nil {
+		t.Fatalf("readonly tier must expose safe get_time: %v", err)
 	}
 	restore()
 }
@@ -177,6 +177,16 @@ func (stubCodeRun) Schema() map[string]any {
 }
 func (stubCodeRun) OutputSchema() map[string]any                 { return map[string]any{"type": "string"} }
 func (stubCodeRun) Execute(context.Context, any) (string, error) { return "ok", nil }
+
+type stubStrReplaceEditor struct{}
+
+func (stubStrReplaceEditor) Name() string        { return "str_replace_editor" }
+func (stubStrReplaceEditor) Description() string { return "stub editor" }
+func (stubStrReplaceEditor) Schema() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{}}
+}
+func (stubStrReplaceEditor) OutputSchema() map[string]any                 { return map[string]any{"type": "string"} }
+func (stubStrReplaceEditor) Execute(context.Context, any) (string, error) { return "ok", nil }
 
 // recordLLM captures the model-facing tool schemas of every request, so a test
 // can assert the session's mode projection on the wire.
@@ -236,12 +246,12 @@ func TestSessionModeWireSurface(t *testing.T) {
 		prompt: prompt.New("You are a test agent."),
 		log:    session.New(),
 	}
-	for _, tt := range []tools.Tool{tools.GetTime{}, tools.ReadFile{}, stubCodeRun{}} {
+	for _, tt := range []tools.Tool{tools.GetTime{}, tools.ReadFile{}, stubCodeRun{}, stubStrReplaceEditor{}} {
 		if err := a.reg.Register(tt); err != nil {
 			t.Fatal(err)
 		}
 	}
-	a.basePolicy = tools.Policy{Enabled: []string{"get_time", "read", "run_code"}}
+	a.basePolicy = tools.Policy{Enabled: []string{"get_time", "read", "run_code", "str_replace_editor"}}
 	a.reg.SetPolicy(a.basePolicy)
 
 	mustSession := func(id, preset string) {
@@ -294,7 +304,7 @@ func TestSessionModeWireSurface(t *testing.T) {
 	}
 	restore()
 
-	// minimal: only the fixed seam (registered subset here: read-only pair).
+	// minimal: only the fixed DSH shell/editor seam.
 	mustSession("s-min", config.ModeMinimal)
 	rt, restore = a.applySessionRuntime("s-min")
 	if err := a.newLoopFor(rt, false).Run(ctx, "hi"); err != nil {
@@ -305,7 +315,7 @@ func TestSessionModeWireSurface(t *testing.T) {
 	if hasName(wire, "run_code") {
 		t.Fatalf("minimal wire tools = %v, must not contain run_code", wire)
 	}
-	if !hasName(wire, "read") {
-		t.Fatalf("minimal wire tools = %v, want the file-editing seam", wire)
+	if !hasName(wire, "str_replace_editor") {
+		t.Fatalf("minimal wire tools = %v, want str_replace_editor", wire)
 	}
 }

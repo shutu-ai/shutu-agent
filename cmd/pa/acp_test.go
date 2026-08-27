@@ -93,11 +93,11 @@ func TestACPFactoryCreatesIndependentCWDAndLogs(t *testing.T) {
 	if one.id == two.id || one.log == two.log || one.registry == two.registry {
 		t.Fatal("ACP sessions must not share identity, log, or registry")
 	}
-	got, err := one.registry.Execute(context.Background(), "read", []byte(`{"file_path":"marker.txt"}`))
+	got, err := one.registry.Execute(context.Background(), "str_replace_editor", []byte(`{"command":"view","path":"marker.txt"}`))
 	if err != nil || got.Output != "1\tone" {
 		t.Fatalf("first cwd read = %q, err=%v", got.Output, err)
 	}
-	got, err = two.registry.Execute(context.Background(), "read", []byte(`{"file_path":"marker.txt"}`))
+	got, err = two.registry.Execute(context.Background(), "str_replace_editor", []byte(`{"command":"view","path":"marker.txt"}`))
 	if err != nil || got.Output != "1\ttwo" {
 		t.Fatalf("second cwd read = %q, err=%v", got.Output, err)
 	}

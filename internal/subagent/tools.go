@@ -1,6 +1,6 @@
 // tools.go — the M5b-2 Consumer half of the subagent seam (ADR
-// 2026-08-18-m5-agent-core.md 决策 ② / dispatch-m5b-2 §2): subagent_spawn,
-// subagent_status, subagent_cancel and subagent_list are registered into the
+// 2026-08-18-m5-agent-core.md 决策 ② / dispatch-m5b-2 §2): subagent,
+// subagent_fork, send_message and interrupt_agent are registered into the
 // tools.Registry by the composition root (cmd/pa) when subagent.enabled, and
 // auto-whitelisted by config.applyDefaults the same way the job_* tools are.
 // They implement the tools.Tool method set structurally (Go structural
@@ -12,8 +12,9 @@
 // false) before this code runs.
 //
 // D3 event logging follows the M5a-2 tool-layer decision (ADR 决策 ① 实施说明 /
-// dispatch-m5b-2 §2): subagent_spawn emits subagent/start on a successful
-// Start, and the observing tool subagent_status emits subagent/end exactly
+// dispatch-m5b-2 §2): subagent emits subagent/start on a successful
+// Start. The model-facing control tools send_message and interrupt_agent
+// operate on the same runtime.
 // once per child once it observes a settled child. Every append happens inside
 // a tool Execute — the serial main-loop path — so the session log is never
 // touched from the background child goroutines (D5). The background goroutine
@@ -23,6 +24,7 @@ package subagent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	agenttools "github.com/jabing/shutu-agent/internal/tools"
 	"strings"
@@ -33,17 +35,18 @@ import (
 
 // Tool names (whitelisted when subagent.enabled; see config.subagentToolNames).
 const (
-	ToolSpawnName     = "subagent_spawn"
+	ToolSpawnName     = "subagent"
+	ToolForkName      = "subagent_fork"
 	ToolStatusName    = "subagent_status"
 	ToolCancelName    = "subagent_cancel"
 	ToolListName      = "subagent_list"
-	ToolSendName      = "subagent_send"
-	ToolInterruptName = "subagent_interrupt"
+	ToolSendName      = "send_message"
+	ToolInterruptName = "interrupt_agent"
 	ToolReportName    = "subagent_report"
 	ToolResumeName    = "subagent_resume"
 )
 
-// defaultProviderName is the provider subagent_spawn delegates to. v1 ships a
+// defaultProviderName is the provider the subagent tool delegates to. v1 ships a
 // single in-process provider ("spawn", spawn.go); config.subagent
 // .default_provider also defaults to "spawn" (config package), so the tool
 // always resolves to the same provider.
@@ -64,11 +67,12 @@ type childInfo struct {
 // across all tools, and the subagent/end tracker so the terminal event is
 // emitted exactly once per child.
 type SubagentTools struct {
-	rt              Runtime
-	defaultMaxDepth int
-	owner           func() string
-	onEvent         func(typ string, data any)
-	endTracker      *subagentEndTracker
+	rt                 Runtime
+	defaultMaxDepth    int
+	defaultContinuable bool
+	owner              func() string
+	onEvent            func(typ string, data any)
+	endTracker         *subagentEndTracker
 
 	mu       sync.Mutex
 	children map[string]*childInfo
@@ -76,26 +80,36 @@ type SubagentTools struct {
 }
 
 // NewSubagentTools returns the shared subagent-tool bundle bound to a Runtime.
-// defaultMaxDepth is applied when the model omits subagent_spawn.max_depth
+// defaultMaxDepth is applied when the model omits subagent.max_depth
 // (the composition root passes config.subagent.max_depth). owner, when
 // non-nil, returns the current session id and is used to default the spawn
 // parent session and subagent_list's parent_session filter. onEvent, when
 // non-nil, receives the subagent/* event payloads; the composition root wires
 // it to the session log (D3).
 func NewSubagentTools(r Runtime, defaultMaxDepth int, owner func() string, onEvent func(typ string, data any)) *SubagentTools {
+	return NewSubagentToolsWithContinuable(r, defaultMaxDepth, owner, onEvent, false)
+}
+
+// NewSubagentToolsWithContinuable configures the DSH standard behavior where
+// the model-facing subagent tool keeps the child conversation continuable.
+func NewSubagentToolsWithContinuable(r Runtime, defaultMaxDepth int, owner func() string, onEvent func(typ string, data any), defaultContinuable bool) *SubagentTools {
 	return &SubagentTools{
-		rt:              r,
-		defaultMaxDepth: defaultMaxDepth,
-		owner:           owner,
-		onEvent:         onEvent,
-		endTracker:      newSubagentEndTracker(),
-		children:        map[string]*childInfo{},
-		settled:         map[string]Result{},
+		rt:                 r,
+		defaultMaxDepth:    defaultMaxDepth,
+		defaultContinuable: defaultContinuable,
+		owner:              owner,
+		onEvent:            onEvent,
+		endTracker:         newSubagentEndTracker(),
+		children:           map[string]*childInfo{},
+		settled:            map[string]Result{},
 	}
 }
 
-// Spawn returns the subagent_spawn tool.
+// Spawn returns the subagent tool.
 func (t *SubagentTools) Spawn() SubagentSpawnTool { return SubagentSpawnTool{t: t} }
+
+// Fork returns the DSH-named continuable delegation tool.
+func (t *SubagentTools) Fork() SubagentForkTool { return SubagentForkTool{t: t} }
 
 // Status returns the subagent_status tool.
 func (t *SubagentTools) Status() SubagentStatusTool { return SubagentStatusTool{t: t} }
@@ -251,7 +265,7 @@ func (SubagentSpawnTool) Schema() map[string]any {
 			},
 			"continuable": map[string]any{
 				"type":        "boolean",
-				"description": "keep the child alive after a turn so subagent_send can queue follow-up messages",
+				"description": "keep the child alive after a turn so send_message can queue follow-up messages",
 			},
 		},
 		"required":             []string{"prompt"},
@@ -270,10 +284,10 @@ func (t SubagentSpawnTool) Execute(ctx context.Context, args any) (string, error
 		Continuable        bool     `json:"continuable"`
 	}
 	if err := agenttools.DecodeArgs(args, &a); err != nil {
-		return "", fmt.Errorf("subagent_spawn: %w", err)
+		return "", fmt.Errorf("%s: %w", ToolSpawnName, err)
 	}
 	if strings.TrimSpace(a.Prompt) == "" {
-		return "", fmt.Errorf("subagent_spawn: empty prompt")
+		return "", fmt.Errorf("%s: empty prompt", ToolSpawnName)
 	}
 	label := a.Label
 	if label == "" {
@@ -286,6 +300,11 @@ func (t SubagentSpawnTool) Execute(ctx context.Context, args any) (string, error
 	maxDepth := a.MaxDepth
 	if maxDepth <= 0 {
 		maxDepth = t.t.defaultMaxDepth
+	}
+	// DSH standard mounts both delegation entries as continuable background
+	// conversations; follow-up turns are sent through send_message.
+	if t.t.defaultContinuable {
+		a.Continuable = true
 	}
 	// provider defaults to the local in-process provider; an explicit
 	// provider selects an external backend when it is enabled and registered.
@@ -304,13 +323,36 @@ func (t SubagentSpawnTool) Execute(ctx context.Context, args any) (string, error
 		Continuable:        a.Continuable,
 	})
 	if err != nil {
-		return "", fmt.Errorf("subagent_spawn: %w", err)
+		return "", fmt.Errorf("%s: %w", ToolSpawnName, err)
 	}
 	t.t.register(run.ID, &childInfo{run: run, provider: provider, label: label, parent: parent})
 	t.t.emit(session.EventSubagentStart, session.NewSubagentStart(run.ID, provider, parent, label))
 	return fmt.Sprintf("started subagent %s (provider=%s, label=%q, parent=%s); "+
-		"observe with subagent_status/subagent_list, cancel with subagent_cancel",
+		"send follow-up with send_message, stop with interrupt_agent",
 		run.ID, provider, label, parent), nil
+}
+
+// SubagentForkTool is the DSH-named second continuable delegation entry. The
+// local runtime has one spawn provider, so fork shares that provider while
+// retaining the distinct official model-facing name.
+type SubagentForkTool struct{ t *SubagentTools }
+
+func (SubagentForkTool) Name() string { return ToolForkName }
+func (SubagentForkTool) Description() string {
+	return "fork a continuable subagent conversation and return its child id"
+}
+func (t SubagentForkTool) Schema() map[string]any { return SubagentSpawnTool{t: t.t}.Schema() }
+func (t SubagentForkTool) Execute(ctx context.Context, args any) (string, error) {
+	var in map[string]any
+	if err := agenttools.DecodeArgs(args, &in); err != nil {
+		return "", fmt.Errorf("subagent_fork: %w", err)
+	}
+	in["continuable"] = true
+	raw, err := json.Marshal(in)
+	if err != nil {
+		return "", fmt.Errorf("subagent_fork: %w", err)
+	}
+	return (SubagentSpawnTool{t: t.t}).Execute(ctx, raw)
 }
 
 // SubagentSendTool queues a follow-up message for a live continuable child.

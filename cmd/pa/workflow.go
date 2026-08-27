@@ -2,7 +2,7 @@
 // (docs/dispatch-gap-3.md §6). This is where the task-DAG orchestration seam
 // (ADR 2026-08-20-standard-gaps.md D-GAP-2, 用户拍板 JSON DAG 声明式编排) is
 // wired into the REPL: registerWorkflow builds the workflow Engine over the
-// subagent spawn capability and registers the workflow_run tool when
+// subagent spawn capability and registers the workflow tool when
 // workflow.enabled (默认关 D10). config.applyDefaults already whitelisted the
 // name. The spawn closure drives a.subagents.Start("spawn", …) with the current
 // session id (a.currentID — the same source the subagent wiring uses, read at
@@ -25,7 +25,7 @@ import (
 
 // registerWorkflow wires the task-DAG orchestration seam (D-GAP-2) when
 // workflow.enabled (默认关 D10): Engine over the subagent spawn capability +
-// workflow_run tool. config.applyDefaults already whitelisted the name. The
+// workflow tool. config.applyDefaults already whitelisted the name. The
 // spawn closure drives a.subagents.Start("spawn", …) with the current session
 // id (a.currentID, read at spawn time like the ralph/subagent wiring), awaits
 // the run, and returns the child Output. It holds no closable resources, so

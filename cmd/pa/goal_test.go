@@ -24,8 +24,8 @@ func (l *goalFinishLLM) Stream(_ context.Context, _ llm.ChatRequest) (llm.Stream
 			FinishReason: "tool_calls",
 			ToolCalls: []llm.ToolCall{{
 				ID:        "set-done",
-				Name:      "plan_status",
-				Arguments: `{"scope":"goal","id":"` + l.goalID + `","status":"done"}`,
+				Name:      "update_goal",
+				Arguments: `{"goal_id":"` + l.goalID + `","revision":2,"action":"complete"}`,
 			}},
 		}}}, nil
 	}

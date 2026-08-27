@@ -48,20 +48,16 @@ func newACPSubagent(a *app, id string, log *session.Log, registry *tools.Registr
 			fmt.Fprintln(os.Stderr, "pa: "+typ+" event:", err)
 		}
 	}
-	st := subagent.NewSubagentTools(rt, a.cfg.Subagent.MaxDepth, func() string { return id }, onEvent)
+	st := subagent.NewSubagentToolsWithContinuable(rt, a.cfg.Subagent.MaxDepth, func() string { return id }, onEvent, true)
 	return rt, st, nil
 }
 
 func registerACPSubagentTools(registry *tools.Registry, st *subagent.SubagentTools) error {
 	for _, tool := range []tools.Tool{
 		st.Spawn(),
-		st.Status(),
-		st.Cancel(),
-		st.List(),
+		st.Fork(),
 		st.Send(),
 		st.Interrupt(),
-		st.Report(),
-		st.Resume(),
 	} {
 		if err := registry.Register(tool); err != nil {
 			return fmt.Errorf("register ACP %s: %w", tool.Name(), err)

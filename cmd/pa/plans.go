@@ -49,14 +49,12 @@ func (a *app) registerPlans() error {
 			}
 		}
 	}
-	pt := plan.NewPlanTools(eng, onEvent)
+	pt := plan.NewDSHTools(eng, onEvent)
 	for _, t := range []tools.Tool{
-		pt.Goal(),
-		pt.Plan(),
-		pt.Todo(),
-		pt.Status(),
-		pt.List(),
-		pt.Remove(),
+		pt.GetGoal(),
+		pt.CreateGoal(),
+		pt.UpdateGoal(),
+		pt.TodoWrite(),
 	} {
 		if err := a.reg.Register(t); err != nil {
 			return fmt.Errorf("pa: register %s: %w", t.Name(), err)

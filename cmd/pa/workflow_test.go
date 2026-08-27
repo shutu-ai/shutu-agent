@@ -1,6 +1,6 @@
 // workflow_test.go — the GAP-3 wiring tests (docs/dispatch-gap-3.md §6):
 // registerWorkflow D10 gate + tool registration + whitelist, the workflow E2E
-// through the subagent spawn provider with a scripted LLM, and the cycle
+// through the subagent provider with a scripted LLM, and the cycle
 // rejection. The fakes mirror the ralph_test/subagent_test pattern:
 // makeWorkflowApp builds a minimal app, the whitelist policy lets the registry
 // Execute the workflow_run tool, and ralphFakeLLM (defined in ralph_test.go,
@@ -41,18 +41,18 @@ func makeWorkflowApp(enabled bool, fakeLLM llm.LLM) *app {
 	}
 }
 
-// workflowPolicy whitelists the workflow_run tool so registry Execute can run
+// workflowPolicy whitelists the workflow tool so registry Execute can run
 // it (in production config.applyDefaults + PolicyFromConfig do this).
 func workflowPolicy() tools.Policy {
 	return tools.Policy{
-		Enabled:     []string{"workflow_run"},
+		Enabled:     []string{"workflow"},
 		Timeout:     0, // no per-tool deadline in tests
 		OutputLimit: 0,
 	}
 }
 
 // TestRegisterWorkflowDisabledRegistersNothing verifies the D10 gate: with
-// workflow.enabled=false the composition root registers no workflow_run tool
+// workflow.enabled=false the composition root registers no workflow tool
 // (dispatch-gap-3 §6).
 func TestRegisterWorkflowDisabledRegistersNothing(t *testing.T) {
 	app := makeWorkflowApp(false, nil)
@@ -86,12 +86,12 @@ func TestRegisterWorkflowEnabled(t *testing.T) {
 	if !containsStr(names, workflow.WorkflowRunToolName) {
 		t.Fatalf("registered tools %v lack %q", names, workflow.WorkflowRunToolName)
 	}
-	// Whitelist: Execute succeeds only when workflow_run is both registered and
+	// Whitelist: Execute succeeds only when workflow is both registered and
 	// whitelisted (the D10-gated whitelist in production comes from
 	// config.applyDefaults).
 	if _, err := app.reg.Execute(context.Background(), workflow.WorkflowRunToolName,
 		json.RawMessage(`{"tasks":[{"id":"a","prompt":"x"}]}`)); err != nil {
-		t.Fatalf("workflow_run must be registered and whitelisted when enabled: %v", err)
+		t.Fatalf("workflow must be registered and whitelisted when enabled: %v", err)
 	}
 }
 
@@ -113,7 +113,7 @@ func TestWorkflowRunE2E(t *testing.T) {
 	if err != nil {
 		t.Fatalf("workflow via registry: %v", err)
 	}
-	if !strings.Contains(res.Output, "workflow_run: 2 tasks") ||
+	if !strings.Contains(res.Output, "workflow: 2 tasks") ||
 		!strings.Contains(res.Output, "a: completed") ||
 		!strings.Contains(res.Output, "b: completed") {
 		t.Fatalf("workflow output = %q, want 2 tasks with a/b completed", res.Output)

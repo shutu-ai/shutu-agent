@@ -15,14 +15,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 
 	"github.com/jabing/shutu-agent/internal/config"
 	"github.com/jabing/shutu-agent/internal/eval"
 	"github.com/jabing/shutu-agent/internal/interact"
 	"github.com/jabing/shutu-agent/internal/llm"
-	"github.com/jabing/shutu-agent/internal/tools"
 )
 
 // registerEval wires the task-evaluation seam (ADR 2026-08-20-eval-seam.md)
@@ -53,17 +51,9 @@ func (a *app) registerEval() error {
 		return fmt.Errorf("pa: eval engine: %w", err)
 	}
 	a.evalEng = eng
-	onEvent := func(typ string, data any) {
-		if _, err := a.log.Append(typ, data); err != nil {
-			fmt.Fprintln(os.Stderr, "pa: "+typ+" event:", err)
-		}
-	}
-	et := eval.NewEvalTools(eng, onEvent)
-	for _, t := range []tools.Tool{et.Run(), et.Result(), et.List()} {
-		if err := a.reg.Register(t); err != nil {
-			return fmt.Errorf("pa: register %s: %w", t.Name(), err)
-		}
-	}
+	// DSH standard does not expose eval_* as model tools. The evaluator stays
+	// available internally for goal/acceptance plumbing, but has no registry
+	// entries and therefore cannot enter the model tool catalog.
 	return nil
 }
 

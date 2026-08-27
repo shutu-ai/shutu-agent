@@ -23,7 +23,6 @@ import (
 	"github.com/jabing/shutu-agent/internal/config"
 	"github.com/jabing/shutu-agent/internal/session"
 	"github.com/jabing/shutu-agent/internal/spill"
-	"github.com/jabing/shutu-agent/internal/tools"
 )
 
 // registerSpills creates the configured durable Provider + Engine and registers
@@ -55,22 +54,8 @@ func (a *app) registerSpills() error {
 	// spillAutoSpill turn-completion hook — the serial main-loop path (D5).
 	// a.log is read at call time, so a session switch (/new, /resume) is
 	// honored the same way as the job/subagent/schedule/plan wiring.
-	onEvent := func(typ string, data any) {
-		if _, err := a.log.Append(typ, data); err != nil {
-			fmt.Fprintln(os.Stderr, "pa: "+typ+" event:", err)
-		}
-	}
-	st := spill.NewSpillTools(eng, onEvent)
-	for _, t := range []tools.Tool{
-		st.Write(),
-		st.Recall(),
-		st.List(),
-		st.Delete(),
-	} {
-		if err := a.reg.Register(t); err != nil {
-			return fmt.Errorf("pa: register %s: %w", t.Name(), err)
-		}
-	}
+	// DSH standard keeps long-term memory host-side; spill_* is not a
+	// model-facing capability. Auto-spill may still feed internal goal context.
 	return nil
 }
 

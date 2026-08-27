@@ -84,6 +84,9 @@ func (t *FsTools) List() FsListTool { return FsListTool{t: t} }
 // Edit returns the edit tool.
 func (t *FsTools) Edit() FsEditTool { return FsEditTool{t: t} }
 
+// StrReplaceEditor returns DSH minimal's combined filesystem editor.
+func (t *FsTools) StrReplaceEditor() StrReplaceEditorTool { return StrReplaceEditorTool{t: t} }
+
 // FsReadTool implements bounded, line-numbered read and records the observed
 // file version for the later write/edit observation policy.
 type FsReadTool struct {

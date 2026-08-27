@@ -1115,7 +1115,7 @@ func modeToolWhitelist(mode string, enabled []string) []string {
 	default:
 		out := make([]string, 0, len(enabled))
 		for _, name := range enabled {
-			if name != "run_code" {
+			if name != "run_code" && name != "str_replace_editor" {
 				out = append(out, name)
 			}
 		}
@@ -1138,7 +1138,7 @@ func toolSpecsForMode(mode string, specs []llm.ToolSchema) []llm.ToolSchema {
 	default:
 		allowed = make([]string, 0, len(specs))
 		for _, spec := range specs {
-			if spec.Name != "run_code" {
+			if spec.Name != "run_code" && spec.Name != "str_replace_editor" {
 				allowed = append(allowed, spec.Name)
 			}
 		}

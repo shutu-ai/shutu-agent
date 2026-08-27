@@ -1147,13 +1147,11 @@ func (a *app) webGoalCommand(ctx context.Context, input string) (string, error) 
 	} else if ok {
 		return "", errors.New("a goal is already active; use /goal edit <objective> or /goal clear")
 	}
-	fields := strings.Fields(input)
-	title := fields[0]
-	res, err := a.webPlanGoal(ctx, []string{title, strings.TrimSpace(strings.TrimPrefix(input, title))})
+	res, err := a.webPlanGoal(ctx, []string{input})
 	return res, err
 }
 
-// webPlanGoal creates a goal via the plan_goal tool (dsh /goal /plan entry). It
+// webPlanGoal creates a goal via the DSH create_goal tool (dsh /goal entry). It
 // returns the tool's model-facing output; the plan/create fact also lands in
 // the session log (D3). When plan is disabled the tool is unregistered and
 // Execute reports it.
@@ -1161,13 +1159,12 @@ func (a *app) webPlanGoal(ctx context.Context, args []string) (string, error) {
 	if len(args) == 0 {
 		return "", errors.New("usage: /goal <标题> [目标说明]")
 	}
-	title := args[0]
-	objective := strings.Join(args[1:], " ")
-	payload, err := json.Marshal(map[string]any{"title": title, "objective": objective})
+	objective := strings.TrimSpace(strings.Join(args, " "))
+	payload, err := json.Marshal(map[string]any{"objective": objective})
 	if err != nil {
 		return "", err
 	}
-	res, err := a.reg.Execute(ctx, "plan_goal", payload)
+	res, err := a.reg.Execute(ctx, "create_goal", payload)
 	if err != nil {
 		return "", err
 	}

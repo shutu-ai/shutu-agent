@@ -342,24 +342,24 @@ func TestSubagentToolsSchemaValidation(t *testing.T) {
 		name string
 		args string
 	}{
-		{"subagent_spawn", `{}`},                           // missing required prompt
-		{"subagent_spawn", `{"prompt":""}`},                // empty prompt
-		{"subagent_spawn", `{"prompt":"x","extra":1}`},     // additional properties rejected
-		{"subagent_spawn", `{"prompt":"x","max_depth":0}`}, // max_depth must be >= 1
-		{"subagent_status", `{}`},                          // missing required id
-		{"subagent_status", `{"id":123}`},                  // id must be a string
-		{"subagent_cancel", `{}`},                          // missing required id
-		{"subagent_cancel", `{"id":false}`},                // wrong id type
-		{"subagent_list", `{"parent_session":123}`},        // wrong parent type
+		{"subagent", `{}`},                           // missing required prompt
+		{"subagent", `{"prompt":""}`},                // empty prompt
+		{"subagent", `{"prompt":"x","extra":1}`},     // additional properties rejected
+		{"subagent", `{"prompt":"x","max_depth":0}`}, // max_depth must be >= 1
+		{"subagent_status", `{}`},                    // missing required id
+		{"subagent_status", `{"id":123}`},            // id must be a string
+		{"subagent_cancel", `{}`},                    // missing required id
+		{"subagent_cancel", `{"id":false}`},          // wrong id type
+		{"subagent_list", `{"parent_session":123}`},  // wrong parent type
 	} {
 		if _, err := reg.Execute(context.Background(), tc.name, json.RawMessage(tc.args)); err == nil {
 			t.Errorf("%s with args %s must be rejected (D7)", tc.name, tc.args)
 		}
 	}
 	// A valid spawn flows through the registry and returns the child id.
-	res, err := reg.Execute(context.Background(), "subagent_spawn", json.RawMessage(`{"prompt":"go"}`))
+	res, err := reg.Execute(context.Background(), "subagent", json.RawMessage(`{"prompt":"go"}`))
 	if err != nil {
-		t.Fatalf("subagent_spawn via registry: %v", err)
+		t.Fatalf("subagent via registry: %v", err)
 	}
 	if !strings.Contains(res.Output, "started subagent spawn-1") {
 		t.Fatalf("subagent_spawn output = %q, want started subagent spawn-1", res.Output)

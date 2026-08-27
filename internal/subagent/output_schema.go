@@ -9,4 +9,5 @@ func (SubagentReportTool) OutputSchema() map[string]any    { return map[string]a
 func (SubagentResumeTool) OutputSchema() map[string]any    { return map[string]any{"type": "string"} }
 func (SubagentSendTool) OutputSchema() map[string]any      { return map[string]any{"type": "string"} }
 func (SubagentSpawnTool) OutputSchema() map[string]any     { return map[string]any{"type": "string"} }
+func (SubagentForkTool) OutputSchema() map[string]any      { return map[string]any{"type": "string"} }
 func (SubagentStatusTool) OutputSchema() map[string]any    { return map[string]any{"type": "string"} }

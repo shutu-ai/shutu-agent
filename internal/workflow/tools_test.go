@@ -91,7 +91,7 @@ func TestWorkflowToolExecuteFormatsReport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	for _, want := range []string{"workflow_run: 2 tasks", "A: completed", "B: completed", "output: 默认输出"} {
+	for _, want := range []string{"workflow: 2 tasks", "A: completed", "B: completed", "output: 默认输出"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("report %q lacks %q", out, want)
 		}

@@ -13,33 +13,18 @@ import (
 	"github.com/jabing/shutu-agent/internal/tools"
 )
 
-// makePlanApp builds a minimal app for plan wiring tests: only the fields
-// registerPlans touches (cfg.Plan, reg, log) are set.
 func makePlanApp(planEnabled bool) *app {
 	return &app{
-		cfg: config.Config{
-			Plan: config.PlanConfig{Enabled: config.Bool(planEnabled)},
-		},
+		cfg: config.Config{Plan: config.PlanConfig{Enabled: config.Bool(planEnabled)}},
 		reg: tools.New(),
 		log: session.New(),
 	}
 }
 
-// planPolicy whitelists the six plan tools so the registry Execute gate can run
-// them (in production config.applyDefaults + PolicyFromConfig do this).
 func planPolicy() tools.Policy {
-	return tools.Policy{
-		Enabled: []string{
-			"plan_goal", "plan_plan", "plan_todo", "plan_status", "plan_list", "plan_remove",
-		},
-		Timeout:     0,
-		OutputLimit: 0,
-	}
+	return tools.Policy{Enabled: []string{"get_goal", "create_goal", "update_goal", "todo_write"}}
 }
 
-// TestRegisterPlansDisabledRegistersNothing verifies the D10 gate: with
-// plan.enabled=false the composition root creates no Engine and registers no
-// plan_* tool (dispatch-m6b-2 §4).
 func TestRegisterPlansDisabledRegistersNothing(t *testing.T) {
 	a := makePlanApp(false)
 	if err := a.registerPlans(); err != nil {
@@ -48,167 +33,99 @@ func TestRegisterPlansDisabledRegistersNothing(t *testing.T) {
 	if a.plans != nil {
 		t.Fatal("plan engine must be nil when plan.enabled=false")
 	}
-	for _, spec := range a.reg.Specs() {
-		if strings.HasPrefix(spec.Name, "plan_") {
-			t.Fatalf("plan tool %q registered while plan disabled", spec.Name)
-		}
+	if len(a.reg.Specs()) != 0 {
+		t.Fatalf("disabled goal/todo tools registered: %+v", a.reg.Specs())
 	}
 }
 
-// TestRegisterPlansEnabledRegistersAndValidates verifies the enabled path: the
-// Provider + Engine are created, all six plan_* tools are registered, D7
-// rejects bad arguments at the Execute gate, valid calls flow through
-// (goal → plan → todo → status → list → remove), the plan/* events land in the
-// session log (D3) without deriving into history (log-only), and unknown ids
-// error.
-func TestRegisterPlansEnabledRegistersAndValidates(t *testing.T) {
+func TestRegisterPlansEnabledRegistersDSHTools(t *testing.T) {
 	a := makePlanApp(true)
 	a.reg.SetPolicy(planPolicy())
 	if err := a.registerPlans(); err != nil {
 		t.Fatalf("registerPlans: %v", err)
 	}
 	defer a.plans.Close()
-	if a.plans == nil {
-		t.Fatal("plan engine must be created when plan.enabled=true")
-	}
-	names := make([]string, 0, len(a.reg.Specs()))
-	for _, s := range a.reg.Specs() {
-		names = append(names, s.Name)
-	}
-	for _, want := range []string{"plan_goal", "plan_plan", "plan_todo", "plan_status", "plan_list", "plan_remove"} {
-		if !containsStr(names, want) {
-			t.Fatalf("registered tools %v lack %q", names, want)
+	want := map[string]bool{"get_goal": true, "create_goal": true, "update_goal": true, "todo_write": true}
+	for _, spec := range a.reg.Specs() {
+		delete(want, spec.Name)
+		if strings.HasPrefix(spec.Name, "plan_") {
+			t.Fatalf("legacy plan tool %q registered", spec.Name)
 		}
 	}
-
-	// D7: bad arguments are rejected before any tool code runs.
-	for _, tc := range []struct {
-		name string
-		args string
-	}{
-		{"plan_goal", `{}`},                                               // missing required title
-		{"plan_goal", `{"title":"x","extra":1}`},                          // additional properties rejected
-		{"plan_plan", `{"title":"P"}`},                                    // missing required goal_id
-		{"plan_plan", `{"goal_id":"g","title":123}`},                      // title must be a string
-		{"plan_todo", `{}`},                                               // missing required plan_id/title
-		{"plan_todo", `{"plan_id":"p","title":"t","x":1}`},                // additional properties rejected
-		{"plan_status", `{}`},                                             // missing required scope/id/status
-		{"plan_status", `{"scope":"goal","id":"g","status":"bogus"}`},     // status outside the enum
-		{"plan_status", `{"scope":"widget","id":"g","status":"pending"}`}, // scope outside the enum
-		{"plan_list", `{"extra":1}`},                                      // list takes no arguments
-		{"plan_remove", `{"id":"g"}`},                                     // missing required scope
-		{"plan_remove", `{"scope":"goal","id":123}`},                      // id must be a string
-	} {
-		if _, err := a.reg.Execute(context.Background(), tc.name, json.RawMessage(tc.args)); err == nil {
-			t.Errorf("%s with args %s must be rejected (D7)", tc.name, tc.args)
-		}
+	if len(want) != 0 {
+		t.Fatalf("registered tools lack %v", want)
 	}
-
-	// A valid goal → plan → todo flow works and lands the plan/* events (D3).
-	if _, err := a.reg.Execute(context.Background(), "plan_goal", json.RawMessage(`{"title":"Ship","objective":"ship the agent"}`)); err != nil {
-		t.Fatalf("plan_goal via registry: %v", err)
+	if _, err := a.reg.Execute(context.Background(), "create_goal", json.RawMessage(`{}`)); err == nil {
+		t.Fatal("create_goal must reject missing objective")
 	}
-	if !hasEvent(a.log, session.EventPlanCreate) {
-		t.Fatal("plan/create event missing from the session log after plan_goal")
-	}
-	if _, err := a.reg.Execute(context.Background(), "plan_plan", json.RawMessage(`{"goal_id":"goal-1","title":"Code","steps":["write","test"]}`)); err != nil {
-		t.Fatalf("plan_plan via registry: %v", err)
-	}
-	if _, err := a.reg.Execute(context.Background(), "plan_todo", json.RawMessage(`{"plan_id":"plan-1","title":"self-review"}`)); err != nil {
-		t.Fatalf("plan_todo via registry: %v", err)
-	}
-	if _, err := a.reg.Execute(context.Background(), "plan_status", json.RawMessage(`{"scope":"goal","id":"goal-1","status":"in-progress"}`)); err != nil {
-		t.Fatalf("plan_status via registry: %v", err)
-	}
-	if !hasEvent(a.log, session.EventPlanStatus) {
-		t.Fatal("plan/status event missing from the session log after plan_status")
-	}
-	res, err := a.reg.Execute(context.Background(), "plan_list", json.RawMessage(`{}`))
+	created, err := a.reg.Execute(context.Background(), "create_goal", json.RawMessage(`{"objective":"Ship the agent","max_goal_rounds":3}`))
 	if err != nil {
-		t.Fatalf("plan_list via registry: %v", err)
+		t.Fatalf("create_goal: %v", err)
 	}
-	if !strings.Contains(res.Output, "plan-1: Code (pending)") {
-		t.Fatalf("plan_list output lacks the plan tree:\n%s", res.Output)
+	if !strings.Contains(created.Output, "goal-1") || !hasEvent(a.log, session.EventPlanCreate) {
+		t.Fatalf("create_goal output/events = %q, %+v", created.Output, a.log.Events())
 	}
-	if !hasEvent(a.log, session.EventPlanList) {
-		t.Fatal("plan/list event missing from the session log after plan_list")
+	current, err := a.reg.Execute(context.Background(), "get_goal", json.RawMessage(`{}`))
+	if err != nil || !strings.Contains(current.Output, "Ship the agent") {
+		t.Fatalf("get_goal = %q, err=%v", current.Output, err)
 	}
-	// The plan/* rows are log-only: no derived messages.
-	if msgs := a.log.DeriveHistory(); len(msgs) != 0 {
-		t.Fatalf("plan/* events must not derive into messages: %+v", msgs)
+	var goal struct {
+		ID       string `json:"id"`
+		Revision int    `json:"revision"`
 	}
-	// plan_remove removes and lands plan/delete (D3); unknown ids error.
-	if _, err := a.reg.Execute(context.Background(), "plan_remove", json.RawMessage(`{"scope":"todo","id":"todo-3"}`)); err != nil {
-		t.Fatalf("plan_remove via registry: %v", err)
+	if err := json.Unmarshal([]byte(current.Output), &goal); err != nil {
+		t.Fatal(err)
 	}
-	if !hasEvent(a.log, session.EventPlanDelete) {
-		t.Fatal("plan/delete event missing from the session log after plan_remove")
+	updated, err := a.reg.Execute(context.Background(), "update_goal", json.RawMessage(`{"goal_id":"`+goal.ID+`","revision":`+jsonInt(goal.Revision)+`,"action":"complete"}`))
+	if err != nil || !strings.Contains(updated.Output, `"status":"done"`) {
+		t.Fatalf("update_goal complete = %q, err=%v", updated.Output, err)
 	}
-	if res, err := a.reg.Execute(context.Background(), "plan_remove", json.RawMessage(`{"scope":"goal","id":"goal-99"}`)); err != nil || !res.IsError {
-		t.Fatalf("plan_remove of an unknown id must return a structured error: result=%+v err=%v", res, err)
-	}
-	if res, err := a.reg.Execute(context.Background(), "plan_status", json.RawMessage(`{"scope":"plan","id":"plan-99","status":"done"}`)); err != nil || !res.IsError {
-		t.Fatalf("plan_status of an unknown id must return a structured error: result=%+v err=%v", res, err)
+	todos, err := a.reg.Execute(context.Background(), "todo_write", json.RawMessage(`{"todos":[{"content":"Verify","status":"in_progress"}]}`))
+	if err != nil || !strings.Contains(todos.Output, "Verify") {
+		t.Fatalf("todo_write = %q, err=%v", todos.Output, err)
 	}
 }
 
-func TestPlanTreeRebuildsAcrossAppRestart(t *testing.T) {
+func jsonInt(n int) string { return strings.TrimSpace(string(mustJSON(n))) }
+
+func mustJSON(v any) []byte {
+	b, _ := json.Marshal(v)
+	return b
+}
+
+func TestPlanGoalProjectionRebuildsAcrossAppRestart(t *testing.T) {
 	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "pa.db"))
 	if err != nil {
 		t.Fatalf("OpenSQLite: %v", err)
 	}
 	defer st.Close()
-
 	ctx := context.Background()
 	first := makePlanApp(true)
-	first.store = st
-	first.baseCtx = ctx
+	first.store, first.baseCtx = st, ctx
 	first.reg.SetPolicy(planPolicy())
 	if err := first.registerPlans(); err != nil {
-		t.Fatalf("first registerPlans: %v", err)
+		t.Fatal(err)
 	}
 	if err := first.newSession(ctx); err != nil {
-		t.Fatalf("first newSession: %v", err)
+		t.Fatal(err)
 	}
-	if _, err := first.reg.Execute(ctx, "plan_goal", json.RawMessage(`{"title":"Ship","objective":"durable"}`)); err != nil {
-		t.Fatalf("plan_goal: %v", err)
-	}
-	if _, err := first.reg.Execute(ctx, "plan_plan", json.RawMessage(`{"goal_id":"goal-1","title":"Persist","steps":["reopen"]}`)); err != nil {
-		t.Fatalf("plan_plan: %v", err)
+	if _, err := first.reg.Execute(ctx, "create_goal", json.RawMessage(`{"objective":"durable"}`)); err != nil {
+		t.Fatal(err)
 	}
 	sessionID := first.currentID
 	first.plans.Close()
-
 	second := makePlanApp(true)
-	second.store = st
-	second.baseCtx = ctx
+	second.store, second.baseCtx = st, ctx
 	second.reg.SetPolicy(planPolicy())
 	if err := second.registerPlans(); err != nil {
-		t.Fatalf("second registerPlans: %v", err)
+		t.Fatal(err)
 	}
 	defer second.plans.Close()
 	if err := second.resumeSession(ctx, sessionID); err != nil {
-		t.Fatalf("second resumeSession: %v", err)
+		t.Fatal(err)
 	}
 	goals, err := second.plans.List(ctx)
-	if err != nil {
-		t.Fatalf("restored List: %v", err)
-	}
-	if len(goals) != 1 || goals[0].ID != "goal-1" || len(goals[0].Plans) != 1 {
-		t.Fatalf("restored goals = %+v", goals)
-	}
-	res, err := second.reg.Execute(ctx, "plan_list", json.RawMessage(`{}`))
-	if err != nil {
-		t.Fatalf("restored plan_list: %v", err)
-	}
-	if !strings.Contains(res.Output, "plan-1: Persist (pending)") || !strings.Contains(res.Output, "todo-1: reopen (pending)") {
-		t.Fatalf("restored plan tree = %q", res.Output)
-	}
-	next, err := second.plans.CreateGoal(ctx, "Next", "continue")
-	if err != nil {
-		t.Fatalf("create after restart: %v", err)
-	}
-	if next.ID != "goal-2" {
-		t.Fatalf("next goal id = %q, want goal-2", next.ID)
+	if err != nil || len(goals) != 1 || goals[0].ID != "goal-1" {
+		t.Fatalf("restored goals = %+v, err=%v", goals, err)
 	}
 }

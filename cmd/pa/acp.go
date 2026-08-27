@@ -13,6 +13,7 @@ import (
 	"github.com/jabing/shutu-agent/internal/acp"
 	"github.com/jabing/shutu-agent/internal/compaction"
 	"github.com/jabing/shutu-agent/internal/config"
+	"github.com/jabing/shutu-agent/internal/fs"
 	"github.com/jabing/shutu-agent/internal/llm"
 	"github.com/jabing/shutu-agent/internal/loop"
 	"github.com/jabing/shutu-agent/internal/prompt"
@@ -161,6 +162,15 @@ func acpRegistry(a *app, id, cwd string, log *session.Log, terminalService *acpT
 			return nil, err
 		}
 		policy.Enabled = append(policy.Enabled, "read")
+	}
+	if containsString(allowed, "str_replace_editor") {
+		fsTools := fs.NewFsTools(fs.NewLocalFS(cwd), func(typ string, data any) {
+			_, _ = log.Append(typ, data)
+		})
+		if err := registry.Register(fsTools.StrReplaceEditor()); err != nil {
+			return nil, err
+		}
+		policy.Enabled = append(policy.Enabled, "str_replace_editor")
 	}
 	if terminalService != nil {
 		for _, name := range []string{acpTerminalStart, acpTerminalWrite, acpTerminalRead, acpTerminalSignal, acpTerminalStop} {

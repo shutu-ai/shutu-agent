@@ -1,6 +1,6 @@
 // tools.go — the GAP-3 Consumer half of the workflow seam (ADR
 // 2026-08-20-standard-gaps.md D-GAP-2, 用户拍板 JSON DAG 声明式编排): the
-// workflow_run tool is registered into the tools.Registry by the composition
+// workflow tool is registered into the tools.Registry by the composition
 // root (cmd/pa) when workflow.enabled, and auto-whitelisted by
 // config.applyDefaults the same way the ralph/fs_search tools are. It
 // implements the tools.Tool method set structurally (Go structural typing), so
@@ -20,7 +20,7 @@ import (
 )
 
 // WorkflowRunToolName is the task-DAG orchestration tool name (D-GAP-2).
-const WorkflowRunToolName = "workflow_run"
+const WorkflowRunToolName = "workflow"
 
 // WorkflowRunTool bundles both workflow execution paths: the legacy Go DAG and
 // the optional dsh-shaped JavaScript runner. The D3 event sink is shared.
@@ -32,7 +32,7 @@ type WorkflowRunTool struct {
 	onEvent func(typ string, data any)
 }
 
-// NewWorkflowRunTool returns the workflow_run tool bound to an Engine. onEvent,
+// NewWorkflowRunTool returns the workflow tool bound to an Engine. onEvent,
 // when non-nil, receives the workflow/run payload; the composition root wires
 // it to the session log (D3).
 func NewWorkflowRunTool(eng *Engine, onEvent func(typ string, data any)) *WorkflowRunTool {
@@ -131,14 +131,14 @@ func (t *WorkflowRunTool) Execute(ctx context.Context, args any) (string, error)
 		Tasks  []Task         `json:"tasks"`
 	}
 	if err := agenttools.DecodeArgs(args, &a); err != nil {
-		return "", fmt.Errorf("workflow_run: %w", err)
+		return "", fmt.Errorf("workflow: %w", err)
 	}
 	if a.Script != "" {
 		if t.script == nil {
-			return "", fmt.Errorf("workflow_run: JavaScript provider is unavailable")
+			return "", fmt.Errorf("workflow: JavaScript provider is unavailable")
 		}
 		if err := validateScriptMeta(a.Meta); err != nil {
-			return "", fmt.Errorf("workflow_run: %w", err)
+			return "", fmt.Errorf("workflow: %w", err)
 		}
 		parent := ""
 		if t.parent != nil {
@@ -148,23 +148,23 @@ func (t *WorkflowRunTool) Execute(ctx context.Context, args any) (string, error)
 			t.emit(ev.Type, ev.Data)
 		})
 		if err != nil {
-			return "", fmt.Errorf("workflow_run: JavaScript: %w", err)
+			return "", fmt.Errorf("workflow: JavaScript: %w", err)
 		}
 		if res.StopReason != "completed" {
 			if res.Error == "" {
 				res.Error = "workflow stopped with " + res.StopReason
 			}
-			return "", fmt.Errorf("workflow_run: JavaScript: %s", res.Error)
+			return "", fmt.Errorf("workflow: JavaScript: %s", res.Error)
 		}
 		t.emit(session.EventWorkflowRun, map[string]any{"mode": "script", "stopReason": res.StopReason, "agentsStarted": res.AgentsStarted})
 		return formatScriptResult(res), nil
 	}
 	if len(a.Tasks) == 0 {
-		return "", fmt.Errorf("workflow_run: empty tasks")
+		return "", fmt.Errorf("workflow: empty tasks")
 	}
 	rep, err := t.eng.Run(ctx, Spec{Tasks: a.Tasks})
 	if err != nil {
-		return "", fmt.Errorf("workflow_run: %w", err)
+		return "", fmt.Errorf("workflow: %w", err)
 	}
 	completed, failed := 0, 0
 	for _, tr := range rep.Tasks {
@@ -224,7 +224,7 @@ func formatScriptResult(res ScriptResult) string {
 	if text == "" {
 		text = "null"
 	}
-	return fmt.Sprintf("workflow_run: JavaScript workflow (%d agents)\n  result: %s", res.AgentsStarted, text)
+	return fmt.Sprintf("workflow: JavaScript workflow (%d agents)\n  result: %s", res.AgentsStarted, text)
 }
 
 // formatReport renders the per-task summary: a header with the task count and
@@ -232,7 +232,7 @@ func formatScriptResult(res ScriptResult) string {
 // or error (failed) line.
 func formatReport(rep Report) string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "workflow_run: %d tasks", len(rep.Tasks))
+	fmt.Fprintf(&sb, "workflow: %d tasks", len(rep.Tasks))
 	for _, tr := range rep.Tasks {
 		fmt.Fprintf(&sb, "\n  %s: %s", tr.ID, tr.Status)
 		if tr.Status == StatusCompleted {

@@ -169,7 +169,7 @@ const (
 // defaultEnabledTools is the native standard-mode whitelist applied when
 // tools.enabled is absent. PTC adds run_code only through its mode projection;
 // minimal replaces the list with its fixed terminal/file seam.
-var defaultEnabledTools = []string{"read"}
+var defaultEnabledTools = []string{"get_time", "read"}
 
 // ReadOnlyTools returns the read-only execution whitelist (D10): the tools
 // that are always safe to expose. The General-settings "permission" preset's
@@ -184,9 +184,7 @@ func MinimalTools() []string { return append([]string(nil), minimalEnabledTools.
 // 对齐: 每次调用全新 pwsh 进程) + 文件编辑 (read/write/list/edit). 工具名须与
 // 各包常量一致 (tools.go/fs.go).
 var minimalEnabledTools = []string{
-	"read",
-	platformShellToolName(), "terminal_open", "terminal_list", "terminal_read", "terminal_send", "terminal_signal", "terminal_close",
-	"write", "edit",
+	platformShellToolName(), "str_replace_editor",
 }
 
 // Bool returns a pointer to b, for assigning an explicit *bool flag where the
@@ -1002,18 +1000,7 @@ func applyDefaults(cfg *Config) {
 	// six consumer tools, so the one plan.enabled switch turns the whole
 	// capability (Provider + Engine + tools + event logging) on (mirrors
 	if Enabled(cfg.Plan.Enabled) {
-		for _, name := range planToolNames {
-			if !contains(cfg.Tools.Enabled, name) {
-				cfg.Tools.Enabled = append(cfg.Tools.Enabled, name)
-			}
-		}
-	}
-	// M6c-2 spill defaults: off by default (D10); auto_spill defaults on
-	// Enabling spill whitelists its four consumer tools, so the one
-	// spill.enabled switch turns the whole capability (Provider + Engine +
-	// tools + event logging + auto-sedimentation) on (mirrors
-	if Enabled(cfg.Spill.Enabled) {
-		for _, name := range spillToolNames {
+		for _, name := range append(append([]string{}, goalToolNames...), todoToolNames...) {
 			if !contains(cfg.Tools.Enabled, name) {
 				cfg.Tools.Enabled = append(cfg.Tools.Enabled, name)
 			}
@@ -1235,16 +1222,6 @@ func applyDefaults(cfg *Config) {
 	if cfg.Eval.MaxRecords <= 0 {
 		cfg.Eval.MaxRecords = DefaultEvalMaxRecords
 	}
-	// Enabling eval whitelists its three consumer tools as well, so the
-	// single eval.enabled switch turns the whole capability on; default off
-	// (D10).
-	if Enabled(cfg.Eval.Enabled) {
-		for _, name := range evalToolNames {
-			if !contains(cfg.Tools.Enabled, name) {
-				cfg.Tools.Enabled = append(cfg.Tools.Enabled, name)
-			}
-		}
-	}
 	// D-GAP-1 fs-search defaults: enabled by default to match dsh base. Enabling fs_search
 	// whitelists its two consumer tools grep and glob, so the one fs_search.
 	// enabled switch turns the whole capability (search engine + tools) on
@@ -1402,19 +1379,13 @@ func ApplyModePreset(cfg *Config) {
 // and whitelisted only when jobs is enabled; keeping the names here makes the
 // "jobs.enabled ⇒ 工具自动白名单" rule a single, tested fact shared by
 // applyDefaults and the composition root.
-var jobsToolNames = []string{
-	"job_start", "job_output", "job_kill", "job_list",
-}
+var jobsToolNames = []string{"job_output", "job_kill", "job_list"}
 
 // subagentToolNames are the subagent consumer tools (dispatch-m5b-2 §2). They
 // are registered and whitelisted only when subagent is enabled; keeping the
 // names here makes the "subagent.enabled ⇒ 工具自动白名单" rule a single, tested
 // fact shared by applyDefaults and the composition root.
-var subagentToolNames = []string{
-	"subagent_spawn", "subagent_status", "subagent_cancel", "subagent_list",
-	"subagent_send", "subagent_interrupt", "subagent_report",
-	"subagent_resume",
-}
+var subagentToolNames = []string{"subagent", "subagent_fork", "send_message", "interrupt_agent"}
 
 // skillToolNames are the skill consumer tools (dispatch-m5d-2 §2). skill
 // is registered and whitelisted only when skill is enabled; keeping the name
@@ -1428,17 +1399,9 @@ var skillToolNames = []string{"skill"}
 // fact shared by applyDefaults and the composition root.
 var scheduleToolNames = []string{"schedule_create", "schedule_list", "schedule_delete"}
 
-// planToolNames are the plan consumer tools (dispatch-m6b-2 §3). They are
-// registered and whitelisted only when plan is enabled; keeping the names here
-// makes the "plan.enabled ⇒ 工具自动白名单" rule a single, tested fact shared by
-// applyDefaults and the composition root.
-var planToolNames = []string{"plan_goal", "plan_plan", "plan_todo", "plan_status", "plan_list", "plan_remove"}
-
-// spillToolNames are the spill consumer tools (dispatch-m6c-2 §3). They are
-// registered and whitelisted only when spill is enabled; keeping the names here
-// makes the "spill.enabled ⇒ 工具自动白名单" rule a single, tested fact shared by
-// applyDefaults and the composition root.
-var spillToolNames = []string{"spill_write", "spill_recall", "spill_list", "spill_delete"}
+// goalToolNames and todoToolNames are the DSH goal/todo consumer tools.
+var goalToolNames = []string{"get_goal", "create_goal", "update_goal"}
+var todoToolNames = []string{"todo_write"}
 
 // interactToolNames are the human-approval consumer tools (dispatch-m6d-2 §3).
 // They are registered and whitelisted only when interact is enabled; keeping
@@ -1486,10 +1449,10 @@ var lspToolNames = []string{"lsp"}
 var ralphToolNames = []string{"ralph"}
 
 // workflowToolNames are the task-DAG orchestration consumer tools (D-GAP-2).
-// workflow_run is registered and whitelisted only when workflow is enabled;
+// workflow is registered and whitelisted only when workflow is enabled;
 // keeping the name here makes the "workflow.enabled ⇒ 工具自动白名单" rule a
 // single, tested fact shared by applyDefaults and the composition root.
-var workflowToolNames = []string{"workflow_run"}
+var workflowToolNames = []string{"workflow"}
 
 // webToolNames are the web consumer tools (dispatch-m7-2 §5). They are
 // registered and whitelisted only when web is enabled; keeping the names here
@@ -1512,13 +1475,6 @@ func platformShellToolName() string {
 	}
 	return "bash"
 }
-
-// evalToolNames are the task-evaluation consumer tools (ADR
-// 2026-08-20-eval-seam.md D-EVAL-6). They are registered and whitelisted only
-// when eval is enabled; keeping the names here makes the "eval.enabled ⇒ 工具
-// 自动白名单" rule a single, tested fact shared by applyDefaults and the
-// composition root.
-var evalToolNames = []string{"eval_run", "eval_result", "eval_list"}
 
 func contains(list []string, s string) bool {
 	for _, v := range list {
