@@ -1736,7 +1736,7 @@ func TestNativeProjectionUsesOneDSHShapeForReplayAndLive(t *testing.T) {
 		{Seq: 1, Type: session.EventTurnStart, At: time.UnixMilli(1000), Version: session.EventVersion, Data: json.RawMessage(`{}`)},
 		{Seq: 2, Type: session.EventUserMessage, At: time.UnixMilli(1001), Version: session.EventVersion, Data: json.RawMessage(`{"text":"hello"}`)},
 		{Seq: 3, Type: session.EventAssistantMessage, At: time.UnixMilli(1002), Version: session.EventVersion, Data: json.RawMessage(`{"text":"answer","toolCalls":[{"ID":"c1","Name":"read","Arguments":"{}"}]}`)},
-		{Seq: 4, Type: session.EventToolResult, At: time.UnixMilli(1003), Version: session.EventVersion, Data: json.RawMessage(`{"turn":0,"step":0,"callId":"c1","name":"read","output":"ok"}`)},
+		{Seq: 4, Type: session.EventToolResult, At: time.UnixMilli(1003), Version: session.EventVersion, Data: json.RawMessage(`{"turn":1,"step":1,"callId":"c1","name":"read","output":"ok"}`)},
 	}
 	replayCursor := newNativeProjectionCursor()
 	liveCursor := newNativeProjectionCursor()
@@ -1761,7 +1761,7 @@ func TestNativeProjectionUsesOneDSHShapeForReplayAndLive(t *testing.T) {
 	if err := json.Unmarshal(assistant.Data, &assistantData); err != nil {
 		t.Fatal(err)
 	}
-	if assistantData.Turn != 0 || assistantData.Step != 0 || assistantData.Message.ID == "" || len(assistantData.Message.Content) != 2 {
+	if assistantData.Turn != 1 || assistantData.Step != 0 || assistantData.Message.ID == "" || len(assistantData.Message.Content) != 2 {
 		t.Fatalf("native assistant projection = %+v", assistantData)
 	}
 }

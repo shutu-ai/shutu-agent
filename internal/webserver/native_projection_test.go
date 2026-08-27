@@ -67,3 +67,28 @@ func TestNativeProjectionClampsNegativeCoordinatesAtWireBoundary(t *testing.T) {
 		t.Fatalf("negative assistant chunk coordinates = %+v", chunkData)
 	}
 }
+
+func TestNativeProjectionKeepsImplicitTurnStartAlignedWithToolEvents(t *testing.T) {
+	cursor := newNativeProjectionCursor()
+	turnStart := cursor.project("turn-alignment", session.Event{
+		Seq: 1, Type: session.EventTurnStart, At: time.UnixMilli(1000), Version: session.EventVersion,
+		Data: json.RawMessage(`{}`),
+	})
+	toolCall := cursor.project("turn-alignment", session.Event{
+		Seq: 2, Type: session.EventToolCall, At: time.UnixMilli(1001), Version: session.EventVersion,
+		Data: json.RawMessage(`{"turn":1,"step":1,"callId":"call-1","name":"read","arguments":"{}"}`),
+	})
+	toolResult := cursor.project("turn-alignment", session.Event{
+		Seq: 3, Type: session.EventToolResult, At: time.UnixMilli(1002), Version: session.EventVersion,
+		Data: json.RawMessage(`{"turn":1,"step":1,"callId":"call-1","output":"ok"}`),
+	})
+	for _, projected := range []nativeSessionEvent{turnStart, toolCall, toolResult} {
+		var data map[string]any
+		if err := json.Unmarshal(projected.Data, &data); err != nil {
+			t.Fatalf("decode %s: %v", projected.Type, err)
+		}
+		if got, ok := data["turn"].(float64); !ok || got != 1 {
+			t.Fatalf("%s turn = %#v, want 1", projected.Type, data["turn"])
+		}
+	}
+}

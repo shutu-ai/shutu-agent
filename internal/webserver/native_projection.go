@@ -65,7 +65,15 @@ func (c *nativeProjectionCursor) project(sessionID string, ev session.Event) nat
 
 	switch ev.Type {
 	case session.EventTurnStart:
-		c.turn = nativeNonNegative(nativeEventInt(data, "turn", c.turn+1))
+		// The cursor starts at -1 as an internal "no active turn" sentinel,
+		// while DSH's wire contract is one-based.  Using c.turn+1 directly
+		// would therefore expose the first turn as 0 and make the following
+		// tool events appear to belong to a different turn in the live UI.
+		nextTurn := c.turn + 1
+		if c.turn < 0 {
+			nextTurn = 1
+		}
+		c.turn = nativeNonNegative(nativeEventInt(data, "turn", nextTurn))
 		c.step = 0
 		projectedData = map[string]any{"turn": c.turn}
 	case session.EventTurnEnd:

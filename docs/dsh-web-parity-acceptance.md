@@ -190,6 +190,34 @@ After clamping the internal negative turn sentinel at the native wire boundary, 
 
 The real-task sampler now emits a `performanceGate` object and supports `SHUTU_REAL_TASK_ENFORCE_THRESHOLDS=1`. The default gate is intentionally explicit: minimum FPS `30`, heap growth `128MiB`, DOM nodes `2,500`, total Long Tasks `2,000ms`, maximum event→UI latency `500ms`, and reconnect recovery `1,500ms`; the clean high-density run above is therefore recorded as a failed gate rather than a false pass.
 
+## P36-7.2 / P36-7.3 Clean real continuous stream after turn projection fix (2026-08-27)
+
+The native projection cursor now converts an implicit first `turn/start` to the
+DSH one-based wire value `1`; previously its internal `-1` sentinel leaked as
+`0`, leaving tool events one turn ahead in the live client. The regression test
+`TestNativeProjectionKeepsImplicitTurnStartAlignedWithToolEvents` covers the
+turn/call/result sequence, and the full native browser matrix remains clean.
+
+On the real Super Mario session `s-f556a6f2`, a fresh 60-second run attached to
+the existing conversation before dispatching a real steer prompt. It received
+`618` mux frames (`256→878`, `10.18` frames/s), prompt admission was `14ms`,
+event→UI latency was `6–79ms` (`95` samples), minimum/average FPS was
+`42/59.9`, heap was `28→72MiB`, DOM peak was `1,274`, Long Tasks totaled
+`1,191ms`, and reconnect recovery was `293ms`; console errors were `0` and the
+enforced performance gate passed. The completed resulting session contained
+`1,468` events, `22` assistant messages with `22` reasoning blocks, `29` tool
+call/result pairs, `42,755` assistant text/reasoning characters and projected
+token usage (`15,904` output tokens), so the real stream exercised reasoning,
+tools and token accounting alongside the 100k fixture's long/code content.
+
+The same sampler was also run against the real `s-f15a7e57` conversation at
+`106,355` historical events. Static history remained responsive, but the
+triggered turn produced only two new mux frames and one `931ms` event→UI sample;
+the enforced gate failed on that latency. This is retained as a negative
+high-density result, not hidden as a pass. A real 100k-scale turn that sustains
+high event density while the dense history is mounted remains the only open
+P36-7.2/P36-7.3 performance slice.
+
 ## P36-7.4 Native stream batching and threshold evidence (2026-08-27)
 
 The native mux no longer refreshes queue/jobs control snapshots for unrelated assistant chunks; queue mutations and `job/*` lifecycle events still refresh their authoritative snapshots. The agent loop also batches adjacent streamed text/reasoning deltas within a 50ms/8KiB window while retaining immediate REPL output and the authoritative final assistant message. Go regression tests cover both behaviors.
