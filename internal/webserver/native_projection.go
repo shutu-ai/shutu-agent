@@ -65,21 +65,21 @@ func (c *nativeProjectionCursor) project(sessionID string, ev session.Event) nat
 
 	switch ev.Type {
 	case session.EventTurnStart:
-		c.turn = nativeEventInt(data, "turn", c.turn+1)
+		c.turn = nativeNonNegative(nativeEventInt(data, "turn", c.turn+1))
 		c.step = 0
 		projectedData = map[string]any{"turn": c.turn}
 	case session.EventTurnEnd:
-		turn := nativeEventInt(data, "turn", c.turn)
+		turn := nativeNonNegative(nativeEventInt(data, "turn", c.turn))
 		projectedData = map[string]any{
 			"turn":   turn,
 			"reason": nativeTurnEndReason(data),
 		}
 	case session.EventStepStart:
-		c.step = nativeEventInt(data, "step", c.step)
-		projectedData = map[string]any{"turn": c.turn, "step": c.step}
+		c.step = nativeNonNegative(nativeEventInt(data, "step", c.step))
+		projectedData = map[string]any{"turn": nativeNonNegative(c.turn), "step": c.step}
 	case session.EventStepEnd:
-		step := nativeEventInt(data, "step", c.step)
-		projectedData = map[string]any{"turn": c.turn, "step": step}
+		step := nativeNonNegative(nativeEventInt(data, "step", c.step))
+		projectedData = map[string]any{"turn": nativeNonNegative(c.turn), "step": step}
 	case session.EventLLMRequestStart:
 		c.provider = nativeEventString(data, "provider")
 		c.model = nativeEventString(data, "model")
@@ -104,8 +104,8 @@ func (c *nativeProjectionCursor) project(sessionID string, ev session.Event) nat
 		text := nativeEventString(data, "text")
 		projectedType = session.EventAssistantChunk
 		projectedData = map[string]any{
-			"turn": c.turn,
-			"step": c.step,
+			"turn": nativeNonNegative(c.turn),
+			"step": nativeNonNegative(c.step),
 			"chunk": map[string]any{
 				"type":  chunkType,
 				"index": 0,
@@ -119,8 +119,8 @@ func (c *nativeProjectionCursor) project(sessionID string, ev session.Event) nat
 	case session.EventToolCall, "tool/start":
 		projectedType = session.EventToolCall
 		projectedData = map[string]any{
-			"turn":      nativeEventInt(data, "turn", c.turn),
-			"step":      nativeEventInt(data, "step", c.step),
+			"turn":      nativeNonNegative(nativeEventInt(data, "turn", c.turn)),
+			"step":      nativeNonNegative(nativeEventInt(data, "step", c.step)),
 			"callId":    nativeEventString(data, "callId", "call_id"),
 			"name":      nativeEventString(data, "name"),
 			"arguments": nativeEventString(data, "arguments", "args", "tool_args"),
@@ -790,8 +790,8 @@ func nativeGoalPhase(status string) string {
 
 func (c *nativeProjectionCursor) foldSessionStats(ev session.Event, data map[string]any) {
 	stats := &c.stats
-	turn := nativeEventInt(data, "turn", c.turn)
-	step := nativeEventInt(data, "step", c.step)
+	turn := nativeNonNegative(nativeEventInt(data, "turn", c.turn))
+	step := nativeNonNegative(nativeEventInt(data, "step", c.step))
 	now := ev.At.UnixMilli()
 	switch ev.Type {
 	case session.EventStepStart:
@@ -1168,8 +1168,8 @@ func (c *nativeProjectionCursor) assistantMessageData(sessionID string, seq uint
 		message["source"].(map[string]any)["model"] = "unknown"
 	}
 	result := map[string]any{
-		"turn":    nativeEventInt(data, "turn", c.turn),
-		"step":    nativeEventInt(data, "step", c.step),
+		"turn":    nativeNonNegative(nativeEventInt(data, "turn", c.turn)),
+		"step":    nativeNonNegative(nativeEventInt(data, "step", c.step)),
 		"message": message,
 	}
 	if usage := nativeEventValue(data, "usage"); usage != nil {
@@ -1206,8 +1206,8 @@ func (c *nativeProjectionCursor) toolResultData(sessionID string, seq uint64, da
 		"source":  map[string]any{"kind": "tool", "callId": callID},
 	}
 	result := map[string]any{
-		"turn":    nativeEventInt(data, "turn", c.turn),
-		"step":    nativeEventInt(data, "step", c.step),
+		"turn":    nativeNonNegative(nativeEventInt(data, "turn", c.turn)),
+		"step":    nativeNonNegative(nativeEventInt(data, "step", c.step)),
 		"message": message,
 		"callId":  callID,
 		"name":    name,
@@ -1242,9 +1242,9 @@ func nativeToolResultBlocks(data map[string]any, fallback string, isError bool) 
 func (c *nativeProjectionCursor) retryData(sessionID string, seq uint64, data map[string]any) map[string]any {
 	retry := nativeEventInt(data, "retry", nativeEventInt(data, "attempt", 1))
 	result := map[string]any{
-		"retryId":    fmt.Sprintf("%s:retry:%d:%d", sessionID, nativeEventInt(data, "turn", c.turn), retry),
-		"turn":       nativeEventInt(data, "turn", c.turn),
-		"step":       nativeEventInt(data, "step", c.step),
+		"retryId":    fmt.Sprintf("%s:retry:%d:%d", sessionID, nativeNonNegative(nativeEventInt(data, "turn", c.turn)), retry),
+		"turn":       nativeNonNegative(nativeEventInt(data, "turn", c.turn)),
+		"step":       nativeNonNegative(nativeEventInt(data, "step", c.step)),
 		"provider":   nativeEventString(data, "provider"),
 		"mode":       nativeEventString(data, "mode"),
 		"policyKey":  nativeEventString(data, "policyKey", "policy_key"),
@@ -1390,6 +1390,13 @@ func nativeEventArray(object map[string]any, keys ...string) []map[string]any {
 
 func nativeEventString(object map[string]any, keys ...string) string {
 	value, _ := nativeEventValue(object, keys...).(string)
+	return value
+}
+
+func nativeNonNegative(value int) int {
+	if value < 0 {
+		return 0
+	}
 	return value
 }
 
