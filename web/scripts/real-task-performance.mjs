@@ -51,7 +51,7 @@ async function sessionSearchTerm(summary) {
 async function selectSession(page, summary) {
   const term = await sessionSearchTerm(summary)
   if (!term) throw new Error(`session ${sessionId} has no searchable title or user message`)
-  await page.getByRole('button', { name: /Search sessions|搜索会话/ }).click()
+  await page.getByRole('button', { name: /Search sessions|搜索会话/ }).click({ force: true })
   const search = page.getByPlaceholder(/Search sessions\.\.\.|搜索会话…/)
   await search.fill(term)
   const hitText = page.getByText(term.slice(0, Math.min(term.length, 32)), { exact: false }).last()
@@ -123,7 +123,7 @@ try {
   await page.goto(`${baseUrl}/`, { waitUntil: 'domcontentloaded', timeout: 60_000 })
   const summary = await sessionSummary()
   const tabs = page.getByRole('tab', { name: /Trajectory|轨迹/ })
-  if (!skipSelection || await tabs.count() === 0) await selectSession(page, summary)
+  if (!skipSelection) await selectSession(page, summary)
   await tabs.waitFor({ timeout: 60_000 })
   await page.getByRole('tab', { name: /Trajectory|轨迹/ }).click()
   await page.locator('[data-trajectory-scroll]').waitFor({ timeout: 60_000 })
