@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -21,8 +20,9 @@ func makeCodeApp(codeEnabled bool) *app {
 		cfg: config.Config{
 			Code: config.CodeConfig{Enabled: config.Bool(codeEnabled)},
 		},
-		reg: tools.New(),
-		log: session.New(),
+		reg:        tools.New(),
+		log:        session.New(),
+		basePolicy: tools.Policy{Enabled: []string{"get_time", "run_code"}},
 	}
 }
 
@@ -55,13 +55,18 @@ func TestRegisterCodeDisabledRegistersNothing(t *testing.T) {
 }
 
 // TestRegisterCodeEnabledRegistersAndValidates verifies the enabled path: the
-// local Provider + Engine are created, run_code is registered, D7 rejects bad
+// TypeScript runtime is created, run_code is registered, D7 rejects bad
 // arguments at the Execute gate, a valid run flows through and lands code/run
 // in the session log (D3) without deriving into history (log-only), and a
 // non-zero exit is returned to the model.
 func TestRegisterCodeEnabledRegistersAndValidates(t *testing.T) {
 	a := makeCodeApp(true)
-	a.reg.SetPolicy(codePolicy())
+	if err := a.reg.Register(tools.GetTime{}); err != nil {
+		t.Fatalf("register get_time: %v", err)
+	}
+	pol := codePolicy()
+	pol.Enabled = []string{"get_time", "run_code"}
+	a.reg.SetPolicy(pol)
 	if err := a.registerCode(); err != nil {
 		t.Fatalf("registerCode: %v", err)
 	}
@@ -79,15 +84,13 @@ func TestRegisterCodeEnabledRegistersAndValidates(t *testing.T) {
 		t.Fatal("run_code not registered when code.enabled=true")
 	}
 
-	cwd := t.TempDir()
 	// D7: bad arguments are rejected before any tool code runs.
 	for _, tc := range []struct{ name, args string }{
-		{"run_code", `{}`},                                     // missing required lang/code
-		{"run_code", `{"lang":"python","code":"x"}`},           // lang outside the enum
-		{"run_code", `{"lang":"sh","code":"x","extra":1}`},     // additional properties rejected
-		{"run_code", `{"lang":"sh","code":123}`},               // code must be a string
-		{"run_code", `{"lang":"sh","code":"x","timeout":"5"}`}, // timeout must be a number
-		{"run_code", `{"lang":"sh","code":"x","timeout":-1}`},  // timeout must be >= 0
+		{"run_code", `{}`},                                       // missing required code/description
+		{"run_code", `{"code":"x"}`},                             // description required
+		{"run_code", `{"description":"x"}`},                      // code required
+		{"run_code", `{"code":"x","description":"x","extra":1}`}, // additional properties rejected
+		{"run_code", `{"code":123,"description":"x"}`},           // code must be a string
 	} {
 		if _, err := a.reg.Execute(context.Background(), tc.name, json.RawMessage(tc.args)); err == nil {
 			t.Errorf("%s with args %s must be rejected (D7)", tc.name, tc.args)
@@ -95,8 +98,12 @@ func TestRegisterCodeEnabledRegistersAndValidates(t *testing.T) {
 	}
 
 	// A valid run works and lands the code/run event (D3).
-	good := fmt.Sprintf(`{"lang":"sh","code":"echo hi","cwd":%s}`, jsonString(cwd))
-	res, err := a.reg.Execute(context.Background(), "run_code", json.RawMessage(good))
+	good := fmt.Sprintf(`{"code":%s,"description":"call time and print a marker"}`, jsonString("const now = await tools.get_time({}); console.log('hi'); return now"))
+	prepared, err := a.reg.Prepare(context.Background(), "outer-1", "run_code", json.RawMessage(good))
+	if err != nil {
+		t.Fatalf("prepare run_code via registry: %v", err)
+	}
+	res, err := a.reg.ExecutePrepared(context.Background(), prepared)
 	if err != nil {
 		t.Fatalf("run_code via registry: %v", err)
 	}
@@ -106,19 +113,31 @@ func TestRegisterCodeEnabledRegistersAndValidates(t *testing.T) {
 	if !hasEvent(a.log, session.EventCodeRun) {
 		t.Fatal("code/run event missing from the session log after run_code")
 	}
+	if !hasEvent(a.log, session.EventCodeDispatchStart) || !hasEvent(a.log, session.EventCodeDispatch) {
+		t.Fatalf("nested code dispatch events missing: %+v", a.log.Events())
+	}
+	var dispatchSeen bool
+	for _, event := range a.log.Events() {
+		if event.Type == session.EventCodeDispatch && strings.Contains(string(event.Data), `"subCallId":"outer-1:code:1"`) {
+			dispatchSeen = true
+		}
+	}
+	if !dispatchSeen {
+		t.Fatalf("nested dispatch did not preserve parent call id: %+v", a.log.Events())
+	}
 	if msgs := a.log.DeriveHistory(); len(msgs) != 0 {
 		t.Fatalf("code/run events must not derive into messages: %+v", msgs)
 	}
 
-	// A non-zero exit is returned to the model as a normal result (tool/result,
-	// not tool/error) and still lands code/run.
-	fail := fmt.Sprintf(`{"lang":"sh","code":%s,"cwd":%s}`, jsonString(failCommandString()), jsonString(cwd))
+	// A nested tool failure is catchable inside the TypeScript program, matching
+	// DSH's ToolCallError promise rejection contract.
+	fail := `{"code":"try { await tools.missing({}); return 'unexpected' } catch (error) { return { name: error.name, message: error.message } }","description":"catch a nested tool failure"}`
 	res2, err := a.reg.Execute(context.Background(), "run_code", json.RawMessage(fail))
 	if err != nil {
-		t.Fatalf("non-zero exit run_code via registry must be a normal result: %v", err)
+		t.Fatalf("nested tool failure must be catchable: %v", err)
 	}
-	if !strings.Contains(res2.Output, "[exit code: 3]") {
-		t.Fatalf("run_code output = %q, want [exit code: 3]", res2.Output)
+	if !strings.Contains(res2.Output, "ToolCallError") || !strings.Contains(res2.Output, "unknown tool") {
+		t.Fatalf("run_code output = %q, want caught ToolCallError", res2.Output)
 	}
 }
 
@@ -137,9 +156,7 @@ func TestRegisterCodePolicyDeadlineBoundsSandboxRun(t *testing.T) {
 		t.Fatalf("registerCode: %v", err)
 	}
 	defer a.code.Close()
-	cwd := t.TempDir()
-	args := fmt.Sprintf(`{"lang":"sh","code":%s,"timeout":30,"cwd":%s}`,
-		jsonString(longRunningCommand()), jsonString(cwd))
+	args := `{"code":"await new Promise(() => {})","description":"wait forever"}`
 	res, err := a.reg.Execute(context.Background(), "run_code", json.RawMessage(args))
 	if err != nil {
 		t.Fatalf("run_code after the policy deadline must be a normal timeout result, not an error: %v", err)
@@ -147,24 +164,6 @@ func TestRegisterCodePolicyDeadlineBoundsSandboxRun(t *testing.T) {
 	if !res.IsError || res.Error == nil || res.Error.Code != "TOOL_TIMEOUT" {
 		t.Fatalf("run_code result = %+v, want structured timeout (the code.timeout bound cut the run)", res)
 	}
-}
-
-// failCommandString returns a one-line command that exits 3 with "oops" on
-// stderr (mirrors internal/code's failCommand helper).
-func failCommandString() string {
-	if runtime.GOOS == "windows" {
-		return "echo oops 1>&2 & exit 3"
-	}
-	return "echo oops 1>&2; exit 3"
-}
-
-// longRunningCommand returns a command that blocks far longer than any test
-// deadline (cmd-internal loop on Windows so killing the direct child is clean).
-func longRunningCommand() string {
-	if runtime.GOOS == "windows" {
-		return "for /L %i in (1,1,1000000000) do @rem"
-	}
-	return "sleep 30"
 }
 
 // jsonString returns s as a JSON string literal (for embedding paths/code in

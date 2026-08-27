@@ -1624,7 +1624,7 @@ func nativeDSHEventType(typ string) bool {
 		"compaction/summary", "feedback/record", "goal/change", "llm/retry", "permission/preset", "plan/mode",
 		"request/context", "request/header", "schedule/change", "session/end-seed", "session/title",
 		"session/title-llm-request", "step/end", "step/start", "subagent/descriptor", "todo/write", "tool/call",
-		"tool/result", "turn/end", "turn/start", "user/message":
+		"tool/result", "tool/code-dispatch-start", "tool/code-dispatch", "turn/end", "turn/start", "user/message":
 		return true
 	default:
 		return false

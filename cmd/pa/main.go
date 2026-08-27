@@ -677,10 +677,11 @@ type app struct {
 	// the engine itself remains process-wide for CLI compatibility.
 	interactionMu       sync.RWMutex
 	interactionSessions map[string]string
-	code                code.Engine    // nil when code disabled (D10)
-	mcp                 []mcp.Client   // nil when mcp disabled (D10); one live bridged client per configured server
-	fs                  fs.FileService // nil when fs disabled (D10)
-	web                 *web.Engine    // nil when web disabled (D10)
+	code                code.ProgramRuntime // nil when code disabled (D10)
+	codeBindingPolicy   tools.Policy        // PTC nested tools during the active turn
+	mcp                 []mcp.Client        // nil when mcp disabled (D10); one live bridged client per configured server
+	fs                  fs.FileService      // nil when fs disabled (D10)
+	web                 *web.Engine         // nil when web disabled (D10)
 	hooks               *hookrunner.Runner
 
 	// webserver is the M10a unified web portal (ADR 2026-08-20-m10-web-portal.md);
@@ -969,6 +970,13 @@ func (a *app) buildLoop(onText func(string), onError func(error), sessionID, pro
 	if mode == "" {
 		mode = a.cfg.Mode
 	}
+	if mode == config.ModeCode {
+		pb = pb.Clone().Add(prompt.Section{
+			Name:  "code-mode-sdk",
+			Order: 1001,
+			Text:  codeModeSDKSection(a.reg.Specs()),
+		})
+	}
 	ll := a.llmFor(provider)
 	return loop.New(loop.Config{
 		LLM:             ll,
@@ -1067,6 +1075,17 @@ func (a *app) applySessionRuntime(id string) (sessionRuntime, func()) {
 	base.Enabled = modeToolWhitelist(toolMode, base.Enabled)
 	pol, _ := a.sessionPolicyFrom(base, perm, toolMode)
 	a.reg.SetPolicy(pol)
+	// PTC exposes only run_code to the model, but its TypeScript program may
+	// dispatch the same tools available to the session. Keep that nested view
+	// separate from the direct-call policy so the outer loop remains fail-closed.
+	nested := a.basePolicy
+	nested.Enabled = modeToolWhitelist(config.ModeStandard, nested.Enabled)
+	if perm == "readonly" {
+		nested.Enabled = config.ReadOnlyTools()
+	} else if perm == "full" {
+		nested.Enabled = modeToolWhitelist(config.ModeStandard, a.allRegisteredToolNames())
+	}
+	a.codeBindingPolicy = nested
 	return rt, func() { a.reg.SetPolicy(a.basePolicy) }
 }
 

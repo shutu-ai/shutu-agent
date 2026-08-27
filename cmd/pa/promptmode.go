@@ -14,14 +14,13 @@ import (
 // 自包含, 不依赖 prompts_dir.
 const minimalPersona = `You are a helpful software engineer assistant.`
 
-// codeModeSection is the PTC preset's DSH-aligned direct-call rule. Shutu's
-// current run_code substrate executes a shell program (rather than DSH's
-// generated TypeScript SDK), so the prompt states that contract explicitly and
-// prevents the model from inventing direct shell tool names or cwd semantics.
+// codeModeSection is the PTC preset's DSH-aligned direct-call rule. Native
+// tools are exposed to the model through the dynamic TypeScript SDK section;
+// only run_code remains a direct model tool.
 const codeModeSection = "## Code Mode (PTC)\n" +
 	"`run_code` is the only tool you can call directly in Code Mode. Do not call `shell`, `sh`, `pwsh`, or any other native tool directly; if a programmatic operation is needed, put it in the `run_code` call.\n\n" +
-	"`run_code` executes one non-interactive shell program in the current session workspace unless an explicit `cwd` is supplied. Its required arguments are `lang` (currently \"sh\") and `code`; `timeout` and `cwd` are optional. Use the command's output as the source of truth for the current directory. For a current-directory question, run `pwd`/`cd` in `run_code` and report that result without guessing from the process or sandbox directory.\n\n" +
-	"Use `run_code` for batched operations and keep the program focused. A non-zero exit code or timeout is a normal tool result that should be inspected and, when safe, corrected in a follow-up call."
+	"`run_code` executes the body of one async TypeScript function in the current session workspace. Its required arguments are `code` and `description`; top-level `await` and `return` are supported. Use `await tools.name(args)` to call the host tools declared below. For a current-directory question, call the declared `bash` or `read` tool from the program and report its result rather than guessing from the runtime process.\n\n" +
+	"Use one focused TypeScript program for batched operations. Tool-call failures reject their individual promises and can be handled with `try/catch`; a program exception, timeout, cancellation, or invalid result is reported as the run_code tool failure."
 
 const planModeSection = `## Plan mode
 The user has entered planning mode. Focus on understanding the request, exploring the

@@ -223,6 +223,12 @@ const (
 	// imports the code package.
 	EventCodeRun = "code/run"
 
+	// Code Mode nested dispatch events mirror DSH's opaque trajectory facts.
+	// They never enter derived model history; the outer tool/result remains the
+	// only model-facing result.
+	EventCodeDispatchStart = "tool/code-dispatch-start"
+	EventCodeDispatch      = "tool/code-dispatch"
+
 	// M6f-2 mcp events (design.md §3 / ADR 2026-08-19-m6-agent-full.md
 	// 决策 M6f / dispatch-m6f-2 §1): mcp/list lands when mcp_list lists a
 	// configured server's tools (carrying the count), mcp/call when mcp_call
@@ -1802,6 +1808,41 @@ type codeRunData struct {
 // sandbox execution (dispatch-m6e-2 §1 / D3).
 func NewCodeRun(lang string, exitCode int, timedOut, truncated bool) any {
 	return codeRunData{Lang: lang, ExitCode: exitCode, TimedOut: timedOut, Truncated: truncated}
+}
+
+type codeDispatchStartData struct {
+	RootCallID   string `json:"rootCallId,omitempty"`
+	ParentCallID string `json:"parentCallId,omitempty"`
+	SubCallID    string `json:"subCallId"`
+	Name         string `json:"name"`
+	Arguments    any    `json:"arguments"`
+}
+
+type codeDispatchData struct {
+	RootCallID   string           `json:"rootCallId,omitempty"`
+	ParentCallID string           `json:"parentCallId,omitempty"`
+	SubCallID    string           `json:"subCallId"`
+	Name         string           `json:"name"`
+	Arguments    any              `json:"arguments"`
+	IsError      bool             `json:"isError"`
+	Content      []map[string]any `json:"content"`
+}
+
+// NewCodeDispatchStart records the beginning of a nested Code Mode tool call.
+func NewCodeDispatchStart(rootCallID, parentCallID, subCallID, name string, arguments any) any {
+	return codeDispatchStartData{
+		RootCallID: rootCallID, ParentCallID: parentCallID, SubCallID: subCallID,
+		Name: name, Arguments: arguments,
+	}
+}
+
+// NewCodeDispatch records the settled result of a nested Code Mode tool call.
+func NewCodeDispatch(rootCallID, parentCallID, subCallID, name string, arguments any, isError bool, content string) any {
+	return codeDispatchData{
+		RootCallID: rootCallID, ParentCallID: parentCallID, SubCallID: subCallID,
+		Name: name, Arguments: arguments, IsError: isError,
+		Content: []map[string]any{{"type": "text", "text": content}},
+	}
 }
 
 // mcpListData is the mcp/list payload: the number of tools the listed server

@@ -63,6 +63,28 @@ type Execution struct {
 	Context   context.Context
 }
 
+// callIDContextKey carries the durable outer call id into tool implementations
+// without widening Tool.Execute's long-standing signature. Code Mode uses it
+// to give nested bindings the same parent:code:<n> identity as DSH.
+type callIDContextKey struct{}
+
+// WithCallID binds a tool call id to an execution context.
+func WithCallID(ctx context.Context, callID string) context.Context {
+	if callID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, callIDContextKey{}, callID)
+}
+
+// CallIDFromContext returns the current durable tool call id, if one exists.
+func CallIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	callID, _ := ctx.Value(callIDContextKey{}).(string)
+	return callID
+}
+
 type PreToolDecision struct {
 	Kind   string
 	Reason string
@@ -410,6 +432,7 @@ func (r *Registry) ExecutePrepared(ctx context.Context, prepared *PreparedExecut
 		execCtx, cancel = context.WithTimeout(ctx, prepared.timeout)
 		defer cancel()
 	}
+	execCtx = WithCallID(execCtx, prepared.callID)
 
 	execution := Execution{CallID: prepared.callID, Name: prepared.name, Arguments: prepared.args, Context: ctx}
 	finish := func(result ToolResult) (ToolResult, error) {

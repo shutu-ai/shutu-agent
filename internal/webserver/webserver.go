@@ -3766,6 +3766,8 @@ func eventDetails(ev session.Event) map[string]any {
 		session.EventRalphRun:           {"objective", "rounds", "done", "blocked"},
 		session.EventEvalRun:            {"id", "taskId", "verdict", "reason", "evaluatorKind", "criteriaCount"},
 		session.EventCodeRun:            {"lang", "exitCode", "timedOut", "truncated"},
+		session.EventCodeDispatchStart:  {"rootCallId", "parentCallId", "subCallId", "name", "arguments"},
+		session.EventCodeDispatch:       {"rootCallId", "parentCallId", "subCallId", "name", "arguments", "isError", "content"},
 		session.EventFsRead:             {"path", "size"},
 		session.EventFsWrite:            {"path"},
 		session.EventFsList:             {"dir", "count"},

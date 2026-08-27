@@ -6,11 +6,10 @@
 // tools.Tool method set structurally (Go structural typing), so this package
 // never imports the tools package — the seam stays decoupled (D2).
 //
-// D7 is enforced by the registry: every Execute validates the model-generated
-// arguments against the compiled JSON Schema below (additionalProperties:
-// false; lang restricted to the ["sh"] enum; timeout as numeric seconds; cwd
-// optional) before this code runs; the checks are repeated here so a direct
-// call can never bypass them.
+// D7 is enforced by the registry: every Execute validates model-generated
+// arguments against the compiled JSON Schema before this code runs. The
+// production TypeScript contract requires code + description; the legacy
+// Engine path retains its shell-specific schema for seam tests.
 //
 // D3 event logging follows the M5a-2 tool-layer decision (ADR 决策 M6e /
 // dispatch-m6e-2 §3): run_code emits code/run on a completed sandbox
@@ -31,6 +30,7 @@ package code
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	agenttools "github.com/jabing/shutu-agent/internal/tools"
 	"strings"
@@ -51,6 +51,8 @@ const ToolRunName = "run_code"
 // from config (D2).
 type CodeTools struct {
 	e       Engine
+	runtime ProgramRuntime
+	binding ProgramBinding
 	onEvent func(typ string, data any)
 
 	// DefaultTimeout is the sandbox deadline applied when the model omits the
@@ -78,6 +80,16 @@ func NewCodeTools(e Engine, onEvent func(typ string, data any)) *CodeTools {
 	return &CodeTools{e: e, onEvent: onEvent}
 }
 
+// NewCodeToolsWithRuntime returns a DSH-compatible TypeScript Code Mode tool
+// bundle. The host installs the registry bridge through SetBinding.
+func NewCodeToolsWithRuntime(runtime ProgramRuntime, onEvent func(typ string, data any)) *CodeTools {
+	return &CodeTools{runtime: runtime, onEvent: onEvent}
+}
+
+// SetBinding installs the host-side dispatch bridge used by tools.<name>() in
+// a TypeScript program.
+func (t *CodeTools) SetBinding(binding ProgramBinding) { t.binding = binding }
+
 // Run returns the run_code tool.
 func (t *CodeTools) Run() CodeRunTool { return CodeRunTool{t: t} }
 
@@ -88,23 +100,42 @@ func (t *CodeTools) emit(typ string, data any) {
 	}
 }
 
-// CodeRunTool executes a shell script in the controlled local sandbox
-// (internal/code): a separate child process, a hard-kill timeout, per-stream
-// output quotas with truncation markers, and an isolated sandbox cwd, with
-// credential-shaped environment entries scrubbed (default no network). The run
-// outcome (exit code / output / timeout / truncation) is returned to the model;
-// only a run that did not happen is an error.
+// CodeRunTool executes TypeScript Code Mode through ProgramRuntime in the
+// production wiring. The legacy Engine constructor remains available for
+// isolated shell-seam tests; it is not used by cmd/pa's PTC path.
 type CodeRunTool struct {
 	t *CodeTools
 }
 
 func (CodeRunTool) Name() string { return ToolRunName }
 
-func (CodeRunTool) Description() string {
+func (t CodeRunTool) Description() string {
+	if t.t.runtime != nil {
+		return "Execute a TypeScript program against the available tools. The code is the body of an async function; top-level await and return work. Call host tools as await tools.name(args). Only printed or returned values become program output."
+	}
 	return "run a shell script in a controlled local sandbox (separate child process, hard-kill timeout, per-stream output quota, isolated sandbox cwd, no network credentials); returns the exit code and output, marking timeouts and truncation — a non-zero exit or a timeout is a normal outcome"
 }
 
-func (CodeRunTool) Schema() map[string]any {
+func (t CodeRunTool) Schema() map[string]any {
+	if t.t.runtime != nil {
+		return map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"code": map[string]any{
+					"type":        "string",
+					"minLength":   1,
+					"description": "the body of an async TypeScript function; top-level await and return are supported",
+				},
+				"description": map[string]any{
+					"type":        "string",
+					"minLength":   1,
+					"description": "a concise description of what the program does",
+				},
+			},
+			"required":             []string{"code", "description"},
+			"additionalProperties": false,
+		}
+	}
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -134,6 +165,9 @@ func (CodeRunTool) Schema() map[string]any {
 }
 
 func (t CodeRunTool) Execute(ctx context.Context, args any) (string, error) {
+	if t.t.runtime != nil {
+		return t.executeProgram(ctx, args)
+	}
 	var a struct {
 		Lang    string  `json:"lang"`
 		Code    string  `json:"code"`
@@ -181,6 +215,99 @@ func (t CodeRunTool) Execute(ctx context.Context, args any) (string, error) {
 	// markers; the full stdout/stderr live in the tool/result the loop logs.
 	t.t.emit(session.EventCodeRun, session.NewCodeRun(lang, res.ExitCode, res.TimedOut, res.Truncated))
 	return formatResult(res), nil
+}
+
+func (t CodeRunTool) executeProgram(ctx context.Context, args any) (string, error) {
+	var a struct {
+		Code        string `json:"code"`
+		Description string `json:"description"`
+	}
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
+		return "", fmt.Errorf("run_code: %w", err)
+	}
+	if strings.TrimSpace(a.Code) == "" {
+		return "", fmt.Errorf("run_code: empty TypeScript program")
+	}
+	if strings.TrimSpace(a.Description) == "" {
+		return "", fmt.Errorf("run_code: description is required")
+	}
+	if t.t.binding == nil {
+		return "", fmt.Errorf("run_code: TypeScript tool binding is not configured")
+	}
+	cwd := t.t.DefaultCwd
+	if t.t.DefaultCwdFunc != nil {
+		cwd = t.t.DefaultCwdFunc()
+	}
+	parentCallID := agenttools.CallIDFromContext(ctx)
+	binding := func(bindingCtx context.Context, request ProgramBindingRequest) (any, error) {
+		// Keep nested dispatch visible in the trajectory while its canonical
+		// value remains private to the current TypeScript program.
+		t.t.emit(session.EventCodeDispatchStart, session.NewCodeDispatchStart(
+			parentCallID, parentCallID, request.CallID, request.Name, request.Args,
+		))
+		value, bindingErr := t.t.binding(bindingCtx, request)
+		content := formatProgramBindingValue(value)
+		if bindingErr != nil {
+			content = bindingErr.Error()
+		}
+		t.t.emit(session.EventCodeDispatch, session.NewCodeDispatch(
+			parentCallID, parentCallID, request.CallID, request.Name, request.Args,
+			bindingErr != nil, content,
+		))
+		return value, bindingErr
+	}
+	result, err := t.t.runtime.RunProgram(ctx, ProgramRequest{
+		Code:         a.Code,
+		Cwd:          cwd,
+		Timeout:      t.t.DefaultTimeout,
+		MaxOutput:    t.t.DefaultMaxOutput,
+		ParentCallID: parentCallID,
+		Binding:      binding,
+	})
+	if err != nil {
+		return "", fmt.Errorf("run_code: %w", err)
+	}
+	if result.Failure != nil {
+		message := fmt.Sprintf("run_code failed (%s): %s", result.Failure.Kind, result.Failure.Message)
+		if len(result.Logs) > 0 {
+			message += "\nCaptured output:\n" + strings.Join(result.Logs, "\n")
+		}
+		return "", fmt.Errorf("%s", message)
+	}
+	t.t.emit(session.EventCodeRun, session.NewCodeRun("typescript", 0, false, result.Truncated))
+	return formatProgramResult(result), nil
+}
+
+func formatProgramResult(result ProgramResult) string {
+	parts := make([]string, 0, 2)
+	if len(result.Logs) > 0 {
+		parts = append(parts, strings.Join(result.Logs, "\n"))
+	}
+	if result.HasValue {
+		if encoded, err := json.MarshalIndent(result.Value, "", "  "); err == nil {
+			parts = append(parts, string(encoded))
+		} else {
+			parts = append(parts, fmt.Sprintf("[invalid program result: %v]", err))
+		}
+	}
+	if len(parts) == 0 {
+		return "(run_code completed with no output)"
+	}
+	return strings.Join(parts, "\n")
+}
+
+func formatProgramBindingValue(value any) string {
+	if value == nil {
+		return "null"
+	}
+	if text, ok := value.(string); ok {
+		return text
+	}
+	encoded, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("[unrenderable tool result: %v]", err)
+	}
+	return string(encoded)
 }
 
 // formatResult renders one sandbox Result as model-facing text: the outcome
