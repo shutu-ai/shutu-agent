@@ -186,6 +186,24 @@ func TestFormatSkillCatalogBounded(t *testing.T) {
 	}
 }
 
+func TestSkillCatalogEventVersionScansOneEventSnapshot(t *testing.T) {
+	log := session.New()
+	if _, err := log.Append(session.EventSkillCatalog, session.NewSkillCatalog(1, "old")); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 256; i++ {
+		if _, err := log.Append(session.EventAssistantChunk, session.NewAssistantChunk("opaque")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := log.Append(session.EventSkillCatalog, session.NewSkillCatalog(2, "latest")); err != nil {
+		t.Fatal(err)
+	}
+	if got := skillCatalogEventVersion(log); got != "latest" {
+		t.Fatalf("skill catalog version = %q, want latest", got)
+	}
+}
+
 // TestSkillCatalogVersionStable covers the catalog version: stable for the
 // same catalog, different when the catalog content changes.
 func TestSkillCatalogVersionStable(t *testing.T) {

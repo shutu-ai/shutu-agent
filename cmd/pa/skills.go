@@ -203,8 +203,9 @@ func skillCatalogEventVersion(log *session.Log) string {
 	if log == nil {
 		return ""
 	}
-	for i := len(log.Events()) - 1; i >= 0; i-- {
-		ev := log.Events()[i]
+	events := log.Events()
+	for i := len(events) - 1; i >= 0; i-- {
+		ev := events[i]
 		if ev.Type != session.EventSkillCatalog {
 			continue
 		}
