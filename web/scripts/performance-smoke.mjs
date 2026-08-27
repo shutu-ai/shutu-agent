@@ -52,6 +52,7 @@ function makeEvents() {
 }
 
 const events = makeEvents()
+const sessionState = new Map([['perf', { title: 'Native performance fixture', blank: false }]])
 const projections = { asOfSeq: events.length, values: {
   contextBreakdown: { messageTokens: events.length * 3, systemTokens: 0, toolsTokens: events.length },
   contextPressure: { pressureTokens: events.length * 4 }, goal: null, imageLimits: undefined,
@@ -65,10 +66,14 @@ const projections = { asOfSeq: events.length, values: {
 function valueFor(method, request = null) {
   switch (method) {
     case 'host.describe': return { attachedSessions: 1, canOpenPath: false, cwd: 'C:/shutu-perf', home: '', model: 'perf', version: 'perf' }
-    case 'session.list': return { items: [{ sessionId: 'perf', title: 'Native performance fixture', updatedAt: Date.now(), running: false, blank: false, cwd: 'C:/shutu-perf', projections }] }
+    case 'session.list': return { items: [...sessionState].map(([sessionId, state]) => ({ sessionId, title: state.title, updatedAt: Date.now(), running: false, blank: state.blank, cwd: 'C:/shutu-perf', projections: state.blank ? undefined : projections })) }
     case 'workspace.list': return { items: [{ workspaceId: 'perf-ws', path: 'C:/shutu-perf', title: 'Performance', sessionIds: ['perf'], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }], archivedSessionIds: [] }
     case 'session.history': return historyPage()
     case 'session.search': return { items: [{ sessionId: 'perf', snippet: 'tool result 777' }], hasMore: false }
+    case 'session.fork':
+      sessionState.set('perf-fork', { title: 'Native performance fixture (2)', blank: false })
+      return { sessionId: 'perf-fork' }
+    case 'session.rename': return { title: String(request?.payload?.title ?? 'Native performance fixture (2)'), seq: 0 }
     case 'session.prompt': return { accepted: true }
     case 'messageFeedback/list': return { ok: true, value: { items: [] } }
     case 'messageFeedback/put': {
@@ -94,6 +99,10 @@ function valueFor(method, request = null) {
 
 /** Serve the same tail-paged history shape as the native host contract. */
 function historyPage(payload = {}) {
+  const requestedSession = String(payload.sessionId ?? 'perf')
+  if (requestedSession !== 'perf') {
+    return { header: { version: 0, id: requestedSession, createdAt: 1787746887000, cwd: 'C:/shutu-perf' }, events: [], hasMore: false, surface: { nodes: [], replacements: [] }, projections }
+  }
   const requestedBefore = Number.isFinite(Number(payload.beforeSeq)) ? Number(payload.beforeSeq) : null
   const boundary = requestedBefore === null
     ? -1
@@ -206,6 +215,19 @@ try {
     await composer.press('Enter')
     await page.waitForFunction(() => document.querySelector('textarea')?.value === '')
     assert.ok(requests.some(request => request.method === 'session.prompt'), 'native composer did not send session.prompt')
+    const branch = page.getByRole('button', { name: /Branch into a new conversation|在新对话中分支/ }).last()
+    await branch.waitFor({ timeout: 15_000 })
+    await branch.click()
+    await page.waitForTimeout(100)
+    assert.ok(requests.some(request => request.method === 'session.fork'), 'native message action did not send session.fork')
+    // Fork selects the newly-created child. Re-select the source through the
+    // same DSH session-search path so the remaining Trajectory assertions stay
+    // on the dense source transcript.
+    await page.getByRole('button', { name: /Search sessions|搜索会话/ }).click()
+    await page.getByPlaceholder(/Search sessions\.\.\.|搜索会话鈥?/).fill('tool result 777')
+    const sourceResult = page.getByRole('tree', { name: /Search results|搜索结果/ }).getByRole('treeitem').first()
+    await sourceResult.waitFor({ timeout: 15_000 })
+    await sourceResult.dispatchEvent('click')
     const tab = page.getByRole('tab', { name: /轨迹|Trajectory/ })
     await tab.waitFor({ timeout: 60_000 })
     await tab.click()

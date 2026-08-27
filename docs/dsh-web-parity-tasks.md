@@ -49,6 +49,7 @@
 - [x] P36-4.3：接入 subagent、jobs、model、permission、plan、goal、settings、attachment 和 question 插件。
 - [x] P36-4.4：移除 Shutu 自定义主布局、颜色 token、组件层级和页面导航最终渲染路径。
 - [ ] P36-5.1：完成新建、切换、归档、删除、Fork 会话和 Workspace 管理。
+- [x] P36-5.1a：Playwright native dense fixture 从已完成 assistant 消息发起 Fork，校验 `session.fork` 请求并通过 DSH 搜索路径重新切回源会话；完整新建/归档/删除及 Workspace UI 矩阵仍待补齐。
 - [ ] P36-5.2：完成发送、重试、取消、队列、steer、审批、问题、计划和目标操作。
 - [x] P36-5.2a：补齐 DSH `goals/*` Remote 命名空间到 Shutu goal 引擎的参数解包与操作映射，覆盖 create/edit/pause/resume/complete/clear。
 - [x] P36-5.2b：接入 DSH `approval/requested`/`question/requested` mux 下行、稳定 rpcId 重放和 `POST /api/respond`，回答结果回写同一 interact 引擎并广播 resolved。

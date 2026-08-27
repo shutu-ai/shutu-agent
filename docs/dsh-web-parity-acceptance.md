@@ -74,6 +74,8 @@ npm.cmd run real-performance -- s-f15a7e57 180
 
 ## P36-5.3 Native loaded-session evidence (2026-08-27)
 
+The same loaded-session fixture clicks the last completed assistant's `Branch into a new conversation` action, observes the native `session.fork` request, and re-selects the source through the DSH session-search path before continuing the Trajectory checks. This is partial P36-5.1 evidence; new-session creation, archive/delete, and full Workspace UI lifecycle still require a dedicated host-backed run.
+
 The loaded native fixture now also exercises the DSH message-feedback controller and composer: focusing an assistant action lazily requests `messageFeedback/list`, rating and saving a note issues `messageFeedback/put`, retracting it issues `messageFeedback/delete`, and submitting a composer prompt issues `session.prompt`. The fixture accepts both English and Simplified Chinese labels and passed with zero browser errors. This is browser interaction evidence for P36-5.2; queue/steer, approval/question, and production host lifecycle acceptance remain open.
 
 `SHUTU_PERF_EVENTS=1000 npm.cmd run performance` passed against the native dist with a dense loaded fixture. The fixture returned a tail page first, then a preceding page after the DSH `Load earlier history` action. The run observed a `session.history` request with `beforeSeq`, increased logical trajectory rows, 31 mounted rows, zero console errors, and both native mux/host WebSockets connected. This is repeatable fixture evidence; it does not replace target-production data-scale acceptance.
