@@ -850,6 +850,7 @@ async function runCapabilityMatrix(browser) {
   await result.click()
   await input.press('Escape')
   await page.getByText('Search fixture', { exact: true }).last().waitFor({ timeout: 15_000 })
+  await page.screenshot({ path: resolve(artifactDirectory, 'shutu-native-core-workspace.png') })
   const model = page.getByRole('button').filter({ hasText: 'Fixture model' }).first()
   await model.waitFor({ timeout: 15_000 })
   await model.click()
@@ -896,6 +897,7 @@ async function runExtendedCapabilityMatrix(browser) {
   await jobMenu.waitFor({ timeout: 15_000 })
   assert.match(await jobMenu.innerText(), /npm run build/)
   assert.match(await jobMenu.innerText(), /collect diagnostics/)
+  await page.screenshot({ path: resolve(artifactDirectory, 'shutu-native-core-jobs.png') })
   await page.keyboard.press('Escape')
 
   // Selecting a session hydrates the DSH subagent catalog through subagent.list.
@@ -906,6 +908,7 @@ async function runExtendedCapabilityMatrix(browser) {
   await tree.getByRole('treeitem', { name: /Renderer worker/ }).waitFor({ timeout: 15_000 })
   assert.match(await tree.innerText(), /Renderer worker/)
   assert.ok(requests.includes('subagent.list'), 'native subagent catalog did not request subagent.list')
+  await page.screenshot({ path: resolve(artifactDirectory, 'shutu-native-core-subagents.png') })
 
   // Slash skills and @ references are resolved by their native DSH providers.
   // The composer remains the source of truth; no legacy Shutu menu is involved.
@@ -953,6 +956,7 @@ async function runExtendedCapabilityMatrix(browser) {
   await page.waitForTimeout(250)
   await settingsDialog.getByText('Fixture Provider', { exact: true }).waitFor({ timeout: 15_000 })
   assert.ok(requests.includes('llm.providers'), 'native Models settings did not request llm.providers')
+  await page.screenshot({ path: resolve(artifactDirectory, 'shutu-native-core-settings.png') })
   await page.keyboard.press('Escape')
 
   // Historical image content loads through the session-authorized attachment RPC.

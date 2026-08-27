@@ -110,6 +110,8 @@ The loaded capability fixture now also serves the native DSH slash skill and `@`
 
 The loaded capability fixture now covers the remaining P36-5.4 UI slices. Playwright selected the native `/permission` command and its Read-only option, opened Settings → Models and rendered `Fixture Provider` after observing `commands/list`, `commands/execute`, and `llm.providers`, then loaded a historical image message and rendered `fixture.png` through the session-authorized `session.attachment` RPC. The complete `npm.cmd run e2e` run passed with zero console errors and warnings.
 
+The same loaded-session Playwright path now saves the remaining core-page evidence: `shutu-native-core-workspace.png`, `shutu-native-core-jobs.png`, `shutu-native-core-subagents.png`, and `shutu-native-core-settings.png`. It captures the loaded Workspace/Conversation surface, the open running/failed Jobs list, the Subagent tree with `Renderer worker`, and Settings → Models with `Fixture Provider`; all four states are reached through native DSH UI controls and the full run remains free of console errors and warnings.
+
 ## P36-5.5 Native export media evidence (2026-08-27)
 
 `go test ./internal/webserver -run 'TestSessionExport(HeadMatchesDownloadHeadersWithoutBody|IncludesDescendantLineage|IncludesDeduplicatedMedia)$' -count=1` passed. Root and descendant logs are exported together with one deduplicated image payload under `media/<attachmentId>.png`; missing or unavailable attachment storage fails the export before the response is sent.
