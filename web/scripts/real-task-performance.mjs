@@ -108,15 +108,33 @@ async function selectSession(page, summary) {
 
 async function installBrowserMetrics(page) {
   await page.evaluate(() => {
-    window.__shutuRealMetrics = { frames: 0, longTasks: 0, longTaskMs: 0, mutationAt: 0, mutations: 0, mutationTimes: [] }
+    window.__shutuRealMetrics = {
+      frames: 0,
+      longTasks: 0,
+      longTaskMs: 0,
+      mutationAt: 0,
+      mutations: 0,
+      mutationTimes: [],
+      nativeEventAt: 0,
+      nativeEventPending: false,
+      nativeEventToUiMs: [],
+    }
     const metrics = window.__shutuRealMetrics
     const frame = () => { metrics.frames += 1; requestAnimationFrame(frame) }
     requestAnimationFrame(frame)
     new MutationObserver(() => {
+      const now = performance.now()
       metrics.mutationAt = Date.now()
       metrics.mutations += 1
       metrics.mutationTimes.push(metrics.mutationAt)
       if (metrics.mutationTimes.length > 500) metrics.mutationTimes.shift()
+      // Several mux events can arrive before React commits one frame. Measure
+      // the latest event in that batch to the commit, and do not attribute a
+      // later unrelated mutation to every event that arrived in between.
+      if (metrics.nativeEventPending && metrics.nativeEventAt > 0) {
+        metrics.nativeEventToUiMs.push(Math.max(0, Math.round(now - metrics.nativeEventAt)))
+        metrics.nativeEventPending = false
+      }
     }).observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true })
     if ('PerformanceObserver' in window) {
       try {
@@ -136,7 +154,10 @@ async function installBrowserMetrics(page) {
 
 async function sampleBrowser(page) {
   return page.evaluate(() => {
-    const metrics = window.__shutuRealMetrics ?? { frames: 0, longTasks: 0, longTaskMs: 0, mutationAt: 0, mutations: 0, mutationTimes: [] }
+    const metrics = window.__shutuRealMetrics ?? {
+      frames: 0, longTasks: 0, longTaskMs: 0, mutationAt: 0, mutations: 0, mutationTimes: [],
+      nativeEventToUiMs: [],
+    }
     const frames = metrics.frames
     metrics.frames = 0
     const heap = performance.memory?.usedJSHeapSize
@@ -151,6 +172,7 @@ async function sampleBrowser(page) {
       mutationAt: metrics.mutationAt,
       mutations: metrics.mutations,
       mutationTimes: metrics.mutationTimes.splice(0),
+      eventToUiMs: metrics.nativeEventToUiMs.splice(0),
       scrollHeight: document.querySelector('[data-trajectory-scroll]')?.scrollHeight ?? largest?.scrollHeight ?? 0,
       domNodes: document.getElementsByTagName('*').length,
       trajectoryRows: document.querySelectorAll('[data-trajectory-scroll] tr[data-trajectory-row-key]').length,
@@ -161,8 +183,32 @@ async function sampleBrowser(page) {
 
 const browser = await chromium.launch({ headless: true, args: ['--enable-precise-memory-info'] })
 const page = await browser.newPage({ viewport: { width: 1440, height: 960 } })
+await page.addInitScript(() => {
+  const NativeWebSocket = window.WebSocket
+  function ObservedWebSocket(...args) {
+    const socket = new NativeWebSocket(...args)
+    socket.addEventListener('message', message => {
+      if (typeof message.data !== 'string') return
+      try {
+        const envelope = JSON.parse(message.data)
+        if (envelope?.payload?.type !== 'session/event') return
+        const metrics = window.__shutuRealMetrics ?? (window.__shutuRealMetrics = {
+          nativeEventAt: 0, nativeEventPending: false, nativeEventToUiMs: [],
+        })
+        metrics.nativeEventAt = performance.now()
+        metrics.nativeEventPending = true
+      } catch {
+        // Non-JSON WebSocket frames are outside this sampler's timing scope.
+      }
+    })
+    return socket
+  }
+  ObservedWebSocket.prototype = NativeWebSocket.prototype
+  Object.setPrototypeOf(ObservedWebSocket, NativeWebSocket)
+  window.WebSocket = ObservedWebSocket
+})
 const consoleErrors = []
-const stream = { eventFrames: 0, firstEventSeq: null, lastEventSeq: null, pending: [], latencies: [], invalidTurnFrames: [] }
+const stream = { eventFrames: 0, firstEventSeq: null, lastEventSeq: null, latencies: [], invalidTurnFrames: [] }
 const reconnectAfterMs = Number(process.env.SHUTU_REAL_TASK_RECONNECT_AFTER_MS ?? 0)
 const reconnect = { requested: Number.isFinite(reconnectAfterMs) && reconnectAfterMs > 0, connections: 0, closedAt: null, reconnectedAt: null }
 if (reconnect.requested) {
@@ -193,6 +239,7 @@ page.on('websocket', websocket => {
     if (typeof encoded !== 'string') return
     let envelope
     try { envelope = JSON.parse(encoded) } catch { return }
+    if (envelope?.payload?.sessionId !== sessionId) return
     const seq = Number(envelope?.payload?.event?.seq)
     if (!Number.isFinite(seq)) return
     const event = envelope?.payload?.event
@@ -200,11 +247,9 @@ page.on('websocket', websocket => {
     if (event && (event.type === 'assistant/chunk' || event.type === 'assistant/message') && Number.isFinite(eventTurn) && eventTurn < 0) {
       stream.invalidTurnFrames.push({ seq, type: event.type, turn: eventTurn, step: Number(event.data?.step) })
     }
-    const receivedAt = Date.now()
     stream.eventFrames += 1
     stream.firstEventSeq ??= seq
     stream.lastEventSeq = seq
-    stream.pending.push({ receivedAt, seq })
   })
 })
 page.on('console', message => { if (message.type() === 'error') consoleErrors.push(message.text()) })
@@ -241,14 +286,7 @@ try {
     // sequence is already the authoritative live tail for this sampler.
     const [browserSample] = await Promise.all([sampleBrowser(page)])
     const tail = { count: stream.lastEventSeq ?? baselineSeq, type: null, time: null }
-    const mutationTimes = browserSample.mutationTimes ?? []
-    const remaining = []
-    for (const event of stream.pending) {
-      const mutationAt = mutationTimes.find(time => time >= event.receivedAt)
-      if (mutationAt === undefined) remaining.push(event)
-      else stream.latencies.push(mutationAt - event.receivedAt)
-    }
-    stream.pending = remaining
+    stream.latencies.push(...(browserSample.eventToUiMs ?? []))
     samples.push({ elapsedSeconds: Math.round((Date.now() - startedAt) / 100) / 10, ...tail, ...browserSample })
   }
   assert.ok(samples.length > 0)
