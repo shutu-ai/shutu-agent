@@ -243,6 +243,12 @@ HTML, and listened on `127.0.0.1:18099`; the service was then stopped cleanly.
 This is repeatable Linux-like local evidence. It does not replace a formal
 target-host Linux/systemd deployment record or failure-injection recovery.
 
+In the follow-up run, the same Linux binary returned raw HTTP `101 Switching
+Protocols` for both `/api/events.mux` and `/api/events.host` from inside the
+WSL distro. The process was interrupted and the distro had no remaining
+`18099` listener. This completes the WSL local transport check while keeping
+the formal target-host item open.
+
 ## P36-7.4 Native stream batching and threshold evidence (2026-08-27)
 
 The native mux no longer refreshes queue/jobs control snapshots for unrelated assistant chunks; queue mutations and `job/*` lifecycle events still refresh their authoritative snapshots. The agent loop also batches adjacent streamed text/reasoning deltas within a 50ms/8KiB window while retaining immediate REPL output and the authoritative final assistant message. Go regression tests cover both behaviors.

@@ -132,6 +132,7 @@
 - [x] P36-8.2b：交付包 smoke 使用带 Bearer 认证的原始 WebSocket upgrade 检查 `/api/events.mux` 与 `/api/events.host`，初始/升级/回滚三轮均返回 `101`；目标环境仍待补齐。
 - [x] P36-8.2c：在当前 Windows 主机完成 `GOOS=linux GOARCH=amd64 CGO_ENABLED=0` 交叉构建，并用 `go version -m` 校验 Linux 二进制模块与 revision；目标 Linux runtime 启动/健康/API/WebSocket 仍待目标机。
 - [x] P36-8.2d：AlmaLinux-8 WSL2 使用 Linux 原生 `/tmp` 数据目录完成 runtime smoke：静态首页、`/api/health`、`/api/sessions`、native 两条 WebSocket 均正常，Chromium 控制台错误和横向溢出均为 0；正式目标 Linux 机仍待验收。
+- [x] P36-8.2f：以 revision `0121736` 的 Linux amd64 二进制在 AlmaLinux-8 WSL2 重跑本机验收：`/api/health=200`、静态首页 `200`、`/api/events.mux` 与 `/api/events.host` 原始 upgrade 均为 `101`，服务停止后无残留 `18099` 监听；正式目标 Linux 机仍待验收。
 - [ ] P36-8.3：验证升级、数据目录复用、回滚和失败恢复。
 - [x] P36-8.3a：本机 Windows 部署 smoke 使用共享 `data_dir` 完成初始包、升级副本和回滚副本启动检查；目标环境失败恢复仍待补齐。
 - [x] P36-8.3b：AlmaLinux-8 WSL2 使用共享 Linux 原生数据目录完成旧 binary 建立会话、新 binary 升级、旧 binary 回滚；升级/回滚后 `/api/health=200` 且会话 `s-743c4600` 持续可读，正式目标机失败恢复仍待补齐。
