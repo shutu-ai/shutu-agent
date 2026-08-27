@@ -108,7 +108,7 @@ The same Playwright run delayed the native `session.list` response for 1 second 
 
 ## P36-8.1 / P36-8.2 / P36-8.3 Local package evidence (2026-08-27)
 
-`node scripts/release-package.mjs --output release/shutu-agent-p36-c1dd6a0` passed. The package manifest reports `win32-x64`, binary `bin/shutu-agent.exe`, frontend `web/dist`, and the current commit `c1dd6a04f8998f1b4c5620c52a2d4fe173a56171`; native dist verification reported `111` assets and a valid native manifest. `SHUTU_RELEASE_PACKAGE=release/shutu-agent-p36-c1dd6a0 node scripts/deployment-smoke.mjs` then passed initial, upgrade and rollback copies sharing one data directory, with `/api/health`, `/api/sessions`, `/`, and native `host.describe` all returning 200/valid envelopes. This proves local Windows packaging only; Linux, target-environment WebSocket checks and failure recovery remain open.
+`node scripts/release-package.mjs --output release/shutu-agent-p36-28b824c` passed. The package manifest reports `win32-x64`, binary `bin/shutu-agent.exe`, frontend `web/dist`, and commit `28b824cd6fddb962370008f86da75742e97eacd5`; native dist verification reported `111` assets and a valid native manifest. `SHUTU_RELEASE_PACKAGE=release/shutu-agent-p36-28b824c node scripts/deployment-smoke.mjs` then passed initial, upgrade and rollback copies sharing one data directory, with `/api/health`, `/api/sessions`, `/`, and native `host.describe` all returning 200/valid envelopes. This proves local Windows packaging only; Linux, target-environment WebSocket checks and failure recovery remain open.
 
 ## P36-7.1 / P36-7.2 / P36-7.3 Native 100k fixture evidence (2026-08-27)
 
