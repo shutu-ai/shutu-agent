@@ -1,5 +1,6 @@
 import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
+import { connect } from 'node:net'
 import { spawn } from 'node:child_process'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -60,6 +61,46 @@ async function stop(processHandle) {
   })
 }
 
+async function websocketUpgrade(port, path) {
+  return await new Promise((resolvePromise, reject) => {
+    const socket = connect(port, '127.0.0.1')
+    let response = ''
+    let settled = false
+    const timer = setTimeout(() => {
+      socket.destroy()
+      reject(new Error(`timed out upgrading WebSocket ${path}`))
+    }, 5_000)
+    const finish = (error, result) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      socket.destroy()
+      if (error) reject(error)
+      else resolvePromise(result)
+    }
+    socket.once('error', error => finish(error))
+    socket.on('data', chunk => {
+      response += chunk.toString('latin1')
+      if (!response.includes('\r\n\r\n')) return
+      const status = response.split('\r\n', 1)[0]
+      finish(null, status === 'HTTP/1.1 101 Switching Protocols')
+    })
+    socket.once('connect', () => {
+      socket.write([
+        `GET ${path} HTTP/1.1`,
+        'Host: 127.0.0.1',
+        'Connection: Upgrade',
+        'Upgrade: websocket',
+        'Sec-WebSocket-Version: 13',
+        'Sec-WebSocket-Key: c2h1dHUtcGFjay13cw==',
+        `Authorization: Bearer ${token}`,
+        '',
+        '',
+      ].join('\r\n'))
+    })
+  })
+}
+
 async function removeTemporaryRoot(directory) {
   for (let attempt = 0; attempt < 20; attempt += 1) {
     try {
@@ -95,7 +136,10 @@ async function waitForHealthy(processHandle, port) {
         if (envelope.type !== 'server-response' || envelope.rpcId !== `deployment-${port}` || envelope.result?.ok !== true) {
           throw new Error(`native host.describe returned an invalid response: ${JSON.stringify(envelope)}`)
         }
-        return { health: health.status, sessions: sessions.status, staticShell: staticShell.status, hostDescribe: native.status }
+        const mux = await websocketUpgrade(port, '/api/events.mux')
+        const host = await websocketUpgrade(port, '/api/events.host')
+        if (!mux || !host) throw new Error('native WebSocket upgrade did not return 101')
+        return { health: health.status, sessions: sessions.status, staticShell: staticShell.status, hostDescribe: native.status, webSockets: { mux: 101, host: 101 } }
       }
     } catch {
       // The process may still be binding its listener.

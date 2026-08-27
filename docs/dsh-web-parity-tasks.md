@@ -95,6 +95,7 @@
 - [x] P36-8.1a：提交 `28b824c` 生成 Windows 自包含包，包含 native dist、Go 二进制、配置/提示词和 `release.json`，并通过 dist/manifest 校验。
 - [ ] P36-8.2：验证本机及目标 Windows/Linux 环境的启动、健康检查、API、WebSocket 和静态资源。
 - [x] P36-8.2a：本机 Windows 交付包启动 smoke 覆盖 `/api/health`、会话 API、静态首页和 native `host.describe` RPC；Linux/目标环境及 WebSocket 仍待补齐。
+- [x] P36-8.2b：交付包 smoke 使用带 Bearer 认证的原始 WebSocket upgrade 检查 `/api/events.mux` 与 `/api/events.host`，初始/升级/回滚三轮均返回 `101`；目标环境仍待补齐。
 - [ ] P36-8.3：验证升级、数据目录复用、回滚和失败恢复。
 - [x] P36-8.3a：本机 Windows 部署 smoke 使用共享 `data_dir` 完成初始包、升级副本和回滚副本启动检查；目标环境失败恢复仍待补齐。
 - [ ] P36-8.4：完成目标环境部署记录、验收报告和回滚操作手册。
