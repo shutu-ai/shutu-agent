@@ -261,6 +261,15 @@ WSL distro. The process was interrupted and the distro had no remaining
 `18099` listener. This completes the WSL local transport check while keeping
 the formal target-host item open.
 
+The WSL shared-data failure-recovery check then started the old Linux binary,
+verified health and the existing `s-743c4600` event endpoint at `200`, started
+the current Linux binary and verified the same checks, injected a SIGKILL to
+the precisely identified current service PID, and finally restarted the old
+binary. The rollback instance again returned health `200` and the existing
+session event endpoint `200`; the Linux-native data directory was preserved.
+This closes the local WSL failure-injection slice, not formal production-host
+recovery.
+
 ## P36-7.4 Native stream batching and threshold evidence (2026-08-27)
 
 The native mux no longer refreshes queue/jobs control snapshots for unrelated assistant chunks; queue mutations and `job/*` lifecycle events still refresh their authoritative snapshots. The agent loop also batches adjacent streamed text/reasoning deltas within a 50ms/8KiB window while retaining immediate REPL output and the authoritative final assistant message. Go regression tests cover both behaviors.
