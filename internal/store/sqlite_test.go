@@ -23,6 +23,39 @@ func openSQLite(t *testing.T) *SQLiteStore {
 	return st
 }
 
+func TestListSessionsIsNotStarvedByHistoryReadCursor(t *testing.T) {
+	st := openSQLite(t)
+	if err := st.CreateSession(context.Background(), "concurrent", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+
+	tx, err := st.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := tx.QueryContext(context.Background(), `SELECT id FROM sessions`)
+	if err != nil {
+		tx.Rollback()
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	defer tx.Rollback()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := st.ListSessions(context.Background())
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("ListSessions while history cursor is open: %v", err)
+		}
+	case <-time.After(750 * time.Millisecond):
+		t.Fatal("ListSessions was starved by an open history read cursor")
+	}
+}
+
 // buildLog appends a representative mini-conversation through a session.Log
 // whose sink forwards to the store, returning the log for later comparison.
 func buildLog(t *testing.T, st Store, id string, wantDerived int) *session.Log {

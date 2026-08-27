@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     title      TEXT,
-    cwd        TEXT
+    cwd        TEXT,
+    event_count INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS events (
     session_id TEXT    NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -76,6 +77,7 @@ func migrateSchema(db *sql.DB) error {
 		{"sessions", "sort", `ALTER TABLE sessions ADD COLUMN sort INTEGER NOT NULL DEFAULT 0`},
 		{"sessions", "flat_sort", `ALTER TABLE sessions ADD COLUMN flat_sort INTEGER NOT NULL DEFAULT 0`},
 		{"sessions", "last_viewed_at", `ALTER TABLE sessions ADD COLUMN last_viewed_at INTEGER`},
+		{"sessions", "event_count", `ALTER TABLE sessions ADD COLUMN event_count INTEGER NOT NULL DEFAULT 0`},
 		{"sessions", "agent_preset", `ALTER TABLE sessions ADD COLUMN agent_preset TEXT`},
 		{"sessions", "model", `ALTER TABLE sessions ADD COLUMN model TEXT`},
 		{"sessions", "permission", `ALTER TABLE sessions ADD COLUMN permission TEXT`},
@@ -102,6 +104,13 @@ func migrateSchema(db *sql.DB) error {
 		WHERE title IS NOT NULL AND title <> ''
 		AND (title_source IS NULL OR title_source = '')`); err != nil {
 		return fmt.Errorf("store: migrate legacy title pins: %w", err)
+	}
+	if _, err := db.Exec(`UPDATE sessions SET event_count = (
+		SELECT COUNT(*) FROM events WHERE events.session_id = sessions.id
+	) WHERE event_count = 0 AND EXISTS (
+		SELECT 1 FROM events WHERE events.session_id = sessions.id
+	)`); err != nil {
+		return fmt.Errorf("store: migrate event counts: %w", err)
 	}
 	return nil
 }
@@ -130,9 +139,19 @@ func OpenSQLite(path string) (*SQLiteStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: open %s: %w", path, err)
 	}
-	// One connection keeps SQLite serialized and makes the schema pragmas
-	// deterministic; the agent loop is strictly serial anyway (D5).
-	db.SetMaxOpenConns(1)
+	// The web UI reads history while the agent is appending live events. Keep a
+	// small pool so a long-running read cursor cannot starve control-plane RPCs;
+	// WAL lets those readers continue while the append writer commits. The
+	// pragmas in the DSN apply to every pooled connection, not only the first one
+	// opened by database/sql.
+	db.Close()
+	dsn := path + "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)"
+	db, err = sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("store: open %s: %w", path, err)
+	}
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(4)
 	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("store: pragma foreign_keys: %w", err)
@@ -345,7 +364,7 @@ func (s *SQLiteStore) AppendEvents(ctx context.Context, sessionID string, events
 			return fmt.Errorf("store: append %s seq %d: %w", ev.Type, ev.Seq, err)
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET updated_at = ? WHERE id = ?`, unixNano(now), sessionID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET updated_at = ?, event_count = event_count + ? WHERE id = ?`, unixNano(now), len(events), sessionID); err != nil {
 		return fmt.Errorf("store: touch session %q: %w", sessionID, err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -457,9 +476,8 @@ func (s *SQLiteStore) LoadSessionPage(ctx context.Context, sessionID string, bef
 // manual drag order of the flat view.
 func (s *SQLiteStore) ListSessions(ctx context.Context) ([]SessionMeta, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT s.id, s.created_at, s.updated_at, s.title, s.title_source, s.workspace_id, s.cwd, s.archived_at, s.sort, s.flat_sort, s.last_viewed_at, COUNT(e.seq)
-		FROM sessions s LEFT JOIN events e ON e.session_id = s.id
-		GROUP BY s.id
+		SELECT s.id, s.created_at, s.updated_at, s.title, s.title_source, s.workspace_id, s.cwd, s.archived_at, s.sort, s.flat_sort, s.last_viewed_at, s.event_count
+		FROM sessions s
 		ORDER BY s.updated_at DESC, s.created_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("store: list sessions: %w", err)

@@ -49,6 +49,7 @@ const (
 	nativeSettingsDeepSeek     = "llm-deepseek"
 	nativeSettingsPiAI         = "llm-pi-ai"
 	nativeDirectoryMaxEntries  = 1000
+	nativeSessionListTailLimit = 256
 )
 
 var nativeSettingsSchema = map[string]any{
@@ -2833,7 +2834,13 @@ func (s *Server) nativeSessionList(r *http.Request) nativeRPCResult {
 			SessionID: m.ID, Title: m.Title, UpdatedAt: m.UpdatedAt.UnixMilli(), Running: false,
 			Blank: m.EventCount == 0, CWD: m.CWD,
 		}
-		if events, loadErr := s.store.LoadSession(r.Context(), m.ID); loadErr == nil {
+		// The sidebar is a control-plane read and must not replay a complete
+		// production conversation on every refresh. Keep the list baseline
+		// bounded to the newest event window; session.history performs the full
+		// projection when the conversation is opened, and subsequent mux frames
+		// advance it. This is critical for 100k+ event sessions while a turn is
+		// still appending to the same database.
+		if events, _, loadErr := s.store.LoadSessionPage(r.Context(), m.ID, 0, 0, nativeSessionListTailLimit); loadErr == nil {
 			cursor := newNativeProjectionCursor()
 			for _, ev := range events {
 				cursor.project(m.ID, ev)
@@ -2846,7 +2853,7 @@ func (s *Server) nativeSessionList(r *http.Request) nativeRPCResult {
 					item.AgentPreset = config.AgentPreset
 				}
 			}
-			item.UpdatedAt = m.CreatedAt.UnixMilli()
+			item.UpdatedAt = m.UpdatedAt.UnixMilli()
 			if metadata.lastPromptAt != nil && *metadata.lastPromptAt > item.UpdatedAt {
 				item.UpdatedAt = *metadata.lastPromptAt
 			}
