@@ -84,8 +84,18 @@ async function waitForHealthy(processHandle, port) {
     try {
       const health = await fetch(`${url}/api/health`, { headers })
       const sessions = await fetch(`${url}/api/sessions`, { headers })
-      if (health.status === 200 && sessions.status === 200) {
-        return { health: health.status, sessions: sessions.status }
+      const staticShell = await fetch(`${url}/`, { headers })
+      const native = await fetch(`${url}/api/host.describe`, {
+        method: 'POST',
+        headers: { ...headers, 'content-type': 'application/json' },
+        body: JSON.stringify({ type: 'client-request', rpcId: `deployment-${port}`, method: 'host.describe', payload: {} }),
+      })
+      if (health.status === 200 && sessions.status === 200 && staticShell.status === 200 && native.status === 200) {
+        const envelope = await native.json()
+        if (envelope.type !== 'server-response' || envelope.rpcId !== `deployment-${port}` || envelope.result?.ok !== true) {
+          throw new Error(`native host.describe returned an invalid response: ${JSON.stringify(envelope)}`)
+        }
+        return { health: health.status, sessions: sessions.status, staticShell: staticShell.status, hostDescribe: native.status }
       }
     } catch {
       // The process may still be binding its listener.
