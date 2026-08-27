@@ -1599,6 +1599,7 @@ func (s *Server) handleSessionExport(w http.ResponseWriter, r *http.Request) {
 	}
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
+	attachments := make(map[string]exportAttachmentRef)
 	for index, sessionID := range ids {
 		events, loadErr := s.store.LoadSession(r.Context(), sessionID)
 		if loadErr != nil {
@@ -1625,6 +1626,50 @@ func (s *Server) handleSessionExport(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": writeErr.Error()})
 			return
 		}
+		for _, ev := range events {
+			collectExportAttachmentRefs(ev.Data, attachments)
+		}
+	}
+	attachmentIDs := make([]string, 0, len(attachments))
+	for attachmentID := range attachments {
+		attachmentIDs = append(attachmentIDs, attachmentID)
+	}
+	sort.Strings(attachmentIDs)
+	for _, attachmentID := range attachmentIDs {
+		if s.att == nil {
+			_ = zw.Close()
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "session export attachment store is unavailable"})
+			return
+		}
+		ref, readErr := s.att.GetByID(attachmentID)
+		if readErr != nil {
+			_ = zw.Close()
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": readErr.Error()})
+			return
+		}
+		data, readErr := s.att.Read(ref)
+		if readErr != nil {
+			_ = zw.Close()
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": readErr.Error()})
+			return
+		}
+		extension := exportAttachmentExtension(ref.MediaType)
+		if extension == "" {
+			_ = zw.Close()
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "session export attachment has unsupported media type"})
+			return
+		}
+		entry, createErr := zw.Create(path.Join("media", safeExportSessionID(attachmentID)+"."+extension))
+		if createErr != nil {
+			_ = zw.Close()
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": createErr.Error()})
+			return
+		}
+		if _, writeErr := entry.Write(data); writeErr != nil {
+			_ = zw.Close()
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": writeErr.Error()})
+			return
+		}
 	}
 	if err := zw.Close(); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
@@ -1639,6 +1684,61 @@ func (s *Server) handleSessionExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, _ = w.Write(buf.Bytes())
+}
+
+type exportAttachmentRef struct {
+	mediaType string
+}
+
+func collectExportAttachmentRefs(raw json.RawMessage, refs map[string]exportAttachmentRef) {
+	var value any
+	if json.Unmarshal(raw, &value) != nil {
+		return
+	}
+	var visit func(any)
+	visit = func(value any) {
+		switch typed := value.(type) {
+		case []any:
+			for _, child := range typed {
+				visit(child)
+			}
+		case map[string]any:
+			if typed["type"] == "image" {
+				if attachment, ok := typed["attachment"].(map[string]any); ok {
+					id, _ := attachment["attachmentId"].(string)
+					if id == "" {
+						id, _ = attachment["attachment_id"].(string)
+					}
+					mediaType, _ := attachment["mediaType"].(string)
+					if mediaType == "" {
+						mediaType, _ = attachment["media_type"].(string)
+					}
+					if id != "" {
+						refs[id] = exportAttachmentRef{mediaType: mediaType}
+					}
+				}
+			}
+			for _, child := range typed {
+				visit(child)
+			}
+		}
+	}
+	visit(value)
+}
+
+func exportAttachmentExtension(mediaType string) string {
+	switch mediaType {
+	case "image/png":
+		return "png"
+	case "image/jpeg":
+		return "jpg"
+	case "image/webp":
+		return "webp"
+	case "image/gif":
+		return "gif"
+	default:
+		return ""
+	}
 }
 
 func exportIncludeDescendants(raw string) (bool, error) {

@@ -167,6 +167,64 @@ func TestSessionExportIncludesDescendantLineage(t *testing.T) {
 	}
 }
 
+func TestSessionExportIncludesDeduplicatedMedia(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	attachments, err := attachment.NewStore(filepath.Join(t.TempDir(), "attachments"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	srv.SetAttachmentStore(attachments)
+	data := []byte("image-bytes")
+	ref, err := attachments.SaveImage("image/png", data, 1024)
+	if err != nil {
+		t.Fatalf("SaveImage: %v", err)
+	}
+	imageJSON := `{"content":[{"type":"image","attachment":{"attachmentId":"` + ref.ID + `","mediaType":"image/png"}}]}`
+	seedSession(t, st, "media-root", []session.Event{{
+		Seq: 1, Type: session.EventUserMessage, At: time.UnixMilli(1000), Version: session.EventVersion,
+		Data: json.RawMessage(imageJSON),
+	}})
+	seedSession(t, st, "media-child", []session.Event{{
+		Seq: 1, Type: session.EventSubagentStart, At: time.UnixMilli(1001), Version: session.EventVersion,
+		Data: json.RawMessage(`{"parentSession":"media-root"}`),
+	}, {
+		Seq: 2, Type: session.EventAssistantMessage, At: time.UnixMilli(1002), Version: session.EventVersion,
+		Data: json.RawMessage(imageJSON),
+	}})
+
+	rec := doReq(t, srv.Handler(), http.MethodGet, "/api/session.export?sessionId=media-root&includeDescendants=true", "tok")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("media export = %d body=%s", rec.Code, rec.Body.String())
+	}
+	archive, err := zip.NewReader(bytes.NewReader(rec.Body.Bytes()), int64(rec.Body.Len()))
+	if err != nil {
+		t.Fatalf("read media export: %v", err)
+	}
+	if len(archive.File) != 3 {
+		t.Fatalf("archive entries = %d, want root, child and one media file", len(archive.File))
+	}
+	mediaPath := "media/" + ref.ID + ".png"
+	var media *zip.File
+	for _, file := range archive.File {
+		if file.Name == mediaPath {
+			media = file
+			break
+		}
+	}
+	if media == nil {
+		t.Fatalf("archive is missing %q", mediaPath)
+	}
+	reader, err := media.Open()
+	if err != nil {
+		t.Fatalf("open media: %v", err)
+	}
+	got, err := io.ReadAll(reader)
+	_ = reader.Close()
+	if err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("media bytes = %q, err=%v", got, err)
+	}
+}
+
 func TestNewValidation(t *testing.T) {
 	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "t.db"))
 	if err != nil {
