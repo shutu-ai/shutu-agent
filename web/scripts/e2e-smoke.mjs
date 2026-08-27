@@ -55,6 +55,12 @@ async function installNativeMock(page, options = {}) {
   const socketConnections = new Map()
   const requests = []
   let searchFailuresRemaining = options.searchFailures ?? 0
+  let muxSocket = null
+  let interactionStage = 'idle'
+  const sendMux = (rpcId, method, payload) => {
+    if (muxSocket === null) throw new Error(`native mux is not connected for ${method}`)
+    muxSocket.send(JSON.stringify({ type: 'server-request', rpcId, method, payload }))
+  }
   await page.route('**/plugins/events', route => route.fulfill({
     status: 200,
     contentType: 'text/event-stream',
@@ -63,6 +69,7 @@ async function installNativeMock(page, options = {}) {
   await page.routeWebSocket('**/api/events.*', ws => {
     const pathname = new URL(ws.url()).pathname
     sockets.add(pathname)
+    if (pathname === '/api/events.mux') muxSocket = ws
     const connectionNumber = (socketConnections.get(pathname) ?? 0) + 1
     socketConnections.set(pathname, connectionNumber)
     if (options.closeFirstSocketAfterMs && connectionNumber === 1) {
@@ -73,6 +80,31 @@ async function installNativeMock(page, options = {}) {
   await page.route('**/api/**', async route => {
     if (route.request().method() !== 'POST') return route.fallback()
     const body = JSON.parse(route.request().postData() ?? '{}')
+    if (new URL(route.request().url()).pathname === '/api/respond') {
+      requests.push({ method: '/api/respond', payload: body })
+      if (options.interactions && body.type === 'client-response' && body.result?.ok === true) {
+        if (body.rpcId === 'approval-1' && interactionStage === 'approval') {
+          interactionStage = 'question'
+          sendMux('approval-1', 'approval/resolved', {
+            type: 'approval/resolved', sessionId: 'search-fixture', approvalId: 'approval-1', outcome: 'allowed-once',
+          })
+          setTimeout(() => sendMux('question-1', 'question/requested', {
+            type: 'question/requested', sessionId: 'search-fixture', questions: [{
+              id: 'mode', header: 'Mode', question: 'Choose a mode', options: [{ label: 'Safe', description: 'No side effects' }],
+            }],
+          }), 50)
+        } else if (body.rpcId === 'question-1' && interactionStage === 'question') {
+          interactionStage = 'resolved'
+          sendMux('question-1', 'question/resolved', {
+            type: 'question/resolved', sessionId: 'search-fixture', questionRpcId: 'question-1', outcome: 'answered',
+          })
+        }
+      }
+      return route.fulfill({
+        status: 200, contentType: 'application/json',
+        body: JSON.stringify({ accepted: true }),
+      })
+    }
     assert.equal(body.type, 'client-request', `unexpected native request envelope for ${body.method}`)
     requests.push(body.method)
     if (body.method === 'session.search' && searchFailuresRemaining > 0) {
@@ -193,7 +225,7 @@ async function installNativeMock(page, options = {}) {
       }),
     })
   })
-  return { sockets, socketConnections, requests }
+  return { sockets, socketConnections, requests, sendMux, get interactionStage() { return interactionStage }, setInteractionStage: value => { interactionStage = value } }
 }
 
 async function waitForServer() {
@@ -208,6 +240,15 @@ async function waitForServer() {
     await new Promise(resolvePromise => setTimeout(resolvePromise, 100))
   }
   throw new Error(`Timed out waiting for ${baseUrl}`)
+}
+
+async function waitForCondition(check, timeoutMs = 15_000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (check()) return
+    await new Promise(resolvePromise => setTimeout(resolvePromise, 50))
+  }
+  throw new Error('timed out waiting for native fixture condition')
 }
 
 async function waitForNativeShell(page) {
@@ -398,6 +439,44 @@ async function runSessionLifecycle(browser) {
   return { requests: [...new Set(requests.filter(method => ['session.create', 'workspace.rename', 'workspace.delete', 'workspace.archiveSession'].includes(method)))].sort(), console: 'clean' }
 }
 
+async function runInteractionControls(browser) {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+  const issues = []
+  page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
+  page.on('pageerror', error => issues.push(error.message))
+  page.on('response', response => { if (response.status() >= 400) issues.push(`http ${response.status()}: ${response.url()}`) })
+  const fixture = await installNativeMock(page, { seedSession: true, lifecycle: true, interactions: true })
+  await page.goto(baseUrl, { waitUntil: 'domcontentloaded' })
+  await waitForNativeShell(page)
+  const search = page.locator('button[aria-label="Search sessions"], button[aria-label="Search"], button[aria-label="搜索会话"], button[aria-label="搜索"]').first()
+  await search.click()
+  const input = page.locator('input[placeholder]').first()
+  await input.fill('fixture')
+  const result = page.locator('[role="tree"]').last().getByRole('treeitem').first()
+  await result.waitFor({ timeout: 15_000 })
+  await result.click()
+  await input.press('Escape')
+  await page.getByText('Search fixture', { exact: true }).last().waitFor({ timeout: 15_000 })
+
+  fixture.setInteractionStage('approval')
+  fixture.sendMux('approval-1', 'approval/requested', {
+    type: 'approval/requested', sessionId: 'search-fixture', approvalId: 'approval-1', toolName: 'shell', reason: 'Run the fixture command?',
+  })
+  await page.getByText(/Waiting for approval|等待审批/).last().waitFor({ timeout: 15_000 })
+  await page.getByRole('button', { name: /Allow once|允许一次/ }).click()
+  await waitForCondition(() => fixture.requests.filter(request => request.method === '/api/respond').length === 1)
+  await page.getByText('Choose a mode', { exact: true }).waitFor({ timeout: 15_000 })
+  await page.getByRole('radio', { name: 'Safe' }).click()
+  await page.getByRole('button', { name: /Submit|提交/ }).click()
+  await waitForCondition(() => fixture.requests.filter(request => request.method === '/api/respond').length === 2)
+  await waitForCondition(() => fixture.interactionStage === 'resolved')
+  await page.waitForTimeout(100)
+  assert.equal(await page.getByText('Choose a mode', { exact: true }).count(), 0)
+  assert.deepEqual(issues, [])
+  await page.close()
+  return { responses: 2, resolved: true, console: 'clean' }
+}
+
 async function runMobile(browser) {
   const page = await browser.newPage({ viewport: { width: 390, height: 844 } })
   const issues = []
@@ -440,8 +519,9 @@ try {
     const loadingDesktop = await runLoadingDesktop(browser)
     const searchErrorRecovery = await runSearchErrorRecovery(browser)
     const sessionLifecycle = await runSessionLifecycle(browser)
+    const interactionControls = await runInteractionControls(browser)
     const mobile = await runMobile(browser)
-    console.log(JSON.stringify({ browser: 'playwright', native: 'ok', desktop, reconnectDesktop, darkDesktop, loadingDesktop, searchErrorRecovery, sessionLifecycle, mobile }))
+    console.log(JSON.stringify({ browser: 'playwright', native: 'ok', desktop, reconnectDesktop, darkDesktop, loadingDesktop, searchErrorRecovery, sessionLifecycle, interactionControls, mobile }))
   } finally {
     await browser.close()
   }
