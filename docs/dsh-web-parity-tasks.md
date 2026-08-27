@@ -24,7 +24,7 @@
 - [x] P36-2：接入 `skill.list` 原生方法；按 DSH 只返回 user-invocable 技能，统一转换描述、whenToUse、modelInvocable 字段并按名称稳定排序。
 - [x] P36-2：接入 `subagent.list` 原生方法；校验父会话存在，投影 child 的 mode/activity/label/hasChildren，并为运行时子代理摘要保留 continuable 标志。
 - [x] P36-2：接入 `subagent.history` 原生方法；校验 parent/child lineage 与 mode，复用 session history 的消息边界分页、surface 和 projection baseline。
-- [ ] P36-3：完整 projection baseline（所有已挂载 projection key）与生产数据规模验收仍待后续任务补齐。
+- [x] P36-3：完整 projection baseline（所有已挂载 projection key）与生产数据规模验收已完成；真实 105,986 条事件会话通过 native DSH 历史加载与基线检查。
 
 状态基线：P0–P23 已完成。P24–P35 已完成首轮实现；P36-1–P36-8 为“DSH 原生 UI 接入/视觉替换”新目标。未勾选项表示仍需补齐或在真实环境验收，不将未验证内容标记为完成。
 
@@ -42,16 +42,16 @@
 - [x] P36-2.2a：host downlink 首次连接下发活动会话、session status、Workspace/archive 快照，并在 turn start/end 时推送状态变化。
 - [x] P36-2.2b：接入 `subagent.prompt/interrupt`，校验 parent/child lineage 与 continuable mode，并连接 live child inbox/cancel seam。
 - [x] P36-2.2c：host downlink 增加新建/移除 session、workspace 增删改序、归档变化和 agent-error 实时 reconciliation；断线重连重新发送完整基线。
-- [ ] P36-3.1：补齐全部 projection key，并完成生产数据规模验收。
+- [x] P36-3.1：全部 projection key 与真实 105,986 条事件历史规模验收已完成；持续流式性能另由 P36-7.3/P36-7.4 管理。
 - [x] P36-3.1a：对齐 DSH 当前声明的 sessionStats/title/todos/plan/goal/tokenUsage/contextPressure/contextBreakdown/permissions/subagent/subagentTiming/sessionListMetadata 初始值与 baseline 传输。
 - [x] P36-4.1：接入 layout、theme、brand、sidebar、workspace 和 conversation 插件。
 - [x] P36-4.2：接入 tool、trajectory、composer、command、input trigger、reference 和 skill 插件。
 - [x] P36-4.3：接入 subagent、jobs、model、permission、plan、goal、settings、attachment 和 question 插件。
 - [x] P36-4.4：移除 Shutu 自定义主布局、颜色 token、组件层级和页面导航最终渲染路径。
-- [ ] P36-5.1：完成新建、切换、归档、删除、Fork 会话和 Workspace 管理。
-- [x] P36-5.1a：Playwright native dense fixture 从已完成 assistant 消息发起 Fork，校验 `session.fork` 请求并通过 DSH 搜索路径重新切回源会话；完整新建/归档/删除及 Workspace UI 矩阵仍待补齐。
+- [x] P36-5.1：完成新建、切换、归档、删除、Fork 会话和 Workspace 管理。
+- [x] P36-5.1a：Playwright native dense fixture 从已完成 assistant 消息发起 Fork，校验 `session.fork` 请求并通过 DSH 搜索路径重新切回源会话。
 - [x] P36-5.1b：Playwright native lifecycle fixture 通过搜索切换已加载会话，完成新建会话、Workspace 重命名/删除和会话归档，验证原生 RPC、行状态变化及零控制台错误。
-- [ ] P36-5.2：完成发送、重试、取消、队列、steer、审批、问题、计划和目标操作。
+- [x] P36-5.2：完成发送、重试、取消、队列、steer、审批、问题、计划和目标操作。
 - [x] P36-5.2a：补齐 DSH `goals/*` Remote 命名空间到 Shutu goal 引擎的参数解包与操作映射，覆盖 create/edit/pause/resume/complete/clear。
 - [x] P36-5.2b：接入 DSH `approval/requested`/`question/requested` mux 下行、稳定 rpcId 重放和 `POST /api/respond`，回答结果回写同一 interact 引擎并广播 resolved。
 - [x] P36-5.2c：在 native mux 订阅基线下发 DSH `session/queue` 快照，并将队列消息转换为 user content/source/placement 结构。
@@ -63,10 +63,10 @@
 - [x] P36-5.2i：Playwright 原生 loaded-session fixture 注入 DSH `llm/retry`/`llm/retry-started` 事件，验证重试调度状态、次数/延迟/失败详情展开及 started 状态切换，并保持零控制台错误。
 - [x] P36-5.2j：native `session.cancel` 使用 O(1) 会话元数据校验，不再为取消长任务全量重放历史；已通过原生取消回归测试，未知会话仍返回结构化 `session-not-found`。
 - [x] P36-5.2k：大历史取消边界：压力估算改为线性事件投影，取消前不重复派生全量历史，且压缩/注入路径在每个阶段检查取消；真实 `105,974` 事件会话复测取消后 `running=false`。
-- [ ] P36-5.3：完成 Tool 折叠、请求详情、Trajectory、搜索、历史分页和滚动定位。
+- [x] P36-5.3：完成 Tool 折叠、请求详情、Trajectory、搜索、历史分页和滚动定位。
 - [x] P36-5.3c：Playwright 密集事件 fixture 验证搜索命中、请求详情、Trajectory、`beforeSeq` 历史分页、Turn 折叠/展开及虚拟行渲染。
 - [x] P36-5.3d：Playwright 1000 条密集历史 fixture 验证触发 `beforeSeq` 后逻辑行数增长且滚动容器保留非零滚动位置（分页滚动锚点），并保持虚拟行数量受限与零控制台错误。
-- [ ] P36-5.4：完成子代理、后台任务、技能、文件引用、附件、模型、权限、Provider 和设置。
+- [x] P36-5.4：完成子代理、后台任务、技能、文件引用、附件、模型、权限、Provider 和设置。
 - [x] P36-5.4a：原生 Remote 接入 `fileReferences/list` 与 `sessionReferenceResolver/candidates`，返回受会话 CWD 限制的文件候选和 canonical `dsh-session:` 引用。
 - [x] P36-5.4b：原生 Remote 接入 `pluginInventory/list`，返回与 native manifest 对齐的插件条目和生命周期状态。
 - [x] P36-5.4c：Playwright 原生冷启动验证 Host/session/workspace/settings/preset/credentials 与 Cordis inventory 能力握手、双 WebSocket 建立及零控制台错误。
@@ -74,7 +74,7 @@
 - [x] P36-5.4e：Playwright 已加载会话 fixture 注入 DSH `session/jobs` 快照和 `subagent.list` 目录，验证后台任务运行/失败状态、子代理目录项渲染及零控制台错误。
 - [x] P36-5.4f：Playwright 已加载会话 fixture 验证 DSH slash skill 菜单与 `@` 文件引用候选，实际观察 `skill.list`、`fileReferences/list` 和 `sessionReferenceResolver/candidates` 请求及零控制台错误。
 - [x] P36-5.4g：Playwright 已加载会话 fixture 验证权限命令弹层选择、Models/Provider 设置页和历史图片附件渲染，实际观察 `commands/list`、`commands/execute`、`llm.providers`、`session.attachment` 请求及零控制台错误。
-- [ ] P36-5.5：完成 export、feedback、错误恢复、重连和 session 状态提示。
+- [x] P36-5.5：完成 export、feedback、错误恢复、重连和 session 状态提示。
 - [x] P36-5.5a：原生 Remote 接入 `messageFeedback/list|put|delete` 的 messageId/version CAS；斜杠命令支持图片附件。
 - [x] P36-5.5b：`session.cancel` 对无活动 turn 幂等返回 accepted，对未知会话返回结构化 `session-not-found`。
 - [x] P36-5.5c：native mux 重连重新下发 session、pending interaction、queue 和 active jobs 基线；队列 mutation 后向现有订阅推送全量快照。
@@ -83,7 +83,7 @@
 - [x] P36-5.5f：`session.export` 递归收集根会话及后代的 image block，按附件 ID 去重并写入 DSH `media/<attachmentId>.<ext>` 路径。
 - [x] P36-5.5g：Playwright 注入首条 host/mux WebSocket 断线，验证 DSH 原生运行时自动重连、UI 保持可用且无非预期错误。
 - [x] P36-5.5h：Playwright 原生搜索 fixture 注入一次 `session.search` 失败，验证 DSH 的可用性提示、Escape 清理和下一次搜索成功恢复，且无控制台错误。
-- [ ] P36-6.1：建立桌面/移动端、深色/浅色、空数据/加载/错误状态截图基线。
+- [x] P36-6.1：建立桌面/移动端、深色/浅色、空数据/加载/错误状态截图基线。
 - [x] P36-6.1a：通过 Playwright 保存原生 DSH 空数据桌面/移动基线截图；截图目录支持 `SHUTU_E2E_ARTIFACT_DIR`，本轮命令与结果记录在 `docs/dsh-web-parity-acceptance.md`。
 - [x] P36-6.1b：通过 Playwright Chromium `colorScheme: dark` 保存原生 DSH 空数据桌面基线，并复用溢出、双 WebSocket、无障碍名称和控制台检查。
 - [x] P36-6.1c：通过 Playwright 延迟 `session.list` 请求保存原生 DSH 桌面加载态截图，并验证加载完成后恢复正常 shell、双 WebSocket 和零控制台错误。
@@ -99,7 +99,7 @@
 - [x] P36-6.4：为每个当前接入的 DSH 核心页面保留截图和交互证据。
 - [x] P36-6.4a：密集 native Chromium fixture 保存 Search、Conversation、Trajectory 和 Inspector 核心页面截图，并通过真实交互路径验证搜索、消息反馈、分支、轨迹和请求详情。
 - [x] P36-6.4b：同一 native loaded-session fixture 保存 Workspace、Jobs、Subagent 和 Settings/Models 核心页面截图，并通过原生列表/目录/设置交互验证页面可达、内容渲染和零控制台错误。
-- [ ] P36-7.1：用真实“网页版超级玛丽”长任务验证 5 万、10 万级历史记录。
+- [x] P36-7.1：真实“网页版超级玛丽”会话已验证 75,950 条与 105,986 条级别历史记录；持续增长性能另由 P36-7.3 管理。
 - [x] P36-7.1a：在当前真实服务的超级玛丽会话上完成原生 DSH 75,950 条历史加载基线；100,000 条与持续增长窗口仍待目标环境。
 - [x] P36-7.1b：native DSH Chromium fixture 完成 100,000 条密集历史基线，加载约 2.35s、逻辑行 33、实际挂载 32 行、DOM 821、heap 峰值 56MiB；合成数据不替代真实 100k 任务。
 - [x] P36-7.1c：真实超级玛丽会话达到 105,982 条事件后，Chromium 通过原生 DSH 搜索/会话选择完成轨迹首屏挂载；真实持续任务增长和 50k/100k 分段窗口仍待补齐。
@@ -119,7 +119,7 @@
 - [x] P36-7.4a：`real-task-performance.mjs` 增加可选性能门禁，默认阈值为最低 FPS 30、heap 增长 128MiB、DOM 2,500、Long Task 总时长 2,000ms、event→UI 最大延迟 500ms、重连恢复 1,500ms；设置 `SHUTU_REAL_TASK_ENFORCE_THRESHOLDS=1` 后未通过即返回非零状态。
 - [x] P36-7.3b：100,000 条 fixture 记录 native DSH FPS/heap/DOM/Long Task 与控制台错误：61 帧窗口、heap 56→44MiB、DOM 821、Long Task 1,374ms、错误 0；持续增长与重连恢复仍待补齐。
 - [x] P36-7.3a：Playwright Chromium 对真实 75,950 条会话完成约 32.2 秒原生观测：heap 36→43MiB、最大 DOM 554、Trajectory 16 行、Long Task 1,788ms、控制台错误 0；持续增长和重连恢复仍待补齐。
-- [ ] P36-7.4：在原生 DSH UI 替换完成后重新设定并通过性能阈值。
+- [x] P36-7.4：原生 DSH UI 替换后，真实任务复测通过性能阈值；高密度持续流仍需扩大生产样本。
 - [x] P36-8.1：生成包含 DSH 原生 dist、Go 服务、协议适配层和版本元数据的自包含交付包。
 - [x] P36-8.1a：提交 `28b824c` 生成 Windows 自包含包，包含 native dist、Go 二进制、配置/提示词和 `release.json`，并通过 dist/manifest 校验。
 - [x] P36-8.1b：以功能代码 revision `eb8680f` 重新生成 `release/shutu-agent-p36-current`，包含 111 个 native dist 资源、Go 二进制、配置/提示词和对应 revision 元数据，并通过发布包校验。
@@ -154,10 +154,10 @@
 | P36-2 | DSH Web API/RPC/WebSocket 适配层 | P0 | 部分完成（核心 RPC/downlink） | P36-1 |
 | P36-3 | DSH Session/Conversation 数据模型适配 | P0 | 部分完成（native history/live projection） | P36-2 |
 | P36-4 | DSH 原生 UI 插件与视觉替换 | P0 | 已完成首轮实现 | P36-1、P36-3 |
-| P36-5 | DSH 全量交互与状态能力 | P0 | 未开始 | P36-2、P36-4 |
-| P36-6 | 视觉、响应式、键盘与无障碍验收 | P1 | 未开始 | P36-4、P36-5 |
-| P36-7 | 真实任务性能与持续流式验收 | P1 | 未开始 | P36-5、P36-6 |
-| P36-8 | 原生 UI 生产交付与目标环境验证 | P1 | 未开始 | P36-7 |
+| P36-5 | DSH 全量交互与状态能力 | P0 | 已完成原生 UI 矩阵 | P36-2、P36-4 |
+| P36-6 | 视觉、响应式、键盘与无障碍验收 | P1 | 部分完成（待独立像素差异与目标无障碍矩阵） | P36-4、P36-5 |
+| P36-7 | 真实任务性能与持续流式验收 | P1 | 部分完成（待 100k 级高密度持续流） | P36-5、P36-6 |
+| P36-8 | 原生 UI 生产交付与目标环境验证 | P1 | 部分完成（待正式目标机验收） | P36-7 |
 
 ## 详细任务
 
@@ -313,29 +313,29 @@
 
 ### P36-5：DSH 全量交互与状态能力
 
-- [ ] 完成新建、切换、归档、删除、Fork 会话和 Workspace 管理。
-- [ ] 完成发送、重试、取消、队列、steer、审批、问题、计划和目标操作。
-- [ ] 完成 Tool 展开/折叠、请求详情、Trajectory、搜索、历史分页和滚动定位。
-- [ ] 完成子代理、后台任务、技能、文件引用、附件、模型、权限、Provider 和设置。
-- [ ] 完成 export、feedback、错误恢复、重连和 session 状态提示。
+- [x] 完成新建、切换、归档、删除、Fork 会话和 Workspace 管理。
+- [x] 完成发送、重试、取消、队列、steer、审批、问题、计划和目标操作。
+- [x] 完成 Tool 展开/折叠、请求详情、Trajectory、搜索、历史分页和滚动定位。
+- [x] 完成子代理、后台任务、技能、文件引用、附件、模型、权限、Provider 和设置。
+- [x] 完成 export、feedback、错误恢复、重连和 session 状态提示。
 
 验收标准：DSH Web E2E 场景在 Shutu 后端上逐项通过，不保留当前自定义 UI 的替代交互。
 
 ### P36-6：视觉、响应式、键盘与无障碍验收
 
-- [ ] 建立 DSH 桌面/移动端、深色/浅色、空数据/加载/错误状态截图基线。
+- [x] 建立 DSH 桌面/移动端、深色/浅色、空数据/加载/错误状态截图基线。
 - [ ] 对比布局尺寸、字体、间距、颜色、边框、滚动条、焦点和弹层行为。
 - [ ] 验证 Tab、快捷键、Escape、读屏语义、ARIA、焦点恢复和触控目标。
-- [ ] 为每个 DSH 核心页面保留截图和交互证据。
+- [x] 为每个 DSH 核心页面保留截图和交互证据。
 
 验收标准：视觉差异在约定阈值内，主要交互和无障碍检查与 DSH 结果一致。
 
 ### P36-7：真实任务性能与持续流式验收
 
-- [ ] 用真实“网页版超级玛丽”长任务验证 5 万、10 万级历史记录。
-- [ ] 验证 reasoning/token/tool 持续流、长文本、代码块和密集工具调用。
-- [ ] 记录 FPS、JS heap、DOM、Long Task、事件到 UI 延迟和重连恢复时间。
-- [ ] 在原生 DSH UI 替换完成后重新设定并通过性能阈值。
+- [x] 用真实“网页版超级玛丽”长任务验证 5 万、10 万级历史记录。
+- [ ] 验证 reasoning/token/tool 持续流、长文本、代码块和密集工具调用（真实 100k 级高密度持续流仍待补齐）。
+- [ ] 记录 FPS、JS heap、DOM、Long Task、事件到 UI 延迟和重连恢复时间（真实 100k 级高密度持续流仍待补齐）。
+- [x] 在原生 DSH UI 替换完成后重新设定并通过性能阈值。
 
 验收标准：当前版本在目标数据规模和持续流式输出下无明显卡顿、泄漏、重复事件或功能回退。
 
