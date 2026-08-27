@@ -30,6 +30,7 @@ func testTools() *Tools {
 	log := session.New()
 	_, _ = log.Append(session.EventUserMessage, session.NewUserMessage("deploy the service"))
 	_, _ = log.Append(session.EventAssistantMessage, session.NewAssistantMessage("deployed", nil, "stop"))
+	_, _ = log.Append(session.EventStepStart, session.NewStepStart(1))
 	return NewTools(fakeBackend{
 		hits: []store.SearchHit{
 			{SessionID: "old", Title: "Deploy", UpdatedAt: time.Unix(10, 0), Snippet: "deploy the service"},
@@ -53,6 +54,33 @@ func TestSearchAndEventSearch(t *testing.T) {
 	out, err = ts.EventSearch().Execute(context.Background(), json.RawMessage(`{"query":"service"}`))
 	if err != nil || !strings.Contains(out, "seq 1") {
 		t.Fatalf("event search = %q, err=%v", out, err)
+	}
+}
+
+func TestDSHSearchSchemaFiltersAndConcurrency(t *testing.T) {
+	ts := testTools()
+	searchSchema := ts.Search().Schema()["properties"].(map[string]any)
+	if _, ok := searchSchema["limit"]; ok {
+		t.Fatal("session_search must not expose a model-controlled limit")
+	}
+	for _, name := range []string{"session_ids", "created_at_from", "parent_session_ids", "availability", "event_seq_from", "event_time_from", "event_types", "event_surfaces"} {
+		if _, ok := searchSchema[name]; !ok {
+			t.Errorf("session_search schema missing %q", name)
+		}
+	}
+	eventSchema := ts.EventSearch().Schema()["properties"].(map[string]any)
+	if _, ok := eventSchema["limit"]; ok {
+		t.Fatal("session_event_search must not expose a model-controlled limit")
+	}
+	if ts.Search().ConcurrencySafe(nil) || ts.EventSearch().ConcurrencySafe(nil) {
+		t.Fatal("DSH search concurrency classification is incorrect")
+	}
+	if !ts.Trace().ConcurrencySafe(nil) || !ts.EventTrace().ConcurrencySafe(nil) || !ts.Read().ConcurrencySafe(nil) {
+		t.Fatal("DSH exact session queries must be concurrency-safe")
+	}
+	out, err := ts.Search().Execute(context.Background(), json.RawMessage(`{"query":"deploy","event_types":["user/message"],"availability":["persisted"]}`))
+	if err != nil || !strings.Contains(out, "Best match: seq 1 | user/message") {
+		t.Fatalf("filtered session search = %q, err=%v", out, err)
 	}
 }
 

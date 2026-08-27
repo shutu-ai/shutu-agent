@@ -5,6 +5,7 @@ package main
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/jabing/shutu-agent/internal/sessionquery"
 	"github.com/jabing/shutu-agent/internal/tools"
@@ -14,7 +15,7 @@ func (a *app) registerSessionQuery() error {
 	if !a.cfg.SessionQuery.Enabled {
 		return nil
 	}
-	query := sessionquery.NewTools(a.store, func() string { return a.currentID }, a.cfg.SessionQuery.MaxResults)
+	query := sessionquery.NewToolsWithConfig(a.store, func() string { return a.currentID }, a.cfg.SessionQuery.MaxResults, time.Duration(a.cfg.SessionQuery.SearchTimeoutMS)*time.Millisecond)
 	for _, tool := range []tools.Tool{query.Search(), query.EventSearch(), query.Trace(), query.EventTrace(), query.Read()} {
 		if err := a.reg.Register(tool); err != nil {
 			return fmt.Errorf("pa: register session-query tool: %w", err)

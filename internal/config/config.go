@@ -689,12 +689,11 @@ type FsSearchConfig struct {
 	Enabled *bool `yaml:"enabled"` // default false (D10)
 }
 
-// SessionQueryConfig is the read-only dsh-aligned session history query
-// surface. It is opt-in because the local implementation remains deliberately
-// narrower than dsh's live/persisted dual-source provider.
+// SessionQueryConfig is the read-only DSH session history query surface.
 type SessionQueryConfig struct {
-	Enabled    bool `yaml:"enabled"`
-	MaxResults int  `yaml:"max_results"` // <= 0 means the default 20
+	Enabled         bool `yaml:"enabled"`
+	MaxResults      int  `yaml:"max_results"`
+	SearchTimeoutMS int  `yaml:"search_timeout_ms"`
 }
 
 // LSPConfig is the read-only language-server consumer (P2). It is explicit
@@ -1299,7 +1298,10 @@ func applyDefaults(cfg *Config) {
 		}
 	}
 	if cfg.SessionQuery.MaxResults <= 0 || cfg.SessionQuery.MaxResults > 100 {
-		cfg.SessionQuery.MaxResults = 20
+		cfg.SessionQuery.MaxResults = 100
+	}
+	if cfg.SessionQuery.SearchTimeoutMS <= 0 {
+		cfg.SessionQuery.SearchTimeoutMS = 30000
 	}
 	if cfg.LSP.Enabled {
 		for _, name := range lspToolNames {

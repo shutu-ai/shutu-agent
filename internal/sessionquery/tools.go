@@ -27,9 +27,8 @@ const (
 	SessionTraceToolName  = "session_trace"
 	EventTraceToolName    = "session_event_trace"
 	EventReadToolName     = "session_event_read"
-	DefaultMaxResults     = 20
+	DefaultMaxResults     = 100
 	MaxResults            = 100
-	MaxEventWindow        = 20
 )
 
 // Backend is the minimal read-only persistence surface needed by the tools.
@@ -43,9 +42,37 @@ type Backend interface {
 
 // Tools bundles the five read-only consumers over one backend.
 type Tools struct {
-	backend    Backend
-	current    func() string
-	maxResults int
+	backend       Backend
+	current       func() string
+	maxResults    int
+	searchTimeout time.Duration
+}
+
+type sessionSearchArgs struct {
+	Query            string   `json:"query"`
+	SessionIDs       []string `json:"session_ids"`
+	CreatedAtFrom    string   `json:"created_at_from"`
+	CreatedAtTo      string   `json:"created_at_to"`
+	ParentSessionIDs []string `json:"parent_session_ids"`
+	IncludeRoot      bool     `json:"include_root_sessions"`
+	Availability     []string `json:"availability"`
+	EventSeqFrom     *uint64  `json:"event_seq_from"`
+	EventSeqTo       *uint64  `json:"event_seq_to"`
+	EventTimeFrom    string   `json:"event_time_from"`
+	EventTimeTo      string   `json:"event_time_to"`
+	EventTypes       []string `json:"event_types"`
+	EventSurfaces    []string `json:"event_surfaces"`
+}
+
+type eventSearchArgs struct {
+	SessionID  string   `json:"session_id"`
+	Query      string   `json:"query"`
+	SeqFrom    *uint64  `json:"seq_from"`
+	SeqTo      *uint64  `json:"seq_to"`
+	TimeFrom   string   `json:"time_from"`
+	TimeTo     string   `json:"time_to"`
+	EventTypes []string `json:"event_types"`
+	Surfaces   []string `json:"surfaces"`
 }
 
 // authorizedMetas projects the local workspace boundary for the calling
@@ -104,8 +131,26 @@ func NewTools(backend Backend, current func() string, maxResults ...int) *Tools 
 	if len(maxResults) > 0 && maxResults[0] >= 1 && maxResults[0] <= MaxResults {
 		limit = maxResults[0]
 	}
-	return &Tools{backend: backend, current: current, maxResults: limit}
+	return &Tools{backend: backend, current: current, maxResults: limit, searchTimeout: 30 * time.Second}
 }
+
+// NewToolsWithConfig binds DSH's deployment-owned search cap and cooperative
+// search deadline. The model cannot override either value.
+func NewToolsWithConfig(backend Backend, current func() string, maxResults int, searchTimeout time.Duration) *Tools {
+	if maxResults < 1 || maxResults > MaxResults {
+		maxResults = DefaultMaxResults
+	}
+	if searchTimeout <= 0 {
+		searchTimeout = 30 * time.Second
+	}
+	return &Tools{backend: backend, current: current, maxResults: maxResults, searchTimeout: searchTimeout}
+}
+
+func (SearchTool) ConcurrencySafe(any) bool      { return false }
+func (EventSearchTool) ConcurrencySafe(any) bool { return false }
+func (TraceTool) ConcurrencySafe(any) bool       { return true }
+func (EventTraceTool) ConcurrencySafe(any) bool  { return true }
+func (EventReadTool) ConcurrencySafe(any) bool   { return true }
 
 func (t *Tools) Search() SearchTool           { return SearchTool{tools: t} }
 func (t *Tools) EventSearch() EventSearchTool { return EventSearchTool{tools: t} }
@@ -117,23 +162,33 @@ type SearchTool struct{ tools *Tools }
 
 func (SearchTool) Name() string { return SessionSearchToolName }
 func (SearchTool) Description() string {
-	return "search prior local sessions and return the strongest matching event from each session"
+	return "search prior sessions in the caller workspace and return the strongest matching event from each session"
 }
 func (SearchTool) Schema() map[string]any {
 	return map[string]any{
 		"type": "object", "additionalProperties": false,
 		"properties": map[string]any{
-			"query": map[string]any{"type": "string", "minLength": 1, "description": "literal text to find in prior session events"},
-			"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": MaxResults, "description": "maximum sessions to return; default 20"},
+			"query":                 map[string]any{"type": "string", "minLength": 1, "description": "literal full-text query over prior session history"},
+			"session_ids":           map[string]any{"type": "array", "minItems": 1, "items": map[string]any{"type": "string"}},
+			"created_at_from":       map[string]any{"type": "string", "description": "inclusive timezone-qualified ISO 8601 creation-time lower bound"},
+			"created_at_to":         map[string]any{"type": "string", "description": "inclusive timezone-qualified ISO 8601 creation-time upper bound"},
+			"parent_session_ids":    map[string]any{"type": "array", "minItems": 1, "items": map[string]any{"type": "string"}},
+			"include_root_sessions": map[string]any{"type": "boolean"},
+			"availability":          map[string]any{"type": "array", "minItems": 1, "items": map[string]any{"type": "string", "enum": []string{"live", "persisted"}}},
+			"event_seq_from":        map[string]any{"type": "integer", "minimum": 0},
+			"event_seq_to":          map[string]any{"type": "integer", "minimum": 0},
+			"event_time_from":       map[string]any{"type": "string", "description": "inclusive timezone-qualified ISO 8601 event-time lower bound"},
+			"event_time_to":         map[string]any{"type": "string", "description": "inclusive timezone-qualified ISO 8601 event-time upper bound"},
+			"event_types":           map[string]any{"type": "array", "minItems": 1, "items": map[string]any{"type": "string"}},
+			"event_surfaces":        map[string]any{"type": "array", "minItems": 1, "items": map[string]any{"type": "string", "enum": []string{"current", "shadowed", "log-only"}}},
 		},
 		"required": []string{"query"},
 	}
 }
 func (t SearchTool) Execute(ctx context.Context, args any) (string, error) {
-	var a struct {
-		Query string `json:"query"`
-		Limit int    `json:"limit"`
-	}
+	ctx, cancel := t.tools.searchContext(ctx)
+	defer cancel()
+	var a sessionSearchArgs
 	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("%s: %w", SessionSearchToolName, err)
 	}
@@ -141,8 +196,7 @@ func (t SearchTool) Execute(ctx context.Context, args any) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", SessionSearchToolName, err)
 	}
-	limit, err := t.tools.resultLimit(a.Limit)
-	if err != nil {
+	if err := validateSessionSearchArgs(a); err != nil {
 		return "", fmt.Errorf("%s: %w", SessionSearchToolName, err)
 	}
 	scope, err := t.tools.authorizedMetas(ctx)
@@ -150,11 +204,12 @@ func (t SearchTool) Execute(ctx context.Context, args any) (string, error) {
 		return "", fmt.Errorf("%s: %w", SessionSearchToolName, err)
 	}
 	current := t.tools.currentID()
-	hits, err := t.tools.searchHits(ctx, query, limit, scope, current)
+	hits, err := t.tools.searchHits(ctx, query, 0, scope, current)
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", SessionSearchToolName, err)
 	}
 	lines := []string{}
+	capped := false
 	for _, hit := range hits {
 		if hit.SessionID == current {
 			continue
@@ -162,42 +217,65 @@ func (t SearchTool) Execute(ctx context.Context, args any) (string, error) {
 		if _, ok := scope[hit.SessionID]; !ok {
 			continue
 		}
-		if len(lines) == limit {
+		meta := scope[hit.SessionID]
+		parentID, events, err := t.tools.sessionContext(ctx, hit.SessionID)
+		if err != nil {
+			return "", fmt.Errorf("%s: %w", SessionSearchToolName, err)
+		}
+		if !sessionMatches(meta, parentID, a) {
+			continue
+		}
+		if len(a.ParentSessionIDs) > 0 && parentID != "" {
+			if _, authorized := scope[parentID]; !authorized {
+				continue
+			}
+		}
+		match := bestEventMatch(events, query, a.EventSeqFrom, a.EventSeqTo, a.EventTimeFrom, a.EventTimeTo, a.EventTypes, a.EventSurfaces)
+		if hasEventFilters(a) && match == nil {
+			continue
+		}
+		if len(lines) == t.tools.maxResults {
+			capped = true
 			break
 		}
-		lines = append(lines, fmt.Sprintf("- %s | %s | %s | %s", hit.SessionID, titleOrUntitled(hit.Title), hit.UpdatedAt.UTC().Format(time.RFC3339), bound(hit.Snippet, 500)))
+		lines = append(lines, formatSessionHit(len(lines)+1, hit, meta, parentID, match))
 	}
 	if len(lines) == 0 {
 		return "No prior session matches found.", nil
 	}
-	return fmt.Sprintf("Session search results (%d):\n%s", len(lines), strings.Join(lines, "\n")), nil
+	out := fmt.Sprintf("Session search results (%d):\n%s", len(lines), strings.Join(lines, "\n"))
+	if capped {
+		out += "\n\nResult cap reached. Narrow the query or add filters to find additional matches."
+	}
+	return out, nil
 }
 
 type EventSearchTool struct{ tools *Tools }
 
 func (EventSearchTool) Name() string { return EventSearchToolName }
 func (EventSearchTool) Description() string {
-	return "search earlier events in one local session and return matching event summaries"
+	return "search prior events in one authorized session"
 }
 func (EventSearchTool) Schema() map[string]any {
 	return map[string]any{
 		"type": "object", "additionalProperties": false,
 		"properties": map[string]any{
-			"session_id": map[string]any{"type": "string", "description": "target session; defaults to the current session"},
-			"query":      map[string]any{"type": "string", "minLength": 1, "description": "literal text to find in event data"},
-			"limit":      map[string]any{"type": "integer", "minimum": 1, "maximum": MaxResults, "description": "maximum events to return; default 20"},
+			"session_id":  map[string]any{"type": "string", "description": "target session id; omit for the current session"},
+			"query":       map[string]any{"type": "string", "minLength": 1, "description": "literal full-text query over the target session"},
+			"seq_from":    map[string]any{"type": "integer", "minimum": 0},
+			"seq_to":      map[string]any{"type": "integer", "minimum": 0},
+			"time_from":   map[string]any{"type": "string", "description": "inclusive timezone-qualified ISO 8601 event-time lower bound"},
+			"time_to":     map[string]any{"type": "string", "description": "inclusive timezone-qualified ISO 8601 event-time upper bound"},
+			"event_types": map[string]any{"type": "array", "minItems": 1, "items": map[string]any{"type": "string"}},
+			"surfaces":    map[string]any{"type": "array", "minItems": 1, "items": map[string]any{"type": "string", "enum": []string{"current", "shadowed", "log-only"}}},
 		},
 		"required": []string{"query"},
 	}
 }
 func (t EventSearchTool) Execute(ctx context.Context, args any) (string, error) {
-	// Use a second struct because encoding/json tags on an anonymous combined
-	// declaration are easy to get wrong and would silently widen the contract.
-	var in struct {
-		SessionID string `json:"session_id"`
-		Query     string `json:"query"`
-		Limit     int    `json:"limit"`
-	}
+	ctx, cancel := t.tools.searchContext(ctx)
+	defer cancel()
+	var in eventSearchArgs
 	if err := agenttools.DecodeArgs(args, &in); err != nil {
 		return "", fmt.Errorf("%s: %w", EventSearchToolName, err)
 	}
@@ -205,8 +283,7 @@ func (t EventSearchTool) Execute(ctx context.Context, args any) (string, error) 
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", EventSearchToolName, err)
 	}
-	limit, err := t.tools.resultLimit(in.Limit)
-	if err != nil {
+	if err := validateEventSearchArgs(in); err != nil {
 		return "", fmt.Errorf("%s: %w", EventSearchToolName, err)
 	}
 	id := t.tools.targetID(in.SessionID)
@@ -220,25 +297,43 @@ func (t EventSearchTool) Execute(ctx context.Context, args any) (string, error) 
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", EventSearchToolName, err)
 	}
+	if id == t.tools.currentID() && latestStepStart(events) == 0 {
+		return "", fmt.Errorf("%s: current-session search requires an active step boundary", EventSearchToolName)
+	}
 	needle := foldText(query)
 	lines := []string{}
+	capped := false
 	for _, ev := range events {
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		text := eventText(ev)
-		if !strings.Contains(foldText(text), needle) {
+		if id == t.tools.currentID() && isAfterCurrentStep(events, ev.Seq) {
 			continue
 		}
-		lines = append(lines, fmt.Sprintf("- seq %d | %s | %s\n  %s", ev.Seq, ev.Type, ev.At.UTC().Format(time.RFC3339), bound(text, 500)))
-		if len(lines) == limit {
+		text := eventText(ev)
+		if !strings.Contains(foldText(text), needle) || !eventMatches(events, ev, in.SeqFrom, in.SeqTo, in.TimeFrom, in.TimeTo, in.EventTypes, in.Surfaces) {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("%d. seq %d | %s | %s | %s\n   Snippet: %s", len(lines)+1, ev.Seq, ev.Type, eventSurfaceFor(events, ev), ev.At.UTC().Format(time.RFC3339), bound(text, 500)))
+		if len(lines) == t.tools.maxResults {
+			capped = true
 			break
 		}
 	}
 	if len(lines) == 0 {
 		return fmt.Sprintf("Session %s\n\nNo prior event matches found.", id), nil
 	}
-	return fmt.Sprintf("Session %s\n\nEvent search results (%d):\n%s", id, len(lines), strings.Join(lines, "\n")), nil
+	title := "(untitled)"
+	if scope, scopeErr := t.tools.authorizedMetas(ctx); scopeErr == nil {
+		if meta, ok := scope[id]; ok {
+			title = titleOrUntitled(meta.Title)
+		}
+	}
+	out := fmt.Sprintf("Session %s — %s\n\nEvent search results (%d):\n%s", id, title, len(lines), strings.Join(lines, "\n"))
+	if capped {
+		out += "\n\nResult cap reached. Narrow the query or add filters to find additional matches."
+	}
+	return out, nil
 }
 
 type TraceTool struct{ tools *Tools }
@@ -281,7 +376,7 @@ func (EventTraceTool) Description() string {
 func (EventTraceTool) Schema() map[string]any {
 	return map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{
 		"session_id": map[string]any{"type": "string", "description": "target session; defaults to the current session"},
-		"seq":        map[string]any{"type": "integer", "minimum": 1, "description": "target event sequence"},
+		"seq":        map[string]any{"type": "integer", "minimum": 0, "description": "target event sequence number"},
 	}, "required": []string{"seq"}}
 }
 func (t EventTraceTool) Execute(ctx context.Context, args any) (string, error) {
@@ -333,7 +428,7 @@ func (t EventTraceTool) Execute(ctx context.Context, args any) (string, error) {
 	}
 	_ = replacedBy // retained for compatibility with the original replacement scan
 	relations := eventRelations(events, target)
-	return fmt.Sprintf("Session %s\nTarget: seq %d | %s | %s\nReplaced by: %s\nEvents replaced by target: %s\nEvents cited directly as sources: %s\nDirect derived events: %s", id, events[target].Seq, events[target].Type, events[target].At.UTC().Format(time.RFC3339), seqOrNone(relations.replacedBy), replacementRange(events[target]), seqListOrNone(relations.sources), seqListOrNone(relations.derived)), nil
+	return fmt.Sprintf("Session %s\nTarget: seq %d | %s | %s\nReplaced by: %s\nReplacement chain: %s\nEvents replaced by target: %s\nEvents cited directly as sources: %s\nDirect derived events: %s", id, events[target].Seq, events[target].Type, events[target].At.UTC().Format(time.RFC3339), seqOrNone(relations.replacedBy), replacementChain(events, target), replacementRange(events[target]), seqListOrNone(relations.sources), seqListOrNone(relations.derived)), nil
 }
 
 type EventReadTool struct{ tools *Tools }
@@ -345,16 +440,17 @@ func (EventReadTool) Description() string {
 func (EventReadTool) Schema() map[string]any {
 	return map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{
 		"session_id": map[string]any{"type": "string", "description": "target session; defaults to the current session"},
-		"seq":        map[string]any{"type": "integer", "minimum": 1, "description": "target event sequence"},
-		"before":     map[string]any{"type": "integer", "minimum": 0, "maximum": MaxEventWindow, "description": "preceding events to summarize"},
-		"after":      map[string]any{"type": "integer", "minimum": 0, "maximum": MaxEventWindow, "description": "following events to summarize"},
+		"seq":        map[string]any{"type": "integer", "minimum": 0, "description": "target event sequence number"},
+		"before":     map[string]any{"type": "integer", "minimum": 0, "description": "preceding raw events to summarize; omit for none"},
+		"after":      map[string]any{"type": "integer", "minimum": 0, "description": "following raw events to summarize; omit for none"},
 	}, "required": []string{"seq"}}
 }
 func (t EventReadTool) Execute(ctx context.Context, args any) (string, error) {
 	var in struct {
-		SessionID     string `json:"session_id"`
-		Seq           uint64 `json:"seq"`
-		Before, After int
+		SessionID string `json:"session_id"`
+		Seq       uint64 `json:"seq"`
+		Before    int    `json:"before"`
+		After     int    `json:"after"`
 	}
 	if err := agenttools.DecodeArgs(args, &in); err != nil {
 		return "", fmt.Errorf("%s: %w", EventReadToolName, err)
@@ -369,8 +465,8 @@ func (t EventReadTool) Execute(ctx context.Context, args any) (string, error) {
 	if in.Seq == 0 {
 		return "", fmt.Errorf("%s: seq must be positive", EventReadToolName)
 	}
-	if in.Before < 0 || in.After < 0 || in.Before > MaxEventWindow || in.After > MaxEventWindow {
-		return "", fmt.Errorf("%s: before/after must be between 0 and %d", EventReadToolName, MaxEventWindow)
+	if in.Before < 0 || in.After < 0 {
+		return "", fmt.Errorf("%s: before/after must be non-negative", EventReadToolName)
 	}
 	events, err := t.tools.backend.LoadSession(ctx, id)
 	if err != nil {
@@ -386,6 +482,12 @@ func (t EventReadTool) Execute(ctx context.Context, args any) (string, error) {
 	if index < 0 {
 		return "", fmt.Errorf("%s: event seq %d not found", EventReadToolName, in.Seq)
 	}
+	title := "(untitled)"
+	if scope, scopeErr := t.tools.authorizedMetas(ctx); scopeErr == nil {
+		if meta, ok := scope[id]; ok {
+			title = titleOrUntitled(meta.Title)
+		}
+	}
 	start, end := index-in.Before, index+in.After
 	if start < 0 {
 		start = 0
@@ -398,7 +500,7 @@ func (t EventReadTool) Execute(ctx context.Context, args any) (string, error) {
 		target = string(events[index].Data)
 	}
 	raw, _ := json.MarshalIndent(map[string]any{"seq": events[index].Seq, "type": events[index].Type, "time": events[index].At.UTC(), "version": events[index].Version, "data": target}, "", "  ")
-	lines := []string{fmt.Sprintf("Session %s", id), fmt.Sprintf("Target event seq %d:", in.Seq), "```json", string(raw), "```"}
+	lines := []string{fmt.Sprintf("Session %s — %s", id, title), fmt.Sprintf("Target event seq %d:", in.Seq), "```json", string(raw), "```"}
 	for i := start; i <= end; i++ {
 		if i == index {
 			continue
@@ -419,6 +521,275 @@ func (t *Tools) currentID() string {
 		return ""
 	}
 	return strings.TrimSpace(t.current())
+}
+
+func (t *Tools) searchContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if t.searchTimeout <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, t.searchTimeout)
+}
+
+func (t *Tools) sessionContext(ctx context.Context, id string) (string, []session.Event, error) {
+	events, err := t.backend.LoadSession(ctx, id)
+	if err != nil {
+		return "", nil, err
+	}
+	var parent string
+	for _, ev := range events {
+		if ev.Type != session.EventSubagentStart {
+			continue
+		}
+		var data struct {
+			ID            string `json:"id"`
+			ParentSession string `json:"parentSession"`
+		}
+		if json.Unmarshal(ev.Data, &data) == nil && data.ID == id {
+			parent = data.ParentSession
+			break
+		}
+	}
+	return parent, events, nil
+}
+
+func validateSessionSearchArgs(a sessionSearchArgs) error {
+	if err := validateStringList("session_ids", a.SessionIDs); err != nil {
+		return err
+	}
+	if err := validateStringList("parent_session_ids", a.ParentSessionIDs); err != nil {
+		return err
+	}
+	if err := validateStringList("event_types", a.EventTypes); err != nil {
+		return err
+	}
+	if err := validateStringList("event_surfaces", a.EventSurfaces); err != nil {
+		return err
+	}
+	if err := validateAvailability(a.Availability); err != nil {
+		return err
+	}
+	if err := validateSurfaces(a.EventSurfaces); err != nil {
+		return err
+	}
+	if err := validateTimeRange("created_at", a.CreatedAtFrom, a.CreatedAtTo); err != nil {
+		return err
+	}
+	return validateEventRange(a.EventSeqFrom, a.EventSeqTo, a.EventTimeFrom, a.EventTimeTo, a.EventTypes, a.EventSurfaces)
+}
+
+func validateEventSearchArgs(a eventSearchArgs) error {
+	if err := validateStringList("event_types", a.EventTypes); err != nil {
+		return err
+	}
+	if err := validateStringList("surfaces", a.Surfaces); err != nil {
+		return err
+	}
+	if err := validateSurfaces(a.Surfaces); err != nil {
+		return err
+	}
+	return validateEventRange(a.SeqFrom, a.SeqTo, a.TimeFrom, a.TimeTo, a.EventTypes, a.Surfaces)
+}
+
+func validateStringList(name string, values []string) error {
+	if values == nil {
+		return nil
+	}
+	if len(values) == 0 {
+		return fmt.Errorf("%s must contain at least one value when supplied", name)
+	}
+	for _, value := range values {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("%s must not contain empty values", name)
+		}
+	}
+	return nil
+}
+
+func validateAvailability(values []string) error {
+	for _, value := range values {
+		if value != "live" && value != "persisted" {
+			return fmt.Errorf("availability contains unsupported value %q", value)
+		}
+	}
+	return nil
+}
+
+func validateSurfaces(values []string) error {
+	for _, value := range values {
+		if value != "current" && value != "shadowed" && value != "log-only" {
+			return fmt.Errorf("surfaces contains unsupported value %q", value)
+		}
+	}
+	return nil
+}
+
+func parseOptionalTime(name, value string) (time.Time, bool, error) {
+	if strings.TrimSpace(value) == "" {
+		return time.Time{}, false, nil
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("%s must be an ISO 8601 timestamp with Z or a numeric offset", name)
+	}
+	return parsed.UTC(), true, nil
+}
+
+func validateTimeRange(name, from, to string) error {
+	start, hasStart, err := parseOptionalTime(name+"_from", from)
+	if err != nil {
+		return err
+	}
+	end, hasEnd, err := parseOptionalTime(name+"_to", to)
+	if err != nil {
+		return err
+	}
+	if hasStart && hasEnd && start.After(end) {
+		return fmt.Errorf("%s range from must be less than or equal to to", name)
+	}
+	return nil
+}
+
+func validateEventRange(from, to *uint64, timeFrom, timeTo string, eventTypes, surfaces []string) error {
+	if from != nil && to != nil && *from > *to {
+		return errors.New("event sequence range from must be less than or equal to to")
+	}
+	if err := validateTimeRange("time", timeFrom, timeTo); err != nil {
+		return err
+	}
+	return nil
+}
+
+func sessionMatches(meta store.SessionMeta, parent string, a sessionSearchArgs) bool {
+	if len(a.SessionIDs) > 0 && !contains(a.SessionIDs, meta.ID) {
+		return false
+	}
+	if len(a.Availability) > 0 && !contains(a.Availability, "persisted") {
+		return false
+	}
+	if start, ok, _ := parseOptionalTime("created_at_from", a.CreatedAtFrom); ok && meta.CreatedAt.Before(start) {
+		return false
+	}
+	if end, ok, _ := parseOptionalTime("created_at_to", a.CreatedAtTo); ok && meta.CreatedAt.After(end) {
+		return false
+	}
+	if len(a.ParentSessionIDs) > 0 || a.IncludeRoot {
+		matchesParent := len(a.ParentSessionIDs) > 0 && contains(a.ParentSessionIDs, parent)
+		if a.IncludeRoot && parent == "" {
+			matchesParent = true
+		}
+		if !matchesParent {
+			return false
+		}
+	}
+	return true
+}
+
+func contains(values []string, needle string) bool {
+	for _, value := range values {
+		if value == needle {
+			return true
+		}
+	}
+	return false
+}
+
+func hasEventFilters(a sessionSearchArgs) bool {
+	return a.EventSeqFrom != nil || a.EventSeqTo != nil || a.EventTimeFrom != "" || a.EventTimeTo != "" || len(a.EventTypes) > 0 || len(a.EventSurfaces) > 0
+}
+
+type eventMatch struct {
+	Event   session.Event
+	Surface string
+	Snippet string
+}
+
+func bestEventMatch(events []session.Event, query string, seqFrom, seqTo *uint64, timeFrom, timeTo string, types, surfaces []string) *eventMatch {
+	needle := foldText(query)
+	for _, ev := range events {
+		text := eventText(ev)
+		if !strings.Contains(foldText(text), needle) || !eventMatches(events, ev, seqFrom, seqTo, timeFrom, timeTo, types, surfaces) {
+			continue
+		}
+		return &eventMatch{Event: ev, Surface: eventSurfaceFor(events, ev), Snippet: bound(text, 500)}
+	}
+	return nil
+}
+
+func eventMatches(events []session.Event, ev session.Event, seqFrom, seqTo *uint64, timeFrom, timeTo string, types, surfaces []string) bool {
+	if seqFrom != nil && ev.Seq < *seqFrom || seqTo != nil && ev.Seq > *seqTo {
+		return false
+	}
+	if start, ok, _ := parseOptionalTime("time_from", timeFrom); ok && ev.At.Before(start) {
+		return false
+	}
+	if end, ok, _ := parseOptionalTime("time_to", timeTo); ok && ev.At.After(end) {
+		return false
+	}
+	if len(types) > 0 && !contains(types, ev.Type) {
+		return false
+	}
+	if len(surfaces) > 0 && !contains(surfaces, eventSurfaceFor(events, ev)) {
+		return false
+	}
+	return true
+}
+
+func eventSurfaceFor(events []session.Event, target session.Event) string {
+	for _, ev := range events {
+		if ev.Seq <= target.Seq {
+			continue
+		}
+		var marker struct {
+			SurfaceOp *struct {
+				Op    string `json:"op"`
+				Start int64  `json:"start"`
+				End   int64  `json:"end"`
+			} `json:"surfaceOp"`
+		}
+		if json.Unmarshal(ev.Data, &marker) == nil && marker.SurfaceOp != nil && marker.SurfaceOp.Op == "replace" && target.Seq >= uint64(maxInt64(marker.SurfaceOp.Start)) && target.Seq <= uint64(maxInt64(marker.SurfaceOp.End)) {
+			return "shadowed"
+		}
+	}
+	if isLogOnlyEvent(target.Type) {
+		return "log-only"
+	}
+	return "current"
+}
+
+func isLogOnlyEvent(typ string) bool {
+	for _, prefix := range []string{"turn/", "step/", "llm/", "subagent/", "workflow/", "goal/", "compaction/", "job/", "terminal/", "eval/", "schedule/", "feedback/"} {
+		if strings.HasPrefix(typ, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func isAfterCurrentStep(events []session.Event, seq uint64) bool {
+	start := latestStepStart(events)
+	return start != 0 && seq >= start
+}
+
+func latestStepStart(events []session.Event) uint64 {
+	var start uint64
+	for _, ev := range events {
+		if ev.Type == session.EventStepStart && ev.Seq > start {
+			start = ev.Seq
+		}
+	}
+	return start
+}
+
+func formatSessionHit(index int, hit store.SearchHit, meta store.SessionMeta, parent string, match *eventMatch) string {
+	parentText := "root"
+	if parent != "" {
+		parentText = parent
+	}
+	seq, typ, surface, at, snippet := uint64(0), "unknown", "current", hit.UpdatedAt, bound(hit.Snippet, 500)
+	if match != nil {
+		seq, typ, surface, at, snippet = match.Event.Seq, match.Event.Type, match.Surface, match.Event.At, match.Snippet
+	}
+	return fmt.Sprintf("\n%d. Session %s — %s\n   Created: %s\n   Parent: %s\n   Availability: persisted\n   Best match: seq %d | %s | %s | %s\n   Snippet: %s", index, meta.ID, titleOrUntitled(meta.Title), meta.CreatedAt.UTC().Format(time.RFC3339), parentText, seq, typ, surface, at.UTC().Format(time.RFC3339), snippet)
 }
 
 func (t *Tools) searchHits(ctx context.Context, query string, limit int, scope map[string]store.SessionMeta, current string) ([]store.SearchHit, error) {
@@ -646,6 +1017,29 @@ func replacementRange(ev session.Event) string {
 		return "none"
 	}
 	return fmt.Sprintf("%d-%d", op.SurfaceOp.Start, op.SurfaceOp.End)
+}
+
+func replacementChain(events []session.Event, target int) string {
+	current := events[target].Seq
+	var chain []uint64
+	seen := map[uint64]bool{current: true}
+	for {
+		var next uint64
+		for _, ev := range events {
+			start, end, ok := replacementMarker(ev)
+			if !ok || ev.Seq <= current || current < uint64(start) || current > uint64(end) || (next != 0 && ev.Seq >= next) {
+				continue
+			}
+			next = ev.Seq
+		}
+		if next == 0 || seen[next] {
+			break
+		}
+		chain = append(chain, next)
+		seen[next] = true
+		current = next
+	}
+	return seqListOrNone(chain)
 }
 
 type eventRelationSet struct {
