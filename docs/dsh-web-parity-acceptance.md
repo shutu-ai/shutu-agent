@@ -218,6 +218,22 @@ high-density result, not hidden as a pass. A real 100k-scale turn that sustains
 high event density while the dense history is mounted remains the only open
 P36-7.2/P36-7.3 performance slice.
 
+The follow-up 60-second observation on the same `106,388`-event session, after
+the turn was already running, received no additional mux frames. Static
+metrics were FPS `43–60`, heap `50→66MiB`, DOM peak `1,032`, reconnect `501ms`,
+and Long Tasks `2,041ms`; the enforced gate failed on the Long Task budget.
+This second negative sample confirms that the 100k high-density gate is still
+open rather than a missing measurement.
+
+## P36-8.2 WSL2 rerun after native turn fix (2026-08-27)
+
+The newly rebuilt `GOOS=linux GOARCH=amd64 CGO_ENABLED=0` binary was launched
+inside AlmaLinux-8 WSL2 with SQLite data on Linux-native `/tmp`. From inside
+the distro, the service returned `200` for `/api/health` and the native static
+HTML, and listened on `127.0.0.1:18099`; the service was then stopped cleanly.
+This is repeatable Linux-like local evidence. It does not replace a formal
+target-host Linux/systemd deployment record or failure-injection recovery.
+
 ## P36-7.4 Native stream batching and threshold evidence (2026-08-27)
 
 The native mux no longer refreshes queue/jobs control snapshots for unrelated assistant chunks; queue mutations and `job/*` lifecycle events still refresh their authoritative snapshots. The agent loop also batches adjacent streamed text/reasoning deltas within a 50ms/8KiB window while retaining immediate REPL output and the authoritative final assistant message. Go regression tests cover both behaviors.

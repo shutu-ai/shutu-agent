@@ -32,6 +32,18 @@ curl -fsS http://127.0.0.1:18099/api/sessions
 
 systemd 部署时使用专用用户、固定工作目录和持久 `data_dir`；服务异常退出后由 systemd 重启，但不得在启动失败时自动删除数据目录。`/api/health`、静态首页和两条 WebSocket upgrade 都通过后再接收流量。
 
+WSL2 本机复测可使用 AlmaLinux-8：
+
+```powershell
+$env:WSLENV = "DEEPSEEK_API_KEY/u"
+wsl.exe -d AlmaLinux-8 -- bash -lc "cd /mnt/d/dev-projects/Agent/shutu-agent && exec ./.smoke/pa-linux-p36-turnfix --web-only --config config/config-linux-p36.yaml"
+```
+
+另一个终端在 distro 内执行 `curl -fsS http://127.0.0.1:18099/api/health`、
+`curl -fsS http://127.0.0.1:18099/`，并用原始 WebSocket upgrade 检查
+`/api/events.mux` 与 `/api/events.host`。WSL2 结果只能作为本机 Linux-like
+证据，不能替代正式目标主机和 systemd 验收。
+
 ## 升级流程
 
 1. 记录当前 `release.json` revision、服务状态和数据目录备份位置。
