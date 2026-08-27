@@ -79,3 +79,7 @@ npm.cmd run real-performance -- s-f15a7e57 180
 ## P36-5.5 Native export descendant evidence (2026-08-27)
 
 `go test ./internal/webserver -run 'TestSessionExport(HeadMatchesDownloadHeadersWithoutBody|IncludesDescendantLineage)$' -count=1` passed. The native export endpoint now accepts DSH's boolean `includeDescendants` query, validates the parameter, preserves the DSH `dsh-session-*.zip` filename, and exports root/child/grandchild session logs under `session/events.jsonl` and `subagents/<sessionId>/events.jsonl` in deterministic lineage order.
+
+## P36-5.4 Native capability cold-boot evidence (2026-08-27)
+
+`npm.cmd run e2e` passed against the native dist. The desktop browser recorded `host.describe`, `session.list`, `workspace.list`, `settings.describe`, `agentPreset.list`, `credentials.describe`, `dynamicCordisRunner/inventory`, and `dynamicCordisRunner/syncInspectManifest`; `/api/events.host` and `/api/events.mux` both connected, with no console errors or warnings. The fixture is intentionally empty-data, so loaded capability content and target-production provider/skill catalogs remain open work.

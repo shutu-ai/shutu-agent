@@ -50,6 +50,7 @@ function valueFor(method) {
 
 async function installNativeMock(page) {
   const sockets = new Set()
+  const requests = []
   await page.route('**/plugins/events', route => route.fulfill({
     status: 200,
     contentType: 'text/event-stream',
@@ -63,6 +64,7 @@ async function installNativeMock(page) {
     if (route.request().method() !== 'POST') return route.fallback()
     const body = JSON.parse(route.request().postData() ?? '{}')
     assert.equal(body.type, 'client-request', `unexpected native request envelope for ${body.method}`)
+    requests.push(body.method)
     return route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -73,7 +75,7 @@ async function installNativeMock(page) {
       }),
     })
   })
-  return sockets
+  return { sockets, requests }
 }
 
 async function waitForServer() {
@@ -104,7 +106,7 @@ async function runDesktop(browser) {
   page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
   page.on('pageerror', error => issues.push(error.message))
   page.on('response', response => { if (response.status() >= 400) issues.push(`http ${response.status()}: ${response.url()}`) })
-  const sockets = await installNativeMock(page)
+  const { sockets, requests } = await installNativeMock(page)
   await page.goto(baseUrl, { waitUntil: 'domcontentloaded' })
   await waitForNativeShell(page)
   assert.ok(sockets.has('/api/events.mux'), 'native mux WebSocket was not opened')
@@ -134,7 +136,7 @@ async function runDesktop(browser) {
   assert.deepEqual(issues, [])
   await page.screenshot({ path: resolve(artifactDirectory, 'shutu-native-desktop.png') })
   await page.close()
-  return { sockets: [...sockets].sort(), console: 'clean' }
+  return { sockets: [...sockets].sort(), requests: [...new Set(requests)].sort(), console: 'clean' }
 }
 
 async function runMobile(browser) {

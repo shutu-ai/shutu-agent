@@ -58,6 +58,7 @@
 - [ ] P36-5.4：完成子代理、后台任务、技能、文件引用、附件、模型、权限、Provider 和设置。
 - [x] P36-5.4a：原生 Remote 接入 `fileReferences/list` 与 `sessionReferenceResolver/candidates`，返回受会话 CWD 限制的文件候选和 canonical `dsh-session:` 引用。
 - [x] P36-5.4b：原生 Remote 接入 `pluginInventory/list`，返回与 native manifest 对齐的插件条目和生命周期状态。
+- [x] P36-5.4c：Playwright 原生冷启动验证 Host/session/workspace/settings/preset/credentials 与 Cordis inventory 能力握手、双 WebSocket 建立及零控制台错误。
 - [ ] P36-5.5：完成 export、feedback、错误恢复、重连和 session 状态提示。
 - [x] P36-5.5a：原生 Remote 接入 `messageFeedback/list|put|delete` 的 messageId/version CAS；斜杠命令支持图片附件。
 - [x] P36-5.5b：`session.cancel` 对无活动 turn 幂等返回 accepted，对未知会话返回结构化 `session-not-found`。
