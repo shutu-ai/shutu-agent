@@ -876,6 +876,30 @@ func TestDeriveHistoryMemoFoldsIncrementalEventsAndInvalidatesReplacement(t *tes
 	}
 }
 
+func TestNextTurnUsesRestoredAndAppendedLifecycleAnchors(t *testing.T) {
+	l := New()
+	if got := l.NextTurn(); got != 1 {
+		t.Fatalf("empty NextTurn = %d, want 1", got)
+	}
+	if _, err := l.Append(EventTurnStart, NewTurnStart()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.Append(EventTurnStart, NewTurnStart()); err != nil {
+		t.Fatal(err)
+	}
+	if got := l.NextTurn(); got != 3 {
+		t.Fatalf("appended NextTurn = %d, want 3", got)
+	}
+
+	restored := New()
+	if err := restored.Restore(l.Events()); err != nil {
+		t.Fatal(err)
+	}
+	if got := restored.NextTurn(); got != 3 {
+		t.Fatalf("restored NextTurn = %d, want 3", got)
+	}
+}
+
 func TestDeriveHistoryReplaceShadowingMixedEvents(t *testing.T) {
 	l := New()
 	// Shadowed range spans user, assistant (with a tool call) and tool/result.

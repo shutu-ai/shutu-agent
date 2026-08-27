@@ -276,6 +276,7 @@ type Log struct {
 	mu                  sync.RWMutex
 	events              []Event
 	seq                 uint64
+	turnStarts          int
 	sink                func(Event) error // optional durable sink (D8), called after each append
 	derivedHistory      []llm.Message
 	derivedHistoryValid bool
@@ -305,6 +306,7 @@ func (l *Log) Restore(events []Event) error {
 	defer l.mu.Unlock()
 	l.events = nil
 	l.seq = 0
+	l.turnStarts = 0
 	l.derivedHistory = nil
 	l.derivedHistoryValid = false
 	var last uint64
@@ -313,6 +315,9 @@ func (l *Log) Restore(events []Event) error {
 			return fmt.Errorf("session: non-monotonic seq %d after %d in replay", ev.Seq, last)
 		}
 		l.events = append(l.events, ev)
+		if ev.Type == EventTurnStart {
+			l.turnStarts++
+		}
 		last = ev.Seq
 	}
 	l.seq = last
@@ -350,6 +355,9 @@ func (l *Log) Append(typ string, data any) (Event, error) {
 			l.derivedHistory = append(l.derivedHistory, derive([]Event{ev})...)
 		}
 	}
+	if ev.Type == EventTurnStart {
+		l.turnStarts++
+	}
 	return ev, nil
 }
 
@@ -377,13 +385,7 @@ func (l *Log) NextSeq() uint64 {
 func (l *Log) NextTurn() int {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	turn := 1
-	for _, ev := range l.events {
-		if ev.Type == EventTurnStart {
-			turn++
-		}
-	}
-	return turn
+	return l.turnStarts + 1
 }
 
 // DeriveHistory folds the log into model-visible messages (design.md §3:

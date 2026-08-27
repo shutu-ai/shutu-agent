@@ -271,6 +271,9 @@ func toWireTool(t llm.ToolSchema) wireTool {
 // backoff up to maxRetries; the context is honored both by the HTTP request
 // and between attempts. 4xx errors are returned immediately (dispatch-m2 §5).
 func (c *Client) Stream(ctx context.Context, req llm.ChatRequest) (llm.StreamReader, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("deepseek: cancelled: %w", err)
+	}
 	// M8-3b image fail-closed check FIRST (dispatch-m8-3b §3): a model that
 	// does not declare image input must error on an image request, never
 	// silently drop it. The check runs before offload so offloading cannot
@@ -286,6 +289,9 @@ func (c *Client) Stream(ctx context.Context, req llm.ChatRequest) (llm.StreamRea
 	// first, are replaced by the OffloadedImageText placeholder) before
 	// serialization.
 	msgs := llm.OffloadRequestImages(req.Messages, c.maxRequestImageBytes)
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("deepseek: cancelled: %w", err)
+	}
 
 	body := chatBody{Model: c.model, Stream: true}
 	// dsh 思考强度 (ModelSelect effort): "off" 明确关掉思考 (请求不带
@@ -297,6 +303,9 @@ func (c *Client) Stream(ctx context.Context, req llm.ChatRequest) (llm.StreamRea
 		body.ReasoningEffort = req.ReasoningEffort
 	}
 	for _, m := range msgs {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("deepseek: cancelled: %w", err)
+		}
 		wm, err := toWireMessage(m)
 		if err != nil {
 			return nil, err
@@ -304,7 +313,13 @@ func (c *Client) Stream(ctx context.Context, req llm.ChatRequest) (llm.StreamRea
 		body.Messages = append(body.Messages, wm)
 	}
 	for _, t := range req.Tools {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("deepseek: cancelled: %w", err)
+		}
 		body.Tools = append(body.Tools, toWireTool(t))
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("deepseek: cancelled: %w", err)
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
