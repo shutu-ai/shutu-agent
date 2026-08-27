@@ -54,6 +54,7 @@
 - [x] P36-5.2b：接入 DSH `approval/requested`/`question/requested` mux 下行、稳定 rpcId 重放和 `POST /api/respond`，回答结果回写同一 interact 引擎并广播 resolved。
 - [x] P36-5.2c：在 native mux 订阅基线下发 DSH `session/queue` 快照，并将队列消息转换为 user content/source/placement 结构。
 - [x] P36-5.2d：在 native mux 订阅基线下发已有后台任务的 DSH `session/jobs` 快照，统一 camelCase 字段与毫秒时间戳。
+- [x] P36-5.2e：Playwright 原生 loaded-session fixture 覆盖反馈懒加载、评分/备注保存/撤回及 Composer `session.prompt` 发送，并断言对应 DSH Remote 请求实际发出。
 - [ ] P36-5.3：完成 Tool 折叠、请求详情、Trajectory、搜索、历史分页和滚动定位。
 - [x] P36-5.3c：Playwright 密集事件 fixture 验证搜索命中、请求详情、Trajectory、`beforeSeq` 历史分页、Turn 折叠/展开及虚拟行渲染。
 - [ ] P36-5.4：完成子代理、后台任务、技能、文件引用、附件、模型、权限、Provider 和设置。

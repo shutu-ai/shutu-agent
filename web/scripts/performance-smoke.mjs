@@ -62,13 +62,25 @@ const projections = { asOfSeq: events.length, values: {
   tokenUsage: { cacheReadTokens: 0, cacheWriteTokens: 0, outputTokens: events.length, uncachedInputTokens: 0 },
 } }
 
-function valueFor(method) {
+function valueFor(method, request = null) {
   switch (method) {
     case 'host.describe': return { attachedSessions: 1, canOpenPath: false, cwd: 'C:/shutu-perf', home: '', model: 'perf', version: 'perf' }
     case 'session.list': return { items: [{ sessionId: 'perf', title: 'Native performance fixture', updatedAt: Date.now(), running: false, blank: false, cwd: 'C:/shutu-perf', projections }] }
     case 'workspace.list': return { items: [{ workspaceId: 'perf-ws', path: 'C:/shutu-perf', title: 'Performance', sessionIds: ['perf'], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }], archivedSessionIds: [] }
     case 'session.history': return historyPage()
     case 'session.search': return { items: [{ sessionId: 'perf', snippet: 'tool result 777' }], hasMore: false }
+    case 'session.prompt': return { accepted: true }
+    case 'messageFeedback/list': return { ok: true, value: { items: [] } }
+    case 'messageFeedback/put': {
+      const args = Array.isArray(request?.payload?.args) ? request.payload.args : []
+      const input = args[0] && typeof args[0] === 'object' ? args[0] : {}
+      return { ok: true, value: {
+        messageId: String(input.messageId ?? 'perf-message'), rating: String(input.rating ?? 'positive'),
+        note: typeof input.note === 'string' ? input.note : undefined, version: 'perf-feedback:1',
+        createdAt: Date.now(), updatedAt: Date.now(),
+      } }
+    }
+    case 'messageFeedback/delete': return { ok: true, value: { absent: true } }
     case 'settings.describe': return { hasDocument: false, namespaces: [] }
     case 'credentials.describe': return { credentials: {} }
     case 'agentPreset.list': return { authorable: false, hasDocument: false, presets: [] }
@@ -118,7 +130,7 @@ async function installNativeMock(page) {
     const body = JSON.parse(route.request().postData() ?? '{}')
     assert.equal(body.type, 'client-request')
     requests.push({ method: body.method, payload: body.payload })
-    const value = body.method === 'session.history' ? historyPage(body.payload) : valueFor(body.method)
+    const value = body.method === 'session.history' ? historyPage(body.payload) : valueFor(body.method, body)
     return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ type: 'server-response', rpcId: body.rpcId, result: { ok: true, value } }) })
   })
   return { sockets, requests }
@@ -169,6 +181,31 @@ try {
     const results = page.getByRole('tree', { name: /Search results|搜索结果/ }).getByRole('treeitem')
     await results.first().waitFor({ timeout: 60_000 })
     await results.first().dispatchEvent('click')
+    // Exercise the loaded conversation's native message actions before
+    // switching to Trajectory. The feedback controller intentionally loads
+    // lazily on focus, so this proves the browser reaches the DSH Remote
+    // namespace rather than only rendering the buttons.
+    const like = page.getByRole('button', { name: /Good response|有帮助|好的回答/ }).first()
+    await like.focus()
+    await like.click()
+    const rated = page.getByRole('button', { name: /Remove rating|取消评价|取消标记/ }).first()
+    await rated.waitFor({ timeout: 15_000 })
+    await page.getByRole('button', { name: /Add a note|添加备注|添加说明|补充说明/ }).first().click()
+    const feedbackNote = page.getByRole('textbox', { name: /Feedback note|反馈说明/ })
+    await feedbackNote.fill('native fixture note')
+    await page.getByRole('button', { name: /^(?:Save|保存)$/ }).click()
+    await page.getByText('native fixture note', { exact: true }).waitFor({ timeout: 15_000 })
+    await rated.click()
+    await page.getByRole('button', { name: /Good response|有帮助|好的回答/ }).first().waitFor({ timeout: 15_000 })
+    assert.ok(requests.some(request => request.method === 'messageFeedback/list'), 'native feedback did not load its list')
+    assert.ok(requests.some(request => request.method === 'messageFeedback/put'), 'native feedback did not persist its rating/note')
+    assert.ok(requests.some(request => request.method === 'messageFeedback/delete'), 'native feedback did not retract its rating')
+
+    const composer = page.locator('textarea').first()
+    await composer.fill('native fixture prompt')
+    await composer.press('Enter')
+    await page.waitForFunction(() => document.querySelector('textarea')?.value === '')
+    assert.ok(requests.some(request => request.method === 'session.prompt'), 'native composer did not send session.prompt')
     const tab = page.getByRole('tab', { name: /轨迹|Trajectory/ })
     await tab.waitFor({ timeout: 60_000 })
     await tab.click()
