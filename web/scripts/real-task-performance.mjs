@@ -15,6 +15,7 @@ const skipSelection = process.env.SHUTU_REAL_TASK_SKIP_SELECTION === '1'
 const triggerPrompt = process.env.SHUTU_REAL_TASK_PROMPT?.trim() ?? ''
 const triggerMode = process.env.SHUTU_REAL_TASK_MODE === 'queue' ? 'queue' : 'steer'
 const enforceThresholds = process.env.SHUTU_REAL_TASK_ENFORCE_THRESHOLDS === '1'
+const warmupMs = Number(process.env.SHUTU_REAL_TASK_WARMUP_MS ?? 750)
 const performanceThresholds = {
   minFps: Number(process.env.SHUTU_REAL_TASK_MIN_FPS ?? 30),
   maxHeapGrowthMiB: Number(process.env.SHUTU_REAL_TASK_MAX_HEAP_GROWTH_MIB ?? 128),
@@ -23,6 +24,11 @@ const performanceThresholds = {
   maxEventToUiMs: Number(process.env.SHUTU_REAL_TASK_MAX_EVENT_TO_UI_MS ?? 500),
   maxReconnectMs: Number(process.env.SHUTU_REAL_TASK_MAX_RECONNECT_MS ?? 1_500),
 }
+// Lifecycle anchors (turn/start, step/start, request/context, etc.) are
+// intentionally batched by the native DSH projection and do not represent a
+// visible streaming cell. Measure latency for events that can update the
+// Conversation/Trajectory content surface, while retaining all frame counts
+// and sequence ranges in the report.
 
 if (!existsSync(playwrightRoot)) throw new Error(`Playwright is unavailable under ${dshRoot}`)
 if (!sessionId) throw new Error('usage: node scripts/real-task-performance.mjs <session-id> [duration-seconds]')
@@ -181,10 +187,30 @@ async function sampleBrowser(page) {
   })
 }
 
+async function resetBrowserMetrics(page) {
+  await page.evaluate(() => {
+    const metrics = window.__shutuRealMetrics
+    if (metrics === undefined) return
+    metrics.frames = 0
+    metrics.longTasks = 0
+    metrics.longTaskMs = 0
+    metrics.mutationAt = 0
+    metrics.mutations = 0
+    metrics.mutationTimes = []
+    metrics.nativeEventAt = 0
+    metrics.nativeEventPending = false
+    metrics.nativeEventToUiMs = []
+  })
+}
+
 const browser = await chromium.launch({ headless: true, args: ['--enable-precise-memory-info'] })
 const page = await browser.newPage({ viewport: { width: 1440, height: 960 } })
 await page.addInitScript(() => {
   const NativeWebSocket = window.WebSocket
+  const streamUiEventTypes = new Set([
+    'assistant/chunk', 'assistant/reasoning', 'assistant/message',
+    'tool/call', 'tool/result', 'tool/error',
+  ])
   function ObservedWebSocket(...args) {
     const socket = new NativeWebSocket(...args)
     socket.addEventListener('message', message => {
@@ -192,6 +218,8 @@ await page.addInitScript(() => {
       try {
         const envelope = JSON.parse(message.data)
         if (envelope?.payload?.type !== 'session/event') return
+        const eventType = envelope.payload.event?.type ?? envelope.payload.event?.event?.type
+        if (!streamUiEventTypes.has(eventType)) return
         const metrics = window.__shutuRealMetrics ?? (window.__shutuRealMetrics = {
           nativeEventAt: 0, nativeEventPending: false, nativeEventToUiMs: [],
         })
@@ -208,7 +236,7 @@ await page.addInitScript(() => {
   window.WebSocket = ObservedWebSocket
 })
 const consoleErrors = []
-const stream = { eventFrames: 0, firstEventSeq: null, lastEventSeq: null, latencies: [], invalidTurnFrames: [] }
+const stream = { eventFrames: 0, firstEventSeq: null, lastEventSeq: null, latencies: [], invalidTurnFrames: [], eventTypes: new Set() }
 const reconnectAfterMs = Number(process.env.SHUTU_REAL_TASK_RECONNECT_AFTER_MS ?? 0)
 const reconnect = { requested: Number.isFinite(reconnectAfterMs) && reconnectAfterMs > 0, connections: 0, closedAt: null, reconnectedAt: null }
 if (reconnect.requested) {
@@ -243,6 +271,7 @@ page.on('websocket', websocket => {
     const seq = Number(envelope?.payload?.event?.seq)
     if (!Number.isFinite(seq)) return
     const event = envelope?.payload?.event
+    stream.eventTypes.add(String(event?.type))
     const eventTurn = Number(event?.data?.turn)
     if (event && (event.type === 'assistant/chunk' || event.type === 'assistant/message') && Number.isFinite(eventTurn) && eventTurn < 0) {
       stream.invalidTurnFrames.push({ seq, type: event.type, turn: eventTurn, step: Number(event.data?.step) })
@@ -265,6 +294,17 @@ try {
   await page.locator('[data-trajectory-scroll]').waitFor({ timeout: 60_000 })
   await page.locator('[data-trajectory-scroll] table[data-scroll-ready="true"]').waitFor({ timeout: 60_000 })
   await installBrowserMetrics(page)
+  // The native DSH session projection can finish a last baseline mutation
+  // shortly after the table advertises readiness. Let that initial layout
+  // settle, then reset the sampler so event-to-UI measures only the live turn.
+  if (Number.isFinite(warmupMs) && warmupMs > 0) await page.waitForTimeout(warmupMs)
+  await resetBrowserMetrics(page)
+  stream.eventFrames = 0
+  stream.firstEventSeq = null
+  stream.lastEventSeq = null
+  stream.latencies = []
+  stream.invalidTurnFrames = []
+  stream.eventTypes = new Set()
   process.stderr.write(`observer-ready native session=${sessionId}\n`)
   let triggerStatus = null
   let promptAdmissionMs = null
@@ -332,6 +372,7 @@ try {
     streamEventFrames: stream.eventFrames,
     streamFirstEventSeq: stream.firstEventSeq,
     streamLastEventSeq: stream.lastEventSeq,
+    streamEventTypes: [...stream.eventTypes],
     streamInvalidTurnFrames: stream.invalidTurnFrames,
     streamEventsPerSecond: Math.round(stream.eventFrames / Math.max(1, samples.at(-1)?.elapsedSeconds ?? 0) * 100) / 100,
     triggerStatus,
