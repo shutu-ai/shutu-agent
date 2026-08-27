@@ -15,12 +15,22 @@ import (
 // existing plan engine as a storage projection while exposing only DSH's
 // canonical tool names.
 type DSHTools struct {
-	e       Engine
-	onEvent func(string, any)
+	e                 Engine
+	onEvent           func(string, any)
+	owner             func() string
+	allowParallelTodo bool
 }
 
 func NewDSHTools(e Engine, onEvent func(string, any)) *DSHTools {
-	return &DSHTools{e: e, onEvent: onEvent}
+	return NewDSHToolsWithOwner(e, onEvent, nil, true)
+}
+
+// NewDSHToolsWithOwner binds the model-facing todo list to the addressed
+// session. DSH rejects todo writes without an owning agent; the owner callback
+// is intentionally supplied by the composition root rather than inferred
+// from a process-global plan engine.
+func NewDSHToolsWithOwner(e Engine, onEvent func(string, any), owner func() string, allowParallel bool) *DSHTools {
+	return &DSHTools{e: e, onEvent: onEvent, owner: owner, allowParallelTodo: allowParallel}
 }
 
 func (t *DSHTools) GetGoal() GetGoalTool       { return GetGoalTool{t: t} }
@@ -220,8 +230,62 @@ func (TodoWriteTool) Schema() map[string]any {
 		}, "required": []string{"todos"}, "additionalProperties": false,
 	}
 }
-func (TodoWriteTool) OutputSchema() map[string]any { return map[string]any{"type": "string"} }
+func (TodoWriteTool) OutputSchema() map[string]any {
+	return map[string]any{
+		"type": "object", "additionalProperties": false,
+		"required": []string{"todos", "counts"},
+		"properties": map[string]any{
+			"todos": map[string]any{
+				"type": "array", "items": map[string]any{
+					"type": "object", "additionalProperties": false,
+					"required": []string{"content", "status"},
+					"properties": map[string]any{
+						"content": map[string]any{"type": "string"},
+						"status":  map[string]any{"type": "string", "enum": []string{"pending", "in_progress", "completed"}},
+					},
+				},
+			},
+			"counts": map[string]any{
+				"type": "object", "additionalProperties": false,
+				"required": []string{"pending", "inProgress", "completed"},
+				"properties": map[string]any{
+					"pending":    map[string]any{"type": "integer"},
+					"inProgress": map[string]any{"type": "integer"},
+					"completed":  map[string]any{"type": "integer"},
+				},
+			},
+		},
+	}
+}
+
 func (t TodoWriteTool) Execute(ctx context.Context, args any) (string, error) {
+	value, err := t.write(ctx, args)
+	if err != nil {
+		return "", err
+	}
+	b, err := json.Marshal(value)
+	return string(b), err
+}
+
+// ExecuteResult exposes DSH's structured todo result to the registry. Output
+// is the compact native render while Value remains the complete canonical
+// snapshot for replay, validation and UI consumers.
+func (t TodoWriteTool) ExecuteResult(ctx context.Context, args any) (agenttools.ToolResult, error) {
+	value, err := t.write(ctx, args)
+	if err != nil {
+		return agenttools.ToolResult{}, err
+	}
+	counts := value["counts"].(map[string]any)
+	return agenttools.ToolResult{
+		Value:  value,
+		Output: fmt.Sprintf("Updated todo list: %d pending, %d in progress, %d completed.", counts["pending"], counts["inProgress"], counts["completed"]),
+	}, nil
+}
+
+func (t TodoWriteTool) write(ctx context.Context, args any) (map[string]any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	var in struct {
 		Todos []struct {
 			Content string `json:"content"`
@@ -229,22 +293,42 @@ func (t TodoWriteTool) Execute(ctx context.Context, args any) (string, error) {
 		} `json:"todos"`
 	}
 	if err := agenttools.DecodeArgs(args, &in); err != nil {
-		return "", fmt.Errorf("todo_write: %w", err)
+		return nil, fmt.Errorf("todo_write: %w", err)
 	}
-	items := make([]map[string]string, len(in.Todos))
+	if t.t.owner != nil && strings.TrimSpace(t.t.owner()) == "" {
+		return nil, errors.New("todo_write requires an owning agent session")
+	}
+	items := make([]any, len(in.Todos))
+	seen := make(map[string]struct{}, len(in.Todos))
+	counts := map[string]any{"pending": 0, "inProgress": 0, "completed": 0}
 	for i, todo := range in.Todos {
-		if strings.TrimSpace(todo.Content) == "" {
-			return "", fmt.Errorf("todo_write: todos[%d].content is required", i)
+		content := strings.TrimSpace(todo.Content)
+		if content == "" {
+			return nil, fmt.Errorf("invalid todo: `content` must be a non-empty string")
 		}
+		if _, ok := seen[content]; ok {
+			return nil, fmt.Errorf("invalid todos: duplicate content %q", content)
+		}
+		seen[content] = struct{}{}
 		if todo.Status != "pending" && todo.Status != "in_progress" && todo.Status != "completed" {
-			return "", fmt.Errorf("todo_write: invalid status %q", todo.Status)
+			return nil, fmt.Errorf("todo_write: invalid status %q", todo.Status)
 		}
-		items[i] = map[string]string{"content": todo.Content, "status": todo.Status}
+		items[i] = map[string]any{"content": content, "status": todo.Status}
+		switch todo.Status {
+		case "pending":
+			counts["pending"] = counts["pending"].(int) + 1
+		case "in_progress":
+			counts["inProgress"] = counts["inProgress"].(int) + 1
+		case "completed":
+			counts["completed"] = counts["completed"].(int) + 1
+		}
+	}
+	if !t.t.allowParallelTodo && counts["inProgress"].(int) > 1 {
+		return nil, fmt.Errorf("invalid todos: at most one task may be in_progress (got %d)", counts["inProgress"])
 	}
 	payload := map[string]any{"todos": items}
 	t.t.emit("todo/write", payload)
-	encoded, _ := json.Marshal(payload)
-	return string(encoded), nil
+	return map[string]any{"todos": items, "counts": counts}, nil
 }
 
 func (t *DSHTools) currentGoal(ctx context.Context) (Goal, bool, error) {

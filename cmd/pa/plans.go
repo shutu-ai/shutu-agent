@@ -49,7 +49,11 @@ func (a *app) registerPlans() error {
 			}
 		}
 	}
-	pt := plan.NewDSHTools(eng, onEvent)
+	allowParallel := true
+	if a.cfg.Plan.AllowParallelInProgress != nil {
+		allowParallel = *a.cfg.Plan.AllowParallelInProgress
+	}
+	pt := plan.NewDSHToolsWithOwner(eng, onEvent, func() string { return a.currentID }, allowParallel)
 	for _, t := range []tools.Tool{
 		pt.GetGoal(),
 		pt.CreateGoal(),

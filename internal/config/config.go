@@ -549,6 +549,10 @@ type PlanConfig struct {
 	// created and the plan_* tools are neither registered nor whitelisted
 	// (D10).
 	Enabled *bool `yaml:"enabled"`
+	// AllowParallelInProgress mirrors DSH tool-todo's deployment policy. Nil is
+	// normalized to true, while an explicit false permits at most one active
+	// todo at a time.
+	AllowParallelInProgress *bool `yaml:"allow_parallel_in_progress"`
 }
 
 // SpillConfig is the long-term-memory policy (dispatch-m6c-2 §2 / ADR
@@ -1000,6 +1004,9 @@ func applyDefaults(cfg *Config) {
 	// six consumer tools, so the one plan.enabled switch turns the whole
 	// capability (Provider + Engine + tools + event logging) on (mirrors
 	if Enabled(cfg.Plan.Enabled) {
+		if cfg.Plan.AllowParallelInProgress == nil {
+			cfg.Plan.AllowParallelInProgress = Bool(true)
+		}
 		for _, name := range append(append([]string{}, goalToolNames...), todoToolNames...) {
 			if !contains(cfg.Tools.Enabled, name) {
 				cfg.Tools.Enabled = append(cfg.Tools.Enabled, name)

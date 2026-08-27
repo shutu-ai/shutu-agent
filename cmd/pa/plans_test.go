@@ -15,9 +15,10 @@ import (
 
 func makePlanApp(planEnabled bool) *app {
 	return &app{
-		cfg: config.Config{Plan: config.PlanConfig{Enabled: config.Bool(planEnabled)}},
-		reg: tools.New(),
-		log: session.New(),
+		cfg:       config.Config{Plan: config.PlanConfig{Enabled: config.Bool(planEnabled)}},
+		reg:       tools.New(),
+		log:       session.New(),
+		currentID: "s-plan",
 	}
 }
 
@@ -81,8 +82,59 @@ func TestRegisterPlansEnabledRegistersDSHTools(t *testing.T) {
 		t.Fatalf("update_goal complete = %q, err=%v", updated.Output, err)
 	}
 	todos, err := a.reg.Execute(context.Background(), "todo_write", json.RawMessage(`{"todos":[{"content":"Verify","status":"in_progress"}]}`))
-	if err != nil || !strings.Contains(todos.Output, "Verify") {
+	if err != nil || todos.Output != "Updated todo list: 0 pending, 1 in progress, 0 completed." {
 		t.Fatalf("todo_write = %q, err=%v", todos.Output, err)
+	}
+}
+
+func TestTodoWriteMatchesDshValidationAndStructuredResult(t *testing.T) {
+	a := makePlanApp(true)
+	a.cfg.Plan.AllowParallelInProgress = config.Bool(false)
+	a.reg.SetPolicy(planPolicy())
+	if err := a.registerPlans(); err != nil {
+		t.Fatalf("registerPlans: %v", err)
+	}
+	defer a.plans.Close()
+	duplicate, err := a.reg.Execute(context.Background(), "todo_write", json.RawMessage(`{"todos":[{"content":" inspect ","status":"pending"},{"content":"inspect","status":"completed"}]}`))
+	if err != nil {
+		t.Fatalf("duplicate call transport error: %v", err)
+	}
+	if !duplicate.IsError || !strings.Contains(duplicate.Output, `duplicate content "inspect"`) {
+		t.Fatalf("duplicate result = %#v", duplicate)
+	}
+	multiple, err := a.reg.Execute(context.Background(), "todo_write", json.RawMessage(`{"todos":[{"content":"one","status":"in_progress"},{"content":"two","status":"in_progress"}]}`))
+	if err != nil {
+		t.Fatalf("multiple active transport error: %v", err)
+	}
+	if !multiple.IsError || !strings.Contains(multiple.Output, "at most one task may be in_progress") {
+		t.Fatalf("multiple active result = %#v", multiple)
+	}
+	if _, err := a.reg.Execute(context.Background(), "todo_write", json.RawMessage(`{"todos":[{"content":"one","status":"pending"},{"content":"two","status":"completed"}]}`)); err != nil {
+		t.Fatalf("valid todo_write: %v", err)
+	}
+	valid, err := a.reg.Execute(context.Background(), "todo_write", json.RawMessage(`{"todos":[]}`))
+	if err != nil {
+		t.Fatalf("empty todo_write: %v", err)
+	}
+	if valid.Output != "Updated todo list: 0 pending, 0 in progress, 0 completed." {
+		t.Fatalf("empty result = %q", valid.Output)
+	}
+}
+
+func TestTodoWriteRequiresOwningAgentSession(t *testing.T) {
+	a := makePlanApp(true)
+	a.currentID = ""
+	a.reg.SetPolicy(planPolicy())
+	if err := a.registerPlans(); err != nil {
+		t.Fatalf("registerPlans: %v", err)
+	}
+	defer a.plans.Close()
+	result, err := a.reg.Execute(context.Background(), "todo_write", json.RawMessage(`{"todos":[]}`))
+	if err != nil {
+		t.Fatalf("todo_write transport error: %v", err)
+	}
+	if !result.IsError || !strings.Contains(result.Output, "requires an owning agent session") {
+		t.Fatalf("owner result = %#v", result)
 	}
 }
 
