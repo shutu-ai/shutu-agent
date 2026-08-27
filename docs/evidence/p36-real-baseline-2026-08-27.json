@@ -82,5 +82,15 @@
     "dataDirectory": "Linux-native /tmp",
     "cleanStop": true,
     "scope": "local-linux-like-evidence; not-a-formal-production-host"
+  },
+  "wsl2CurrentRevision": {
+    "revision": "822ea29",
+    "distribution": "AlmaLinux-8",
+    "binary": "GOOS=linux GOARCH=amd64 CGO_ENABLED=0",
+    "healthHttp": 200,
+    "staticHttp": 200,
+    "websocketUpgrade": { "mux": 101, "host": 101 },
+    "cleanStop": true,
+    "scope": "local-linux-like-evidence; not-a-formal-production-host"
   }
 }

@@ -261,6 +261,15 @@ WSL distro. The process was interrupted and the distro had no remaining
 `18099` listener. This completes the WSL local transport check while keeping
 the formal target-host item open.
 
+The same WSL runtime check was rerun with the current `822ea29` Linux amd64
+binary after the bounded-compaction change. From the Linux side, `/api/health`
+and `/` both returned `200`; curl's raw HTTP/1.1 upgrade against
+`/api/events.mux` and `/api/events.host` both returned `101 Switching
+Protocols`. The service was started as a separately owned WSL process,
+identified by its exact Linux PID, then terminated and verified to have no
+remaining `18099` listener. This advances P36-8.2 for the current revision but
+is still local WSL2 evidence, not the formal target Linux host.
+
 The WSL shared-data failure-recovery check then started the old Linux binary,
 verified health and the existing `s-743c4600` event endpoint at `200`, started
 the current Linux binary and verified the same checks, injected a SIGKILL to
