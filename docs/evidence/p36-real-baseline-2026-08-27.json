@@ -135,4 +135,34 @@
     "cleanStop": true,
     "scope": "local-linux-like-evidence; not-a-formal-production-host"
   }
+  ,"wsl2CurrentSourceRevision": {
+    "revision": "26a3223",
+    "distribution": "AlmaLinux-8",
+    "binary": "ELF GOOS=linux GOARCH=amd64 CGO_ENABLED=0",
+    "dataDirectory": "/tmp/shutu-agent-p36-data",
+    "environment": "DEEPSEEK_API_KEY forwarded transiently with WSLENV; not persisted",
+    "healthHttp": 200,
+    "staticHttp": 200,
+    "sessionsHttp": 200,
+    "websocketUpgrade": { "mux": 101, "host": 101 },
+    "cleanStop": true,
+    "scope": "local-linux-like-evidence; not-a-formal-production-host"
+  },
+  "wsl2UpgradeRollbackRecoveryCurrent": {
+    "revision": "26a3223",
+    "distribution": "AlmaLinux-8",
+    "dataDirectory": "/tmp/shutu-agent-p36-data",
+    "oldBinary": "pa-linux-p36-turnfix",
+    "currentBinary": "pa-linux-p36-current",
+    "upgrade": { "healthHttp": 200, "existingSessionEventsHttp": 200 },
+    "rollback": { "healthHttp": 200, "existingSessionEventsHttp": 200 },
+    "failureInjection": {
+      "signal": "SIGKILL",
+      "portReleased": true,
+      "recoveryBinary": "pa-linux-p36-turnfix",
+      "healthHttp": 200,
+      "existingSessionEventsHttp": 200
+    },
+    "scope": "local-linux-like-evidence; not-a-formal-production-host"
+  }
 }

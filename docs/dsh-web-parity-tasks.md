@@ -140,10 +140,12 @@
 - [x] P36-8.2d：AlmaLinux-8 WSL2 使用 Linux 原生 `/tmp` 数据目录完成 runtime smoke：静态首页、`/api/health`、`/api/sessions`、native 两条 WebSocket 均正常，Chromium 控制台错误和横向溢出均为 0；正式目标 Linux 机仍待验收。
 - [x] P36-8.2f：以 revision `0121736` 的 Linux amd64 二进制在 AlmaLinux-8 WSL2 重跑本机验收：`/api/health=200`、静态首页 `200`、`/api/events.mux` 与 `/api/events.host` 原始 upgrade 均为 `101`，服务停止后无残留 `18099` 监听；正式目标 Linux 机仍待验收。
 - [x] P36-8.2g：以当前 revision `822ea29` 的 Linux amd64 二进制在 AlmaLinux-8 WSL2 重跑验收：`/api/health=200`、静态首页 `200`、Linux 侧 curl 对 `/api/events.mux` 与 `/api/events.host` 均返回 `101 Switching Protocols`，精确停止后无残留 `18099` 监听；正式目标 Linux 机仍待验收。
+- [x] P36-8.2h：以代码 revision `26a3223` 重新交叉构建 ELF Linux amd64 二进制，在 AlmaLinux-8 WSL2 通过临时 `WSLENV` 转发 provider 凭据启动；`/api/health`、静态首页、`/api/sessions` 均为 `200`，两条 native WebSocket 均为 `101`，精确停止后无残留监听；正式目标 Linux 机仍待验收。
 - [ ] P36-8.3：验证升级、数据目录复用、回滚和失败恢复。
 - [x] P36-8.3a：本机 Windows 部署 smoke 使用共享 `data_dir` 完成初始包、升级副本和回滚副本启动检查；目标环境失败恢复仍待补齐。
 - [x] P36-8.3b：AlmaLinux-8 WSL2 使用共享 Linux 原生数据目录完成旧 binary 建立会话、新 binary 升级、旧 binary 回滚；升级/回滚后 `/api/health=200` 且会话 `s-743c4600` 持续可读，正式目标机失败恢复仍待补齐。
 - [x] P36-8.3c：在同一 WSL2 共享数据目录对当前 Linux binary 做精确 PID 故障注入，确认端口释放后旧 binary 恢复，`/api/health=200` 且既有会话 `s-743c4600` 的事件接口仍为 `200`；正式目标机故障注入仍待验收。
+- [x] P36-8.3d：以当前代码 revision `26a3223` 的 ELF Linux binary 完成 WSL2 旧版→当前版升级、当前版→旧版回滚及当前版 SIGKILL 恢复；共享 `/tmp/shutu-agent-p36-data` 中既有会话 `s-743c4600` 在每次切换后可读，恢复后 health/event 均为 `200`，正式目标机故障注入仍待验收。
 - [ ] P36-8.4：完成目标环境部署记录、验收报告和回滚操作手册。
 - [x] P36-8.4a：新增 `docs/p36-deployment-runbook.md`，记录 Windows/WSL/Linux 启动、健康/API/WebSocket 验收、共享数据升级、回滚和失败恢复步骤；正式目标机部署记录仍待补齐。
 

@@ -36,8 +36,12 @@ WSL2 本机复测可使用 AlmaLinux-8：
 
 ```powershell
 $env:WSLENV = "DEEPSEEK_API_KEY/u"
-wsl.exe -d AlmaLinux-8 -- bash -lc "cd /mnt/d/dev-projects/Agent/shutu-agent && exec ./.smoke/pa-linux-p36-turnfix --web-only --config config/config-linux-p36.yaml"
+wsl.exe -d AlmaLinux-8 -- bash -lc "cd /mnt/d/dev-projects/Agent/shutu-agent && exec ./.smoke/pa-linux-p36-current --web-only --config config/config-linux-p36.yaml"
 ```
+
+`WSLENV` 只把当前 PowerShell 环境中的 `DEEPSEEK_API_KEY` 临时转发到
+WSL；不要把 key 写入 `config.yaml`、测试脚本、发布包或日志。若未转发
+provider key，服务会在启动时退出并提示 provider 不可用，而不是形成监听。
 
 另一个终端在 distro 内执行 `curl -fsS http://127.0.0.1:18099/api/health`、
 `curl -fsS http://127.0.0.1:18099/`，并用原始 WebSocket upgrade 检查

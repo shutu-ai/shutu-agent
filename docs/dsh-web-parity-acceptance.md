@@ -279,6 +279,24 @@ identified by its exact Linux PID, then terminated and verified to have no
 remaining `18099` listener. This advances P36-8.2 for the current revision but
 is still local WSL2 evidence, not the formal target Linux host.
 
+The source revision `26a3223` was then cross-built as an ELF
+`GOOS=linux GOARCH=amd64 CGO_ENABLED=0` binary and rerun in AlmaLinux-8 WSL2.
+Because the provider key is intentionally environment-only, the test forwarded
+it transiently with `WSLENV=DEEPSEEK_API_KEY/u`; it was not written to config,
+the binary, or logs. Linux-side `/api/health`, `/`, and `/api/sessions` all
+returned `200`, raw upgrades for both native WebSockets returned `101`, and the
+exact process was stopped with no remaining `18099` listener. This is current
+source local evidence; it does not claim formal target-host deployment.
+
+Using the same Linux-native data directory, the current source binary was
+then exercised through old-binary startup, current-binary upgrade, old-binary
+rollback, and a precise `SIGKILL` failure injection. The existing session
+`s-743c4600` remained readable after upgrade and rollback; after the forced
+termination the `18099` listener was released and the old binary recovered
+with `/api/health=200` and the existing session events endpoint at `200`.
+This closes the reproducible WSL2 lifecycle slice while retaining the formal
+target-host deployment and systemd recovery items as open.
+
 ## P36-7.2 / P36-7.3 current frontend stream regression (2026-08-27)
 
 After the native event-card memoization and callback-stability change at
