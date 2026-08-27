@@ -53,7 +53,13 @@ func (a *app) registerPlans() error {
 	if a.cfg.Plan.AllowParallelInProgress != nil {
 		allowParallel = *a.cfg.Plan.AllowParallelInProgress
 	}
-	pt := plan.NewDSHToolsWithOwner(eng, onEvent, func() string { return a.currentID }, allowParallel)
+	blockedAfterRounds := 3
+	if a.cfg.Plan.BlockedAfterConsecutiveRounds != nil {
+		blockedAfterRounds = *a.cfg.Plan.BlockedAfterConsecutiveRounds
+	}
+	pt := plan.NewDSHToolsWithOwnerAndActivation(eng, onEvent, func() string { return a.currentID }, func() bool {
+		return a.goalIsArmed(a.currentID)
+	}, func(armed bool) { a.setGoalActivation(a.currentID, armed) }, allowParallel, blockedAfterRounds)
 	for _, t := range []tools.Tool{
 		pt.GetGoal(),
 		pt.CreateGoal(),

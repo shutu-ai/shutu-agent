@@ -129,7 +129,7 @@ func (d *Driver) Run(ctx context.Context, goalID string) (Result, error) {
 		prompt := renderPrompt(goal, admitted, max, d.Observe, ctx)
 		d.appendStart(goal.ID, admitted, prompt)
 		started++
-		runErr := d.Runner(ctx, prompt)
+		runErr := d.Runner(plan.WithGoalRound(ctx), prompt)
 		if runErr != nil {
 			d.disarm(goal)
 			if ctx.Err() != nil {

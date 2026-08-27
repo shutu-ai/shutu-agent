@@ -15,14 +15,17 @@ import (
 // existing plan engine as a storage projection while exposing only DSH's
 // canonical tool names.
 type DSHTools struct {
-	e                 Engine
-	onEvent           func(string, any)
-	owner             func() string
-	allowParallelTodo bool
+	e                  Engine
+	onEvent            func(string, any)
+	owner              func() string
+	activation         func() bool
+	setActivation      func(bool)
+	allowParallelTodo  bool
+	blockedAfterRounds int
 }
 
 func NewDSHTools(e Engine, onEvent func(string, any)) *DSHTools {
-	return NewDSHToolsWithOwner(e, onEvent, nil, true)
+	return NewDSHToolsWithOwnerAndActivation(e, onEvent, nil, nil, nil, true, 3)
 }
 
 // NewDSHToolsWithOwner binds the model-facing todo list to the addressed
@@ -30,7 +33,29 @@ func NewDSHTools(e Engine, onEvent func(string, any)) *DSHTools {
 // is intentionally supplied by the composition root rather than inferred
 // from a process-global plan engine.
 func NewDSHToolsWithOwner(e Engine, onEvent func(string, any), owner func() string, allowParallel bool) *DSHTools {
-	return &DSHTools{e: e, onEvent: onEvent, owner: owner, allowParallelTodo: allowParallel}
+	return NewDSHToolsWithOwnerAndActivation(e, onEvent, owner, nil, nil, allowParallel, 3)
+}
+
+// NewDSHToolsWithOwnerAndActivation binds goal activation to the addressed
+// session and applies DSH's configurable minimum blocked-round threshold.
+func NewDSHToolsWithOwnerAndActivation(e Engine, onEvent func(string, any), owner func() string, activation func() bool, setActivation func(bool), allowParallel bool, blockedAfterRounds int) *DSHTools {
+	if blockedAfterRounds < 1 {
+		blockedAfterRounds = 3
+	}
+	return &DSHTools{e: e, onEvent: onEvent, owner: owner, activation: activation, setActivation: setActivation, allowParallelTodo: allowParallel, blockedAfterRounds: blockedAfterRounds}
+}
+
+func (t *DSHTools) requireOwner(tool string) error {
+	if t.owner != nil && strings.TrimSpace(t.owner()) == "" {
+		return fmt.Errorf("%s requires an owning agent session", tool)
+	}
+	return nil
+}
+
+func (t *DSHTools) setArmed(armed bool) {
+	if t.setActivation != nil {
+		t.setActivation(armed)
+	}
 }
 
 func (t *DSHTools) GetGoal() GetGoalTool       { return GetGoalTool{t: t} }
@@ -53,19 +78,47 @@ func (GetGoalTool) Description() string {
 func (GetGoalTool) Schema() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}
 }
-func (GetGoalTool) OutputSchema() map[string]any { return map[string]any{"type": "string"} }
+func (GetGoalTool) OutputSchema() map[string]any { return goalOutputSchema() }
 func (t GetGoalTool) Execute(ctx context.Context, args any) (string, error) {
 	if _, err := decodeEmpty(args); err != nil {
 		return "", fmt.Errorf("get_goal: %w", err)
+	}
+	if err := t.t.requireOwner("get_goal"); err != nil {
+		return "", err
 	}
 	g, ok, err := t.t.currentGoal(ctx)
 	if err != nil {
 		return "", fmt.Errorf("get_goal: %w", err)
 	}
 	if !ok {
-		return "no active goal", nil
+		return marshalGoalValue(map[string]any{"goal": nil}), nil
 	}
-	return encodeGoal(g), nil
+	return marshalGoalValue(t.t.goalValue(g)), nil
+}
+
+func (t GetGoalTool) ExecuteResult(ctx context.Context, args any) (agenttools.ToolResult, error) {
+	value, err := t.value(ctx, args)
+	if err != nil {
+		return agenttools.ToolResult{}, err
+	}
+	return agenttools.ToolResult{Value: value, Output: marshalGoalValue(value)}, nil
+}
+
+func (t GetGoalTool) value(ctx context.Context, args any) (map[string]any, error) {
+	if _, err := decodeEmpty(args); err != nil {
+		return nil, fmt.Errorf("get_goal: %w", err)
+	}
+	if err := t.t.requireOwner("get_goal"); err != nil {
+		return nil, err
+	}
+	g, ok, err := t.t.currentGoal(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get_goal: %w", err)
+	}
+	if !ok {
+		return map[string]any{"goal": nil}, nil
+	}
+	return t.t.goalValue(g), nil
 }
 
 type CreateGoalTool struct{ t *DSHTools }
@@ -79,28 +132,47 @@ func (CreateGoalTool) Schema() map[string]any {
 		"type": "object",
 		"properties": map[string]any{
 			"objective":       map[string]any{"type": "string", "minLength": 1},
-			"max_goal_rounds": map[string]any{"type": "integer", "minimum": 1},
+			"max_goal_rounds": map[string]any{"type": "integer"},
 		},
 		"required": []string{"objective"}, "additionalProperties": false,
 	}
 }
-func (CreateGoalTool) OutputSchema() map[string]any { return map[string]any{"type": "string"} }
+func (CreateGoalTool) OutputSchema() map[string]any { return goalOutputSchema() }
 func (t CreateGoalTool) Execute(ctx context.Context, args any) (string, error) {
+	value, err := t.value(ctx, args)
+	if err != nil {
+		return "", err
+	}
+	return marshalGoalValue(value), nil
+}
+
+func (t CreateGoalTool) ExecuteResult(ctx context.Context, args any) (agenttools.ToolResult, error) {
+	value, err := t.value(ctx, args)
+	if err != nil {
+		return agenttools.ToolResult{}, err
+	}
+	return agenttools.ToolResult{Value: value, Output: marshalGoalValue(value)}, nil
+}
+
+func (t CreateGoalTool) value(ctx context.Context, args any) (map[string]any, error) {
+	if err := t.t.requireOwner("create_goal"); err != nil {
+		return nil, err
+	}
 	var in struct {
 		Objective     string `json:"objective"`
 		MaxGoalRounds int    `json:"max_goal_rounds"`
 	}
 	if err := agenttools.DecodeArgs(args, &in); err != nil {
-		return "", fmt.Errorf("create_goal: %w", err)
+		return nil, fmt.Errorf("create_goal: %w", err)
 	}
 	in.Objective = strings.TrimSpace(in.Objective)
 	if in.Objective == "" {
-		return "", errors.New("create_goal: objective is required")
+		return nil, errors.New("create_goal: objective is required")
 	}
 	if _, ok, err := t.t.currentGoal(ctx); err != nil {
-		return "", fmt.Errorf("create_goal: %w", err)
+		return nil, fmt.Errorf("create_goal: %w", err)
 	} else if ok {
-		return "", errors.New("create_goal: an active goal already exists")
+		return nil, errors.New("create_goal: an active goal already exists")
 	}
 	var g Goal
 	var err error
@@ -112,13 +184,13 @@ func (t CreateGoalTool) Execute(ctx context.Context, args any) (string, error) {
 		g, err = t.t.e.CreateGoal(ctx, firstGoalTitle(in.Objective), in.Objective)
 	}
 	if err != nil {
-		return "", fmt.Errorf("create_goal: %w", err)
+		return nil, fmt.Errorf("create_goal: %w", err)
 	}
 	t.t.emit(session.EventPlanCreate, session.NewPlanCreate(string(ScopeGoal), g.ID, g.Title, nil, map[string]any{
 		"objective": g.Objective, "status": g.Status, "revision": g.Revision,
 		"maxRounds": g.MaxRounds, "roundsStarted": g.RoundsStarted, "createdAt": g.CreatedAt,
 	}))
-	return encodeGoal(g), nil
+	return t.t.goalValue(g), nil
 }
 
 type UpdateGoalTool struct{ t *DSHTools }
@@ -141,75 +213,129 @@ func (UpdateGoalTool) Schema() map[string]any {
 		"required": []string{"goal_id", "revision", "action"}, "additionalProperties": false,
 	}
 }
-func (UpdateGoalTool) OutputSchema() map[string]any { return map[string]any{"type": "string"} }
+func (UpdateGoalTool) OutputSchema() map[string]any { return goalOutputSchema() }
 func (t UpdateGoalTool) Execute(ctx context.Context, args any) (string, error) {
+	value, err := t.value(ctx, args)
+	if err != nil {
+		return "", err
+	}
+	return marshalGoalValue(value), nil
+}
+
+func (t UpdateGoalTool) ExecuteResult(ctx context.Context, args any) (agenttools.ToolResult, error) {
+	value, err := t.value(ctx, args)
+	if err != nil {
+		return agenttools.ToolResult{}, err
+	}
+	return agenttools.ToolResult{Value: value, Output: marshalGoalValue(value)}, nil
+}
+
+func (t UpdateGoalTool) value(ctx context.Context, args any) (map[string]any, error) {
+	if err := t.t.requireOwner("update_goal"); err != nil {
+		return nil, err
+	}
 	var in struct {
 		GoalID        string  `json:"goal_id"`
 		Revision      int     `json:"revision"`
 		Action        string  `json:"action"`
 		Objective     *string `json:"objective"`
 		MaxGoalRounds *int    `json:"max_goal_rounds"`
-		BlockedReason string  `json:"blocked_reason"`
+		BlockedReason *string `json:"blocked_reason"`
 	}
 	if err := agenttools.DecodeArgs(args, &in); err != nil {
-		return "", fmt.Errorf("update_goal: %w", err)
+		return nil, fmt.Errorf("update_goal: %w", err)
+	}
+	if in.GoalID == "" || in.GoalID != strings.TrimSpace(in.GoalID) || in.Revision < 1 {
+		return nil, errors.New("update_goal: goal_id must be non-empty and revision must be a positive integer")
 	}
 	g, err := t.t.goalByID(ctx, in.GoalID, in.Revision)
 	if err != nil {
-		return "", fmt.Errorf("update_goal: %w", err)
+		return nil, fmt.Errorf("update_goal: %w", err)
 	}
+	hasObjective := in.Objective != nil && *in.Objective != ""
+	hasRounds := in.MaxGoalRounds != nil && *in.MaxGoalRounds != 0
+	hasBlockedReason := in.BlockedReason != nil && *in.BlockedReason != ""
 	switch in.Action {
 	case "edit":
-		if in.Objective == nil && in.MaxGoalRounds == nil {
-			return "", errors.New("update_goal: edit requires objective or max_goal_rounds")
+		if !hasObjective && !hasRounds {
+			return nil, errors.New("update_goal: edit requires objective or max_goal_rounds")
+		}
+		if hasBlockedReason {
+			return nil, errors.New("update_goal: blocked_reason is valid only with action blocked")
 		}
 		updater, ok := t.t.e.(interface {
 			UpdateGoalIfRevision(context.Context, string, int, *string, *int) (Goal, error)
 		})
 		if !ok {
-			return "", errors.New("update_goal: revisioned edit is unavailable")
+			return nil, errors.New("update_goal: revisioned edit is unavailable")
 		}
-		g, err = updater.UpdateGoalIfRevision(ctx, g.ID, in.Revision, in.Objective, in.MaxGoalRounds)
+		var objective *string
+		if hasObjective {
+			objective = in.Objective
+		}
+		var maxRounds *int
+		if hasRounds {
+			maxRounds = in.MaxGoalRounds
+		}
+		g, err = updater.UpdateGoalIfRevision(ctx, g.ID, in.Revision, objective, maxRounds)
 		if err == nil {
 			t.t.emit(session.EventPlanUpdate, session.NewPlanUpdate(string(ScopeGoal), g.ID, map[string]any{"title": g.Title, "objective": g.Objective, "maxRounds": g.MaxRounds}))
 		}
 	case "pause", "resume", "complete", "blocked":
-		if in.Action == "blocked" && strings.TrimSpace(in.BlockedReason) == "" {
-			return "", errors.New("update_goal: blocked_reason is required for blocked")
+		if (in.Action == "pause" || in.Action == "resume") && (hasObjective || hasRounds || hasBlockedReason) {
+			return nil, errors.New("update_goal: objective and max_goal_rounds are valid only with action edit; blocked_reason is valid only with action blocked")
+		}
+		if (in.Action == "complete" || in.Action == "blocked") && (hasObjective || hasRounds) {
+			return nil, errors.New("update_goal: objective and max_goal_rounds are valid only with action edit")
+		}
+		if in.Action == "complete" && hasBlockedReason {
+			return nil, errors.New("update_goal: blocked_reason is valid only with action blocked")
+		}
+		if in.Action == "blocked" && !hasBlockedReason {
+			return nil, errors.New("update_goal: blocked_reason is required with action blocked")
+		}
+		if in.Action == "blocked" && IsGoalRound(ctx) && g.RoundsStarted < t.t.blockedAfterRounds {
+			return nil, fmt.Errorf("blocked requires at least %d consecutive goal rounds; current round is %d", t.t.blockedAfterRounds, g.RoundsStarted)
 		}
 		status := map[string]Status{"pause": StatusPaused, "resume": StatusInProgress, "complete": StatusDone, "blocked": StatusBlocked}[in.Action]
 		setter, ok := t.t.e.(interface {
 			SetGoalStatusIfRevision(context.Context, string, int, Status) error
 		})
 		if !ok {
-			return "", errors.New("update_goal: revisioned status update is unavailable")
+			return nil, errors.New("update_goal: revisioned status update is unavailable")
 		}
 		err = setter.SetGoalStatusIfRevision(ctx, g.ID, in.Revision, status)
 		if err == nil && in.Action == "blocked" {
 			if reasoner, ok := t.t.e.(interface {
 				SetGoalBlockedReason(context.Context, string, string) error
 			}); ok {
-				err = reasoner.SetGoalBlockedReason(ctx, g.ID, strings.TrimSpace(in.BlockedReason))
+				err = reasoner.SetGoalBlockedReason(ctx, g.ID, strings.TrimSpace(*in.BlockedReason))
 			}
 		}
 		if err == nil {
 			reason := ""
 			if in.Action == "blocked" {
-				reason = strings.TrimSpace(in.BlockedReason)
+				reason = strings.TrimSpace(*in.BlockedReason)
 			}
 			t.t.emit(session.EventPlanStatus, session.NewPlanStatus(string(ScopeGoal), g.ID, string(status), reason))
 		}
 	default:
-		return "", fmt.Errorf("update_goal: unknown action %q", in.Action)
+		return nil, fmt.Errorf("update_goal: unknown action %q", in.Action)
 	}
 	if err != nil {
-		return "", fmt.Errorf("update_goal: %w", err)
+		return nil, fmt.Errorf("update_goal: %w", err)
 	}
 	g, err = t.t.goalByID(ctx, g.ID, 0)
 	if err != nil {
-		return "", fmt.Errorf("update_goal: %w", err)
+		return nil, fmt.Errorf("update_goal: %w", err)
 	}
-	return encodeGoal(g), nil
+	if in.Action == "resume" {
+		t.t.setArmed(true)
+	}
+	if in.Action == "complete" || in.Action == "blocked" {
+		t.t.setArmed(false)
+	}
+	return t.t.goalValue(g), nil
 }
 
 type TodoWriteTool struct{ t *DSHTools }
@@ -345,6 +471,9 @@ func (t *DSHTools) currentGoal(ctx context.Context) (Goal, bool, error) {
 }
 
 func (t *DSHTools) goalByID(ctx context.Context, id string, revision int) (Goal, error) {
+	if id == "" || id != strings.TrimSpace(id) {
+		return Goal{}, errors.New("goal_id must be non-empty and trimmed")
+	}
 	goals, err := t.e.List(ctx)
 	if err != nil {
 		return Goal{}, err
@@ -360,8 +489,60 @@ func (t *DSHTools) goalByID(ctx context.Context, id string, revision int) (Goal,
 	return Goal{}, fmt.Errorf("goal %q was not found", id)
 }
 
-func encodeGoal(g Goal) string {
-	b, _ := json.Marshal(map[string]any{"id": g.ID, "objective": g.Objective, "status": string(g.Status), "revision": g.Revision, "max_goal_rounds": g.MaxRounds, "rounds_started": g.RoundsStarted, "blocked_reason": g.BlockedReason})
+func (t *DSHTools) goalValue(g Goal) map[string]any {
+	phase := "active"
+	switch g.Status {
+	case StatusPaused:
+		phase = "paused"
+	case StatusBlocked:
+		phase = "blocked"
+	case StatusDone, StatusCancelled:
+		phase = "complete"
+	}
+	goal := map[string]any{
+		"id": g.ID, "revision": g.Revision, "objective": g.Objective,
+		"phase": phase, "roundsStarted": g.RoundsStarted,
+		"maxGoalRounds": g.MaxRounds,
+	}
+	if g.BlockedReason != "" {
+		goal["blockedReason"] = map[string]any{"code": "model-reported", "message": g.BlockedReason}
+	}
+	activation := "armed"
+	if t.activation != nil && !t.activation() {
+		activation = "disarmed"
+	}
+	return map[string]any{"goal": goal, "activation": activation}
+}
+
+func goalOutputSchema() map[string]any {
+	return map[string]any{
+		"oneOf": []any{
+			map[string]any{
+				"type": "object", "additionalProperties": false,
+				"required": []string{"goal"}, "properties": map[string]any{"goal": map[string]any{"type": "null"}},
+			},
+			map[string]any{
+				"type": "object", "additionalProperties": false,
+				"required": []string{"goal", "activation"}, "properties": map[string]any{
+					"goal": map[string]any{
+						"type": "object", "additionalProperties": false,
+						"required": []string{"id", "revision", "objective", "phase", "roundsStarted", "maxGoalRounds"},
+						"properties": map[string]any{
+							"id": map[string]any{"type": "string"}, "revision": map[string]any{"type": "integer"},
+							"objective": map[string]any{"type": "string"}, "phase": map[string]any{"type": "string", "enum": []string{"active", "paused", "blocked", "complete"}},
+							"roundsStarted": map[string]any{"type": "integer"}, "maxGoalRounds": map[string]any{"type": "integer"},
+							"blockedReason": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"code", "message"}, "properties": map[string]any{"code": map[string]any{"type": "string"}, "message": map[string]any{"type": "string"}}},
+						},
+					},
+					"activation": map[string]any{"type": "string", "enum": []string{"armed", "disarmed"}},
+				},
+			},
+		},
+	}
+}
+
+func marshalGoalValue(value map[string]any) string {
+	b, _ := json.Marshal(value)
 	return string(b)
 }
 

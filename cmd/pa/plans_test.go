@@ -71,14 +71,16 @@ func TestRegisterPlansEnabledRegistersDSHTools(t *testing.T) {
 		t.Fatalf("get_goal = %q, err=%v", current.Output, err)
 	}
 	var goal struct {
-		ID       string `json:"id"`
-		Revision int    `json:"revision"`
+		Goal struct {
+			ID       string `json:"id"`
+			Revision int    `json:"revision"`
+		} `json:"goal"`
 	}
 	if err := json.Unmarshal([]byte(current.Output), &goal); err != nil {
 		t.Fatal(err)
 	}
-	updated, err := a.reg.Execute(context.Background(), "update_goal", json.RawMessage(`{"goal_id":"`+goal.ID+`","revision":`+jsonInt(goal.Revision)+`,"action":"complete"}`))
-	if err != nil || !strings.Contains(updated.Output, `"status":"done"`) {
+	updated, err := a.reg.Execute(context.Background(), "update_goal", json.RawMessage(`{"goal_id":"`+goal.Goal.ID+`","revision":`+jsonInt(goal.Goal.Revision)+`,"action":"complete"}`))
+	if err != nil || !strings.Contains(updated.Output, `"phase":"complete"`) {
 		t.Fatalf("update_goal complete = %q, err=%v", updated.Output, err)
 	}
 	todos, err := a.reg.Execute(context.Background(), "todo_write", json.RawMessage(`{"todos":[{"content":"Verify","status":"in_progress"}]}`))

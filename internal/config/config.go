@@ -553,6 +553,9 @@ type PlanConfig struct {
 	// normalized to true, while an explicit false permits at most one active
 	// todo at a time.
 	AllowParallelInProgress *bool `yaml:"allow_parallel_in_progress"`
+	// BlockedAfterConsecutiveRounds is the DSH lower bound before an automatic
+	// goal round may report blocked. Nil defaults to 3.
+	BlockedAfterConsecutiveRounds *int `yaml:"blocked_after_consecutive_rounds"`
 }
 
 // SpillConfig is the long-term-memory policy (dispatch-m6c-2 §2 / ADR
@@ -1006,6 +1009,10 @@ func applyDefaults(cfg *Config) {
 	if Enabled(cfg.Plan.Enabled) {
 		if cfg.Plan.AllowParallelInProgress == nil {
 			cfg.Plan.AllowParallelInProgress = Bool(true)
+		}
+		if cfg.Plan.BlockedAfterConsecutiveRounds == nil {
+			threshold := 3
+			cfg.Plan.BlockedAfterConsecutiveRounds = &threshold
 		}
 		for _, name := range append(append([]string{}, goalToolNames...), todoToolNames...) {
 			if !contains(cfg.Tools.Enabled, name) {
