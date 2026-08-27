@@ -1103,7 +1103,7 @@ func (a *app) sessionPolicyFrom(base tools.Policy, perm, mode string) (tools.Pol
 }
 
 // modeToolWhitelist projects the model-facing tool surface for a mode. Native
-// standard keeps registered tools, PTC exposes only run_code, and minimal keeps
+// standard keeps registered tools (including str_replace_editor), PTC exposes only run_code, and minimal keeps
 // its fixed terminal/file seam. The executor receives the same projection, so a
 // session cannot call a tool hidden from its model surface.
 func modeToolWhitelist(mode string, enabled []string) []string {
@@ -1115,7 +1115,7 @@ func modeToolWhitelist(mode string, enabled []string) []string {
 	default:
 		out := make([]string, 0, len(enabled))
 		for _, name := range enabled {
-			if name != "run_code" && name != "str_replace_editor" {
+			if name != "run_code" {
 				out = append(out, name)
 			}
 		}
@@ -1138,7 +1138,7 @@ func toolSpecsForMode(mode string, specs []llm.ToolSchema) []llm.ToolSchema {
 	default:
 		allowed = make([]string, 0, len(specs))
 		for _, spec := range specs {
-			if spec.Name != "run_code" && spec.Name != "str_replace_editor" {
+			if spec.Name != "run_code" {
 				allowed = append(allowed, spec.Name)
 			}
 		}

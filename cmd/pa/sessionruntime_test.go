@@ -278,6 +278,9 @@ func TestSessionModeWireSurface(t *testing.T) {
 	if !hasName(wire, "get_time") || !hasName(wire, "read") {
 		t.Fatalf("standard wire tools = %v, want native read-only tools", wire)
 	}
+	if !hasName(wire, "str_replace_editor") {
+		t.Fatalf("standard wire tools = %v, want str_replace_editor", wire)
+	}
 	_, restore = a.applySessionRuntime("s-std")
 	if _, err := a.reg.Execute(ctx, "run_code", json.RawMessage(`{}`)); err == nil {
 		t.Fatal("standard session must not execute run_code")
@@ -301,6 +304,9 @@ func TestSessionModeWireSurface(t *testing.T) {
 	}
 	if _, err := a.reg.Execute(ctx, "read", json.RawMessage(`{"file_path":"x"}`)); err == nil {
 		t.Fatal("PTC session must not execute native tools directly")
+	}
+	if !a.codeBindingPolicy.Allows("str_replace_editor") {
+		t.Fatal("PTC nested tool policy must retain str_replace_editor")
 	}
 	restore()
 
