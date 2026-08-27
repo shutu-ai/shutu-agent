@@ -111,6 +111,7 @@
 - [x] P36-7.2g：当前 `26a3223` 前端 memo 优化后的真实超级玛丽 steer 回归覆盖持续 reasoning/tool/token 流、长任务 UI 更新和重连；60.8 秒收到 559 个 mux 帧（9.19 帧/s），无控制台错误，内容与 100k fixture 组合覆盖完整；真实 100k 高密度模型流仍单独保留。
 - [x] P36-7.2h：同一真实 100k 会话分别使用 `deepseek-v4-flash` 与 `deepseek-v4-pro`（high reasoning）各观察 120.7 秒；分别收到 2/3 个实时帧，均未达到高密度持续流门禁，确认更换更大模型不是当前瓶颈，默认模型保持 flash，证据见 `real100kModelComparison`。
 - [x] P36-7.2i：为会话日志增加模型历史 memo 与普通事件增量折叠，`surfaceOp.replace` 自动失效，覆盖单测及调用方可变副本隔离；真实 106,685 事件复测 admission `10ms`，但仅 2 个实时帧且 event→UI `847ms`，作为负向高密度基线保留，证据见 `real100kHistoryCacheCurrent`。
+- [x] P36-7.2j：`NextTurn` 改为生命周期计数，DeepSeek 大历史请求在消息/工具序列化阶段响应取消；全量 `go test ./...` 与 `go vet ./...` 通过，真实 100k 高密度流仍按门禁保留未完成。
 - [x] P36-7.2a：100,000 条 fixture 覆盖 reasoning、token usage、tool call/result、长文本和 TypeScript code block，并通过原生 Trajectory 展示与分页验证。
 - [x] P36-7.2b：真实超级玛丽新会话连续流产生 1,418 个 assistant chunk、8 条 assistant message、12 次 tool call/result、token usage 与 plan/interaction 事件；35.4 秒收到 376 个 mux 帧（10.62 帧/s），真实 UI 零错误渲染和长文本/代码混合内容仍待补齐。
 - [x] P36-7.2c：修复负 turn projection 后，真实会话连续流复测 12.6 秒无控制台错误，收到 678 个 mux 帧（53.81 帧/s）；真实 UI 高密度渲染稳定性和长文本/代码混合内容仍待补齐。

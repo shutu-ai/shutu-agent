@@ -154,7 +154,7 @@
     "conclusion": "The larger model did not improve 100k-scale stream density; retain deepseek-v4-flash as the default and treat the remaining issue as runtime/history/stream behavior rather than a model-size problem."
   },
   "real100kHistoryCacheCurrent": {
-    "codeRevision": "working-tree-after-32b14b1",
+    "codeRevision": "7db755c",
     "sessionId": "s-f15a7e57",
     "model": "deepseek-v4-flash",
     "durationSeconds": 60.9,
@@ -172,7 +172,7 @@
     "reconnectMs": 463,
     "consoleErrors": 0,
     "thresholdGate": "failed-event-to-ui-and-insufficient-stream-density",
-    "reason": "Incremental derived-history caching keeps prompt admission fast, but the real 100k turn still does not produce a high-density continuous stream."
+    "reason": "Incremental derived-history caching keeps prompt admission fast, and long request serialization now observes cancellation between messages/tools, but the real 100k turn still does not produce a high-density continuous stream."
   },
   "wsl2": {
     "distribution": "AlmaLinux-8",
