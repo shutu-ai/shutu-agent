@@ -38,7 +38,7 @@ function makeEvents() {
       { seq: ++seq, type: 'step/start', time, data: { turn, step: 1 } },
       { seq: ++seq, type: 'assistant/chunk', time, data: { turn, step: 1, chunk: { type: 'reasoning-delta', index: 0, text: `reasoning ${turn} ` } } },
       { seq: ++seq, type: 'assistant/chunk', time, data: { turn, step: 1, chunk: { type: 'text-delta', index: 0, text: `stream ${turn} ${streamText}` } } },
-      { seq: ++seq, type: 'assistant/message', time, data: { turn, step: 1, message: { id: `assistant-tools-${turn}`, role: 'assistant', content: [{ type: 'reasoning', text: `reasoning ${turn}` }, { type: 'tool-call', id: readCallId, name: 'read', arguments: readArguments }, { type: 'tool-call', id: searchCallId, name: 'search', arguments: searchArguments }], source: { kind: 'model', provider: 'test', model: 'perf' } }, usage: { inputTokens: 1200, outputTokens: 260, reasoningTokens: 40 } }, surfaceOp: 'append' },
+      { seq: ++seq, type: 'assistant/message', time, data: { turn, step: 1, message: { id: `assistant-tools-${turn}`, role: 'assistant', content: [{ type: 'reasoning', text: `reasoning ${turn}` }, { type: 'text', text: `planning tool work for level ${turn}` }, { type: 'tool-call', id: readCallId, name: 'read', arguments: readArguments }, { type: 'tool-call', id: searchCallId, name: 'search', arguments: searchArguments }], source: { kind: 'model', provider: 'test', model: 'perf' } }, usage: { inputTokens: 1200, outputTokens: 260, reasoningTokens: 40 } }, surfaceOp: 'append' },
       { seq: ++seq, type: 'tool/call', time, data: { turn, step: 1, callId: readCallId, name: 'read', arguments: readArguments } },
       { seq: ++seq, type: 'tool/result', time, data: { turn, step: 1, message: { id: `tool-read-${turn}`, role: 'user', content: [{ type: 'tool-result', toolCallId: readCallId, content: [{ type: 'text', text: toolText }], isError: false }], source: { kind: 'tool', callId: readCallId } } }, surfaceOp: 'append' },
       { seq: ++seq, type: 'tool/call', time, data: { turn, step: 1, callId: searchCallId, name: 'search', arguments: searchArguments } },
@@ -176,6 +176,18 @@ try {
     await trajectory.waitFor({ timeout: 60_000 })
     await page.locator('[data-trajectory-scroll] table[data-scroll-ready="true"]').waitFor({ timeout: 60_000 })
     const initialRowCount = Number(await page.locator('[data-trajectory-scroll] table').getAttribute('aria-rowcount'))
+    const requestBoundary = page.locator('[data-trajectory-scroll] button[data-request-run-index]').first()
+    await requestBoundary.waitFor({ timeout: 15_000 })
+    await requestBoundary.click()
+    const details = page.getByRole('complementary', { name: /Event details/ })
+    await details.waitFor({ timeout: 15_000 })
+    assert.match(await details.innerText(), /Request #|Summary/)
+    const turnsControl = page.getByRole('button', { name: /turns/i }).first()
+    await turnsControl.click()
+    await page.locator('[data-trajectory-scroll] tr[data-collapsed-summary="turn"]').first().waitFor({ timeout: 15_000 })
+    assert.ok(await page.locator('[data-trajectory-scroll] tr[data-collapsed-summary="turn"]').count() > 0, 'native trajectory turns did not collapse')
+    await turnsControl.click()
+    await page.locator('[data-trajectory-scroll] tr[data-collapsed-summary="turn"]').first().waitFor({ state: 'detached', timeout: 15_000 })
     const loadEarlier = page.locator('[data-history-load] button')
     await loadEarlier.waitFor({ timeout: 15_000 })
     await loadEarlier.evaluate(button => button.click())
