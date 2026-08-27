@@ -139,6 +139,25 @@ async function runDesktop(browser) {
   return { sockets: [...sockets].sort(), requests: [...new Set(requests)].sort(), console: 'clean' }
 }
 
+async function runDarkDesktop(browser) {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 }, colorScheme: 'dark' })
+  const issues = []
+  page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
+  page.on('pageerror', error => issues.push(error.message))
+  page.on('response', response => { if (response.status() >= 400) issues.push(`http ${response.status()}: ${response.url()}`) })
+  const { sockets } = await installNativeMock(page)
+  await page.goto(baseUrl, { waitUntil: 'domcontentloaded' })
+  await waitForNativeShell(page)
+  assert.ok(sockets.has('/api/events.mux'), 'dark native mux WebSocket was not opened')
+  assert.ok(sockets.has('/api/events.host'), 'dark native host WebSocket was not opened')
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
+  assert.ok(overflow <= 1, `dark desktop page has horizontal overflow: ${overflow}px`)
+  assert.deepEqual(issues, [])
+  await page.screenshot({ path: resolve(artifactDirectory, 'shutu-native-dark-desktop.png') })
+  await page.close()
+  return { viewport: '1280x900', colorScheme: 'dark', overflow, console: 'clean' }
+}
+
 async function runMobile(browser) {
   const page = await browser.newPage({ viewport: { width: 390, height: 844 } })
   const issues = []
@@ -176,8 +195,9 @@ try {
   const browser = await chromium.launch({ headless: true })
   try {
     const desktop = await runDesktop(browser)
+    const darkDesktop = await runDarkDesktop(browser)
     const mobile = await runMobile(browser)
-    console.log(JSON.stringify({ browser: 'playwright', native: 'ok', desktop, mobile }))
+    console.log(JSON.stringify({ browser: 'playwright', native: 'ok', desktop, darkDesktop, mobile }))
   } finally {
     await browser.close()
   }
