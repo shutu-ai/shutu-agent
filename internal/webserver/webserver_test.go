@@ -1758,6 +1758,11 @@ func TestWorkspaceSessionCWD(t *testing.T) {
 // sessions and workspaces.
 func TestSessionForkArchiveOrder(t *testing.T) {
 	srv, st := newTestServer(t, "")
+	forkAdded := make(chan string, 1)
+	removeForkListener := srv.subscribeNativeMuxSessionAdded(func(sessionID string) {
+		forkAdded <- sessionID
+	})
+	defer removeForkListener()
 	h := srv.Handler()
 	seedSession(t, st, "s1", []session.Event{
 		{Seq: 1, Type: session.EventUserMessage, Version: 1, At: time.Now().UTC(), Data: []byte(`{"text":"hi"}`)},
@@ -1777,6 +1782,14 @@ func TestSessionForkArchiveOrder(t *testing.T) {
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &fork); err != nil || fork.ID == "" {
 		t.Fatalf("fork resp = %s", rec.Body.String())
+	}
+	select {
+	case addedID := <-forkAdded:
+		if addedID != fork.ID {
+			t.Fatalf("REST fork notification = %q, want %q", addedID, fork.ID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("REST fork did not notify the native mux")
 	}
 	events, err := st.LoadSession(context.Background(), fork.ID)
 	if err != nil {
