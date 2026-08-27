@@ -36,4 +36,23 @@ describe('DSH native accessibility bridge', () => {
       globalThis.requestAnimationFrame = requestAnimationFrame
     }
   })
+
+  it('keeps Tab focus inside the native dialog', () => {
+    document.body.innerHTML = '<button id="trigger" aria-haspopup="dialog"></button>'
+    const cleanup = installDshNativeAccessibilityBridge(document)
+    const dialog = document.createElement('div')
+    dialog.setAttribute('role', 'dialog')
+    dialog.innerHTML = '<button id="first">First</button><button id="last">Last</button>'
+    document.body.append(dialog)
+    const first = document.querySelector<HTMLButtonElement>('#first')
+    const last = document.querySelector<HTMLButtonElement>('#last')
+    if (first === null || last === null) throw new Error('test dialog controls were not mounted')
+
+    last.focus()
+    last.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true }))
+    expect(document.activeElement).toBe(first)
+    first.dispatchEvent(new KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true }))
+    expect(document.activeElement).toBe(last)
+    cleanup()
+  })
 })

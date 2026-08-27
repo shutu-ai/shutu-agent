@@ -77,6 +77,7 @@
 - [ ] P36-6.3：验证 Tab、快捷键、Escape、读屏语义、ARIA、焦点恢复和触控目标。
 - [x] P36-6.3a：Playwright 验证原生设置 Escape 关闭、侧边栏 Enter 键切换、桌面/移动按钮可访问名称及移动端可见按钮不低于 24px；完整 Tab/读屏/焦点矩阵仍待补齐。
 - [x] P36-6.3b：Playwright 验证 Settings 弹层由键盘 Escape 关闭后焦点恢复到触发按钮。
+- [x] P36-6.3c：host-owned accessibility bridge 为 DSH 原生 `role=dialog` 增加 Tab/Shift+Tab 循环，jsdom 单测与 Playwright 桌面/移动 smoke 均通过。
 - [ ] P36-6.4：为每个 DSH 核心页面保留截图和交互证据。
 - [ ] P36-7.1：用真实“网页版超级玛丽”长任务验证 5 万、10 万级历史记录。
 - [x] P36-7.1a：在当前真实服务的超级玛丽会话上完成原生 DSH 75,950 条历史加载基线；100,000 条与持续增长窗口仍待目标环境。

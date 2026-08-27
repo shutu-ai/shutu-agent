@@ -98,6 +98,10 @@ export async function mountDshNativeApp(container: HTMLElement): Promise<void> {
 export function installDshNativeAccessibilityBridge(documentObject: Document = document): () => void {
   let lastDialogTrigger: HTMLButtonElement | null = null
   let dialogWasMounted = false
+  const focusableSelector = [
+    'button:not([disabled])', 'input:not([disabled])', 'select:not([disabled])',
+    'textarea:not([disabled])', 'a[href]', '[tabindex]:not([tabindex="-1"])',
+  ].join(',')
   const rememberDialogTrigger = (event: MouseEvent): void => {
     const target = event.target
     if (!(target instanceof Element)) return
@@ -121,13 +125,36 @@ export function installDshNativeAccessibilityBridge(documentObject: Document = d
       if (trigger.isConnected) trigger.focus()
     })
   }
+  const trapDialogFocus = (event: KeyboardEvent): void => {
+    if (event.key !== 'Tab') return
+    const active = documentObject.activeElement
+    if (!(active instanceof HTMLElement)) return
+    const dialog = active.closest<HTMLElement>('[role="dialog"]')
+    if (dialog === null) return
+    const focusable = [...dialog.querySelectorAll<HTMLElement>(focusableSelector)]
+      .filter(element => element.isConnected)
+    if (focusable.length === 0) {
+      event.preventDefault()
+      return
+    }
+    const index = focusable.indexOf(active)
+    if (index < 0) return
+    const next = event.shiftKey
+      ? focusable[(index - 1 + focusable.length) % focusable.length]
+      : focusable[(index + 1) % focusable.length]
+    if (next === undefined) return
+    event.preventDefault()
+    next.focus()
+  }
   apply()
   const observer = new MutationObserver(apply)
   observer.observe(documentObject.body, { childList: true, subtree: true })
   documentObject.addEventListener('click', rememberDialogTrigger, true)
+  documentObject.addEventListener('keydown', trapDialogFocus, true)
   return () => {
     observer.disconnect()
     documentObject.removeEventListener('click', rememberDialogTrigger, true)
+    documentObject.removeEventListener('keydown', trapDialogFocus, true)
   }
 }
 
