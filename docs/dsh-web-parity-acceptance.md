@@ -116,6 +116,10 @@ The fixture now includes assistant text alongside reasoning, tool calls/results,
 
 The same Playwright run delayed the native `session.list` response for 1 second and captured `docs/evidence/dsh-native-2026-08-27/shutu-native-loading-desktop.png` during the low-opacity loading state. The request then settled into the normal DSH shell with no page errors. A separate desktop/mobile run injects a DSH `turn/end` error and captures `shutu-native-error-desktop.png` and `shutu-native-error-mobile.png`, asserting the visible `This turn failed` / `本轮运行失败` status, failure detail, zero horizontal overflow, and zero console errors.
 
+## P36-6.2 Native geometry evidence (2026-08-27)
+
+The native Playwright geometry matrix passed for desktop `1280x900` and mobile `390x844`. Body widths were `1280` and `390` with no horizontal overflow; all sampled scroll containers had valid viewport/content heights. The settings overlay stayed inside the viewport at desktop `{x:240,y:50,w:800,h:800}` and mobile `{x:24,y:24,w:342,h:796}`, and Escape restored focus to its trigger. JSON and screenshots are stored as `docs/evidence/dsh-native-2026-08-27/shutu-native-geometry-{desktop,mobile}.{json,png}`. This is native geometry evidence; pixel-level comparison against separately captured reference builds remains open.
+
 ## P36-6.3 Native focus recovery evidence (2026-08-27)
 
 The native accessibility bridge now moves focus into the first dialog control when a `role=dialog` opens, traps Tab/Shift+Tab within its focusable controls, and restores focus to the trigger after removal. `npm.cmd run test -- dsh-native-entry.test.ts` passed three jsdom tests and the full `npm.cmd run e2e` smoke passed; the desktop Settings flow closes with Escape and returns focus to the Settings trigger. Screen-reader announcement coverage and the full multi-browser matrix remain open.

@@ -1,0 +1,36 @@
+{
+  "viewport": {
+    "width": 390,
+    "height": 844
+  },
+  "body": {
+    "x": 0,
+    "y": 0,
+    "width": 390,
+    "height": 844,
+    "font": "16px -apple-system, BlinkMacSystemFont, \"Segoe UI\", \"PingFang SC\", \"Hiragino Sans GB\", \"Microsoft YaHei\", \"Helvetica Neue\", Helvetica, Arial, sans-serif",
+    "color": "rgb(15, 17, 21)",
+    "background": "rgb(255, 255, 255)",
+    "border": "rgb(15, 17, 21)",
+    "overflowX": "visible",
+    "overflowY": "visible"
+  },
+  "tabpanel": null,
+  "trajectory": null,
+  "scrollables": [
+    {
+      "height": 752,
+      "scrollHeight": 1084
+    },
+    {
+      "height": 28,
+      "scrollHeight": 76
+    }
+  ],
+  "overlay": {
+    "x": 24,
+    "y": 24,
+    "width": 342,
+    "height": 796
+  }
+}

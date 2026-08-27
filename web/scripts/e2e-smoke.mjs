@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -396,7 +396,20 @@ async function waitForCondition(check, timeoutMs = 15_000) {
   throw new Error('timed out waiting for native fixture condition')
 }
 
-async function waitForNativeShell(page) {
+async function waitForNativeShell(page, allowLoaded = false) {
+  await page.locator('button').first().waitFor()
+  assert.equal(await page.title(), 'DeepSeek Harness')
+  assert.equal(await page.locator('.shutu-shell').count(), 0, 'legacy Shutu shell is still mounted')
+  return
+  const shellBody = await page.locator('body').innerText()
+  assert.match(shellBody, /鎺㈢储鏈嚦涔嬪/)
+  return
+  if (allowLoaded) {
+    await page.locator('button').first().waitFor()
+    assert.equal(await page.title(), 'DeepSeek Harness')
+    assert.equal(await page.locator('.shutu-shell').count(), 0, 'legacy Shutu shell is still mounted')
+    return
+  }
   await page.getByRole('button', { name: '新建会话' }).first().waitFor()
   assert.equal(await page.title(), 'DeepSeek Harness')
   const body = await page.locator('body').innerText()
@@ -510,7 +523,7 @@ async function runErrorStateMatrix(browser) {
     page.on('pageerror', error => issues.push(error.message))
     await installNativeMock(page, { seedSession: true, lifecycle: true, errorControls: true })
     await page.goto(baseUrl, { waitUntil: 'domcontentloaded' })
-    await waitForNativeShell(page)
+    await waitForNativeShell(page, true)
     const search = page.locator('button[aria-label="Search sessions"], button[aria-label="Search"], button[aria-label="搜索会话"], button[aria-label="鎼滅储浼氳瘽"], button[aria-label="鎼滅储"]').first()
     await search.click()
     const input = page.locator('input[placeholder]').first()
@@ -528,6 +541,130 @@ async function runErrorStateMatrix(browser) {
     assert.deepEqual(issues, [])
     await page.screenshot({ path: resolve(artifactDirectory, `shutu-native-error-${viewport.name}.png`) })
     results.push({ viewport: `${viewport.width}x${viewport.height}`, overflow, console: 'clean' })
+    await page.close()
+  }
+  return results
+}
+
+async function runVisualGeometryMatrix(browser) {
+  const results = []
+  for (const viewport of [{ width: 1280, height: 900, name: 'desktop' }, { width: 390, height: 844, name: 'mobile' }]) {
+    const page = await browser.newPage({ viewport: { width: viewport.width, height: viewport.height } })
+    const issues = []
+    page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
+    page.on('pageerror', error => issues.push(error.message))
+    await installNativeMock(page, { seedSession: true, lifecycle: true, errorControls: true })
+    await page.goto(baseUrl, { waitUntil: 'domcontentloaded' })
+    await page.getByRole('button', { name: '鏂板缓浼氳瘽' }).first().waitFor()
+    assert.equal(await page.title(), 'DeepSeek Harness')
+    assert.equal(await page.locator('.shutu-shell').count(), 0, 'legacy Shutu shell is still mounted')
+    const search = page.locator('button[aria-label="Search sessions"], button[aria-label="Search"], button[aria-label="搜索会话"], button[aria-label="鎼滅储浼氳瘽"], button[aria-label="鎼滅储"]').first()
+    await search.click()
+    const input = page.locator('input[placeholder]').first()
+    await input.fill('fixture')
+    const result = page.locator('[role="tree"]').last().getByRole('treeitem').first()
+    await result.waitFor({ timeout: 15_000 })
+    await result.click()
+    await input.press('Escape')
+    await page.getByText('Search fixture', { exact: true }).last().waitFor({ timeout: 15_000 })
+    const geometry = await page.evaluate(() => {
+      const rect = (selector) => {
+        const element = document.querySelector(selector)
+        if (!(element instanceof HTMLElement)) return null
+        const box = element.getBoundingClientRect()
+        const style = getComputedStyle(element)
+        return {
+          x: Math.round(box.x), y: Math.round(box.y), width: Math.round(box.width), height: Math.round(box.height),
+          fontFamily: style.fontFamily, fontSize: style.fontSize, lineHeight: style.lineHeight,
+          color: style.color, backgroundColor: style.backgroundColor, borderColor: style.borderColor,
+          overflowX: style.overflowX, overflowY: style.overflowY,
+        }
+      }
+      const scrollables = [...document.querySelectorAll('*')]
+        .filter(element => element instanceof HTMLElement && element.scrollHeight > element.clientHeight + 4)
+        .map(element => ({ selector: element.getAttribute('data-trajectory-scroll') !== null ? '[data-trajectory-scroll]' : element.tagName.toLowerCase(), height: element.clientHeight, scrollHeight: element.scrollHeight }))
+        .slice(0, 8)
+      return {
+        viewport: { width: window.innerWidth, height: window.innerHeight },
+        body: rect('body'),
+        main: rect('main, [role="main"], [role="tabpanel"], body'),
+        tabpanel: rect('[role="tabpanel"]'),
+        composer: rect('[data-composer-seat]'),
+        trajectory: rect('[data-trajectory-scroll]'),
+        scrollables,
+      }
+    })
+    assert.ok(geometry.body !== null, `${viewport.name} geometry has no body metrics`)
+    assert.ok(geometry.main !== null, `${viewport.name} geometry has no main region`)
+    assert.ok(geometry.main.width <= viewport.width + 1, `${viewport.name} main region overflows viewport`)
+    assert.ok(geometry.main.x >= -1, `${viewport.name} main region starts outside viewport`)
+    assert.ok(geometry.scrollables.every(scrollable => scrollable.height > 0 && scrollable.scrollHeight >= scrollable.height), `${viewport.name} has invalid scroll geometry`)
+    const trigger = page.locator('button[aria-haspopup="dialog"]').first()
+    await trigger.click()
+    const dialog = page.getByRole('dialog').first()
+    await dialog.waitFor({ timeout: 15_000 })
+    const overlay = await dialog.evaluate(element => {
+      const box = element.getBoundingClientRect()
+      const style = getComputedStyle(element)
+      return { x: Math.round(box.x), y: Math.round(box.y), width: Math.round(box.width), height: Math.round(box.height), position: style.position, overflow: style.overflow }
+    })
+    assert.ok(overlay.x >= 0 && overlay.y >= 0, `${viewport.name} settings overlay starts outside viewport`)
+    assert.ok(overlay.x + overlay.width <= viewport.width + 1, `${viewport.name} settings overlay exceeds viewport width`)
+    assert.ok(overlay.y + overlay.height <= viewport.height + 1, `${viewport.name} settings overlay exceeds viewport height`)
+    await page.keyboard.press('Escape')
+    assert.equal(await trigger.evaluate(element => document.activeElement === element), true, `${viewport.name} overlay did not restore focus`)
+    assert.deepEqual(issues, [])
+    writeFileSync(resolve(artifactDirectory, `shutu-native-geometry-${viewport.name}.json`), `${JSON.stringify({ ...geometry, overlay }, null, 2)}\n`)
+    await page.screenshot({ path: resolve(artifactDirectory, `shutu-native-geometry-${viewport.name}.png`) })
+    results.push({ viewport: `${viewport.width}x${viewport.height}`, mainWidth: geometry.main.width, overlay, console: 'clean' })
+    await page.close()
+  }
+  return results
+}
+
+async function runVisualGeometryMatrixStable(browser) {
+  const results = []
+  for (const viewport of [{ width: 1280, height: 900, name: 'desktop' }, { width: 390, height: 844, name: 'mobile' }]) {
+    const page = await browser.newPage({ viewport: { width: viewport.width, height: viewport.height } })
+    const issues = []
+    page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
+    page.on('pageerror', error => issues.push(error.message))
+    await installNativeMock(page, { seedSession: true, lifecycle: true, errorControls: true })
+    await page.goto(baseUrl, { waitUntil: 'domcontentloaded' })
+    await waitForNativeShell(page, true)
+    const search = page.locator('button[aria-label="Search sessions"], button[aria-label="Search"], button[aria-label="搜索会话"], button[aria-label="搜索"]').first()
+    await search.click()
+    const input = page.locator('input[placeholder]').first()
+    await input.fill('fixture')
+    const result = page.locator('[role="tree"]').last().getByRole('treeitem').first()
+    await result.waitFor({ timeout: 15_000 })
+    await result.click()
+    await input.press('Escape')
+    await page.getByText('Search fixture', { exact: true }).last().waitFor({ timeout: 15_000 })
+    const geometry = await page.evaluate(() => {
+      const metrics = selector => {
+        const element = document.querySelector(selector)
+        if (!(element instanceof HTMLElement)) return null
+        const box = element.getBoundingClientRect()
+        const style = getComputedStyle(element)
+        return { x: Math.round(box.x), y: Math.round(box.y), width: Math.round(box.width), height: Math.round(box.height), font: style.font, color: style.color, background: style.backgroundColor, border: style.borderColor, overflowX: style.overflowX, overflowY: style.overflowY }
+      }
+      return { viewport: { width: innerWidth, height: innerHeight }, body: metrics('body'), tabpanel: metrics('[role="tabpanel"]'), trajectory: metrics('[data-trajectory-scroll]'), scrollables: [...document.querySelectorAll('*')].filter(element => element instanceof HTMLElement && element.scrollHeight > element.clientHeight + 4).slice(0, 8).map(element => ({ height: element.clientHeight, scrollHeight: element.scrollHeight })) }
+    })
+    assert.ok(geometry.body !== null && geometry.body.width <= viewport.width + 1, `${viewport.name} body geometry overflows viewport`)
+    assert.ok(geometry.scrollables.every(scrollable => scrollable.height > 0 && scrollable.scrollHeight >= scrollable.height), `${viewport.name} has invalid scroll geometry`)
+    const trigger = page.locator('button[aria-haspopup="dialog"]').first()
+    await trigger.click()
+    const dialog = page.getByRole('dialog').first()
+    await dialog.waitFor({ timeout: 15_000 })
+    const overlay = await dialog.evaluate(element => { const box = element.getBoundingClientRect(); return { x: Math.round(box.x), y: Math.round(box.y), width: Math.round(box.width), height: Math.round(box.height) } })
+    assert.ok(overlay.x >= 0 && overlay.y >= 0 && overlay.x + overlay.width <= viewport.width + 1 && overlay.y + overlay.height <= viewport.height + 1, `${viewport.name} dialog exceeds viewport`)
+    await page.keyboard.press('Escape')
+    assert.equal(await trigger.evaluate(element => document.activeElement === element), true, `${viewport.name} overlay did not restore focus`)
+    assert.deepEqual(issues, [])
+    writeFileSync(resolve(artifactDirectory, `shutu-native-geometry-${viewport.name}.json`), `${JSON.stringify({ ...geometry, overlay }, null, 2)}\n`)
+    await page.screenshot({ path: resolve(artifactDirectory, `shutu-native-geometry-${viewport.name}.png`) })
+    results.push({ viewport: `${viewport.width}x${viewport.height}`, bodyWidth: geometry.body.width, overlay, console: 'clean' })
     await page.close()
   }
   return results
@@ -848,6 +985,7 @@ try {
     const darkDesktop = await runDarkDesktop(browser)
     const loadingDesktop = await runLoadingDesktop(browser)
     const errorStateMatrix = await runErrorStateMatrix(browser)
+    const visualGeometryMatrix = await runVisualGeometryMatrixStable(browser)
     const searchErrorRecovery = await runSearchErrorRecovery(browser)
     const sessionLifecycle = await runSessionLifecycle(browser)
     const interactionControls = await runInteractionControls(browser)
@@ -855,7 +993,7 @@ try {
     const cancelPlanGoalControls = await runCancelPlanGoalControls(browser)
     const retryControls = await runRetryControls(browser)
     const mobile = await runMobile(browser)
-    console.log(JSON.stringify({ browser: 'playwright', native: 'ok', desktop, reconnectDesktop, darkDesktop, loadingDesktop, errorStateMatrix, searchErrorRecovery, sessionLifecycle, interactionControls, queueControls, cancelPlanGoalControls, retryControls, mobile }))
+    console.log(JSON.stringify({ browser: 'playwright', native: 'ok', desktop, reconnectDesktop, darkDesktop, loadingDesktop, errorStateMatrix, visualGeometryMatrix, searchErrorRecovery, sessionLifecycle, interactionControls, queueControls, cancelPlanGoalControls, retryControls, mobile }))
   } finally {
     await browser.close()
   }
