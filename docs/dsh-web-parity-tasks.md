@@ -116,6 +116,7 @@
 - [x] P36-7.3h：为 native `session.history` 增加 4,096 条原始事件传输上限，避免单条超长 streamed message 使首屏 JSON/Trajectory 挂载失控；真实 105,982 事件会话完成 25 秒 Chromium 观察，FPS 60.8、DOM 657、heap 28→36MiB。
 - [x] P36-7.3i：真实连续流采样器记录 35.4 秒 FPS/heap/DOM/Long Task/event→UI 指标：60.7 FPS、heap 54→71MiB、DOM 657、3 个 Long Task 共 425ms、event→UI 4–2,795ms；该轮仍有 `assistant-step invalid turn -1` 控制台错误，重连恢复和通过阈值仍待补齐。
 - [x] P36-7.3j：修复 wire projection 负 turn 后，真实连续流+断线探针记录 12.6 秒 FPS 14–61（平均 46）、heap 40→135MiB、DOM 654、6 个 Long Task 共 601ms、event→UI 0–4,747ms、控制台错误 0，mux 重连约 454ms；高密度性能阈值仍未通过。
+- [x] P36-7.4a：`real-task-performance.mjs` 增加可选性能门禁，默认阈值为最低 FPS 30、heap 增长 128MiB、DOM 2,500、Long Task 总时长 2,000ms、event→UI 最大延迟 500ms、重连恢复 1,500ms；设置 `SHUTU_REAL_TASK_ENFORCE_THRESHOLDS=1` 后未通过即返回非零状态。
 - [x] P36-7.3b：100,000 条 fixture 记录 native DSH FPS/heap/DOM/Long Task 与控制台错误：61 帧窗口、heap 56→44MiB、DOM 821、Long Task 1,374ms、错误 0；持续增长与重连恢复仍待补齐。
 - [x] P36-7.3a：Playwright Chromium 对真实 75,950 条会话完成约 32.2 秒原生观测：heap 36→43MiB、最大 DOM 554、Trajectory 16 行、Long Task 1,788ms、控制台错误 0；持续增长和重连恢复仍待补齐。
 - [ ] P36-7.4：在原生 DSH UI 替换完成后重新设定并通过性能阈值。

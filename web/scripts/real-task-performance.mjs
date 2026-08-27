@@ -14,6 +14,15 @@ const durationSeconds = Number(process.argv[3] ?? process.env.SHUTU_REAL_TASK_SE
 const skipSelection = process.env.SHUTU_REAL_TASK_SKIP_SELECTION === '1'
 const triggerPrompt = process.env.SHUTU_REAL_TASK_PROMPT?.trim() ?? ''
 const triggerMode = process.env.SHUTU_REAL_TASK_MODE === 'queue' ? 'queue' : 'steer'
+const enforceThresholds = process.env.SHUTU_REAL_TASK_ENFORCE_THRESHOLDS === '1'
+const performanceThresholds = {
+  minFps: Number(process.env.SHUTU_REAL_TASK_MIN_FPS ?? 30),
+  maxHeapGrowthMiB: Number(process.env.SHUTU_REAL_TASK_MAX_HEAP_GROWTH_MIB ?? 128),
+  maxDomNodes: Number(process.env.SHUTU_REAL_TASK_MAX_DOM_NODES ?? 2_500),
+  maxLongTaskMs: Number(process.env.SHUTU_REAL_TASK_MAX_LONG_TASK_MS ?? 2_000),
+  maxEventToUiMs: Number(process.env.SHUTU_REAL_TASK_MAX_EVENT_TO_UI_MS ?? 500),
+  maxReconnectMs: Number(process.env.SHUTU_REAL_TASK_MAX_RECONNECT_MS ?? 1_500),
+}
 
 if (!existsSync(playwrightRoot)) throw new Error(`Playwright is unavailable under ${dshRoot}`)
 if (!sessionId) throw new Error('usage: node scripts/real-task-performance.mjs <session-id> [duration-seconds]')
@@ -245,6 +254,35 @@ try {
   assert.ok(samples.length > 0)
   const fps = samples.map(sample => sample.frames)
   const heaps = samples.flatMap(sample => sample.heapMiB === null ? [] : [sample.heapMiB])
+  const eventToUi = stream.latencies.length > 0 ? {
+    min: Math.min(...stream.latencies),
+    avg: Math.round(stream.latencies.reduce((sum, value) => sum + value, 0) / stream.latencies.length * 10) / 10,
+    max: Math.max(...stream.latencies),
+    samples: stream.latencies.length,
+  } : null
+  const minFps = fps.length > 0 ? Math.min(...fps) : null
+  const avgFps = fps.length > 0 ? Math.round(fps.reduce((sum, value) => sum + value, 0) / fps.length * 10) / 10 : null
+  const heapStartMiB = heaps[0] ?? null
+  const heapMaxMiB = heaps.length > 0 ? Math.max(...heaps) : null
+  const maxDomNodes = Math.max(...samples.map(sample => sample.domNodes))
+  const longTaskMs = samples.at(-1)?.longTaskMs ?? 0
+  const reconnectRecoveryMs = reconnect.closedAt !== null && reconnect.reconnectedAt !== null
+    ? reconnect.reconnectedAt - reconnect.closedAt
+    : null
+  const checks = {
+    minFps: minFps === null || minFps >= performanceThresholds.minFps,
+    heapGrowth: heapStartMiB === null || heapMaxMiB === null || heapMaxMiB - heapStartMiB <= performanceThresholds.maxHeapGrowthMiB,
+    domNodes: maxDomNodes <= performanceThresholds.maxDomNodes,
+    longTasks: longTaskMs <= performanceThresholds.maxLongTaskMs,
+    eventToUi: eventToUi === null || eventToUi.max <= performanceThresholds.maxEventToUiMs,
+    reconnect: !reconnect.requested || reconnectRecoveryMs === null || reconnectRecoveryMs <= performanceThresholds.maxReconnectMs,
+  }
+  const performanceGate = {
+    enforced: enforceThresholds,
+    passed: Object.values(checks).every(Boolean),
+    thresholds: performanceThresholds,
+    checks,
+  }
   console.log(JSON.stringify({
     url: baseUrl,
     transport: 'native-rpc+downlink-websocket',
@@ -260,28 +298,23 @@ try {
     streamEventsPerSecond: Math.round(stream.eventFrames / Math.max(1, samples.at(-1)?.elapsedSeconds ?? 0) * 100) / 100,
     triggerStatus,
     promptAdmissionMs,
-    eventToUiMs: stream.latencies.length > 0 ? {
-      min: Math.min(...stream.latencies),
-      avg: Math.round(stream.latencies.reduce((sum, value) => sum + value, 0) / stream.latencies.length * 10) / 10,
-      max: Math.max(...stream.latencies),
-      samples: stream.latencies.length,
-    } : null,
-    minFps: fps.length > 0 ? Math.min(...fps) : null,
-    avgFps: fps.length > 0 ? Math.round(fps.reduce((sum, value) => sum + value, 0) / fps.length * 10) / 10 : null,
-    maxDomNodes: Math.max(...samples.map(sample => sample.domNodes)),
-    heapStartMiB: heaps[0] ?? null,
-    heapMaxMiB: heaps.length > 0 ? Math.max(...heaps) : null,
+    eventToUiMs: eventToUi,
+    minFps,
+    avgFps,
+    maxDomNodes,
+    heapStartMiB,
+    heapMaxMiB,
     longTasks: samples.at(-1)?.longTasks ?? 0,
-    longTaskMs: samples.at(-1)?.longTaskMs ?? 0,
+    longTaskMs,
+    performanceGate,
     reconnect: {
       ...reconnect,
-      recoveryMs: reconnect.closedAt !== null && reconnect.reconnectedAt !== null
-        ? reconnect.reconnectedAt - reconnect.closedAt
-        : null,
+      recoveryMs: reconnectRecoveryMs,
     },
     consoleErrors,
     samplesDetail: samples,
   }))
+  if (enforceThresholds && !performanceGate.passed) process.exitCode = 2
 } finally {
   await page.close()
   await browser.close()
