@@ -376,3 +376,7 @@ P24–P35 已完成首轮实现；P34/P35 的真实环境事项与 P36-1–P36-8
 
 - [x] P36-5.3a: Playwright Chromium native fixture verifies session search opens a loaded session and the DSH Trajectory tab renders a bounded virtual table over dense tool, reasoning, code, and long-text history.
 - [x] P36-5.3b: The native fixture serves tail-paged `session.history`; `Load earlier history` sends `beforeSeq`, prepends logical rows, and preserves the virtualized rendering/error-free browser state.
+
+## P36 incremental acceptance slices
+
+- [x] P36-4a: `verify-dist.mjs` now requires the complete native DSH client roster plus Typert, Cordis runner, UI Cordis, export, and native Remote bridge entries; a release dist with a partial plugin graph fails verification.

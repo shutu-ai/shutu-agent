@@ -38,6 +38,26 @@ if (existsSync(nativeManifestPath)) {
   if (!Array.isArray(nativeManifest.plugins) || nativeManifest.plugins.length === 0) {
     throw new Error('native frontend manifest has no linked plugins')
   }
+  const requiredNativePlugins = [
+    'connection', 'hmr', 'locale', 'runtime', 'ui-agent-preset', 'ui-attachment',
+    'ui-brand-official', 'ui-commands', 'ui-conversation', 'ui-deliverables',
+    'ui-directory-picker-browse', 'ui-goal', 'ui-input-trigger', 'ui-jobs',
+    'ui-layout', 'ui-message-feedback', 'ui-model-selection', 'ui-permission-presets',
+    'ui-plan', 'ui-reference', 'ui-renderer', 'ui-settings', 'ui-settings-general',
+    'ui-settings-models', 'ui-settings-plugin-inventory', 'ui-settings-plugins',
+    'ui-sidebar', 'ui-skill', 'ui-subagent', 'ui-theme', 'ui-tool', 'ui-trajectory',
+    'ui-user-questions', 'ui-workflow-run', 'ui-workspace',
+  ].map(name => `@deepseek-ai/dsh-client-${name}`)
+  requiredNativePlugins.push(
+    '@deepseek-ai/dsh-typert-registry',
+    '@deepseek-ai/dsh-cordis-client-runner',
+    '@deepseek-ai/dsh-client-ui-cordis',
+    '@deepseek-ai/dsh-session-log-export',
+    '@deepseek-ai/dsh-api-remotes',
+  )
+  const linked = new Set(nativeManifest.plugins.map(plugin => plugin?.id))
+  const missing = requiredNativePlugins.filter(id => !linked.has(id))
+  if (missing.length > 0) throw new Error(`native frontend manifest is missing required plugins: ${missing.join(', ')}`)
 }
 
 console.log(JSON.stringify({
