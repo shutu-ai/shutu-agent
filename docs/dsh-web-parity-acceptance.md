@@ -110,6 +110,8 @@ The same Playwright run delayed the native `session.list` response for 1 second 
 
 The native accessibility bridge now moves focus into the first dialog control when a `role=dialog` opens, traps Tab/Shift+Tab within its focusable controls, and restores focus to the trigger after removal. `npm.cmd run test -- dsh-native-entry.test.ts` passed three jsdom tests and the full `npm.cmd run e2e` smoke passed; the desktop Settings flow closes with Escape and returns focus to the Settings trigger. Screen-reader announcement coverage and the full multi-browser matrix remain open.
 
+The same native smoke now injects one rejected `session.search` response, observes the DSH "content search unavailable" status, clears it with Escape, and confirms the next search succeeds with no browser errors. This is fixture-level error recovery evidence; host-backed failure recovery and broader session lifecycle acceptance remain open.
+
 ## P36-7.1 / P36-7.3 Native real-session baseline (2026-08-27)
 
 `npm.cmd run real-performance -- s-f15a7e57 30` passed against the running service at `http://127.0.0.1:18099` after the harness fixed its selection branch and masked search-button click. This was the real Super Mario session, not a generated browser fixture. The native DSH page loaded `75,950` historical events and ran for `32.2s`: minimum sampled FPS `62`, average sampled frames `164.7`, JS heap `36→43MiB`, maximum DOM `554`, six Long Tasks totaling `1,788ms`, 16 mounted trajectory rows, logical row count `16`, and zero console errors. The event tail stayed at `75,950` throughout, so this is a static 75k baseline only; 100k history, continuous event growth, event-to-UI latency and reconnect recovery remain open.

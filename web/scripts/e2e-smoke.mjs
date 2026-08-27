@@ -35,6 +35,8 @@ function valueFor(method) {
       return { items: [] }
     case 'workspace.list':
       return { items: [], ungroupedSessionIds: [], archivedSessionIds: [] }
+    case 'session.search':
+      return { items: [], hasMore: false }
     case 'agentPreset.list':
       return { authorable: false, hasDocument: false, presets: [] }
     case 'llm.providers':
@@ -52,6 +54,7 @@ async function installNativeMock(page, options = {}) {
   const sockets = new Set()
   const socketConnections = new Map()
   const requests = []
+  let searchFailuresRemaining = options.searchFailures ?? 0
   await page.route('**/plugins/events', route => route.fulfill({
     status: 200,
     contentType: 'text/event-stream',
@@ -72,6 +75,60 @@ async function installNativeMock(page, options = {}) {
     const body = JSON.parse(route.request().postData() ?? '{}')
     assert.equal(body.type, 'client-request', `unexpected native request envelope for ${body.method}`)
     requests.push(body.method)
+    if (body.method === 'session.search' && searchFailuresRemaining > 0) {
+      searchFailuresRemaining -= 1
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          type: 'server-response',
+          rpcId: body.rpcId,
+          result: { ok: false, error: { code: 'search-unavailable', message: 'search fixture failure' } },
+        }),
+      })
+    }
+    if (body.method === 'session.list' && options.seedSession) {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          type: 'server-response',
+          rpcId: body.rpcId,
+          result: { ok: true, value: {
+            items: [{
+              sessionId: 'search-fixture', title: 'Search fixture', updatedAt: Date.now(),
+              running: false, blank: false, cwd: 'C:/shutu-search',
+              projections: { asOfSeq: 0, values: { sessionListMetadata: { blank: false } } },
+            }],
+          } },
+        }),
+      })
+    }
+    if (body.method === 'workspace.list' && options.seedSession) {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          type: 'server-response',
+          rpcId: body.rpcId,
+          result: { ok: true, value: {
+            items: [{ workspaceId: 'search-ws', path: 'C:/shutu-search', title: 'Search', sessionIds: ['search-fixture'], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }],
+            archivedSessionIds: [],
+          } },
+        }),
+      })
+    }
+    if (body.method === 'session.create' && options.seedSession) {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          type: 'server-response',
+          rpcId: body.rpcId,
+          result: { ok: true, value: { sessionId: 'created-search' } },
+        }),
+      })
+    }
     if (body.method === 'session.list' && options.sessionListDelayMs) {
       await new Promise(resolvePromise => setTimeout(resolvePromise, options.sessionListDelayMs))
     }
@@ -207,6 +264,32 @@ async function runLoadingDesktop(browser) {
   return { viewport: '1280x900', state: 'loading', console: 'clean' }
 }
 
+async function runSearchErrorRecovery(browser) {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+  const issues = []
+  page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
+  page.on('pageerror', error => issues.push(error.message))
+  page.on('response', response => { if (response.status() >= 400) issues.push(`http ${response.status()}: ${response.url()}`) })
+  const { requests } = await installNativeMock(page, { searchFailures: 1, seedSession: true })
+  await page.goto(baseUrl, { waitUntil: 'domcontentloaded' })
+  await waitForNativeShell(page)
+  const search = page.locator('button[aria-label="Search sessions"], button[aria-label="Search"], button[aria-label="搜索会话"], button[aria-label="搜索"]').first()
+  await search.click()
+  const input = page.locator('input[placeholder]').first()
+  await input.fill('first failed query')
+  const unavailable = page.getByRole('status').filter({ hasText: /Content search is temporarily unavailable|内容搜索暂不可用/ })
+  await unavailable.waitFor({ timeout: 15_000 })
+  await input.press('Escape')
+  await search.click()
+  await input.fill('second recovered query')
+  await page.waitForTimeout(500)
+  assert.equal(await unavailable.count(), 0)
+  assert.equal(requests.filter(method => method === 'session.search').length, 2)
+  assert.deepEqual(issues, [])
+  await page.close()
+  return { requests: 2, recovered: true, console: 'clean' }
+}
+
 async function runMobile(browser) {
   const page = await browser.newPage({ viewport: { width: 390, height: 844 } })
   const issues = []
@@ -247,8 +330,9 @@ try {
     const reconnectDesktop = await runReconnectDesktop(browser)
     const darkDesktop = await runDarkDesktop(browser)
     const loadingDesktop = await runLoadingDesktop(browser)
+    const searchErrorRecovery = await runSearchErrorRecovery(browser)
     const mobile = await runMobile(browser)
-    console.log(JSON.stringify({ browser: 'playwright', native: 'ok', desktop, reconnectDesktop, darkDesktop, loadingDesktop, mobile }))
+    console.log(JSON.stringify({ browser: 'playwright', native: 'ok', desktop, reconnectDesktop, darkDesktop, loadingDesktop, searchErrorRecovery, mobile }))
   } finally {
     await browser.close()
   }
