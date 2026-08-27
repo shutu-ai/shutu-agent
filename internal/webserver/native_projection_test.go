@@ -136,3 +136,20 @@ func TestNativeProjectionConvertsRequestStartToDSHRequestHeader(t *testing.T) {
 		t.Fatalf("subsequent request header reason = %q, want update", updatedData.Reason)
 	}
 }
+
+func TestNativeProjectionSeedsContextMeterCapacity(t *testing.T) {
+	cursor := newNativeProjectionCursor()
+	cursor.setContextWindow(128000)
+	cursor.project("context-meter", session.Event{
+		Seq: 1, Type: session.EventLLMRequestEnd, At: time.UnixMilli(1001), Version: session.EventVersion,
+		Data: json.RawMessage(`{"usage":{"inputTokens":100,"cachedInputTokens":40,"cacheWriteTokens":5}}`),
+	})
+	values := cursor.projectionBlock("", 1).Values
+	pressure, ok := values["contextPressure"].(map[string]any)
+	if !ok {
+		t.Fatalf("context pressure projection = %#v", values["contextPressure"])
+	}
+	if pressure["contextWindow"] != 128000 || pressure["pressureTokens"] != int64(145) {
+		t.Fatalf("context meter pressure = %#v, want window=128000 pressure=145", pressure)
+	}
+}

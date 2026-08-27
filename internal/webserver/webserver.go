@@ -795,6 +795,18 @@ func (s *Server) SetContextWindow(fn func(sessionID string) int) {
 	s.contextWindowFn = fn
 }
 
+// contextWindowForSession resolves the same effective capacity used by the
+// generic context endpoint, for native DSH projection baselines and streams.
+func (s *Server) contextWindowForSession(sessionID string) int {
+	window := defaultContextWindow
+	if s.contextWindowFn != nil {
+		if resolved := s.contextWindowFn(sessionID); resolved > 0 {
+			window = resolved
+		}
+	}
+	return window
+}
+
 // SetSessionStateProvider wires the durable per-session state projection. A
 // nil provider leaves the endpoint at 501, preserving the generic server's
 // optional-composition behavior.
@@ -3520,12 +3532,7 @@ func (s *Server) handleSessionContext(w http.ResponseWriter, r *http.Request) {
 	// append-only log deliberately retains shadowed events for audit/replay, so
 	// summing every raw event here would make /compact appear to do nothing.
 	used := estimateContextTokens(events)
-	window := defaultContextWindow
-	if s.contextWindowFn != nil {
-		if w := s.contextWindowFn(id); w > 0 {
-			window = w
-		}
-	}
+	window := s.contextWindowForSession(id)
 	percent := 0.0
 	if window > 0 {
 		percent = float64(used) / float64(window)

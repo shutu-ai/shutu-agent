@@ -713,11 +713,12 @@ func TestNativePluginInventoryMatchesNativeManifestShape(t *testing.T) {
 
 func TestNativeHistoryReturnsDSHProjectionBaseline(t *testing.T) {
 	srv, st := newTestServer(t, "tok")
+	srv.SetContextWindow(func(string) int { return 128000 })
 	seedSession(t, st, "native-projections", []session.Event{
 		{Seq: 1, Type: session.EventPlanCreate, At: time.UnixMilli(1001), Version: session.EventVersion, Data: json.RawMessage(`{"scope":"todo","id":"todo-1","title":"ship native UI"}`)},
 		{Seq: 2, Type: session.EventPlanStatus, At: time.UnixMilli(1002), Version: session.EventVersion, Data: json.RawMessage(`{"scope":"todo","id":"todo-1","status":"in-progress"}`)},
 		{Seq: 3, Type: session.EventPlanMode, At: time.UnixMilli(1003), Version: session.EventVersion, Data: json.RawMessage(`{"active":true,"pending":false}`)},
-		{Seq: 4, Type: session.EventLLMRequestStart, At: time.UnixMilli(1004), Version: session.EventVersion, Data: json.RawMessage(`{"provider":"deepseek","model":"reasoner","contextWindow":128000}`)},
+		{Seq: 4, Type: session.EventLLMRequestStart, At: time.UnixMilli(1004), Version: session.EventVersion, Data: json.RawMessage(`{"provider":"deepseek","model":"reasoner"}`)},
 		{Seq: 5, Type: session.EventLLMRequestEnd, At: time.UnixMilli(1005), Version: session.EventVersion, Data: json.RawMessage(`{"usage":{"inputTokens":100,"outputTokens":20,"cachedInputTokens":40,"cacheWriteTokens":5}}`)},
 	})
 	if err := st.SetSessionTitle(context.Background(), "native-projections", "Native UI parity", session.TitleSourceUser); err != nil {
@@ -764,7 +765,7 @@ func TestNativeHistoryReturnsDSHProjectionBaseline(t *testing.T) {
 	if err := json.Unmarshal(encoded, &contextPressure); err != nil {
 		t.Fatal(err)
 	}
-	if contextPressure["contextWindow"] != 128000 || contextPressure["pressureTokens"] != 100 {
+	if contextPressure["contextWindow"] != 128000 || contextPressure["pressureTokens"] != 145 {
 		t.Fatalf("projection context pressure = %#v", contextPressure)
 	}
 	var plan map[string]bool

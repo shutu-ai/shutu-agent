@@ -54,6 +54,19 @@ func newNativeProjectionCursor() *nativeProjectionCursor {
 	}
 }
 
+// setContextWindow seeds the native context-meter projection with the
+// effective route capacity. DSH keeps this denominator independent from the
+// provider usage sample, so history replay and live mux delivery must both
+// receive it before folding the session log.
+func (c *nativeProjectionCursor) setContextWindow(window int) {
+	if window <= 0 {
+		return
+	}
+	context := nativeProjectionMap(c.values["contextPressure"])
+	context["contextWindow"] = window
+	c.setProjectionValue("contextPressure", context)
+}
+
 func (c *nativeProjectionCursor) project(sessionID string, ev session.Event) nativeSessionEvent {
 	data := nativeJSONObject(ev.Data)
 	c.changed = make(map[string]any)
@@ -926,8 +939,9 @@ func (c *nativeProjectionCursor) addUsage(usage map[string]any) {
 		"cacheWriteTokens":    c.usage.CacheWriteTokens,
 	})
 	context := nativeProjectionMap(c.values["contextPressure"])
-	if input > 0 {
-		context["pressureTokens"] = input
+	pressure := input + cached + nativeEventInt64(usage, "cacheWriteTokens", "cache_write_tokens")
+	if pressure > 0 {
+		context["pressureTokens"] = pressure
 	}
 	c.setProjectionValue("contextPressure", context)
 }

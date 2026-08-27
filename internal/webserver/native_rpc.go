@@ -2873,6 +2873,7 @@ func (s *Server) nativeSessionList(r *http.Request) nativeRPCResult {
 		// still appending to the same database.
 		if events, _, loadErr := s.store.LoadSessionPage(r.Context(), m.ID, 0, 0, nativeSessionListTailLimit); loadErr == nil {
 			cursor := newNativeProjectionCursor()
+			cursor.setContextWindow(s.contextWindowForSession(m.ID))
 			for _, ev := range events {
 				cursor.project(m.ID, ev)
 			}
@@ -2948,6 +2949,7 @@ func (s *Server) nativeSessionHistory(r *http.Request, raw json.RawMessage) nati
 	}
 	entries := make([]nativeHistoryEntry, 0, len(events))
 	projection := newNativeProjectionCursor()
+	projection.setContextWindow(s.contextWindowForSession(req.SessionID))
 	projected := make([]nativeSessionEvent, 0, len(events))
 	for _, ev := range events {
 		projected = append(projected, projection.project(req.SessionID, ev))
@@ -3767,6 +3769,7 @@ func (s *Server) handleNativeMuxWebSocket(w http.ResponseWriter, r *http.Request
 			return loadErr
 		}
 		projection := newNativeProjectionCursor()
+		projection.setContextWindow(s.contextWindowForSession(meta.ID))
 		var projectionMu sync.Mutex
 		lastSeq := int64(-1)
 		if len(events) > 0 {
