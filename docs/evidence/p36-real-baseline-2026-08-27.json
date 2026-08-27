@@ -1,0 +1,69 @@
+{
+  "revision": "0121736",
+  "service": "http://127.0.0.1:18099",
+  "realContinuousStream": {
+    "task": "网页版超级玛丽",
+    "sessionId": "s-f556a6f2",
+    "durationSeconds": 60.7,
+    "baselineEventSeq": 256,
+    "streamEventSeq": [256, 878],
+    "streamFrames": 618,
+    "streamFramesPerSecond": 10.18,
+    "promptAdmissionMs": 14,
+    "eventToUiMs": { "min": 6, "avg": 18.7, "max": 79, "samples": 95 },
+    "fps": { "min": 42, "avg": 59.9 },
+    "heapMiB": { "start": 28, "max": 72 },
+    "domNodesMax": 1274,
+    "longTaskMs": 1191,
+    "reconnectMs": 293,
+    "consoleErrors": 0,
+    "thresholdGate": "passed",
+    "contentEvidence": {
+      "totalEventsAfterRun": 1468,
+      "assistantMessages": 22,
+      "reasoningBlocks": 22,
+      "toolCalls": 29,
+      "assistantTextAndReasoningChars": 42755,
+      "outputTokens": 15904
+    }
+  },
+  "real100kStatic": {
+    "sessionId": "s-f15a7e57",
+    "historicalEvents": 106389,
+    "durationSeconds": 60.8,
+    "streamFrames": 0,
+    "fps": { "min": 50, "avg": 60.5 },
+    "heapMiB": { "start": 48, "max": 57 },
+    "domNodesMax": 1022,
+    "longTaskMs": 1330,
+    "reconnectMs": 448,
+    "consoleErrors": 0,
+    "thresholdGate": "passed",
+    "scope": "static-100k-history-and-reconnect"
+  },
+  "real100kContinuousAttempt": {
+    "sessionId": "s-f15a7e57",
+    "historicalEventsAtAttach": 106389,
+    "durationSeconds": 120.9,
+    "streamFrames": 2,
+    "eventToUiMs": { "min": 38, "avg": 38, "max": 38, "samples": 1 },
+    "fps": { "min": 44, "avg": 60.6 },
+    "heapMiB": { "start": 42, "max": 58 },
+    "domNodesMax": 1037,
+    "longTaskMs": 1371,
+    "reconnectMs": 468,
+    "consoleErrors": 0,
+    "thresholdGate": "not-sufficient-for-continuous-stream",
+    "reason": "The real model turn was admitted but produced only two live frames during the observation window."
+  },
+  "wsl2": {
+    "distribution": "AlmaLinux-8",
+    "binary": "GOOS=linux GOARCH=amd64 CGO_ENABLED=0",
+    "healthHttp": 200,
+    "staticHttp": 200,
+    "websocketUpgrade": { "mux": 101, "host": 101 },
+    "dataDirectory": "Linux-native /tmp",
+    "cleanStop": true,
+    "scope": "local-linux-like-evidence; not-a-formal-production-host"
+  }
+}
