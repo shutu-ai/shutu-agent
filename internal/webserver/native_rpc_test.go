@@ -1129,6 +1129,9 @@ func TestNativeSessionAttachmentRequiresReferenceAndReturnsDSHData(t *testing.T)
 
 func TestNativeSessionModelsUsesStandardSessionMethod(t *testing.T) {
 	srv, st := newTestServer(t, "tok")
+	srv.SetConfigProvider(func() map[string]any {
+		return map[string]any{"llm_provider": "deepseek-official", "model": "deepseek-v4-flash"}
+	})
 	seedSession(t, st, "native-models", nil)
 	rec := doReqBody(t, srv.Handler(), "POST", "/api/session.models", "tok", `{"type":"client-request","rpcId":"models-1","method":"session.models","payload":{"sessionId":"native-models"}}`)
 	response := nativeResponse(t, rec.Body.Bytes())
@@ -1140,7 +1143,8 @@ func TestNativeSessionModelsUsesStandardSessionMethod(t *testing.T) {
 	if err := json.Unmarshal(encoded, &value); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := value["current"].(map[string]any); !ok || value["routable"] != false {
+	current, ok := value["current"].(map[string]any)
+	if !ok || current["provider"] != "deepseek-official" || current["model"] != "deepseek-v4-flash" || value["routable"] != true {
 		t.Fatalf("session.models value = %#v", value)
 	}
 }
@@ -1894,7 +1898,17 @@ func TestNativeLLMCatalogUsesSanitizedConfig(t *testing.T) {
 		return map[string]any{"providers": []map[string]any{
 			{
 				"id": "deepseek-official", "name": "DeepSeek", "available": true,
-				"configured": true, "env_var": "DEEPSEEK_API_KEY", "candidates": []string{"deepseek-v4-flash"},
+				"configured": true, "env_var": "DEEPSEEK_API_KEY", "model": "deepseek-v4-flash", "candidates": []string{"deepseek-v4-flash", "deepseek-v4-pro"},
+			},
+			{
+				"id": "deepseek-new", "name": "DeepSeek New", "available": true,
+				"configured": true, "model": "deepseek-v4-flash", "models": []map[string]any{
+					{"id": "deepseek-v4-flash"}, {"id": "deepseek-v4-pro"},
+				},
+			},
+			{
+				"id": "dormant", "name": "Dormant", "available": false,
+				"configured": false, "model": "hidden-model", "candidates": []string{"hidden-candidate"},
 			},
 		}}
 	})
@@ -1911,7 +1925,7 @@ func TestNativeLLMCatalogUsesSanitizedConfig(t *testing.T) {
 	if err := json.Unmarshal(encoded, &providers); err != nil {
 		t.Fatal(err)
 	}
-	if len(providers.Providers) != 1 || providers.Providers[0]["provider"] != "deepseek-official" {
+	if len(providers.Providers) != 3 || providers.Providers[0]["provider"] != "deepseek-official" {
 		t.Fatalf("llm providers = %+v", providers.Providers)
 	}
 
@@ -1927,8 +1941,22 @@ func TestNativeLLMCatalogUsesSanitizedConfig(t *testing.T) {
 	if err := json.Unmarshal(encoded, &models); err != nil {
 		t.Fatal(err)
 	}
-	if len(models.Groups) != 1 {
+	if len(models.Groups) != 2 {
 		t.Fatalf("llm model groups = %+v", models.Groups)
+	}
+	if got := models.Groups[0]["id"]; got != "deepseek-official" {
+		t.Fatalf("first model group = %+v", models.Groups)
+	}
+	firstModels, ok := models.Groups[0]["models"].([]any)
+	if !ok || len(firstModels) != 1 {
+		t.Fatalf("single configured model group = %+v", models.Groups[0])
+	}
+	if got := models.Groups[1]["id"]; got != "deepseek-new" {
+		t.Fatalf("second model group = %+v", models.Groups)
+	}
+	secondModels, ok := models.Groups[1]["models"].([]any)
+	if !ok || len(secondModels) != 2 {
+		t.Fatalf("explicit configured models = %+v", models.Groups[1])
 	}
 }
 

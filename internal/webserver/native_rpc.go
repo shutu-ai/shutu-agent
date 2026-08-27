@@ -1971,8 +1971,14 @@ func (s *Server) nativeLLMModels() nativeRPCResult {
 	}
 	groups := make([]any, 0, len(providers))
 	for _, provider := range providers {
+		// The settings directory intentionally contains dormant providers so
+		// users can configure them. The session model picker is different: it
+		// must only expose routes that are configured and usable now.
+		if !nativeBool(provider["configured"]) || !nativeBool(provider["available"]) {
+			continue
+		}
 		id := nativeString(provider["id"])
-		models := nativeProviderModels(provider)
+		models := nativeConfiguredProviderModels(provider)
 		if id == "" || len(models) == 0 {
 			continue
 		}
@@ -2005,6 +2011,22 @@ func (s *Server) nativeLLMModels() nativeRPCResult {
 		groups = append(groups, map[string]any{"id": id, "name": name, "models": items})
 	}
 	return nativeRPCSuccess(map[string]any{"groups": groups, "failures": []any{}})
+}
+
+// nativeConfiguredProviderModels is the model source for llm.models and
+// session.models. Provider candidates are discovery/catalog suggestions for
+// settings and must never become selectable session routes by themselves.
+func nativeConfiguredProviderModels(provider map[string]any) []any {
+	if models := nativeProviderModels(provider); len(models) > 0 {
+		if nativeConfigMaps(provider["models"]) != nil {
+			return models
+		}
+	}
+	model := nativeString(provider["model"])
+	if model == "" {
+		return nil
+	}
+	return []any{map[string]any{"id": model}}
 }
 
 func (s *Server) nativeLLMDiscoverModels(r *http.Request, raw json.RawMessage) nativeRPCResult {
@@ -2650,7 +2672,10 @@ func (s *Server) nativeSessionModels(r *http.Request, raw json.RawMessage) nativ
 	effort := ""
 	if s.cfgFn != nil {
 		view := s.cfgFn()
-		provider = nativeString(view["provider"])
+		provider = nativeString(view["llm_provider"])
+		if provider == "" {
+			provider = nativeString(view["provider"])
+		}
 		model = nativeString(view["model"])
 	}
 	if configs, ok := s.store.(store.SessionConfigStore); ok {

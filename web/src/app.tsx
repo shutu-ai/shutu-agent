@@ -4,7 +4,6 @@ import { ShutuApiError } from './api'
 import { projectDshConversation, type DshConversationNode, type DshConversationSnapshot } from './dsh-conversation'
 import { collapseDshAssistantToolCalls, collapseDshTrajectoryTurns, projectDshTrajectory, projectDshTrajectoryRecords, summarizeDshTimeline, type DshTimelineMode, type DshTrajectoryEvent, type DshTrajectoryRecord } from './dsh-trajectory'
 import { deriveProducedFiles } from './produced-files'
-import { configuredModelIds, selectConfiguredModel } from './model-selection'
 import { WebStore } from './store'
 import { TrajectorySearchIndex } from './trajectory-search'
 import { buildVirtualOffsets, virtualRange } from './virtual-list'
@@ -1713,14 +1712,13 @@ function SessionControls({ store, sessionId, onError }: { store: WebStore; sessi
       if (abort.signal.aborted) return
       setConfig(globalConfig)
       const providerId = sessionConfig.provider ?? globalConfig.llm_provider ?? ''
-      const provider = (globalConfig.providers ?? []).find(item => item.id === providerId)
-      setValues({ provider: providerId, model: selectConfiguredModel(provider, sessionConfig.model ?? globalConfig.model ?? ''), reasoning_effort: sessionConfig.reasoning_effort ?? globalConfig.reasoning_effort ?? '', permission: sessionConfig.permission ?? '' })
+      setValues({ provider: providerId, model: sessionConfig.model ?? globalConfig.model ?? '', reasoning_effort: sessionConfig.reasoning_effort ?? globalConfig.reasoning_effort ?? '', permission: sessionConfig.permission ?? '' })
     }).catch(error => { if (!abort.signal.aborted) onError(error) })
     return () => abort.abort()
   }, [onError, sessionId, store])
   const providers = config?.providers ?? []
   const provider = providers.find(item => item.id === values.provider)
-  const models = useMemo(() => configuredModelIds(provider), [provider])
+  const models = provider?.models?.map(item => item.id) ?? provider?.candidates ?? []
   const update = async (next: Partial<typeof values>): Promise<void> => {
     if (sessionId === null) return
     const merged = { ...values, ...next }
@@ -1730,7 +1728,7 @@ function SessionControls({ store, sessionId, onError }: { store: WebStore; sessi
     finally { setBusy(false) }
   }
   if (sessionId === null || config === null) return null
-  return <div className="session-controls" aria-label="Current session controls"><label><span>Model</span><select value={values.model} disabled={busy || models.length === 0} onChange={event => void update({ model: event.target.value })}>{models.length > 0 ? models.map(item => <option key={item} value={item}>{item}</option>) : <option value="">暂无已配置模型</option>}</select></label><label><span>Reasoning</span><select value={values.reasoning_effort} disabled={busy} onChange={event => void update({ reasoning_effort: event.target.value })}><option value="">Default</option><option value="off">Off</option><option value="low">Low</option><option value="high">High</option><option value="max">Max</option></select></label><label><span>Permission</span><select value={values.permission} disabled={busy} onChange={event => void update({ permission: event.target.value })}><option value="">Default</option><option value="readonly">Read only</option><option value="standard">Standard</option><option value="full">Full</option></select></label></div>
+  return <div className="session-controls" aria-label="Current session controls"><label><span>Model</span><select value={values.model} disabled={busy} onChange={event => void update({ model: event.target.value })}>{models.length > 0 ? models.map(item => <option key={item} value={item}>{item}</option>) : <option value={values.model}>{values.model || 'default'}</option>}</select></label><label><span>Reasoning</span><select value={values.reasoning_effort} disabled={busy} onChange={event => void update({ reasoning_effort: event.target.value })}><option value="">Default</option><option value="off">Off</option><option value="low">Low</option><option value="high">High</option><option value="max">Max</option></select></label><label><span>Permission</span><select value={values.permission} disabled={busy} onChange={event => void update({ permission: event.target.value })}><option value="">Default</option><option value="readonly">Read only</option><option value="standard">Standard</option><option value="full">Full</option></select></label></div>
 }
 
 function isConversationEvent(event: EventView): boolean {
