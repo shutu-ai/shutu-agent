@@ -88,6 +88,10 @@ npm.cmd run real-performance -- s-f15a7e57 180
 
 `go test ./internal/webserver -run 'TestSessionExport(HeadMatchesDownloadHeadersWithoutBody|IncludesDescendantLineage|IncludesDeduplicatedMedia)$' -count=1` passed. Root and descendant logs are exported together with one deduplicated image payload under `media/<attachmentId>.png`; missing or unavailable attachment storage fails the export before the response is sent.
 
+## P36-5.5 Native WebSocket reconnect evidence (2026-08-27)
+
+`npm.cmd run e2e` passed with a Playwright `WebSocketRoute.close(1011, ...)` fault injected into the first `/api/events.mux` and `/api/events.host` connections. Both native channels reconnected (`connections: {"/api/events.mux":2,"/api/events.host":2}`), the DSH shell remained available, and the only console warning was the expected `[web-runtime] connection lost, retry #1`; no page error or unexpected HTTP/console error occurred.
+
 ## P36-6.1 Native dark baseline evidence (2026-08-27)
 
 `SHUTU_E2E_ARTIFACT_DIR=../docs/evidence/dsh-native-2026-08-27 npm.cmd run e2e` passed with a separate Chromium `colorScheme: dark` page. The dark desktop screenshot is `docs/evidence/dsh-native-2026-08-27/shutu-native-dark-desktop.png`; it has zero horizontal overflow, both native WebSockets, no unnamed-button regression, and no console errors or warnings. A stable user-visible error state and the full light/dark matrix remain open.

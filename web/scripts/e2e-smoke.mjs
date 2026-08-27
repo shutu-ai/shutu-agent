@@ -50,6 +50,7 @@ function valueFor(method) {
 
 async function installNativeMock(page, options = {}) {
   const sockets = new Set()
+  const socketConnections = new Map()
   const requests = []
   await page.route('**/plugins/events', route => route.fulfill({
     status: 200,
@@ -57,7 +58,13 @@ async function installNativeMock(page, options = {}) {
     body: 'retry: 3000\n\n',
   }))
   await page.routeWebSocket('**/api/events.*', ws => {
-    sockets.add(new URL(ws.url()).pathname)
+    const pathname = new URL(ws.url()).pathname
+    sockets.add(pathname)
+    const connectionNumber = (socketConnections.get(pathname) ?? 0) + 1
+    socketConnections.set(pathname, connectionNumber)
+    if (options.closeFirstSocketAfterMs && connectionNumber === 1) {
+      setTimeout(() => ws.close(1011, 'native reconnect smoke'), options.closeFirstSocketAfterMs)
+    }
     ws.onMessage(() => {})
   })
   await page.route('**/api/**', async route => {
@@ -78,7 +85,7 @@ async function installNativeMock(page, options = {}) {
       }),
     })
   })
-  return { sockets, requests }
+  return { sockets, socketConnections, requests }
 }
 
 async function waitForServer() {
@@ -161,6 +168,26 @@ async function runDarkDesktop(browser) {
   return { viewport: '1280x900', colorScheme: 'dark', overflow, console: 'clean' }
 }
 
+async function runReconnectDesktop(browser) {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+  const issues = []
+  page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
+  page.on('pageerror', error => issues.push(error.message))
+  page.on('response', response => { if (response.status() >= 400) issues.push(`http ${response.status()}: ${response.url()}`) })
+  const { sockets, socketConnections } = await installNativeMock(page, { closeFirstSocketAfterMs: 1_500 })
+  await page.goto(baseUrl, { waitUntil: 'domcontentloaded' })
+  await waitForNativeShell(page)
+  await page.waitForTimeout(4_000)
+  assert.ok(sockets.has('/api/events.mux'), 'reconnect smoke did not open native mux WebSocket')
+  assert.ok(sockets.has('/api/events.host'), 'reconnect smoke did not open native host WebSocket')
+  assert.ok((socketConnections.get('/api/events.mux') ?? 0) >= 2, 'native mux WebSocket did not reconnect')
+  assert.ok((socketConnections.get('/api/events.host') ?? 0) >= 2, 'native host WebSocket did not reconnect')
+  await waitForNativeShell(page)
+  assert.deepEqual(issues.filter(issue => issue !== '[web-runtime] connection lost, retry #1'), [])
+  await page.close()
+  return { sockets: [...sockets].sort(), connections: Object.fromEntries(socketConnections), console: 'clean' }
+}
+
 async function runLoadingDesktop(browser) {
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
   const issues = []
@@ -214,10 +241,11 @@ try {
   const browser = await chromium.launch({ headless: true })
   try {
     const desktop = await runDesktop(browser)
+    const reconnectDesktop = await runReconnectDesktop(browser)
     const darkDesktop = await runDarkDesktop(browser)
     const loadingDesktop = await runLoadingDesktop(browser)
     const mobile = await runMobile(browser)
-    console.log(JSON.stringify({ browser: 'playwright', native: 'ok', desktop, darkDesktop, loadingDesktop, mobile }))
+    console.log(JSON.stringify({ browser: 'playwright', native: 'ok', desktop, reconnectDesktop, darkDesktop, loadingDesktop, mobile }))
   } finally {
     await browser.close()
   }

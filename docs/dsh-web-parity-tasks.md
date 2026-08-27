@@ -66,6 +66,7 @@
 - [x] P36-5.5d：补齐 DSH `HEAD /api/session.export` 预检，返回与 ZIP 下载一致的类型、文件名和长度且不发送响应体。
 - [x] P36-5.5e：`session.export` 支持 `includeDescendants`，按持久化 subagent lineage 将根会话及后代稳定写入 DSH ZIP 路径，并拒绝非法布尔参数。
 - [x] P36-5.5f：`session.export` 递归收集根会话及后代的 image block，按附件 ID 去重并写入 DSH `media/<attachmentId>.<ext>` 路径。
+- [x] P36-5.5g：Playwright 注入首条 host/mux WebSocket 断线，验证 DSH 原生运行时自动重连、UI 保持可用且无非预期错误。
 - [ ] P36-6.1：建立桌面/移动端、深色/浅色、空数据/加载/错误状态截图基线。
 - [x] P36-6.1a：通过 Playwright 保存原生 DSH 空数据桌面/移动基线截图；截图目录支持 `SHUTU_E2E_ARTIFACT_DIR`，本轮命令与结果记录在 `docs/dsh-web-parity-acceptance.md`。
 - [x] P36-6.1b：通过 Playwright Chromium `colorScheme: dark` 保存原生 DSH 空数据桌面基线，并复用溢出、双 WebSocket、无障碍名称和控制台检查。
