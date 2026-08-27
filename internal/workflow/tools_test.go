@@ -28,23 +28,27 @@ func (f *fakeScriptRunner) RunScript(_ context.Context, req ScriptRequest, _ Age
 	return ScriptResult{Value: map[string]any{"ok": true}, StopReason: "completed", AgentsStarted: 1}, nil
 }
 
-func TestWorkflowToolSchemaDeclaresBothWorkflowPaths(t *testing.T) {
+func TestWorkflowToolSchemaMatchesDSHWorkflowContract(t *testing.T) {
 	description := WorkflowRunTool{}.Description()
-	if !strings.Contains(description, "dsh-compatible JavaScript workflow") || !strings.Contains(description, "Go-native task DAG") {
-		t.Fatal("workflow description must disclose both JavaScript and Go-native workflow paths")
+	if !strings.Contains(description, "JavaScript workflow") || !strings.Contains(description, "pipeline") || !strings.Contains(description, "parallel") {
+		t.Fatal("workflow description must document the DSH JavaScript workflow hooks")
 	}
 	schema := WorkflowRunTool{}.Schema()
 	properties, ok := schema["properties"].(map[string]any)
 	if !ok {
 		t.Fatal("workflow schema properties missing")
 	}
-	for _, name := range []string{"meta", "args", "script", "tasks"} {
+	for _, name := range []string{"meta", "args", "script"} {
 		if _, ok := properties[name]; !ok {
 			t.Errorf("workflow schema missing %q", name)
 		}
 	}
-	if _, ok := schema["anyOf"]; !ok {
-		t.Fatal("workflow schema must express script/tasks alternative")
+	if _, ok := properties["tasks"]; ok {
+		t.Fatal("workflow model-facing schema must not expose the legacy tasks DAG")
+	}
+	required, ok := schema["required"].([]string)
+	if !ok || len(required) != 2 || required[0] != "meta" || required[1] != "script" {
+		t.Fatalf("required = %#v, want meta and script", schema["required"])
 	}
 }
 
@@ -56,11 +60,12 @@ func TestWorkflowToolExecuteScriptPathValidatesMetaAndForwardsEvents(t *testing.
 	tool := NewWorkflowRunToolWithScript(eng, runner, nil, func() string { return "parent-1" }, func(typ string, data any) {
 		events = append(events, eventCapture{typ: typ, data: data})
 	})
+	tool.agent = func(context.Context, AgentRequest) (AgentResult, error) { return AgentResult{}, nil }
 	out, err := tool.Execute(context.Background(), json.RawMessage(`{"meta":{"name":"audit","description":"check files"},"args":{"scope":"repo"},"script":"return 1"}`))
 	if err != nil {
 		t.Fatalf("Execute script: %v", err)
 	}
-	if !strings.Contains(out, `"ok":true`) {
+	if !strings.Contains(out, `"ok": true`) || !strings.Contains(out, `workflow "audit" completed`) {
 		t.Fatalf("script result = %q, want JSON result", out)
 	}
 	if runner.request.ParentSessionID != "parent-1" || runner.request.Script != "return 1" {

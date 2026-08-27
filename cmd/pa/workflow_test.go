@@ -68,7 +68,7 @@ func TestRegisterWorkflowDisabledRegistersNothing(t *testing.T) {
 
 // TestRegisterWorkflowEnabled verifies the enabled path: the workflow_run tool
 // is registered and whitelisted (Execute succeeds through the registry on a
-// single-task DAG).
+// single JavaScript workflow).
 func TestRegisterWorkflowEnabled(t *testing.T) {
 	app := makeWorkflowApp(true, ralphFakeLLM{text: "任务A 完成"})
 	app.reg.SetPolicy(workflowPolicy())
@@ -90,14 +90,13 @@ func TestRegisterWorkflowEnabled(t *testing.T) {
 	// whitelisted (the D10-gated whitelist in production comes from
 	// config.applyDefaults).
 	if _, err := app.reg.Execute(context.Background(), workflow.WorkflowRunToolName,
-		json.RawMessage(`{"tasks":[{"id":"a","prompt":"x"}]}`)); err != nil {
+		json.RawMessage(`{"meta":{"name":"smoke","description":"smoke"},"script":"return 42"}`)); err != nil {
 		t.Fatalf("workflow must be registered and whitelisted when enabled: %v", err)
 	}
 }
 
-// TestWorkflowRunE2E drives a two-task DAG (b depends on a) through the
-// registry: both tasks complete, the report renders both blocks, and the
-// workflow/run event lands in the session log (D3).
+// TestWorkflowRunE2E drives a JavaScript workflow with an agent call through
+// the registry and verifies the structured DSH envelope.
 func TestWorkflowRunE2E(t *testing.T) {
 	app := makeWorkflowApp(true, ralphFakeLLM{text: "子代理输出"})
 	app.reg.SetPolicy(workflowPolicy())
@@ -109,23 +108,27 @@ func TestWorkflowRunE2E(t *testing.T) {
 		t.Fatalf("registerWorkflow: %v", err)
 	}
 	res, err := app.reg.Execute(context.Background(), workflow.WorkflowRunToolName,
-		json.RawMessage(`{"tasks":[{"id":"a","prompt":"x"},{"id":"b","prompt":"y","depends_on":["a"]}]}`))
+		json.RawMessage(`{"meta":{"name":"e2e-flow","description":"test"},"script":"return await agent(\"x\")"}`))
 	if err != nil {
 		t.Fatalf("workflow via registry: %v", err)
 	}
-	if !strings.Contains(res.Output, "workflow: 2 tasks") ||
-		!strings.Contains(res.Output, "a: completed") ||
-		!strings.Contains(res.Output, "b: completed") {
-		t.Fatalf("workflow output = %q, want 2 tasks with a/b completed", res.Output)
+	if !strings.Contains(res.Output, `workflow "e2e-flow" completed`) ||
+		!strings.Contains(res.Output, `Return value:`) {
+		t.Fatalf("workflow output = %q, want DSH workflow envelope", res.Output)
+	}
+	envelope, ok := res.Value.(map[string]any)
+	if !ok || envelope["runId"] == "" || envelope["agentsStarted"] != 1 || envelope["result"] != "子代理输出" {
+		t.Fatalf("workflow value = %#v, want runId/agentsStarted/result envelope", res.Value)
 	}
 	if !hasEvent(app.log, session.EventWorkflowRun) {
 		t.Fatal("workflow/run event missing from the session log after workflow Execute")
 	}
 }
 
-// TestWorkflowRunCycleError submits a cyclic DAG (a depends on b and vice
-// versa): the engine rejects it with ErrCycle and Execute surfaces the error.
-func TestWorkflowRunCycleError(t *testing.T) {
+// TestWorkflowRunScriptError submits a workflow with an unsupported hook
+// option; the DSH runner fails the whole script instead of returning partial
+// output.
+func TestWorkflowRunScriptError(t *testing.T) {
 	app := makeWorkflowApp(true, ralphFakeLLM{text: "子代理输出"})
 	app.reg.SetPolicy(workflowPolicy())
 	if err := app.registerSubagent(); err != nil {
@@ -136,8 +139,8 @@ func TestWorkflowRunCycleError(t *testing.T) {
 		t.Fatalf("registerWorkflow: %v", err)
 	}
 	res, err := app.reg.Execute(context.Background(), workflow.WorkflowRunToolName,
-		json.RawMessage(`{"tasks":[{"id":"a","prompt":"x","depends_on":["b"]},{"id":"b","prompt":"y","depends_on":["a"]}]}`))
-	if err != nil || !res.IsError || !strings.Contains(res.Output, "cycle") {
-		t.Fatalf("cyclic DAG result = %+v, err=%v, want structured cycle error", res, err)
+		json.RawMessage(`{"meta":{"name":"bad-flow","description":"test"},"script":"return await agent(\"x\", {effort: \"high\"})"}`))
+	if err != nil || !res.IsError || !strings.Contains(res.Output, "workflow run failed") {
+		t.Fatalf("invalid workflow result = %+v, err=%v, want structured workflow error", res, err)
 	}
 }

@@ -49,6 +49,7 @@ type ScriptRunner interface {
 
 // ScriptResult is the terminal result of a JavaScript workflow.
 type ScriptResult struct {
+	RunID         string
 	Value         any
 	StopReason    string
 	Error         string

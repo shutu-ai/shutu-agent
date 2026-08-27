@@ -217,7 +217,7 @@ func (r *Runner) RunScript(ctx context.Context, req workflow.ScriptRequest, agen
 			if len(msg.Value) != 0 {
 				_ = json.Unmarshal(msg.Value, &value)
 			}
-			result = &workflow.ScriptResult{Value: value, StopReason: msg.StopReason, Error: msg.Error, AgentsStarted: msg.Agents}
+			result = &workflow.ScriptResult{RunID: runID, Value: value, StopReason: msg.StopReason, Error: msg.Error, AgentsStarted: msg.Agents}
 		}
 		if result != nil {
 			break
