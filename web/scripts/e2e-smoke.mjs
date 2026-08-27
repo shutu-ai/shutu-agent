@@ -98,7 +98,7 @@ async function installNativeMock(page, options = {}) {
             items: [{
               sessionId: 'search-fixture', title: 'Search fixture', updatedAt: Date.now(),
               running: false, blank: false, cwd: 'C:/shutu-search',
-              projections: { asOfSeq: 0, values: { sessionListMetadata: { blank: false } } },
+              projections: { asOfSeq: 0, values: { title: 'Search fixture', sessionListMetadata: { blank: false } } },
             }],
           } },
         }),
@@ -127,6 +127,57 @@ async function installNativeMock(page, options = {}) {
           rpcId: body.rpcId,
           result: { ok: true, value: { sessionId: 'created-search' } },
         }),
+      })
+    }
+    if (options.lifecycle && body.method === 'session.history') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          type: 'server-response',
+          rpcId: body.rpcId,
+          result: { ok: true, value: {
+            header: { version: 0, id: 'search-fixture', createdAt: Date.now(), cwd: 'C:/shutu-search' },
+            events: [], hasMore: false, surface: { nodes: [], replacements: [] },
+            projections: { asOfSeq: 0, values: { title: 'Search fixture', sessionListMetadata: { blank: false } } },
+          } },
+        }),
+      })
+    }
+    if (options.lifecycle && body.method === 'session.search') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          type: 'server-response', rpcId: body.rpcId,
+          result: { ok: true, value: { items: [{ sessionId: 'search-fixture', snippet: 'lifecycle seed' }], hasMore: false } },
+        }),
+      })
+    }
+    if (options.lifecycle && body.method === 'workspace.rename') {
+      const title = String(body.payload?.title ?? 'Lifecycle renamed')
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          type: 'server-response', rpcId: body.rpcId,
+          result: { ok: true, value: { workspace: {
+            workspaceId: 'search-ws', path: 'C:/shutu-search', title,
+            sessionIds: ['search-fixture'], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+          } } },
+        }),
+      })
+    }
+    if (options.lifecycle && body.method === 'workspace.delete') {
+      return route.fulfill({
+        status: 200, contentType: 'application/json',
+        body: JSON.stringify({ type: 'server-response', rpcId: body.rpcId, result: { ok: true, value: { deleted: true } } }),
+      })
+    }
+    if (options.lifecycle && body.method === 'workspace.archiveSession') {
+      return route.fulfill({
+        status: 200, contentType: 'application/json',
+        body: JSON.stringify({ type: 'server-response', rpcId: body.rpcId, result: { ok: true, value: { archivedSessionIds: ['search-fixture'] } } }),
       })
     }
     if (body.method === 'session.list' && options.sessionListDelayMs) {
@@ -290,6 +341,63 @@ async function runSearchErrorRecovery(browser) {
   return { requests: 2, recovered: true, console: 'clean' }
 }
 
+async function runSessionLifecycle(browser) {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+  const issues = []
+  page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
+  page.on('pageerror', error => issues.push(error.message))
+  page.on('response', response => { if (response.status() >= 400) issues.push(`http ${response.status()}: ${response.url()}`) })
+  const { requests } = await installNativeMock(page, { seedSession: true, lifecycle: true })
+  await page.goto(baseUrl, { waitUntil: 'domcontentloaded' })
+  await waitForNativeShell(page)
+  const search = page.locator('button[aria-label="Search sessions"], button[aria-label="Search"], button[aria-label="搜索会话"], button[aria-label="搜索"]').first()
+  await search.click()
+  const searchInput = page.locator('input[placeholder]').first()
+  await searchInput.fill('fixture')
+  const searchResult = page.locator('[role="tree"]').last().getByRole('treeitem').first()
+  await searchResult.waitFor({ timeout: 15_000 })
+  await searchResult.click()
+  const seedText = page.getByText('Search fixture', { exact: true }).first()
+  await seedText.waitFor({ timeout: 15_000 })
+  await searchInput.press('Escape')
+
+  const newSession = page.locator('button[aria-label="New session"], button[aria-label="新建会话"]').last()
+  await newSession.click()
+  assert.ok(requests.includes('session.create'), 'native new-session action did not send session.create')
+
+  const workspaceActions = page.locator('button[aria-label="Workspace actions for Search"], button[aria-label="工作区“Search”的操作"]').first()
+  const workspaceRow = workspaceActions.locator('xpath=ancestor::*[@role="treeitem"][1]')
+  await workspaceRow.hover()
+  await workspaceActions.click()
+  await page.getByRole('menuitem', { name: /Rename|重命名/ }).click()
+  const renameDialog = page.getByRole('dialog').last()
+  await renameDialog.locator('input').first().fill('Lifecycle renamed')
+  await renameDialog.getByRole('button', { name: /Rename|重命名/ }).click()
+  await page.getByText('Lifecycle renamed', { exact: true }).waitFor({ timeout: 15_000 })
+  assert.ok(requests.includes('workspace.rename'), 'native workspace rename did not send workspace.rename')
+
+  const renamedRow = page.locator('[role="treeitem"]').filter({ hasText: 'Lifecycle renamed' }).first()
+  await renamedRow.hover()
+  await renamedRow.locator('button[aria-label*="Lifecycle renamed"]').first().click()
+  await page.getByRole('menuitem', { name: /Delete workspace|删除工作区/ }).click()
+  const deleteDialog = page.getByRole('dialog').last()
+  await deleteDialog.getByRole('button', { name: /Delete workspace|删除工作区/ }).click()
+  await page.getByText('Lifecycle renamed', { exact: true }).waitFor({ state: 'detached', timeout: 15_000 })
+  assert.ok(requests.includes('workspace.delete'), 'native workspace delete did not send workspace.delete')
+
+  const remainingSession = page.getByText('Search fixture', { exact: true })
+  await remainingSession.waitFor({ timeout: 15_000 })
+  const sessionRow = page.locator('[role="treeitem"]').filter({ hasText: 'Search fixture' }).first()
+  await sessionRow.hover()
+  await sessionRow.locator('button[aria-label*="Search fixture"]').first().click()
+  await page.getByRole('menuitem', { name: /Archive session|归档会话/ }).click()
+  await remainingSession.waitFor({ state: 'detached', timeout: 15_000 })
+  assert.ok(requests.includes('workspace.archiveSession'), 'native session archive did not send workspace.archiveSession')
+  assert.deepEqual(issues, [])
+  await page.close()
+  return { requests: [...new Set(requests.filter(method => ['session.create', 'workspace.rename', 'workspace.delete', 'workspace.archiveSession'].includes(method)))].sort(), console: 'clean' }
+}
+
 async function runMobile(browser) {
   const page = await browser.newPage({ viewport: { width: 390, height: 844 } })
   const issues = []
@@ -331,8 +439,9 @@ try {
     const darkDesktop = await runDarkDesktop(browser)
     const loadingDesktop = await runLoadingDesktop(browser)
     const searchErrorRecovery = await runSearchErrorRecovery(browser)
+    const sessionLifecycle = await runSessionLifecycle(browser)
     const mobile = await runMobile(browser)
-    console.log(JSON.stringify({ browser: 'playwright', native: 'ok', desktop, reconnectDesktop, darkDesktop, loadingDesktop, searchErrorRecovery, mobile }))
+    console.log(JSON.stringify({ browser: 'playwright', native: 'ok', desktop, reconnectDesktop, darkDesktop, loadingDesktop, searchErrorRecovery, sessionLifecycle, mobile }))
   } finally {
     await browser.close()
   }
