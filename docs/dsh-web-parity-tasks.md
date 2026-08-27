@@ -116,7 +116,7 @@
 - [x] P36-7.3e：native `session.prompt` 改为 admission RPC；handler 阻塞模型/工具 turn 时仍立即返回 accepted，实际生命周期继续通过 mux 下行，且请求取消不会取消已接收的 turn。
 - [x] P36-7.3f：native `session.list` 使用 sessions 事件计数列与 256 条 tail projection，不再为侧边栏刷新全量重放会话；105,953 条真实历史实测返回约 245ms。
 - [x] P36-7.3g：真实 turn 运行中仍可读取 native `session.list`（返回 `running:true`）；事件计数/尾部 projection 优化后实测约 462ms，且持续采样得到真实 event→UI 延迟 320–347ms。
-- [x] P36-7.3h：为 native `session.history` 增加 4,096 条原始事件传输上限，避免单条超长 streamed message 使首屏 JSON/Trajectory 挂载失控；真实 105,982 事件会话完成 25 秒 Chromium 观察，FPS 60.8、DOM 657、heap 28→36MiB。
+- [x] P36-7.3h：为 native `session.history` 增加 2,048 条原始事件传输上限，避免单条超长 streamed message 使首屏 JSON/Trajectory 挂载失控；完整 projection 和 `beforeSeq` 分页仍保留，真实 105,982 事件会话完成 Chromium 观察。
 - [x] P36-7.3i：真实连续流采样器记录 35.4 秒 FPS/heap/DOM/Long Task/event→UI 指标：60.7 FPS、heap 54→71MiB、DOM 657、3 个 Long Task 共 425ms、event→UI 4–2,795ms；该轮仍有 `assistant-step invalid turn -1` 控制台错误，重连恢复和通过阈值仍待补齐。
 - [x] P36-7.3j：修复 wire projection 负 turn 后，真实连续流+断线探针记录 12.6 秒 FPS 14–61（平均 46）、heap 40→135MiB、DOM 654、6 个 Long Task 共 601ms、event→UI 0–4,747ms、控制台错误 0，mux 重连约 454ms；高密度性能阈值仍未通过。
 - [x] P36-7.4a：`real-task-performance.mjs` 增加可选性能门禁，默认阈值为最低 FPS 30、heap 增长 128MiB、DOM 2,500、Long Task 总时长 2,000ms、event→UI 最大延迟 500ms、重连恢复 1,500ms；设置 `SHUTU_REAL_TASK_ENFORCE_THRESHOLDS=1` 后未通过即返回非零状态。

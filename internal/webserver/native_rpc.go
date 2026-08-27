@@ -3023,7 +3023,11 @@ func nativeHistoryPageBounds(events []nativeSessionEvent, before *uint64, maxMes
 // make the initial JSON payload and browser mount unbounded. Older events stay
 // reachable through beforeSeq pagination; this bound may split one raw message
 // span because raw event rows are individually renderable by the trajectory.
-const nativeHistoryEventLimit = 4096
+// Keep the first native history payload bounded enough for the DSH browser to
+// parse and virtualize without a long task on large real sessions. The full
+// projection still runs server-side and older raw events remain available via
+// the beforeSeq cursor.
+const nativeHistoryEventLimit = 2048
 
 func nativeHistoryTransportBounds(start, end int) (int, int) {
 	if start < 0 {
