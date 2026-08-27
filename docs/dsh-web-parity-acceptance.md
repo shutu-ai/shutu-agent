@@ -270,6 +270,27 @@ session event endpoint `200`; the Linux-native data directory was preserved.
 This closes the local WSL failure-injection slice, not formal production-host
 recovery.
 
+## P36-7.2 / P36-7.3 bounded compaction follow-up (2026-08-27)
+
+Commit `822ea29` adds `compaction.summary_input_tokens` with a default of
+`12,000`. When the shadowed prefix exceeds that budget, the compaction engine
+keeps assistant tool calls with their immediate results, summarizes bounded
+chunks, recursively reduces the intermediate checkpoints, and persists only
+the final DSH `surfaceOp.replace` marker. The implementation is covered by
+unit tests for staged requests, oversized single messages and non-converging
+test/model summaries; the append-only event log and DSH wire shape are
+unchanged.
+
+The new binary was exercised against real Super Mario session `s-f15a7e57`
+with `106,389` historical events for `120.9s`. It returned normally after the
+real steer prompt and reconnect probe: FPS `44–60.6`, heap `42→58MiB`, DOM
+peak `1,407`, Long Tasks `1,387ms`, reconnect recovery `395ms`, and zero
+console errors. The run produced only `2` target-session live frames and one
+`1,014ms` event→UI sample, so the enforced gate failed on event→UI latency and
+the run is retained as evidence that bounded compaction prevents the former
+unbounded-request stall, not as completion of the real 100k high-density
+continuous-stream requirement.
+
 ## P36-7.4 Native stream batching and threshold evidence (2026-08-27)
 
 The native mux no longer refreshes queue/jobs control snapshots for unrelated assistant chunks; queue mutations and `job/*` lifecycle events still refresh their authoritative snapshots. The agent loop also batches adjacent streamed text/reasoning deltas within a 50ms/8KiB window while retaining immediate REPL output and the authoritative final assistant message. Go regression tests cover both behaviors.

@@ -106,11 +106,13 @@
 - [x] P36-7.1c：真实超级玛丽会话达到 105,982 条事件后，Chromium 通过原生 DSH 搜索/会话选择完成轨迹首屏挂载；真实持续任务增长和 50k/100k 分段窗口仍待补齐。
 - [ ] P36-7.2：验证 reasoning/token/tool 持续流、长文本、代码块和密集工具调用。
 - [x] P36-7.2d：真实超级玛丽会话修复隐式首轮 `turn/start=0` 的 wire projection 错位后，连续 60 秒收到 618 个 mux 帧，历史累计含 22 条 assistant/message、22 个 reasoning block、29 次 tool call、token usage 和 42,755 字符输出；与 100k fixture 组合完成内容类型覆盖，零控制台错误。
+- [x] P36-7.2e：自动压缩增加 `summary_input_tokens` 有界分段/递归汇总；大历史仍只追加一个 DSH `surfaceOp.replace` 检查点，单元测试覆盖多分块、工具消息边界、单条超大消息和递归收敛。
 - [x] P36-7.2a：100,000 条 fixture 覆盖 reasoning、token usage、tool call/result、长文本和 TypeScript code block，并通过原生 Trajectory 展示与分页验证。
 - [x] P36-7.2b：真实超级玛丽新会话连续流产生 1,418 个 assistant chunk、8 条 assistant message、12 次 tool call/result、token usage 与 plan/interaction 事件；35.4 秒收到 376 个 mux 帧（10.62 帧/s），真实 UI 零错误渲染和长文本/代码混合内容仍待补齐。
 - [x] P36-7.2c：修复负 turn projection 后，真实会话连续流复测 12.6 秒无控制台错误，收到 678 个 mux 帧（53.81 帧/s）；真实 UI 高密度渲染稳定性和长文本/代码混合内容仍待补齐。
 - [ ] P36-7.3：记录 FPS、JS heap、DOM、Long Task、事件到 UI 延迟和重连恢复时间。
 - [x] P36-7.3k：真实连续 60 秒采样通过当前门禁：FPS `42–60`（平均 `59.9`）、heap `28→72MiB`、DOM 峰值 `1,274`、Long Task `1,191ms`、event→UI `6–79ms`、重连 `293ms`、控制台错误 `0`；100k 高密度连续流仍单独保留为未完成项。
+- [x] P36-7.3l：新分段压缩版本在真实 `106,389` 历史会话上完成 120 秒采样并正常返回；FPS `44–60.6`、heap `42→58MiB`、DOM `1,407`、Long Task `1,387ms`、重连 `395ms`、控制台错误 `0`，但仅 2 个实时帧且 event→UI `1,014ms`，高密度持续流门禁仍失败，未误标通过。
 - [x] P36-7.3c：真实任务基准脚本支持在 native session attach 后后台触发受控 `session.prompt`，并记录 mux 事件帧、事件序号和 MutationObserver 事件到 UI 延迟；服务端同步返回也不会阻塞采样。
 - [x] P36-7.3d：native performance fixture 支持可控持续 mux 下行（`SHUTU_PERF_CONTINUOUS_SECONDS`），5 秒窗口收到 46 帧且保持 61 FPS 采样、DOM 887、控制台错误 0；真实任务持续增长仍待目标环境。
 - [x] P36-7.3e：native `session.prompt` 改为 admission RPC；handler 阻塞模型/工具 turn 时仍立即返回 accepted，实际生命周期继续通过 mux 下行，且请求取消不会取消已接收的 turn。
