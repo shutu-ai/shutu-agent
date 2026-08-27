@@ -169,6 +169,15 @@ initial, upgrade and rollback copies: each returned health/sessions/static
 `101`, and `sharedData: true`. The package is therefore refreshed with the
 latest fixes; formal target-host deployment remains an environment task.
 
+After the bounded-compaction change, `node scripts/release-package.mjs
+--output release/shutu-agent-p36-current` rebuilt the package at revision
+`475fdad`. The package again contains `111` native dist assets and `40`
+manifest plugins. `SHUTU_RELEASE_PACKAGE=release/shutu-agent-p36-current node
+scripts/deployment-smoke.mjs` passed initial, upgrade and rollback copies:
+health, sessions, static shell and `host.describe` were `200`, both native
+WebSocket upgrades were `101`, and shared data remained readable. The package
+now includes the current compaction implementation.
+
 The E2E screenshots were rerun into `docs/p36-visual-baseline/` and include light/dark desktop, mobile, loading/error, workspace, jobs, subagents, settings, and geometry captures. The rendered captures show the DSH native shell; the independent DSH pixel-diff is recorded under `docs/evidence/p36-pixel-2026-08-27/` and is byte-identical on mobile, with only the desktop build/version label differing.
 
 ## P36-7.1 / P36-7.2 / P36-7.3 Native 100k fixture evidence (2026-08-27)
