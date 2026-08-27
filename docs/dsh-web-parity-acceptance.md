@@ -390,6 +390,18 @@ third-party image tooling. The report proves the rendered shell, responsive
 layout, font/color/border/scrollbar placement, and dynamic label boundary; the
 existing geometry and focus/overlay matrices prove the interaction portions.
 
+## P36-7.2 / P36-7.3 100k model-size comparison (2026-08-27)
+
+The same real 100k-scale session `s-f15a7e57` was observed for 120.7 seconds
+with `deepseek-v4-flash` and then `deepseek-v4-pro` at high reasoning effort.
+Flash produced 2 live target frames (`106394..106395`); Pro produced 3
+(`106396..106398`) and was still running when the observation window ended.
+Both runs had zero console errors and acceptable static FPS/heap samples, but
+neither met the continuous-stream density gate. The larger model therefore did
+not resolve the issue. `deepseek-v4-flash` remains the default; the open work
+belongs to runtime/history serialization and sustained stream behavior, not an
+automatic model replacement.
+
 ## P36-6.3 Cross-engine accessibility evidence (2026-08-27)
 
 Playwright Firefox and WebKit binaries were installed in the user-level browser cache and the full native accessibility fixture was rerun alongside Chromium. Desktop `1280x900` and mobile `390x844` passed in all three engines: two Conversation/Trajectory tabs exposed valid selection state and panel labels, visible controls had accessible names, Settings focus trapping passed for Tab/Shift+Tab, Escape restored the trigger focus, touch-target counts were reported, and console errors were zero. Real screen-reader speech output remains the only P36-6.3 evidence not executable in this environment.

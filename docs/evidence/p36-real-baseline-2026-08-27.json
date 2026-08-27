@@ -115,6 +115,44 @@
       "promptMode": "steer"
     }
   },
+  "real100kModelComparison": {
+    "codeRevision": "26a3223",
+    "sessionId": "s-f15a7e57",
+    "observationWindowSeconds": 120.7,
+    "flash": {
+      "provider": "deepseek-official",
+      "model": "deepseek-v4-flash",
+      "streamFrames": 2,
+      "streamSeq": [106394, 106395],
+      "promptAdmissionMs": 14,
+      "eventToUiMs": { "min": 355, "avg": 355, "max": 355, "samples": 1 },
+      "fps": { "min": 43, "avg": 60.5 },
+      "heapMiB": { "start": 44, "max": 63 },
+      "domNodesMax": 1044,
+      "longTaskMs": 1520,
+      "reconnectMs": 436,
+      "consoleErrors": 0,
+      "thresholdGate": "accepted-static-only-not-sufficient-for-continuous-stream"
+    },
+    "pro": {
+      "provider": "deepseek-official",
+      "model": "deepseek-v4-pro",
+      "reasoningEffort": "high",
+      "streamFrames": 3,
+      "streamSeq": [106396, 106398],
+      "promptAdmissionMs": 20,
+      "eventToUiMs": { "min": 16, "avg": 16, "max": 16, "samples": 1 },
+      "fps": { "min": 39, "avg": 60.6 },
+      "heapMiB": { "start": 29, "max": 50 },
+      "domNodesMax": 1044,
+      "longTaskMs": 1959,
+      "reconnectMs": 300,
+      "consoleErrors": 0,
+      "thresholdGate": "accepted-static-only-not-sufficient-for-continuous-stream",
+      "stillRunningAtWindowEnd": true
+    },
+    "conclusion": "The larger model did not improve 100k-scale stream density; retain deepseek-v4-flash as the default and treat the remaining issue as runtime/history/stream behavior rather than a model-size problem."
+  },
   "wsl2": {
     "distribution": "AlmaLinux-8",
     "binary": "GOOS=linux GOARCH=amd64 CGO_ENABLED=0",
