@@ -1,0 +1,10 @@
+# Linux/WSL smoke configuration. Keep SQLite on the Linux filesystem; WSL
+# mounted Windows paths can report disk I/O errors for WAL/locking workloads.
+data_dir: /tmp/shutu-agent-p36-data
+prompts_dir: ../config/prompts
+
+web_server:
+  enabled: true
+  addr: 127.0.0.1:18099
+  token: ""
+  dist_dir: ../web/dist

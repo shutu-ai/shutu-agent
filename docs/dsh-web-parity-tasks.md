@@ -125,6 +125,8 @@
 - [ ] P36-8.2：验证本机及目标 Windows/Linux 环境的启动、健康检查、API、WebSocket 和静态资源。
 - [x] P36-8.2a：本机 Windows 交付包启动 smoke 覆盖 `/api/health`、会话 API、静态首页和 native `host.describe` RPC；Linux/目标环境及 WebSocket 仍待补齐。
 - [x] P36-8.2b：交付包 smoke 使用带 Bearer 认证的原始 WebSocket upgrade 检查 `/api/events.mux` 与 `/api/events.host`，初始/升级/回滚三轮均返回 `101`；目标环境仍待补齐。
+- [x] P36-8.2c：在当前 Windows 主机完成 `GOOS=linux GOARCH=amd64 CGO_ENABLED=0` 交叉构建，并用 `go version -m` 校验 Linux 二进制模块与 revision；目标 Linux runtime 启动/健康/API/WebSocket 仍待目标机。
+- [x] P36-8.2d：AlmaLinux-8 WSL2 使用 Linux 原生 `/tmp` 数据目录完成 runtime smoke：静态首页、`/api/health`、`/api/sessions`、native 两条 WebSocket 均正常，Chromium 控制台错误和横向溢出均为 0；正式目标 Linux 机仍待验收。
 - [ ] P36-8.3：验证升级、数据目录复用、回滚和失败恢复。
 - [x] P36-8.3a：本机 Windows 部署 smoke 使用共享 `data_dir` 完成初始包、升级副本和回滚副本启动检查；目标环境失败恢复仍待补齐。
 - [ ] P36-8.4：完成目标环境部署记录、验收报告和回滚操作手册。
