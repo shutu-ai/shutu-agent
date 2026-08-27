@@ -471,3 +471,14 @@ the focused DSH control; the DOM focus and ARIA state remained correct. This
 probe is intentionally not accepted as real speech evidence. A human must run
 the documented Narrator keyboard/voice scenario and confirm the spoken control
 name, state, and type before P36-6.3 can be checked.
+
+Manual close-out procedure: open the current Windows build, press `Win+Ctrl+Enter`
+to start Narrator, focus the page (not the browser address bar), and use `Tab`
+through the Conversation/Trajectory tabs, loaded event actions, composer, and
+Settings. Use `Narrator+Tab` or `Narrator+Right Arrow` to reread the current
+item, confirm the spoken name/state/type, use `Shift+Tab` and `Escape` for
+reverse navigation and focus restoration, then open Speech recap with
+`Narrator+Alt+X` and save the transcript with the build revision. Repeat once
+at `390x844` touch emulation or a touch-capable Windows device. The checklist
+should only be checked after a human records that transcript and confirms the
+main scenarios without relying on sight.
