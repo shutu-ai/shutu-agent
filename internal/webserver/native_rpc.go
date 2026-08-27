@@ -2928,6 +2928,7 @@ func (s *Server) nativeSessionHistory(r *http.Request, raw json.RawMessage) nati
 		projected = append(projected, projection.project(req.SessionID, ev))
 	}
 	start, end := nativeHistoryPageBounds(projected, req.BeforeSeq, limit)
+	start, end = nativeHistoryTransportBounds(start, end)
 	for _, event := range projected[start:end] {
 		entries = append(entries, nativeHistoryEntry{Event: event})
 	}
@@ -3014,6 +3015,27 @@ func nativeHistoryPageBounds(events []nativeSessionEvent, before *uint64, maxMes
 		return events[index].Seq >= cut
 	})
 	return start, end
+}
+
+// nativeHistoryEventLimit is a transport safety bound, independent of the
+// message-count page size. A single streamed assistant message can contain
+// tens of thousands of raw events, so honoring only maxMessages would still
+// make the initial JSON payload and browser mount unbounded. Older events stay
+// reachable through beforeSeq pagination; this bound may split one raw message
+// span because raw event rows are individually renderable by the trajectory.
+const nativeHistoryEventLimit = 4096
+
+func nativeHistoryTransportBounds(start, end int) (int, int) {
+	if start < 0 {
+		start = 0
+	}
+	if end < start {
+		end = start
+	}
+	if end-start <= nativeHistoryEventLimit {
+		return start, end
+	}
+	return end - nativeHistoryEventLimit, end
 }
 
 func nativeIsAppendSurfaceMessage(event nativeSessionEvent) bool {

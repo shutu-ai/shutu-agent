@@ -1711,6 +1711,21 @@ func TestNativeHistoryPageBoundsSkipsReplacementAndKeepsMessageSources(t *testin
 	}
 }
 
+func TestNativeHistoryTransportBoundsCapsLargeStreamedMessage(t *testing.T) {
+	start, end := nativeHistoryTransportBounds(0, nativeHistoryEventLimit+123)
+	if got := end - start; got != nativeHistoryEventLimit {
+		t.Fatalf("transport event window = %d, want %d", got, nativeHistoryEventLimit)
+	}
+	if start != 123 || end != nativeHistoryEventLimit+123 {
+		t.Fatalf("transport event bounds = (%d,%d), want (%d,%d)", start, end, 123, nativeHistoryEventLimit+123)
+	}
+
+	start, end = nativeHistoryTransportBounds(7, 41)
+	if start != 7 || end != 41 {
+		t.Fatalf("small transport event bounds = (%d,%d), want (7,41)", start, end)
+	}
+}
+
 func uint64Ptr(value uint64) *uint64 {
 	return &value
 }
