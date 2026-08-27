@@ -415,6 +415,13 @@ reconnect (`463ms`) and console errors (`0`) were healthy. This is a useful
 runtime improvement and a negative high-density-stream result; P36-7.2/7.3
 remain open until a genuine 100k continuous stream meets the gate.
 
+The latest runtime revision `7db755c` was cross-built as a static Linux amd64
+ELF and rerun on AlmaLinux-8 WSL2. With `DEEPSEEK_API_KEY` forwarded only via
+transient `WSLENV`, health, static index, sessions and both native WebSocket
+upgrades returned `200/101` as expected, and the service stopped cleanly. This
+updates the local Linux-like evidence only; it does not close the formal target
+Linux host item.
+
 ## P36-6.3 Cross-engine accessibility evidence (2026-08-27)
 
 Playwright Firefox and WebKit binaries were installed in the user-level browser cache and the full native accessibility fixture was rerun alongside Chromium. Desktop `1280x900` and mobile `390x844` passed in all three engines: two Conversation/Trajectory tabs exposed valid selection state and panel labels, visible controls had accessible names, Settings focus trapping passed for Tab/Shift+Tab, Escape restored the trigger focus, touch-target counts were reported, and console errors were zero. Real screen-reader speech output remains the only P36-6.3 evidence not executable in this environment.

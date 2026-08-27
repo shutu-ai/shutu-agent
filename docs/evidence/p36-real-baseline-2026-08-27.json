@@ -223,5 +223,18 @@
       "existingSessionEventsHttp": 200
     },
     "scope": "local-linux-like-evidence; not-a-formal-production-host"
+  },
+  "wsl2LongHistoryCurrent": {
+    "revision": "7db755c",
+    "distribution": "AlmaLinux-8",
+    "binary": "ELF GOOS=linux GOARCH=amd64 CGO_ENABLED=0",
+    "dataDirectory": "/tmp/shutu-agent-p36-data",
+    "environment": "DEEPSEEK_API_KEY forwarded transiently with WSLENV; not persisted",
+    "healthHttp": 200,
+    "staticHttp": 200,
+    "sessionsHttp": 200,
+    "websocketUpgrade": { "mux": 101, "host": 101 },
+    "cleanStop": true,
+    "scope": "local-linux-like-evidence; not-a-formal-production-host"
   }
 }
