@@ -154,6 +154,8 @@ The real-task harness now accepts `SHUTU_REAL_TASK_PROMPT` and dispatches `sessi
 
 The current Windows host produced a Linux `amd64` binary with `GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build ./cmd/pa`; `go version -m` confirmed the executable, module revision, dependency set, and Linux build metadata. AlmaLinux-8 under WSL2 then ran the binary with `config/config-linux-p36.yaml`, which keeps SQLite on the Linux filesystem to avoid `/mnt/d` WAL I/O errors. From Windows, `/`, `/api/health`, and `/api/sessions` returned `200`; Chromium observed `/api/events.mux` and `/api/events.host`, with title `DeepSeek Harness`, console errors `0`, and horizontal overflow `0`. This closes the WSL Linux startup/static/API/WebSocket smoke slice; a separately provisioned target Linux host, upgrade, rollback and failure-recovery run remains open.
 
+The same WSL2 setup completed an upgrade/rollback smoke with a shared Linux-native `/tmp/shutu-agent-p36-data` directory: the old Linux binary created session `s-743c4600`, the new binary resumed it with `/api/health=200`, and the old binary resumed it again with `/api/health=200` and the same session still visible. This proves data reuse across the two local Linux binaries; target-host failure injection and recovery remain open.
+
 ## P36-7.1 / P36-7.2 / P36-7.3 Native 100k fixture evidence (2026-08-27)
 
 `SHUTU_PERF_CONTINUOUS_SECONDS=5 npm.cmd run performance` passed with a controlled native mux stream injected after connection: `continuousFrames=46`, the settled sample kept `61` frames, `DOM=887`, and zero browser errors. The injected events are a transport/rendering fixture, not a production Super Mario stream, so real continuous history growth, event-to-UI latency and reconnect recovery remain open.

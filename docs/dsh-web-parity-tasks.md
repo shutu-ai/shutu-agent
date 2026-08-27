@@ -129,6 +129,7 @@
 - [x] P36-8.2d：AlmaLinux-8 WSL2 使用 Linux 原生 `/tmp` 数据目录完成 runtime smoke：静态首页、`/api/health`、`/api/sessions`、native 两条 WebSocket 均正常，Chromium 控制台错误和横向溢出均为 0；正式目标 Linux 机仍待验收。
 - [ ] P36-8.3：验证升级、数据目录复用、回滚和失败恢复。
 - [x] P36-8.3a：本机 Windows 部署 smoke 使用共享 `data_dir` 完成初始包、升级副本和回滚副本启动检查；目标环境失败恢复仍待补齐。
+- [x] P36-8.3b：AlmaLinux-8 WSL2 使用共享 Linux 原生数据目录完成旧 binary 建立会话、新 binary 升级、旧 binary 回滚；升级/回滚后 `/api/health=200` 且会话 `s-743c4600` 持续可读，正式目标机失败恢复仍待补齐。
 - [ ] P36-8.4：完成目标环境部署记录、验收报告和回滚操作手册。
 
 ## 总览
