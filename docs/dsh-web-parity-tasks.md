@@ -131,6 +131,7 @@
 - [x] P36-8.3a：本机 Windows 部署 smoke 使用共享 `data_dir` 完成初始包、升级副本和回滚副本启动检查；目标环境失败恢复仍待补齐。
 - [x] P36-8.3b：AlmaLinux-8 WSL2 使用共享 Linux 原生数据目录完成旧 binary 建立会话、新 binary 升级、旧 binary 回滚；升级/回滚后 `/api/health=200` 且会话 `s-743c4600` 持续可读，正式目标机失败恢复仍待补齐。
 - [ ] P36-8.4：完成目标环境部署记录、验收报告和回滚操作手册。
+- [x] P36-8.4a：新增 `docs/p36-deployment-runbook.md`，记录 Windows/WSL/Linux 启动、健康/API/WebSocket 验收、共享数据升级、回滚和失败恢复步骤；正式目标机部署记录仍待补齐。
 
 ## 总览
 

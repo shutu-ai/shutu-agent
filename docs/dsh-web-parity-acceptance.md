@@ -156,6 +156,8 @@ The current Windows host produced a Linux `amd64` binary with `GOOS=linux GOARCH
 
 The same WSL2 setup completed an upgrade/rollback smoke with a shared Linux-native `/tmp/shutu-agent-p36-data` directory: the old Linux binary created session `s-743c4600`, the new binary resumed it with `/api/health=200`, and the old binary resumed it again with `/api/health=200` and the same session still visible. This proves data reuse across the two local Linux binaries; target-host failure injection and recovery remain open.
 
+`docs/p36-deployment-runbook.md` now records the reproducible Windows and Linux/WSL startup checks, health/static/native WebSocket acceptance, data-preserving upgrade sequence, rollback procedure, and failure-recovery checklist. It explicitly distinguishes the completed local Windows/WSL evidence from the still-required formal target-host deployment record.
+
 ## P36-7.1 / P36-7.2 / P36-7.3 Native 100k fixture evidence (2026-08-27)
 
 `SHUTU_PERF_CONTINUOUS_SECONDS=5 npm.cmd run performance` passed with a controlled native mux stream injected after connection: `continuousFrames=46`, the settled sample kept `61` frames, `DOM=887`, and zero browser errors. The injected events are a transport/rendering fixture, not a production Super Mario stream, so real continuous history growth, event-to-UI latency and reconnect recovery remain open.
