@@ -3,6 +3,7 @@ package fs
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -272,6 +273,70 @@ func TestFsToolsRejectBadArgs(t *testing.T) {
 	}
 	if len(*recs) != 0 {
 		t.Fatalf("no event may be emitted on a failed call, got %v", eventTypes(*recs))
+	}
+}
+
+func TestStrReplaceEditorMatchesDSHCommandsAndObservation(t *testing.T) {
+	svc, ft, _ := newToolsWithEvents(t)
+	ctx := context.Background()
+	path := filepath.Join(svc.Root(), "editor.txt")
+	if err := svc.Write(ctx, path, "alpha\nbeta\ngamma"); err != nil {
+		t.Fatalf("seed editor file: %v", err)
+	}
+
+	jsonPath := filepath.ToSlash(path)
+	out, err := ft.StrReplaceEditor().Execute(ctx, json.RawMessage(`{"command":"view","path":"`+jsonPath+`"}`))
+	if err != nil {
+		t.Fatalf("editor view: %v", err)
+	}
+	if !strings.Contains(out, "total of 3 lines") || !strings.Contains(out, "     1  alpha") {
+		t.Fatalf("editor view = %q, want DSH header and padded line numbers", out)
+	}
+
+	// DSH observes the current version as part of an edit; an explicit view is
+	// not required before the first replacement.
+	path2 := filepath.Join(svc.Root(), "first-edit.txt")
+	if err := svc.Write(ctx, path2, "before"); err != nil {
+		t.Fatal(err)
+	}
+	jsonPath2 := filepath.ToSlash(path2)
+	if _, err := ft.StrReplaceEditor().Execute(ctx, json.RawMessage(`{"command":"str_replace","path":"`+jsonPath2+`","old_str":"before","new_str":"after"}`)); err != nil {
+		t.Fatalf("first editor replacement: %v", err)
+	}
+	if err := svc.Write(ctx, path, "changed externally"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ft.StrReplaceEditor().Execute(ctx, json.RawMessage(`{"command":"str_replace","path":"`+jsonPath+`","old_str":"alpha","new_str":"x"}`)); err == nil {
+		t.Fatal("editor must reject a stale observed version")
+	}
+
+	if _, err := ft.StrReplaceEditor().Execute(ctx, json.RawMessage(`{"command":"view","path":"editor.txt"}`)); err == nil {
+		t.Fatal("editor must require an absolute path")
+	}
+	if _, err := ft.StrReplaceEditor().Execute(ctx, json.RawMessage(`{"command":"view","path":"`+jsonPath+`","view_range":[99,100]}`)); err == nil {
+		t.Fatal("editor must reject a view range outside the file")
+	}
+}
+
+func TestStrReplaceEditorDirectoryView(t *testing.T) {
+	svc, ft, _ := newToolsWithEvents(t)
+	ctx := context.Background()
+	root := svc.Root()
+	if err := svc.Write(ctx, filepath.Join(root, "visible.txt"), "x"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Write(ctx, filepath.Join(root, "nested", "child.txt"), "x"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Write(ctx, filepath.Join(root, ".hidden.txt"), "x"); err != nil {
+		t.Fatal(err)
+	}
+	out, err := ft.StrReplaceEditor().Execute(ctx, json.RawMessage(`{"command":"view","path":"`+filepath.ToSlash(root)+`"}`))
+	if err != nil {
+		t.Fatalf("directory view: %v", err)
+	}
+	if !strings.Contains(out, "visible.txt") || !strings.Contains(out, "child.txt") || strings.Contains(out, ".hidden.txt") {
+		t.Fatalf("directory view = %q, want visible two-level listing without hidden files", out)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -93,12 +94,12 @@ func TestACPFactoryCreatesIndependentCWDAndLogs(t *testing.T) {
 	if one.id == two.id || one.log == two.log || one.registry == two.registry {
 		t.Fatal("ACP sessions must not share identity, log, or registry")
 	}
-	got, err := one.registry.Execute(context.Background(), "str_replace_editor", []byte(`{"command":"view","path":"marker.txt"}`))
-	if err != nil || got.Output != "1\tone" {
+	got, err := one.registry.Execute(context.Background(), "str_replace_editor", []byte(`{"command":"view","path":"`+filepath.ToSlash(filepath.Join(first, "marker.txt"))+`"}`))
+	if err != nil || !strings.Contains(got.Output, "     1  one") {
 		t.Fatalf("first cwd read = %q, err=%v", got.Output, err)
 	}
-	got, err = two.registry.Execute(context.Background(), "str_replace_editor", []byte(`{"command":"view","path":"marker.txt"}`))
-	if err != nil || got.Output != "1\ttwo" {
+	got, err = two.registry.Execute(context.Background(), "str_replace_editor", []byte(`{"command":"view","path":"`+filepath.ToSlash(filepath.Join(second, "marker.txt"))+`"}`))
+	if err != nil || !strings.Contains(got.Output, "     1  two") {
 		t.Fatalf("second cwd read = %q, err=%v", got.Output, err)
 	}
 	metas, err := st.ListSessions(context.Background())
