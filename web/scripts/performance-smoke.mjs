@@ -283,6 +283,12 @@ try {
       const table = document.querySelector('[data-trajectory-scroll] table')
       return table !== null && Number(table.getAttribute('aria-rowcount') ?? 0) > minimum
     }, initialRowCount, { timeout: 15_000 })
+    const historyScroll = await trajectory.evaluate(element => ({
+      top: element.scrollTop,
+      height: element.scrollHeight,
+      viewport: element.clientHeight,
+    }))
+    assert.ok(historyScroll.top > 0, `native history pagination lost the scroll anchor: ${JSON.stringify(historyScroll)}`)
     assert.ok(requests.some(request => request.method === 'session.history' && request.payload?.beforeSeq !== undefined), 'native history pagination did not send beforeSeq')
     await page.evaluate(() => {
       window.__perf = { frames: 0, longTasks: 0, longTaskMs: 0 }

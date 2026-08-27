@@ -63,6 +63,7 @@
 - [x] P36-5.2i：Playwright 原生 loaded-session fixture 注入 DSH `llm/retry`/`llm/retry-started` 事件，验证重试调度状态、次数/延迟/失败详情展开及 started 状态切换，并保持零控制台错误。
 - [ ] P36-5.3：完成 Tool 折叠、请求详情、Trajectory、搜索、历史分页和滚动定位。
 - [x] P36-5.3c：Playwright 密集事件 fixture 验证搜索命中、请求详情、Trajectory、`beforeSeq` 历史分页、Turn 折叠/展开及虚拟行渲染。
+- [x] P36-5.3d：Playwright 1000 条密集历史 fixture 验证触发 `beforeSeq` 后逻辑行数增长且滚动容器保留非零滚动位置（分页滚动锚点），并保持虚拟行数量受限与零控制台错误。
 - [ ] P36-5.4：完成子代理、后台任务、技能、文件引用、附件、模型、权限、Provider 和设置。
 - [x] P36-5.4a：原生 Remote 接入 `fileReferences/list` 与 `sessionReferenceResolver/candidates`，返回受会话 CWD 限制的文件候选和 canonical `dsh-session:` 引用。
 - [x] P36-5.4b：原生 Remote 接入 `pluginInventory/list`，返回与 native manifest 对齐的插件条目和生命周期状态。
@@ -80,6 +81,7 @@
 - [x] P36-6.1a：通过 Playwright 保存原生 DSH 空数据桌面/移动基线截图；截图目录支持 `SHUTU_E2E_ARTIFACT_DIR`，本轮命令与结果记录在 `docs/dsh-web-parity-acceptance.md`。
 - [x] P36-6.1b：通过 Playwright Chromium `colorScheme: dark` 保存原生 DSH 空数据桌面基线，并复用溢出、双 WebSocket、无障碍名称和控制台检查。
 - [x] P36-6.1c：通过 Playwright 延迟 `session.list` 请求保存原生 DSH 桌面加载态截图，并验证加载完成后恢复正常 shell、双 WebSocket 和零控制台错误。
+- [x] P36-6.1d：通过 Playwright 注入 DSH `turn/end` 错误事件，保存桌面/移动错误态截图，验证“本轮运行失败”状态、错误详情、零横向溢出和零控制台错误。
 - [ ] P36-6.2：对比布局尺寸、字体、间距、颜色、边框、滚动条、焦点和弹层行为。
 - [ ] P36-6.3：验证 Tab、快捷键、Escape、读屏语义、ARIA、焦点恢复和触控目标。
 - [x] P36-6.3a：Playwright 验证原生设置 Escape 关闭、侧边栏 Enter 键切换、桌面/移动按钮可访问名称及移动端可见按钮不低于 24px；完整 Tab/读屏/焦点矩阵仍待补齐。

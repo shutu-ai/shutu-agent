@@ -82,6 +82,18 @@ async function installNativeMock(page, options = {}) {
       delayMs: 2_000, failure: { code: 'TRANSPORT', message: 'temporary fixture failure' },
     } },
   ]
+  const errorEvents = [
+    { seq: 1, type: 'turn/start', time: 1_700_000_000_001, data: { turn: 1 } },
+    { seq: 2, type: 'user/message', time: 1_700_000_000_002, data: {
+      id: 'error-user', role: 'user', content: [{ type: 'text', text: 'run the error fixture' }],
+      source: { kind: 'user' },
+    }, surfaceOp: 'append' },
+    { seq: 3, type: 'step/start', time: 1_700_000_000_003, data: { turn: 1, step: 1 } },
+    { seq: 4, type: 'step/end', time: 1_700_000_000_004, data: { turn: 1, step: 1 } },
+    { seq: 5, type: 'turn/end', time: 1_700_000_000_005, data: {
+      turn: 1, reason: { kind: 'error', error: { code: 'FIXTURE_TURN_FAILED', message: 'fixture turn failed' } },
+    } },
+  ]
   const sendMux = (rpcId, method, payload) => {
     if (muxSocket === null) throw new Error(`native mux is not connected for ${method}`)
     muxSocket.send(JSON.stringify({ type: 'server-request', rpcId, method, payload }))
@@ -279,7 +291,7 @@ async function installNativeMock(page, options = {}) {
       })
     }
     if (options.lifecycle && body.method === 'session.history') {
-      const events = options.retryControls === true ? retryEvents : []
+      const events = options.retryControls === true ? retryEvents : options.errorControls === true ? errorEvents : []
       return route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -487,6 +499,38 @@ async function runLoadingDesktop(browser) {
   assert.deepEqual(issues, [])
   await page.close()
   return { viewport: '1280x900', state: 'loading', console: 'clean' }
+}
+
+async function runErrorStateMatrix(browser) {
+  const results = []
+  for (const viewport of [{ width: 1280, height: 900, name: 'desktop' }, { width: 390, height: 844, name: 'mobile' }]) {
+    const page = await browser.newPage({ viewport: { width: viewport.width, height: viewport.height } })
+    const issues = []
+    page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
+    page.on('pageerror', error => issues.push(error.message))
+    await installNativeMock(page, { seedSession: true, lifecycle: true, errorControls: true })
+    await page.goto(baseUrl, { waitUntil: 'domcontentloaded' })
+    await waitForNativeShell(page)
+    const search = page.locator('button[aria-label="Search sessions"], button[aria-label="Search"], button[aria-label="搜索会话"], button[aria-label="鎼滅储浼氳瘽"], button[aria-label="鎼滅储"]').first()
+    await search.click()
+    const input = page.locator('input[placeholder]').first()
+    await input.fill('fixture')
+    const result = page.locator('[role="tree"]').last().getByRole('treeitem').first()
+    await result.waitFor({ timeout: 15_000 })
+    await result.click()
+    await input.press('Escape')
+    await page.waitForTimeout(250)
+    const status = page.getByRole('status').filter({ hasText: /This turn failed|本轮运行失败|澶辫触/ }).last()
+    await status.waitFor({ timeout: 15_000 })
+    assert.match(await status.innerText(), /fixture turn failed|本轮运行失败|This turn failed/)
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
+    assert.ok(overflow <= 1, `${viewport.name} error state has horizontal overflow: ${overflow}px`)
+    assert.deepEqual(issues, [])
+    await page.screenshot({ path: resolve(artifactDirectory, `shutu-native-error-${viewport.name}.png`) })
+    results.push({ viewport: `${viewport.width}x${viewport.height}`, overflow, console: 'clean' })
+    await page.close()
+  }
+  return results
 }
 
 async function runSearchErrorRecovery(browser) {
@@ -803,6 +847,7 @@ try {
     const reconnectDesktop = await runReconnectDesktop(browser)
     const darkDesktop = await runDarkDesktop(browser)
     const loadingDesktop = await runLoadingDesktop(browser)
+    const errorStateMatrix = await runErrorStateMatrix(browser)
     const searchErrorRecovery = await runSearchErrorRecovery(browser)
     const sessionLifecycle = await runSessionLifecycle(browser)
     const interactionControls = await runInteractionControls(browser)
@@ -810,7 +855,7 @@ try {
     const cancelPlanGoalControls = await runCancelPlanGoalControls(browser)
     const retryControls = await runRetryControls(browser)
     const mobile = await runMobile(browser)
-    console.log(JSON.stringify({ browser: 'playwright', native: 'ok', desktop, reconnectDesktop, darkDesktop, loadingDesktop, searchErrorRecovery, sessionLifecycle, interactionControls, queueControls, cancelPlanGoalControls, retryControls, mobile }))
+    console.log(JSON.stringify({ browser: 'playwright', native: 'ok', desktop, reconnectDesktop, darkDesktop, loadingDesktop, errorStateMatrix, searchErrorRecovery, sessionLifecycle, interactionControls, queueControls, cancelPlanGoalControls, retryControls, mobile }))
   } finally {
     await browser.close()
   }

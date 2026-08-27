@@ -88,9 +88,9 @@ The native cancel/Plan/Goal fixture selected a running loaded session, clicked t
 
 The native retry fixture replayed a DSH `llm/retry` event with a finite normal-mode maximum, opened its disclosure to verify retry count, delay, and failure details, then delivered the matching `llm/retry-started` event over the mux and observed the rendered `started` state. The complete E2E run passed with `{ scheduled: true, started: true, details: true }` and zero browser errors; target-production interaction acceptance remains open.
 
-`SHUTU_PERF_EVENTS=1000 npm.cmd run performance` passed against the native dist with a dense loaded fixture. The fixture returned a tail page first, then a preceding page after the DSH `Load earlier history` action. The run observed a `session.history` request with `beforeSeq`, increased logical trajectory rows, 31 mounted rows, zero console errors, and both native mux/host WebSockets connected. This is repeatable fixture evidence; it does not replace target-production data-scale acceptance.
+`SHUTU_PERF_EVENTS=1000 npm.cmd run performance` passed against the native dist with a dense loaded fixture. The fixture returned a tail page first, then a preceding page after the DSH `Load earlier history` action. The run observed a `session.history` request with `beforeSeq`, increased logical trajectory rows, a non-zero preserved scroll position, 31 mounted rows, zero console errors, and both native mux/host WebSockets connected. This is repeatable fixture evidence; it does not replace target-production data-scale acceptance.
 
-The fixture now includes assistant text alongside reasoning, tool calls/results, long text, and TypeScript code. The browser path clicked a search result, opened the request details panel, toggled the native Turns collapse control and expanded it again, then loaded an earlier history page. `npm.cmd run performance` passed with `eventCount: 10000`, `trajectoryRows: 33`, logical row count `34`, `domNodes: 887`, `scrollHeight: 1141`, `61` sampled frames after settling, and zero browser errors. This is repeatable P36-5.3 interaction evidence; production scroll-anchor and continuous-growth acceptance remain open.
+The fixture now includes assistant text alongside reasoning, tool calls/results, long text, and TypeScript code. The browser path clicked a search result, opened the request details panel, toggled the native Turns collapse control and expanded it again, then loaded an earlier history page. `npm.cmd run performance` passed with `eventCount: 10000`, `trajectoryRows: 33`, logical row count `34`, `domNodes: 887`, `scrollHeight: 1141`, `61` sampled frames after settling, and zero browser errors. The 1000-event boundary run additionally verified the post-prepend scroll anchor remained non-zero. This is repeatable P36-5.3 interaction evidence; production scroll-anchor and continuous-growth acceptance remain open.
 
 ## P36-5.5 Native export descendant evidence (2026-08-27)
 
@@ -110,11 +110,11 @@ The fixture now includes assistant text alongside reasoning, tool calls/results,
 
 ## P36-6.1 Native dark baseline evidence (2026-08-27)
 
-`SHUTU_E2E_ARTIFACT_DIR=../docs/evidence/dsh-native-2026-08-27 npm.cmd run e2e` passed with a separate Chromium `colorScheme: dark` page. The dark desktop screenshot is `docs/evidence/dsh-native-2026-08-27/shutu-native-dark-desktop.png`; it has zero horizontal overflow, both native WebSockets, no unnamed-button regression, and no console errors or warnings. A stable user-visible error state and the full light/dark matrix remain open.
+`SHUTU_E2E_ARTIFACT_DIR=../docs/evidence/dsh-native-2026-08-27 npm.cmd run e2e` passed with a separate Chromium `colorScheme: dark` page. The dark desktop screenshot is `docs/evidence/dsh-native-2026-08-27/shutu-native-dark-desktop.png`; it has zero horizontal overflow, both native WebSockets, no unnamed-button regression, and no console errors or warnings. The error-state matrix now also covers desktop and mobile terminal turn failures; the complete light/dark page matrix remains open.
 
 ## P36-6.1 Native loading evidence (2026-08-27)
 
-The same Playwright run delayed the native `session.list` response for 1 second and captured `docs/evidence/dsh-native-2026-08-27/shutu-native-loading-desktop.png` during the low-opacity loading state. The request then settled into the normal DSH shell with no page errors. A stable user-visible error-state surface remains open because the upstream shell currently falls back to its empty shell for this fixture failure.
+The same Playwright run delayed the native `session.list` response for 1 second and captured `docs/evidence/dsh-native-2026-08-27/shutu-native-loading-desktop.png` during the low-opacity loading state. The request then settled into the normal DSH shell with no page errors. A separate desktop/mobile run injects a DSH `turn/end` error and captures `shutu-native-error-desktop.png` and `shutu-native-error-mobile.png`, asserting the visible `This turn failed` / `本轮运行失败` status, failure detail, zero horizontal overflow, and zero console errors.
 
 ## P36-6.3 Native focus recovery evidence (2026-08-27)
 
