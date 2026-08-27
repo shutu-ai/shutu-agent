@@ -238,6 +238,14 @@ The structured results for the positive, static, negative-continuous and WSL
 runs are preserved in
 `docs/evidence/p36-real-baseline-2026-08-27.json`.
 
+After the 2,048-event transport bound was released, the 100k dense browser
+fixture was rerun with a 10-second controlled mux stream. It loaded in
+`3,199ms`, mounted `32` physical rows for logical row count `33`, held
+`881` DOM nodes, completed at `61` sampled FPS, delivered `34` live mux frames,
+and recorded `1,313ms` Long Tasks with zero console errors. This confirms the
+virtualized DSH UI path remains bounded after the transport change; it remains
+fixture evidence and does not replace the open real 100k model-stream run.
+
 ## P36-8.2 WSL2 rerun after native turn fix (2026-08-27)
 
 The newly rebuilt `GOOS=linux GOARCH=amd64 CGO_ENABLED=0` binary was launched
