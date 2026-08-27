@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent, type ReactNode } from 'react'
+import { createContext, memo, useCallback, useContext, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent, type ReactNode } from 'react'
 import type { AttachmentView, CommandView, ConfigView, ContextView, DirectoryListing, EventDetails, EventView, FeedbackView, GoalView, ImageView, InteractionView, JobView, MCPServerView, PlanView, ProviderModelView, ProviderView, QueueItem, RunningSnapshot, SessionSearchHit, SessionStateView, SessionSummary, SettingsView, SkillView, SkillsView, SubagentView, TodoView, WorkspaceView } from './api'
 import { ShutuApiError } from './api'
 import { projectDshConversation, type DshConversationNode, type DshConversationSnapshot } from './dsh-conversation'
@@ -937,6 +937,25 @@ function EventCard({ event, store, sessionId, feedback, producedPaths = [], onFe
   )
 }
 
+function sameProducedPaths(left: readonly string[] = [], right: readonly string[] = []): boolean {
+  if (left === right) return true
+  if (left.length !== right.length) return false
+  return left.every((path, index) => path === right[index])
+}
+
+// Streaming appends replace the store snapshot, but visible historical cards
+// keep the same event object. Memoizing at the card boundary prevents every
+// new chunk from reparsing Markdown and rebuilding buttons for all visible
+// rows; callback identities are intentionally ignored because the row action
+// semantics are keyed by the stable event and action label.
+const MemoEventCard = memo(EventCard, (left, right) => {
+  if (left.event !== right.event || left.store !== right.store || left.sessionId !== right.sessionId) return false
+  if (left.textOverride !== right.textOverride) return false
+  if ((left.toolCallsAction?.label ?? '') !== (right.toolCallsAction?.label ?? '')) return false
+  if (left.feedback?.rating !== right.feedback?.rating || left.feedback?.note !== right.feedback?.note) return false
+  return sameProducedPaths(left.producedPaths, right.producedPaths)
+})
+
 type InspectorTab = 'overview' | 'input' | 'output' | 'raw' | 'timing'
 
 function inspectorPayload(event: EventView, keys: readonly string[]): string | null {
@@ -1262,7 +1281,7 @@ function DshConversation({ events, sessionId, store, feedbackBySeq, producedBySe
             : undefined
         return <section className={`conversation-node conversation-virtual-row ${node.kind}`} data-virtual-row-key={key} key={key} role="listitem" ref={element => measureRow(key, element)} style={{ transform: `translateY(${offsets[start + index] ?? 0}px)` }}>
           <div className="conversation-node-head"><span>{conversationNodeLabel(node)}</span><span>{nodeRequestId && `request ${nodeRequestId} · `}#{node.seq}</span></div>
-          <EventCard event={raw} store={store} sessionId={sessionId} feedback={feedbackBySeq[raw.seq]} producedPaths={visibleProducedBySeq.get(raw.seq)} onFeedback={onFeedback} onCopy={onCopy} onRetry={onRetry} onFork={onFork} onOpenFile={onOpenFile} onInspect={onLocate ? () => onLocate(node.seq) : undefined} textOverride={conversationText} additionalContent={additionalContent} />
+          <MemoEventCard event={raw} store={store} sessionId={sessionId} feedback={feedbackBySeq[raw.seq]} producedPaths={visibleProducedBySeq.get(raw.seq)} onFeedback={onFeedback} onCopy={onCopy} onRetry={onRetry} onFork={onFork} onOpenFile={onOpenFile} onInspect={onLocate ? () => onLocate(node.seq) : undefined} textOverride={conversationText} additionalContent={additionalContent} />
         </section>
       })}
     </div>
@@ -1400,7 +1419,7 @@ function VirtualEvents({ events, store, sessionId, feedbackBySeq, producedBySeq,
         const key = String(event.seq)
         const hasToolCalls = event.type === 'assistant/message' && assistantToolCallSeqs.has(event.seq)
         return <div className={`virtual-row ${selectedSeq === event.seq ? 'selected' : ''} ${timelineFocusSeqs.has(event.seq) ? 'timeline-focused' : ''}`} data-virtual-row-key={key} key={key} ref={element => measureRow(key, element)} role="listitem" aria-current={selectedSeq === event.seq ? 'true' : undefined} aria-label={`Trajectory record #${event.seq}`} onClick={() => onSelectSeq(event.seq)} style={{ transform: `translateY(${offsets[start + index] ?? 0}px)` }}>
-        <EventCard event={event} store={store} sessionId={sessionId} feedback={feedbackBySeq[event.seq]} producedPaths={producedBySeq.get(event.seq)} onFeedback={onFeedback} onCopy={onCopy} onRetry={onRetry} onFork={onFork} onOpenFile={onOpenFile} onInspect={() => onSelectSeq(event.seq)} toolCallsAction={hasToolCalls ? { label: collapsedAssistants.has(event.seq) ? 'Expand tool calls' : 'Collapse tool calls', onClick: () => setCollapsedAssistants(current => { const next = new Set(current); if (next.has(event.seq)) next.delete(event.seq); else next.add(event.seq); return next }) } : undefined} />
+        <MemoEventCard event={event} store={store} sessionId={sessionId} feedback={feedbackBySeq[event.seq]} producedPaths={producedBySeq.get(event.seq)} onFeedback={onFeedback} onCopy={onCopy} onRetry={onRetry} onFork={onFork} onOpenFile={onOpenFile} onInspect={() => onSelectSeq(event.seq)} toolCallsAction={hasToolCalls ? { label: collapsedAssistants.has(event.seq) ? 'Expand tool calls' : 'Collapse tool calls', onClick: () => setCollapsedAssistants(current => { const next = new Set(current); if (next.has(event.seq)) next.delete(event.seq); else next.add(event.seq); return next }) } : undefined} />
       </div>
       })}
     </div>
@@ -1899,25 +1918,25 @@ export function App({ store }: { store: WebStore }) {
     }
   }
 
-  const copyMessage = async (text: string): Promise<void> => {
+  const copyMessage = useCallback(async (text: string): Promise<void> => {
     try {
       await navigator.clipboard.writeText(text)
       setSendError(null)
     } catch (error) { setSendError(error instanceof Error ? error.message : String(error)) }
-  }
+  }, [])
 
-  const retryMessage = async (text: string): Promise<void> => {
+  const retryMessage = useCallback(async (text: string): Promise<void> => {
     setSendError(null)
     try { await store.send(text) }
     catch (error) { setSendError(error instanceof Error ? error.message : String(error)) }
-  }
+  }, [store])
 
-  const forkSession = async (): Promise<void> => {
+  const forkSession = useCallback(async (): Promise<void> => {
     if (state.selectedId === null) return
     setSendError(null)
     try { await store.forkSession(state.selectedId) }
     catch (error) { setSendError(error instanceof Error ? error.message : String(error)) }
-  }
+  }, [state.selectedId, store])
 
   const downloadExport = useCallback(async (): Promise<void> => {
     if (state.selectedId === null) return
@@ -2015,7 +2034,7 @@ export function App({ store }: { store: WebStore }) {
     setPendingImages(previous => previous.filter(candidate => candidate.ref.id !== id))
   }
 
-  const submitFeedback = async (seq: number, rating: 'positive' | 'negative'): Promise<void> => {
+  const submitFeedback = useCallback(async (seq: number, rating: 'positive' | 'negative'): Promise<void> => {
     if (state.selectedId === null) return
     const current = feedbackBySeq[seq]
     try {
@@ -2027,7 +2046,7 @@ export function App({ store }: { store: WebStore }) {
         setFeedbackBySeq(previous => ({ ...previous, [seq]: item }))
       }
     } catch (error) { setSendError(error instanceof Error ? error.message : String(error)) }
-  }
+  }, [feedbackBySeq, state.selectedId, store])
   const onFeedback = submitFeedback
 
   const stopRun = async (): Promise<void> => {
