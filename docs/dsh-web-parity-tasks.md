@@ -126,6 +126,7 @@
 - [x] P36-8.1：生成包含 DSH 原生 dist、Go 服务、协议适配层和版本元数据的自包含交付包。
 - [x] P36-8.1a：提交 `28b824c` 生成 Windows 自包含包，包含 native dist、Go 二进制、配置/提示词和 `release.json`，并通过 dist/manifest 校验。
 - [x] P36-8.1b：以功能代码 revision `eb8680f` 重新生成 `release/shutu-agent-p36-current`，包含 111 个 native dist 资源、Go 二进制、配置/提示词和对应 revision 元数据，并通过发布包校验。
+- [x] P36-8.1c：以 revision `0121736` 刷新当前 release 包；三轮初始/升级/回滚 deployment smoke 均通过 health/sessions/static `200`、`host.describe=200`、双 native WebSocket `101` 与 shared data 保留。
 - [ ] P36-8.2：验证本机及目标 Windows/Linux 环境的启动、健康检查、API、WebSocket 和静态资源。
 - [x] P36-8.2a：本机 Windows 交付包启动 smoke 覆盖 `/api/health`、会话 API、静态首页和 native `host.describe` RPC；Linux/目标环境及 WebSocket 仍待补齐。
 - [x] P36-8.2b：交付包 smoke 使用带 Bearer 认证的原始 WebSocket upgrade 检查 `/api/events.mux` 与 `/api/events.host`，初始/升级/回滚三轮均返回 `101`；目标环境仍待补齐。

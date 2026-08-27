@@ -160,6 +160,15 @@ The same WSL2 setup completed an upgrade/rollback smoke with a shared Linux-nati
 
 The release pipeline was rerun after the native roster guard was added: Vite transformed `973` modules, generated a manifest with `40` linked native plugins, `npm run verify` passed, all `45` frontend tests passed, and the complete Playwright DSH interaction matrix passed without console errors. This is local release evidence; it does not close target-host deployment or high-density production-performance gates.
 
+After the native turn projection and 2,048-event first-page changes, the
+current release package was rebuilt at revision `0121736`
+(`012173681fbea4a95c312f3f6f57bb1888c76739`). The package manifest matches
+the binary/frontend revision, and `node scripts/deployment-smoke.mjs` passed
+initial, upgrade and rollback copies: each returned health/sessions/static
+`200`, `host.describe` `200`, both authenticated native WebSocket upgrades
+`101`, and `sharedData: true`. The package is therefore refreshed with the
+latest fixes; formal target-host deployment remains an environment task.
+
 The E2E screenshots were rerun into `docs/p36-visual-baseline/` and include light/dark desktop, mobile, loading/error, workspace, jobs, subagents, settings, and geometry captures. The rendered captures show the DSH native shell; the independent DSH pixel-diff is recorded under `docs/evidence/p36-pixel-2026-08-27/` and is byte-identical on mobile, with only the desktop build/version label differing.
 
 ## P36-7.1 / P36-7.2 / P36-7.3 Native 100k fixture evidence (2026-08-27)
