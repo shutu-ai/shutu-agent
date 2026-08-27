@@ -45,7 +45,10 @@ type Deps struct {
 // SpawnProvider spawns a brand-new child session + child loop for every Start.
 // It is safe for concurrent use.
 type SpawnProvider struct {
-	deps Deps
+	deps                 Deps
+	name                 string
+	idPrefix             string
+	inheritParentContext bool
 
 	mu       sync.Mutex
 	children map[string]*childRun
@@ -67,6 +70,7 @@ type childRun struct {
 	done        chan struct{}      // closed once the child settles
 	inbox       chan string        // follow-up messages for continuable children
 	continuable bool
+	seedSeq     uint64 // parent-history watermark for fork result derivation
 
 	mu            sync.Mutex
 	cancelReason  string
@@ -78,17 +82,29 @@ type childRun struct {
 
 // NewSpawnProvider returns a SpawnProvider bound to the given core components.
 func NewSpawnProvider(deps Deps) *SpawnProvider {
-	return &SpawnProvider{deps: deps, children: map[string]*childRun{}}
+	return &SpawnProvider{deps: deps, name: "spawn", idPrefix: "spawn", children: map[string]*childRun{}}
+}
+
+// NewForkProvider returns the independent fork backend. It uses the same local
+// runner as spawn, but has its own provider identity and seeds the child from
+// the parent's completed event history when available.
+func NewForkProvider(deps Deps) *SpawnProvider {
+	return &SpawnProvider{deps: deps, name: "fork", idPrefix: "fork", inheritParentContext: true, children: map[string]*childRun{}}
 }
 
 // Name returns the provider name ("spawn"), the default subagent provider.
-func (p *SpawnProvider) Name() string { return "spawn" }
+func (p *SpawnProvider) Name() string {
+	if p.name == "" {
+		return "spawn"
+	}
+	return p.name
+}
 
 // Capabilities declares what the spawn provider actually enforces: delegation
 // depth (MaxDepth ⇒ ErrDepthExceeded). ToolFilter/Persona application and
 // structured output is captured through a child-scoped structured_output tool.
 func (p *SpawnProvider) Capabilities() Capabilities {
-	return Capabilities{DepthLimit: true, OutputSchema: true}
+	return Capabilities{DepthLimit: true, OutputSchema: true, ContextInheritance: p.inheritParentContext}
 }
 
 // Start registers a brand-new child session (depth = parent depth + 1, tracked
@@ -135,7 +151,11 @@ func (p *SpawnProvider) Start(ctx context.Context, req StartRequest) (*Run, erro
 			ErrDepthExceeded, depth, req.MaxDepth, req.ParentSessionID)
 	}
 	p.nextID++
-	id := fmt.Sprintf("spawn-%d", p.nextID)
+	prefix := p.idPrefix
+	if prefix == "" {
+		prefix = "spawn"
+	}
+	id := fmt.Sprintf("%s-%d", prefix, p.nextID)
 	runCtx, cancel := context.WithCancel(context.Background())
 	child := &childRun{
 		id:          id,
@@ -148,8 +168,28 @@ func (p *SpawnProvider) Start(ctx context.Context, req StartRequest) (*Run, erro
 		inbox:       make(chan string, 16),
 		continuable: req.Continuable,
 	}
+	var parentEvents []session.Event
+	if req.InheritParentContext {
+		if req.ParentSessionID == "" {
+			if p.deps.Log != nil {
+				parentEvents = p.deps.Log.Events()
+			}
+		} else if parent, ok := p.children[req.ParentSessionID]; ok {
+			parentEvents = parent.log.Events()
+		}
+	}
 	p.children[id] = child
 	p.mu.Unlock()
+	if len(parentEvents) > 0 {
+		if err := child.log.Restore(parentEvents); err != nil {
+			cancel()
+			p.mu.Lock()
+			delete(p.children, id)
+			p.mu.Unlock()
+			return nil, fmt.Errorf("subagent: seed fork history %q: %w", req.ParentSessionID, err)
+		}
+		child.seedSeq = parentEvents[len(parentEvents)-1].Seq
+	}
 	if p.deps.Store != nil {
 		if err := p.deps.Store.CreateSession(context.Background(), id, time.Now().UTC()); err != nil {
 			cancel()
@@ -249,7 +289,10 @@ func (p *SpawnProvider) Resume(ctx context.Context, sessionID, message string, c
 
 func parseSpawnID(id string) int {
 	var n int
-	if _, err := fmt.Sscanf(id, "spawn-%d", &n); err != nil {
+	if _, err := fmt.Sscanf(id, "spawn-%d", &n); err == nil {
+		return n
+	}
+	if _, err := fmt.Sscanf(id, "fork-%d", &n); err != nil {
 		return 0
 	}
 	return n
@@ -328,7 +371,7 @@ func (p *SpawnProvider) settle(child *childRun, res Result) {
 // ②: completed | aborted | error | max-tokens | refusal). Output is the child's
 // last non-empty assistant/message text, derived from the child's own log (D1).
 func (p *SpawnProvider) deriveResult(child *childRun, runErr error) Result {
-	last := lastAssistantEvent(child.log)
+	last := lastAssistantEventAfter(child.log, child.seedSeq)
 	child.mu.Lock()
 	cancelled := child.cancelReason != ""
 	structured := child.structured
@@ -497,8 +540,15 @@ type assistantEvent struct {
 // reason (D1: the log is the source of truth — the result is derived, never
 // stored separately).
 func lastAssistantEvent(log *session.Log) assistantEvent {
+	return lastAssistantEventAfter(log, 0)
+}
+
+func lastAssistantEventAfter(log *session.Log, afterSeq uint64) assistantEvent {
 	var ev assistantEvent
 	for _, e := range log.Events() {
+		if e.Seq <= afterSeq {
+			continue
+		}
 		if e.Type != session.EventAssistantMessage {
 			continue
 		}

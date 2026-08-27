@@ -61,7 +61,7 @@ func makeSubagentApp(enabled bool) *app {
 // run them (in production config.applyDefaults + PolicyFromConfig do this).
 func subagentPolicy() tools.Policy {
 	return tools.Policy{
-		Enabled:     []string{"subagent", "subagent_fork", "send_message", "interrupt_agent"},
+		Enabled:     []string{"subagent", "subagent_fork", "send_message", "interrupt_agent", "list_agents"},
 		Timeout:     0, // no per-tool deadline in tests
 		OutputLimit: 0,
 	}
@@ -120,7 +120,7 @@ func TestRegisterSubagentEnabledRegistersAndLogsEvents(t *testing.T) {
 	for _, s := range specs {
 		names = append(names, s.Name)
 	}
-	for _, want := range []string{"subagent", "subagent_fork", "send_message", "interrupt_agent"} {
+	for _, want := range []string{"subagent", "subagent_fork", "send_message", "interrupt_agent", "list_agents"} {
 		if !containsStr(names, want) {
 			t.Fatalf("registered tools %v lack %q", names, want)
 		}
@@ -131,11 +131,11 @@ func TestRegisterSubagentEnabledRegistersAndLogsEvents(t *testing.T) {
 		name string
 		args string
 	}{
-		{"subagent", `{}`},                       // missing required prompt
-		{"subagent", `{"prompt":"x","extra":1}`}, // additional properties rejected
-		{"send_message", `{}`},                    // missing required id/message
-		{"send_message", `{"id":123,"message":"x"}`}, // id must be a string
-		{"interrupt_agent", `{"id":false}`},     // wrong id type
+		{"subagent", `{}`},                                    // missing required prompt
+		{"subagent", `{"prompt":"x","extra":1}`},              // additional properties rejected
+		{"send_message", `{}`},                                // missing required subagent_id/message
+		{"send_message", `{"subagent_id":123,"message":"x"}`}, // id must be a string
+		{"interrupt_agent", `{"agent_id":false}`},             // wrong id type
 	} {
 		if _, err := app.reg.Execute(context.Background(), tc.name, json.RawMessage(tc.args)); err == nil {
 			t.Errorf("%s with args %s must be rejected (D7)", tc.name, tc.args)
@@ -143,7 +143,7 @@ func TestRegisterSubagentEnabledRegistersAndLogsEvents(t *testing.T) {
 	}
 
 	// A valid spawn flows through the registry and returns the child id.
-	res, err := app.reg.Execute(context.Background(), "subagent", json.RawMessage(`{"prompt":"do research","label":"researcher"}`))
+	res, err := app.reg.Execute(context.Background(), "subagent", json.RawMessage(`{"description":"researcher","prompt":"do research"}`))
 	if err != nil {
 		t.Fatalf("subagent via registry: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestRegisterSubagentEnabledRegistersAndLogsEvents(t *testing.T) {
 	}
 
 	// The fork alias is also available and retains the same execution contract.
-	if _, err := app.reg.Execute(context.Background(), "subagent_fork", json.RawMessage(`{"prompt":"forked"}`)); err != nil {
+	if _, err := app.reg.Execute(context.Background(), "subagent_fork", json.RawMessage(`{"description":"forked","prompt":"forked"}`)); err != nil {
 		t.Fatalf("subagent_fork via registry: %v", err)
 	}
 }
@@ -201,7 +201,7 @@ func TestRegisterSubagentExternalDisabled(t *testing.T) {
 	}
 	defer app.subagents.Close()
 	got := app.subagents.ListProviders()
-	if len(got) != 1 || got[0] != "spawn" {
-		t.Fatalf("registered providers = %v, want only [spawn] when no external provider is enabled", got)
+	if len(got) != 2 || !containsStr(got, "spawn") || !containsStr(got, "fork") {
+		t.Fatalf("registered providers = %v, want [fork spawn] when no external provider is enabled", got)
 	}
 }

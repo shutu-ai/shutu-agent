@@ -15,17 +15,22 @@ import (
 // mutable registry, prompt, log and current session.
 func newACPSubagent(a *app, id string, log *session.Log, registry *tools.Registry, pb *prompt.Builder) (subagent.Runtime, *subagent.SubagentTools, error) {
 	rt := subagent.NewRuntime()
-	prov := subagent.NewSpawnProvider(subagent.Deps{
+	deps := subagent.Deps{
 		Log:    log,
 		LLM:    a.currentLLM(),
 		Tools:  registry,
 		Prompt: pb,
 		Model:  a.cfg.Model,
 		Store:  a.store,
-	})
+	}
+	prov := subagent.NewSpawnProvider(deps)
 	if err := rt.RegisterProvider(prov); err != nil {
 		_ = rt.Close()
 		return nil, nil, fmt.Errorf("ACP subagent spawn provider: %w", err)
+	}
+	if err := rt.RegisterProvider(subagent.NewForkProvider(deps)); err != nil {
+		_ = rt.Close()
+		return nil, nil, fmt.Errorf("ACP subagent fork provider: %w", err)
 	}
 	for name, ep := range a.cfg.Subagent.ExternalProviders {
 		if !ep.Enabled {
@@ -49,6 +54,7 @@ func newACPSubagent(a *app, id string, log *session.Log, registry *tools.Registr
 		}
 	}
 	st := subagent.NewSubagentToolsWithContinuable(rt, a.cfg.Subagent.MaxDepth, func() string { return id }, onEvent, true)
+	st.SetJobs(a.jobs)
 	return rt, st, nil
 }
 
@@ -58,6 +64,7 @@ func registerACPSubagentTools(registry *tools.Registry, st *subagent.SubagentToo
 		st.Fork(),
 		st.Send(),
 		st.Interrupt(),
+		st.ListAgents(),
 	} {
 		if err := registry.Register(tool); err != nil {
 			return fmt.Errorf("register ACP %s: %w", tool.Name(), err)

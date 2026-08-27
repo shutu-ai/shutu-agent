@@ -72,7 +72,7 @@ func testBundle(t *testing.T, model llm.LLM, maxDepth int, onEvent func(string, 
 		t.Fatalf("register provider: %v", err)
 	}
 	t.Cleanup(func() { _ = rt.Close() })
-	return NewSubagentTools(rt, maxDepth, func() string { return "sess-1" }, onEvent)
+	return NewSubagentToolsWithContinuable(rt, maxDepth, func() string { return "sess-1" }, onEvent, true)
 }
 
 // waitSettled polls the bundle's settle cache until the child's terminal
@@ -105,11 +105,11 @@ func TestSubagentSpawnReturnsChildID(t *testing.T) {
 	log := &eventLog{}
 	st := testBundle(t, model, 8, log.record)
 
-	out, err := st.Spawn().Execute(context.Background(), json.RawMessage(`{"prompt":"summarize the docs","label":"researcher"}`))
+	out, err := st.Spawn().Execute(context.Background(), json.RawMessage(`{"description":"researcher","prompt":"summarize the docs"}`))
 	if err != nil {
 		t.Fatalf("subagent_spawn: %v", err)
 	}
-	if !strings.Contains(out, "started subagent spawn-1") || !strings.Contains(out, "label=\"researcher\"") {
+	if !strings.Contains(out, "started subagent spawn-1") {
 		t.Fatalf("subagent_spawn output = %q, want started subagent spawn-1 ...", out)
 	}
 	c := log.counts()
@@ -128,10 +128,7 @@ func TestSubagentSpawnReturnsChildID(t *testing.T) {
 	if start.ID != "spawn-1" || start.Provider != "spawn" || start.ParentSession != "sess-1" || start.Label != "researcher" {
 		t.Fatalf("subagent/start payload = %+v", start)
 	}
-	// The spawn defaulted the parent session to the injected owner.
-	if !strings.Contains(out, "parent=sess-1") {
-		t.Fatalf("subagent_spawn output = %q, want default parent sess-1", out)
-	}
+	// The spawn event records the injected owner as the parent.
 }
 
 // TestSubagentSpawnAcceptanceCriteria verifies subagent_spawn's schema exposes
@@ -139,6 +136,7 @@ func TestSubagentSpawnReturnsChildID(t *testing.T) {
 // spawned child's first user message contains the injected acceptance section
 // with both criteria.
 func TestSubagentSpawnAcceptanceCriteria(t *testing.T) {
+	t.Skip("acceptance criteria is intentionally removed from the DSH model-facing schema")
 	model := &scriptedLLM{steps: [][]llm.StreamEvent{{
 		{Kind: llm.StreamFinish, FinishReason: "stop"},
 	}}}
@@ -150,8 +148,8 @@ func TestSubagentSpawnAcceptanceCriteria(t *testing.T) {
 	if !ok {
 		t.Fatalf("spawn schema properties = %T, want map[string]any", schema["properties"])
 	}
-	if _, ok := props["acceptance_criteria"]; !ok {
-		t.Fatalf("spawn schema must expose acceptance_criteria, got properties %v", props)
+	if _, ok := props["run_in_background"]; !ok {
+		t.Fatalf("spawn schema must expose run_in_background, got properties %v", props)
 	}
 
 	out, err := st.Spawn().Execute(ctx, json.RawMessage(
@@ -186,7 +184,7 @@ func TestSubagentStatusReflectsResultAndEmitsEndOnce(t *testing.T) {
 	st := testBundle(t, model, 8, log.record)
 	ctx := context.Background()
 
-	if _, err := st.Spawn().Execute(ctx, json.RawMessage(`{"prompt":"go","label":"r"}`)); err != nil {
+	if _, err := st.Spawn().Execute(ctx, json.RawMessage(`{"description":"r","prompt":"go","run_in_background":false}`)); err != nil {
 		t.Fatalf("subagent_spawn: %v", err)
 	}
 	waitSettled(t, st, "spawn-1", 5*time.Second)
@@ -229,7 +227,7 @@ func TestSubagentStatusRunningBeforeSettle(t *testing.T) {
 	st := testBundle(t, &blockingLLM{started: started}, 8, nil)
 	ctx := context.Background()
 
-	if _, err := st.Spawn().Execute(ctx, json.RawMessage(`{"prompt":"work","label":"slow"}`)); err != nil {
+	if _, err := st.Spawn().Execute(ctx, json.RawMessage(`{"description":"slow","prompt":"work"}`)); err != nil {
 		t.Fatalf("subagent_spawn: %v", err)
 	}
 	<-started // the child is live inside its first model request
@@ -252,7 +250,7 @@ func TestSubagentCancelRequestsCancellation(t *testing.T) {
 	st := testBundle(t, &blockingLLM{started: started}, 8, log.record)
 	ctx := context.Background()
 
-	if _, err := st.Spawn().Execute(ctx, json.RawMessage(`{"prompt":"work","label":"slow"}`)); err != nil {
+	if _, err := st.Spawn().Execute(ctx, json.RawMessage(`{"description":"slow","prompt":"work"}`)); err != nil {
 		t.Fatalf("subagent_spawn: %v", err)
 	}
 	<-started
@@ -290,10 +288,10 @@ func TestSubagentListProjectsChildren(t *testing.T) {
 	st := testBundle(t, model, 8, nil)
 	ctx := context.Background()
 
-	if _, err := st.Spawn().Execute(ctx, json.RawMessage(`{"prompt":"a","label":"one"}`)); err != nil {
+	if _, err := st.Spawn().Execute(ctx, json.RawMessage(`{"description":"one","prompt":"a"}`)); err != nil {
 		t.Fatalf("spawn one: %v", err)
 	}
-	if _, err := st.Spawn().Execute(ctx, json.RawMessage(`{"prompt":"b","label":"two"}`)); err != nil {
+	if _, err := st.Spawn().Execute(ctx, json.RawMessage(`{"description":"two","prompt":"b"}`)); err != nil {
 		t.Fatalf("spawn two: %v", err)
 	}
 	// Default parent = the injected owner session.
@@ -322,6 +320,43 @@ func TestSubagentListProjectsChildren(t *testing.T) {
 	}
 }
 
+func TestDSHControlToolsUseCanonicalSchemasAndValues(t *testing.T) {
+	model := &scriptedLLM{steps: [][]llm.StreamEvent{
+		{{Kind: llm.StreamFinish, FinishReason: "stop"}},
+	}}
+	st := testBundle(t, model, 8, nil)
+	ctx := context.Background()
+	if _, err := st.Spawn().Execute(ctx, json.RawMessage(`{"description":"research","prompt":"work"}`)); err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	list, err := st.ListAgents().ExecuteResult(ctx, json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("list_agents: %v", err)
+	}
+	entries, ok := list.Value.([]any)
+	if !ok || len(entries) != 1 {
+		t.Fatalf("list_agents value = %#v, want one projected child", list.Value)
+	}
+	entry := entries[0].(map[string]any)
+	if entry["kind"] != "child" || entry["id"] != "spawn-1" || entry["status"] != "running" {
+		t.Fatalf("list_agents entry = %#v", entry)
+	}
+	sent, err := st.Send().ExecuteResult(ctx, json.RawMessage(`{"subagent_id":"spawn-1","message":"continue"}`))
+	if err != nil {
+		t.Fatalf("send_message: %v", err)
+	}
+	if sent.Value.(map[string]any)["messageId"] == "" || !strings.Contains(sent.Output, "next turn") {
+		t.Fatalf("send_message result = %#v / %q", sent.Value, sent.Output)
+	}
+	interrupted, err := st.Interrupt().ExecuteResult(ctx, json.RawMessage(`{"agent_id":"spawn-1"}`))
+	if err != nil {
+		t.Fatalf("interrupt_agent: %v", err)
+	}
+	if interrupted.Value.(map[string]any)["accepted"] != true {
+		t.Fatalf("interrupt_agent value = %#v", interrupted.Value)
+	}
+}
+
 // TestSubagentToolsSchemaValidation verifies the D7 gate: the four subagent
 // tools' schemas reject missing required fields, wrong argument types, and
 // unknown (additional) properties at the registry's Execute gate.
@@ -329,11 +364,11 @@ func TestSubagentToolsSchemaValidation(t *testing.T) {
 	st := testBundle(t, &scriptedLLM{}, 8, nil)
 	reg := tools.New()
 	reg.SetPolicy(tools.Policy{
-		Enabled:     []string{ToolSpawnName, ToolStatusName, ToolCancelName, ToolListName},
+		Enabled:     []string{ToolSpawnName, ToolStatusName, ToolCancelName, ToolListName, ToolListAgentsName},
 		Timeout:     0,
 		OutputLimit: 0,
 	})
-	for _, tool := range []tools.Tool{st.Spawn(), st.Status(), st.Cancel(), st.List()} {
+	for _, tool := range []tools.Tool{st.Spawn(), st.Status(), st.Cancel(), st.List(), st.ListAgents()} {
 		if err := reg.Register(tool); err != nil {
 			t.Fatalf("register %s: %v", tool.Name(), err)
 		}
@@ -342,22 +377,25 @@ func TestSubagentToolsSchemaValidation(t *testing.T) {
 		name string
 		args string
 	}{
-		{"subagent", `{}`},                           // missing required prompt
-		{"subagent", `{"prompt":""}`},                // empty prompt
-		{"subagent", `{"prompt":"x","extra":1}`},     // additional properties rejected
-		{"subagent", `{"prompt":"x","max_depth":0}`}, // max_depth must be >= 1
-		{"subagent_status", `{}`},                    // missing required id
-		{"subagent_status", `{"id":123}`},            // id must be a string
-		{"subagent_cancel", `{}`},                    // missing required id
-		{"subagent_cancel", `{"id":false}`},          // wrong id type
-		{"subagent_list", `{"parent_session":123}`},  // wrong parent type
+		{"subagent", `{}`}, // missing required description/prompt
+		{"subagent", `{"description":"x","prompt":""}`},                     // empty prompt
+		{"subagent", `{"description":"x","prompt":"x","extra":1}`},          // additional properties rejected
+		{"subagent", `{"description":"x","prompt":"x","provider":"spawn"}`}, // provider is bound by composition
+		{"subagent_status", `{}`},                                           // missing required id
+		{"subagent_status", `{"id":123}`},                                   // id must be a string
+		{"subagent_cancel", `{}`},                                           // missing required id
+		{"subagent_cancel", `{"id":false}`},                                 // wrong id type
+		{"subagent_list", `{"parent_session":123}`},                         // wrong parent type
+		{"list_agents", `{"scope":"invalid"}`},                              // closed enum
+		{"send_message", `{"subagent_id":123,"message":"x"}`},
+		{"interrupt_agent", `{"agent_id":123}`},
 	} {
 		if _, err := reg.Execute(context.Background(), tc.name, json.RawMessage(tc.args)); err == nil {
 			t.Errorf("%s with args %s must be rejected (D7)", tc.name, tc.args)
 		}
 	}
 	// A valid spawn flows through the registry and returns the child id.
-	res, err := reg.Execute(context.Background(), "subagent", json.RawMessage(`{"prompt":"go"}`))
+	res, err := reg.Execute(context.Background(), "subagent", json.RawMessage(`{"description":"go","prompt":"go"}`))
 	if err != nil {
 		t.Fatalf("subagent via registry: %v", err)
 	}
@@ -385,6 +423,7 @@ func TestSubagentUnknownChild(t *testing.T) {
 // "unknown provider" error (no silent fallback). The test runtime registers
 // only the local spawn provider.
 func TestSpawnToolProviderField(t *testing.T) {
+	t.Skip("provider selection is composition-bound in the DSH tool contract")
 	model := &scriptedLLM{steps: [][]llm.StreamEvent{{
 		{Kind: llm.StreamFinish, FinishReason: "stop"},
 	}}}

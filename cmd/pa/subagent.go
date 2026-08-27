@@ -28,7 +28,7 @@ func (a *app) registerSubagent() error {
 	if !config.Enabled(a.cfg.Subagent.Enabled) {
 		return nil
 	}
-	prov := subagent.NewSpawnProvider(subagent.Deps{
+	deps := subagent.Deps{
 		// Log is the parent/host log the provider is bound to; it is never
 		// appended to by the provider (each child owns an independent log) —
 		// subagent/* events reach the parent log through the onEvent sink
@@ -39,10 +39,14 @@ func (a *app) registerSubagent() error {
 		Prompt: a.prompt,
 		Model:  a.cfg.Model,
 		Store:  a.store,
-	})
+	}
+	prov := subagent.NewSpawnProvider(deps)
 	rt := subagent.NewRuntime()
 	if err := rt.RegisterProvider(prov); err != nil {
 		return fmt.Errorf("pa: register subagent provider: %w", err)
+	}
+	if err := rt.RegisterProvider(subagent.NewForkProvider(deps)); err != nil {
+		return fmt.Errorf("pa: register fork provider: %w", err)
 	}
 	// D-GAP-4: optional external subagent backends (codex / claude-code).
 	// Register one provider per enabled config entry; a failed registration
@@ -75,12 +79,14 @@ func (a *app) registerSubagent() error {
 		}
 	}
 	st := subagent.NewSubagentToolsWithContinuable(rt, a.cfg.Subagent.MaxDepth, func() string { return a.currentID }, onEvent, true)
+	st.SetJobs(a.jobs)
 	a.subagentTools = st
 	for _, t := range []tools.Tool{
 		st.Spawn(),
 		st.Fork(),
 		st.Send(),
 		st.Interrupt(),
+		st.ListAgents(),
 	} {
 		if err := a.reg.Register(t); err != nil {
 			return fmt.Errorf("pa: register %s: %w", t.Name(), err)

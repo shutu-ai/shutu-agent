@@ -270,10 +270,10 @@ func TestACPExplicitSubagentOwnsRuntimeAndTools(t *testing.T) {
 		_ = rt.Close()
 		t.Fatal(err)
 	}
-	if providers := rt.ListProviders(); len(providers) != 1 || providers[0] != "spawn" {
-		t.Fatalf("ACP providers = %v, want isolated spawn provider", providers)
+	if providers := rt.ListProviders(); len(providers) != 2 || !containsStr(providers, "spawn") || !containsStr(providers, "fork") {
+		t.Fatalf("ACP providers = %v, want isolated spawn and fork providers", providers)
 	}
-	if _, err := registry.Execute(context.Background(), subagent.ToolSpawnName, []byte(`{"prompt":"summarize"}`)); err != nil {
+	if _, err := registry.Execute(context.Background(), subagent.ToolSpawnName, []byte(`{"description":"summary","prompt":"summarize","run_in_background":false}`)); err != nil {
 		_ = rt.Close()
 		t.Fatalf("ACP subagent_spawn: %v", err)
 	}

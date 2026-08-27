@@ -29,6 +29,9 @@ type Capabilities struct {
 	DepthLimit   bool // MaxDepth is enforced (depth tracking + ErrDepthExceeded)
 	ToolFilter   bool // ToolFilter whitelist is applied to the child's visible tools
 	Persona      bool // Persona is applied to the child's system prompt
+	// ContextInheritance means the provider can seed a child from its parent's
+	// completed session history (the fork provider capability).
+	ContextInheritance bool
 }
 
 // StartRequest is one delegation request (ADR 决策 ②).
@@ -64,6 +67,9 @@ type StartRequest struct {
 	// queue follow-up messages while the process remains alive. It is false
 	// for one-shot children and is intentionally opt-in for compatibility.
 	Continuable bool
+	// InheritParentContext requests a fork-style child seeded from its parent's
+	// completed session history.
+	InheritParentContext bool
 }
 
 // Result is the terminal outcome of a subagent run. StopReason is one of
@@ -251,6 +257,9 @@ func (r *runtime) Start(ctx context.Context, name string, req StartRequest) (*Ru
 	}
 	if req.Persona != "" && !caps.Persona {
 		return nil, fmt.Errorf("%w: persona requires a persona provider", ErrCapabilityNotSupported)
+	}
+	if req.InheritParentContext && !caps.ContextInheritance {
+		return nil, fmt.Errorf("%w: parent context inheritance requires a fork-capable provider", ErrCapabilityNotSupported)
 	}
 	return p.Start(ctx, req)
 }
