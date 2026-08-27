@@ -3114,6 +3114,10 @@ func (s *Server) nativeSessionCreate(r *http.Request, raw json.RawMessage) nativ
 			return nativeRPCFailure("session-create-failed", err.Error(), nil)
 		}
 	}
+	// The native mux is already connected while the user creates a session.
+	// Publish the new address before returning so its live event subscription is
+	// installed before the client can submit the first prompt.
+	s.notifyNativeMuxSessionAdded(id)
 	return nativeRPCSuccess(map[string]any{"sessionId": id})
 }
 
@@ -3733,23 +3737,31 @@ func (s *Server) handleNativeMuxWebSocket(w http.ResponseWriter, r *http.Request
 			return false
 		}
 	}
-	metas, err := s.store.ListSessions(ctx)
-	if err != nil {
-		return
-	}
-	unsubs := make([]func(), 0, len(metas))
-	defer func() {
-		for _, unsub := range unsubs {
-			unsub()
-		}
-	}()
-	for _, meta := range metas {
+	sessionMu := sync.Mutex{}
+	subscribed := make(map[string]struct{})
+	unsubs := make(map[string]func())
+	snapshotUnsubs := make(map[string]func())
+	var subscribeSession func(store.SessionMeta) error
+	subscribeSession = func(meta store.SessionMeta) error {
 		if !meta.ArchivedAt.IsZero() {
-			continue
+			return nil
+		}
+		sessionMu.Lock()
+		if _, exists := subscribed[meta.ID]; exists {
+			sessionMu.Unlock()
+			return nil
+		}
+		subscribed[meta.ID] = struct{}{}
+		sessionMu.Unlock()
+		forgetSubscription := func() {
+			sessionMu.Lock()
+			delete(subscribed, meta.ID)
+			sessionMu.Unlock()
 		}
 		events, loadErr := s.store.LoadSession(ctx, meta.ID)
 		if loadErr != nil {
-			continue
+			forgetSubscription()
+			return loadErr
 		}
 		projection := newNativeProjectionCursor()
 		var projectionMu sync.Mutex
@@ -3761,7 +3773,8 @@ func (s *Server) handleNativeMuxWebSocket(w http.ResponseWriter, r *http.Request
 			projection.project(meta.ID, ev)
 		}
 		if err := write(nativeSubscribedFrame{Type: "session/subscribed", SessionID: meta.ID, LastSeq: lastSeq}); err != nil {
-			return
+			forgetSubscription()
+			return err
 		}
 		if s.interactionFn != nil {
 			if pending, listErr := s.interactionFn(ctx, meta.ID); listErr == nil {
@@ -3807,8 +3820,7 @@ func (s *Server) handleNativeMuxWebSocket(w http.ResponseWriter, r *http.Request
 			}
 		}
 		removeSnapshotSubscription := s.subscribeNativeMux(meta.ID, emitSnapshots)
-		defer removeSnapshotSubscription()
-		unsubs = append(unsubs, s.evSrc(meta.ID, func(ev session.Event) {
+		eventUnsub := s.evSrc(meta.ID, func(ev session.Event) {
 			projectionMu.Lock()
 			projected := projection.project(meta.ID, ev)
 			changes := projection.projectionChanges()
@@ -3821,7 +3833,49 @@ func (s *Server) handleNativeMuxWebSocket(w http.ResponseWriter, r *http.Request
 			if eventNeedsControlSnapshots(ev) {
 				emitSnapshots()
 			}
-		}))
+		})
+		sessionMu.Lock()
+		snapshotUnsubs[meta.ID] = removeSnapshotSubscription
+		unsubs[meta.ID] = eventUnsub
+		sessionMu.Unlock()
+		return nil
+	}
+	addedUnsub := s.subscribeNativeMuxSessionAdded(func(sessionID string) {
+		meta, metaErr := s.store.GetSessionMeta(ctx, sessionID)
+		if metaErr != nil {
+			return
+		}
+		_ = subscribeSession(meta)
+	})
+	defer addedUnsub()
+	metas, err := s.store.ListSessions(ctx)
+	if err != nil {
+		return
+	}
+	defer func() {
+		sessionMu.Lock()
+		eventUnsubs := make([]func(), 0, len(unsubs))
+		for _, unsub := range unsubs {
+			if unsub != nil {
+				eventUnsubs = append(eventUnsubs, unsub)
+			}
+		}
+		snapshotRemovals := make([]func(), 0, len(snapshotUnsubs))
+		for _, remove := range snapshotUnsubs {
+			snapshotRemovals = append(snapshotRemovals, remove)
+		}
+		sessionMu.Unlock()
+		for _, unsub := range eventUnsubs {
+			unsub()
+		}
+		for _, remove := range snapshotRemovals {
+			remove()
+		}
+	}()
+	for _, meta := range metas {
+		if err := subscribeSession(meta); err != nil {
+			return
+		}
 	}
 	go drainNativeWebSocket(reader, cancel)
 	<-ctx.Done()

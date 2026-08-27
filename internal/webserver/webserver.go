@@ -87,6 +87,7 @@ type Server struct {
 	// the composition root.
 	nativeMuxMu           sync.Mutex
 	nativeMuxSubscribers  map[string]map[uint64]func()
+	nativeMuxSessionAdded map[uint64]func(string)
 	nativeMuxSubscriberID uint64
 	// nativeQueueUpdateFn accepts the DSH action vocabulary. The legacy queue
 	// callback above intentionally remains text/action-only for the REST API;
@@ -575,6 +576,47 @@ func (s *Server) notifyNativeMux(sessionID string) {
 	s.nativeMuxMu.Unlock()
 	for _, refresh := range listeners {
 		refresh()
+	}
+}
+
+// subscribeNativeMuxSessionAdded registers a callback for sessions created
+// after a native mux connection was established. DSH keeps the mux stream
+// resident while the user creates sessions, so the new session must join its
+// event subscription without waiting for a browser refresh.
+func (s *Server) subscribeNativeMuxSessionAdded(added func(string)) func() {
+	s.nativeMuxMu.Lock()
+	if s.nativeMuxSessionAdded == nil {
+		s.nativeMuxSessionAdded = make(map[uint64]func(string))
+	}
+	s.nativeMuxSubscriberID++
+	id := s.nativeMuxSubscriberID
+	s.nativeMuxSessionAdded[id] = added
+	s.nativeMuxMu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.nativeMuxMu.Lock()
+			delete(s.nativeMuxSessionAdded, id)
+			s.nativeMuxMu.Unlock()
+		})
+	}
+}
+
+// notifyNativeMuxSessionAdded asks every connected native mux stream to
+// subscribe a newly created session immediately.
+func (s *Server) notifyNativeMuxSessionAdded(sessionID string) {
+	if strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	s.nativeMuxMu.Lock()
+	listeners := make([]func(string), 0, len(s.nativeMuxSessionAdded))
+	for _, added := range s.nativeMuxSessionAdded {
+		listeners = append(listeners, added)
+	}
+	s.nativeMuxMu.Unlock()
+	for _, added := range listeners {
+		added(sessionID)
 	}
 }
 

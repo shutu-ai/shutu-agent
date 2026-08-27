@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -2147,6 +2148,160 @@ func TestNativeMuxWebSocketSendsSubscriptionBaseline(t *testing.T) {
 	}
 	if got := jobCalls.Load(); got != jobCallsBeforeEvent {
 		t.Fatalf("job provider called for unrelated plan event: before=%d after=%d", jobCallsBeforeEvent, got)
+	}
+}
+
+func TestNativeMuxWebSocketSubscribesSessionCreatedAfterConnect(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	seedSession(t, st, "native-existing", nil)
+	srv.SetSessionManager(func(ctx context.Context, action, requestedID string) (string, error) {
+		if action != "new" {
+			t.Fatalf("session action = %q, want new", action)
+		}
+		if err := st.CreateSession(ctx, requestedID, time.Now().UTC()); err != nil {
+			return "", err
+		}
+		return requestedID, nil
+	})
+	var callbacksMu sync.Mutex
+	callbacks := make(map[string]func(session.Event))
+	registered := make(chan string, 2)
+	srv.SetEventSource(func(sessionID string, callback func(session.Event)) func() {
+		callbacksMu.Lock()
+		callbacks[sessionID] = callback
+		callbacksMu.Unlock()
+		registered <- sessionID
+		return func() {
+			callbacksMu.Lock()
+			delete(callbacks, sessionID)
+			callbacksMu.Unlock()
+		}
+	})
+	httpServer := httptest.NewServer(srv.Handler())
+	defer httpServer.Close()
+	address := strings.TrimPrefix(httpServer.URL, "http://")
+	conn, err := net.Dial("tcp", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	request := fmt.Sprintf("GET /api/events.mux HTTP/1.1\r\nHost: %s\r\nConnection: keep-alive, Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGVzdC1uYXRpdmUta2V5\r\nAuthorization: Bearer tok\r\n\r\n", address)
+	if _, err := io.WriteString(conn, request); err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(conn)
+	status, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(status, "101 Switching Protocols") {
+		t.Fatalf("upgrade status = %q", status)
+	}
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.TrimSpace(line) == "" {
+			break
+		}
+	}
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	baseline, err := readNativeTextFrame(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var baselineEnvelope struct {
+		Payload nativeSubscribedFrame `json:"payload"`
+	}
+	if err := json.Unmarshal(baseline, &baselineEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	if baselineEnvelope.Payload.SessionID != "native-existing" {
+		t.Fatalf("baseline frame = %s", baseline)
+	}
+	select {
+	case sessionID := <-registered:
+		if sessionID != "native-existing" {
+			t.Fatalf("initial callback session = %q", sessionID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("mux did not register the initial event callback")
+	}
+
+	createRequest, err := http.NewRequest(http.MethodPost, httpServer.URL+"/api/session.create", strings.NewReader(`{"type":"client-request","rpcId":"create-live","method":"session.create","payload":{"sessionId":"native-live"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	createRequest.Header.Set("Authorization", "Bearer tok")
+	createRequest.Header.Set("Content-Type", "application/json")
+	createResponse, err := http.DefaultClient.Do(createRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer createResponse.Body.Close()
+	if createResponse.StatusCode != http.StatusOK {
+		t.Fatalf("session.create status = %d", createResponse.StatusCode)
+	}
+	var createBody nativeRPCResponse
+	if err := json.NewDecoder(createResponse.Body).Decode(&createBody); err != nil {
+		t.Fatal(err)
+	}
+	if !createBody.Result.OK {
+		t.Fatalf("session.create response = %+v", createBody)
+	}
+
+	var subscribed struct {
+		Payload nativeSubscribedFrame `json:"payload"`
+	}
+	for {
+		frame, readErr := readNativeTextFrame(reader)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if err := json.Unmarshal(frame, &subscribed); err != nil {
+			t.Fatal(err)
+		}
+		if subscribed.Payload.Type == "session/subscribed" && subscribed.Payload.SessionID == "native-live" {
+			break
+		}
+	}
+	if subscribed.Payload.LastSeq != -1 {
+		t.Fatalf("new session baseline = %+v", subscribed.Payload)
+	}
+	select {
+	case sessionID := <-registered:
+		if sessionID != "native-live" {
+			t.Fatalf("new callback session = %q", sessionID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("mux did not register the new session event callback")
+	}
+	callbacksMu.Lock()
+	emit := callbacks["native-live"]
+	callbacksMu.Unlock()
+	if emit == nil {
+		t.Fatal("new session event callback is nil")
+	}
+	emit(session.Event{Seq: 1, Type: session.EventUserMessage, At: time.UnixMilli(2001), Version: session.EventVersion, Data: json.RawMessage(`{"text":"hi"}`)})
+	var eventEnvelope struct {
+		Method  string                  `json:"method"`
+		Payload nativeSessionEventFrame `json:"payload"`
+	}
+	for {
+		frame, readErr := readNativeTextFrame(reader)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if err := json.Unmarshal(frame, &eventEnvelope); err != nil {
+			t.Fatal(err)
+		}
+		if eventEnvelope.Method == "session/event" {
+			break
+		}
+	}
+	if eventEnvelope.Payload.SessionID != "native-live" || eventEnvelope.Payload.Event.Seq != 1 || eventEnvelope.Payload.Event.Type != session.EventUserMessage {
+		t.Fatalf("new session live event = %+v", eventEnvelope.Payload)
 	}
 }
 
