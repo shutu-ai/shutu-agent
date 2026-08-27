@@ -113,8 +113,12 @@ export function installDshNativeAccessibilityBridge(documentObject: Document = d
       if (button.getAttribute('aria-label')?.trim() || button.textContent?.trim()) continue
       button.setAttribute('aria-label', 'Settings')
     }
-    const dialogMounted = documentObject.querySelector('[role="dialog"]') !== null
+    const dialog = documentObject.querySelector<HTMLElement>('[role="dialog"]')
+    const dialogMounted = dialog !== null
     if (dialogMounted) {
+      if (!dialogWasMounted && dialog !== null && !dialog.contains(documentObject.activeElement)) {
+        dialog.querySelector<HTMLElement>(focusableSelector)?.focus()
+      }
       dialogWasMounted = true
       return
     }

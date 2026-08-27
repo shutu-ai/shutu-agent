@@ -55,4 +55,20 @@ describe('DSH native accessibility bridge', () => {
     expect(document.activeElement).toBe(last)
     cleanup()
   })
+
+  it('moves focus into the first dialog control when it opens', async () => {
+    const trigger = document.createElement('button')
+    trigger.setAttribute('aria-haspopup', 'dialog')
+    document.body.append(trigger)
+    const cleanup = installDshNativeAccessibilityBridge(document)
+    trigger.focus()
+    const dialog = document.createElement('div')
+    dialog.setAttribute('role', 'dialog')
+    dialog.innerHTML = '<button id="first">First</button><button id="last">Last</button>'
+    document.body.append(dialog)
+    await Promise.resolve()
+
+    expect(document.activeElement).toBe(document.querySelector('#first'))
+    cleanup()
+  })
 })

@@ -108,7 +108,7 @@ The same Playwright run delayed the native `session.list` response for 1 second 
 
 ## P36-6.3 Native focus recovery evidence (2026-08-27)
 
-The native accessibility bridge now remembers the trigger for a `role=dialog` control, restores focus after the dialog is removed, and traps Tab/Shift+Tab within the dialog's focusable controls. `npm.cmd run test -- dsh-native-entry.test.ts` passed two jsdom tests and the full `npm.cmd run e2e` smoke passed; the desktop Settings flow closes with Escape and returns focus to the Settings trigger. Screen-reader announcement coverage and the full multi-browser matrix remain open.
+The native accessibility bridge now moves focus into the first dialog control when a `role=dialog` opens, traps Tab/Shift+Tab within its focusable controls, and restores focus to the trigger after removal. `npm.cmd run test -- dsh-native-entry.test.ts` passed three jsdom tests and the full `npm.cmd run e2e` smoke passed; the desktop Settings flow closes with Escape and returns focus to the Settings trigger. Screen-reader announcement coverage and the full multi-browser matrix remain open.
 
 ## P36-7.1 / P36-7.3 Native real-session baseline (2026-08-27)
 
