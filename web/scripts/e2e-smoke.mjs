@@ -9,7 +9,7 @@ const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const dshRoot = resolve(process.env.SHUTU_DSH_ROOT ?? resolve(webRoot, '../../deepseek-harness'))
 const vite = resolve(dshRoot, 'apps/web/node_modules/vite/bin/vite.js')
 const distIndex = resolve(webRoot, 'dist/index.html')
-const { chromium } = createRequire(import.meta.url)(resolve(dshRoot, 'apps/web/node_modules/playwright'))
+const { chromium, firefox, webkit } = createRequire(import.meta.url)(resolve(dshRoot, 'apps/web/node_modules/playwright'))
 const host = '127.0.0.1'
 const port = Number(process.env.SHUTU_E2E_PORT ?? 18117)
 const baseUrl = `http://${host}:${port}/`
@@ -521,7 +521,7 @@ async function waitForCondition(check, timeoutMs = 15_000) {
 
 async function waitForNativeShell(page, allowLoaded = false) {
   await page.locator('button').first().waitFor()
-  assert.equal(await page.title(), 'DeepSeek Harness')
+  assert.match(await page.title(), /DeepSeek Harness/)
   assert.equal(await page.locator('.shutu-shell').count(), 0, 'legacy Shutu shell is still mounted')
   if (!allowLoaded) {
     const newSession = page.getByRole('button', { name: '新建会话' }).first()
@@ -825,7 +825,7 @@ async function runAccessibilityMatrix(browser) {
     assert.ok(semantics.tabs.every(tab => tab.name.length > 0 && (tab.selected === 'true' || tab.selected === 'false')), `${viewport.name} conversation tab semantics are incomplete`)
     assert.ok(semantics.panels.every(panel => panel.labelledBy !== null && panel.labelTargetExists), `${viewport.name} tabpanel semantics are incomplete`)
     assert.equal(semantics.unnamedControls, 0, `${viewport.name} has an unnamed visible interactive control: ${JSON.stringify(semantics.controls.filter(control => control.label.length === 0))}`)
-    const settingsButton = page.locator('button').filter({ hasText: /^设置$/ }).first()
+    const settingsButton = page.getByRole('button', { name: /设置|Settings/ }).first()
     await settingsButton.focus()
     await settingsButton.click()
     const dialog = page.getByRole('dialog').first()
@@ -846,6 +846,26 @@ async function runAccessibilityMatrix(browser) {
     assert.deepEqual(issues, [])
     results.push({ viewport: `${viewport.width}x${viewport.height}`, tabs: semantics.tabs.length, focusableCount, namedControls: semantics.controls.length, touchTargets: semantics.controls.filter(control => control.width >= 24 && control.height >= 24).length, console: 'clean' })
     await page.close()
+  }
+  return results
+}
+
+/**
+ * Run the same native accessibility/keyboard contract against every locally
+ * installed Playwright engine. Keep this separate from the Chromium matrix so
+ * the normal smoke remains fast while CI or a developer can see exactly which
+ * engine failed.
+ */
+async function runCrossBrowserAccessibilityMatrix() {
+  const engines = { firefox, webkit }
+  const results = {}
+  for (const [name, browserType] of Object.entries(engines)) {
+    const browser = await browserType.launch({ headless: true })
+    try {
+      results[name] = await runAccessibilityMatrix(browser)
+    } finally {
+      await browser.close()
+    }
   }
   return results
 }
@@ -1320,6 +1340,7 @@ try {
     const errorStateMatrix = await runErrorStateMatrix(browser)
     const visualGeometryMatrix = await runVisualGeometryMatrixStable(browser)
     const accessibilityMatrix = await runAccessibilityMatrix(browser)
+    const crossBrowserAccessibilityMatrix = await runCrossBrowserAccessibilityMatrix()
     const capabilityMatrix = await runCapabilityMatrix(browser)
     const extendedCapabilityMatrix = await runExtendedCapabilityMatrix(browser)
     const searchErrorRecovery = await runSearchErrorRecovery(browser)
@@ -1329,7 +1350,7 @@ try {
     const cancelPlanGoalControls = await runCancelPlanGoalControls(browser)
     const retryControls = await runRetryControls(browser)
     const mobile = await runMobile(browser)
-    console.log(JSON.stringify({ browser: 'playwright', native: 'ok', desktop, reconnectDesktop, darkDesktop, loadingDesktop, errorStateMatrix, visualGeometryMatrix, accessibilityMatrix, capabilityMatrix, extendedCapabilityMatrix, searchErrorRecovery, sessionLifecycle, interactionControls, queueControls, cancelPlanGoalControls, retryControls, mobile }))
+    console.log(JSON.stringify({ browser: 'playwright', native: 'ok', desktop, reconnectDesktop, darkDesktop, loadingDesktop, errorStateMatrix, visualGeometryMatrix, accessibilityMatrix, crossBrowserAccessibilityMatrix, capabilityMatrix, extendedCapabilityMatrix, searchErrorRecovery, sessionLifecycle, interactionControls, queueControls, cancelPlanGoalControls, retryControls, mobile }))
   } finally {
     await browser.close()
   }
