@@ -83,6 +83,16 @@ async function installNativeMock(page, options = {}) {
       { kind: 'child', id: 'child-fixture', mode: 'continuable', label: 'Renderer worker', activity: 'running', hasChildren: false },
     ],
   }
+  const imageAttachment = {
+    attachmentId: 'fixture-image', mediaType: 'image/png', bytes: 68, width: 1, height: 1, name: 'fixture.png',
+  }
+  const imageEvents = [
+    { seq: 1, type: 'turn/start', time: 1_700_000_000_001, data: { turn: 1 } },
+    { seq: 2, type: 'user/message', time: 1_700_000_000_002, data: {
+      id: 'image-user', role: 'user', content: [{ type: 'image', attachment: imageAttachment }],
+      source: { kind: 'user' },
+    }, surfaceOp: 'append' },
+  ]
   const retryEvents = [
     { seq: 1, type: 'turn/start', time: 1_700_000_000_001, data: { turn: 1 } },
     { seq: 2, type: 'step/start', time: 1_700_000_000_002, data: { turn: 1, step: 1 } },
@@ -314,7 +324,51 @@ async function installNativeMock(page, options = {}) {
       return route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ type: 'server-response', rpcId: body.rpcId, result: { ok: true, value: [] } }),
+        body: JSON.stringify({ type: 'server-response', rpcId: body.rpcId, result: { ok: true, value: [
+          { name: 'permission', description: 'Switch the permission preset', input: { hint: '<preset>' } },
+        ] } }),
+      })
+    }
+    if (options.extendedCapabilities && body.method === 'session.attachment') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ type: 'server-response', rpcId: body.rpcId, result: {
+          ok: true, value: { attachment: imageAttachment, data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+        },
+      } }),
+      })
+    }
+    if (options.extendedCapabilities && body.method === 'llm.providers') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ type: 'server-response', rpcId: body.rpcId, result: { ok: true, value: { providers: [
+          { provider: 'fixture-provider', displayName: 'Fixture Provider', settingsNs: 'fixture-settings', settingsPath: [], active: true, declared: true },
+        ] } } }),
+      })
+    }
+    if (options.extendedCapabilities && body.method === 'credentials.describe') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ type: 'server-response', rpcId: body.rpcId, result: { ok: true, value: { credentials: {} } } }),
+      })
+    }
+    if (options.extendedCapabilities && body.method === 'settings.describe') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ type: 'server-response', rpcId: body.rpcId, result: { ok: true, value: {
+          writable: true, hasDocument: false, namespaces: [{
+            ns: 'ui-onboarding', schema: { uid: 1, refs: { 1: { type: 'object', dict: { welcomeNoticeVersion: 1 } } } },
+            value: { welcomeNoticeVersion: '2026-08-13.1' }, base: {}, user: { welcomeNoticeVersion: '2026-08-13.1' },
+            applies: 'live', secrets: [], revision: 1,
+          }, {
+            ns: 'fixture-settings', schema: { uid: 1, refs: { 1: { type: 'object', dict: {} } } },
+            value: {}, base: {}, user: {}, applies: 'live', secrets: [], revision: 1,
+          }],
+        } } }),
       })
     }
     if (options.extendedCapabilities && body.method === 'skill.list') {
@@ -357,7 +411,9 @@ async function installNativeMock(page, options = {}) {
       })
     }
     if (options.lifecycle && body.method === 'session.history') {
-      const events = options.retryControls === true ? retryEvents : options.errorControls === true ? errorEvents : []
+      const events = options.imageHistory === true
+        ? imageEvents
+        : options.retryControls === true ? retryEvents : options.errorControls === true ? errorEvents : []
       return route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -372,6 +428,7 @@ async function installNativeMock(page, options = {}) {
               asOfSeq: 0,
               values: {
                 title: 'Search fixture', sessionListMetadata: { blank: false },
+                ...(options.imageHistory === true ? { imageLimits: { maxImages: 4, maxBytes: 20_000_000 } } : {}),
                 ...(options.goalControls === true ? {
                   goal: { goal: goalState, roundsStarted: 0, createdAt: goalState.createdAt, updatedAt: goalState.updatedAt },
                   plan: { active: false, pending: false },
@@ -814,9 +871,12 @@ async function runExtendedCapabilityMatrix(browser) {
   page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
   page.on('pageerror', error => issues.push(error.message))
   page.on('response', response => { if (response.status() >= 400) issues.push(`http ${response.status()}: ${response.url()}`) })
-  const { requests, sendJobsSnapshot } = await installNativeMock(page, { seedSession: true, lifecycle: true, extendedCapabilities: true })
+  const { requests, sendJobsSnapshot, sendProjection } = await installNativeMock(page, { seedSession: true, lifecycle: true, extendedCapabilities: true })
   await page.goto(baseUrl, { waitUntil: 'domcontentloaded' })
   await waitForNativeShell(page, true)
+  // A writable settings response can legitimately surface DSH's first-run
+  // onboarding mask; dismiss it before entering the loaded-session matrix.
+  await page.keyboard.press('Escape')
   const search = page.locator('button[aria-label="Search sessions"], button[aria-label="Search"], button[aria-label="搜索会话"], button[aria-label="搜索"]').first()
   await search.click()
   const input = page.locator('input[placeholder]').first()
@@ -865,9 +925,61 @@ async function runExtendedCapabilityMatrix(browser) {
   assert.ok(requests.includes('fileReferences/list'), 'native @ reference menu did not request fileReferences/list')
   assert.ok(requests.includes('sessionReferenceResolver/candidates'), 'native @ reference menu did not request sessionReferenceResolver/candidates')
 
+  // Permission is a projection-gated decoration on the host /permission command.
+  sendProjection('permissions', {
+    options: [
+      { value: 'readonly', name: 'Read-only' },
+      { value: 'standard', name: 'Standard' },
+      { value: 'full', name: 'Full access' },
+    ],
+    currentValue: 'standard',
+  }, 2)
+  await page.keyboard.press('Escape')
+  await composer.fill('/permission')
+  const permissionCommandMenu = page.getByRole('listbox').last()
+  await permissionCommandMenu.getByRole('option').filter({ hasText: 'permission' }).waitFor({ timeout: 15_000 })
+  await permissionCommandMenu.getByRole('option').filter({ hasText: 'permission' }).click()
+  const permissionMenu = page.getByRole('listbox').last()
+  await permissionMenu.getByRole('option').filter({ hasText: /Standard|标准/ }).waitFor({ timeout: 15_000 })
+  await permissionMenu.getByRole('option').filter({ hasText: /Read-only|只读/ }).click()
+  await waitForCondition(() => requests.includes('commands/list') && requests.includes('commands/execute'))
+
+  // Provider/settings content is loaded only when the native Settings page is opened.
+  await page.keyboard.press('Escape')
+  const settingsButton = page.getByRole('button', { name: '设置', exact: true }).first()
+  await settingsButton.click()
+  const settingsDialog = page.getByRole('dialog').last()
+  await settingsDialog.getByRole('button', { name: /Models|模型/ }).click()
+  await page.waitForTimeout(250)
+  await settingsDialog.getByText('Fixture Provider', { exact: true }).waitFor({ timeout: 15_000 })
+  assert.ok(requests.includes('llm.providers'), 'native Models settings did not request llm.providers')
+  await page.keyboard.press('Escape')
+
+  // Historical image content loads through the session-authorized attachment RPC.
+  const imagePage = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+  const imageIssues = []
+  imagePage.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') imageIssues.push(message.text()) })
+  imagePage.on('pageerror', error => imageIssues.push(error.message))
+  imagePage.on('response', response => { if (response.status() >= 400) imageIssues.push(`http ${response.status()}: ${response.url()}`) })
+  const { requests: imageRequests } = await installNativeMock(imagePage, { seedSession: true, lifecycle: true, extendedCapabilities: true, imageHistory: true })
+  await imagePage.goto(baseUrl, { waitUntil: 'domcontentloaded' })
+  await waitForNativeShell(imagePage, true)
+  const imageSearch = imagePage.locator('button[aria-label="Search sessions"], button[aria-label="Search"], button[aria-label="搜索会话"], button[aria-label="搜索"]').first()
+  await imageSearch.click()
+  const imageInput = imagePage.locator('input[placeholder]').first()
+  await imageInput.fill('fixture')
+  const imageResult = imagePage.locator('[role="tree"]').last().getByRole('treeitem').first()
+  await imageResult.waitFor({ timeout: 15_000 })
+  await imageResult.click()
+  await imageInput.press('Escape')
+  await imagePage.locator('img[alt="fixture.png"]').waitFor({ timeout: 15_000 })
+  assert.ok(imageRequests.includes('session.attachment'), 'native image history did not request session.attachment')
+  assert.deepEqual(imageIssues, [])
+  await imagePage.close()
+
   assert.deepEqual(issues, [])
   await page.close()
-  return { jobs: true, subagents: true, skills: true, fileReferences: true, console: 'clean' }
+  return { jobs: true, subagents: true, skills: true, fileReferences: true, permissions: true, providers: true, settings: true, attachments: true, console: 'clean' }
 }
 
 async function runSearchErrorRecovery(browser) {

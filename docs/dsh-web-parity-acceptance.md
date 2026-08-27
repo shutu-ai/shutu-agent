@@ -108,6 +108,8 @@ The loaded capability fixture now also injects a DSH `session/jobs` whole-set sn
 
 The loaded capability fixture now also serves the native DSH slash skill and `@` reference providers. Playwright typed `/fixture` and verified the `fixture-skill` option after observing `skill.list`, then typed `@src` and verified the `src/main.ts` option after observing both `fileReferences/list` and `sessionReferenceResolver/candidates`; the complete E2E run remained free of console errors. Attachments, permissions, Provider and settings content remain open for dedicated loaded/host-backed coverage.
 
+The loaded capability fixture now covers the remaining P36-5.4 UI slices. Playwright selected the native `/permission` command and its Read-only option, opened Settings → Models and rendered `Fixture Provider` after observing `commands/list`, `commands/execute`, and `llm.providers`, then loaded a historical image message and rendered `fixture.png` through the session-authorized `session.attachment` RPC. The complete `npm.cmd run e2e` run passed with zero console errors and warnings.
+
 ## P36-5.5 Native export media evidence (2026-08-27)
 
 `go test ./internal/webserver -run 'TestSessionExport(HeadMatchesDownloadHeadersWithoutBody|IncludesDescendantLineage|IncludesDeduplicatedMedia)$' -count=1` passed. Root and descendant logs are exported together with one deduplicated image payload under `media/<attachmentId>.png`; missing or unavailable attachment storage fails the export before the response is sent.
