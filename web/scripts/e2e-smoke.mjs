@@ -54,12 +54,28 @@ async function installNativeMock(page, options = {}) {
   const sockets = new Set()
   const socketConnections = new Map()
   const requests = []
+  const queueUpdates = []
+  let queueItems = (options.queueItems ?? []).map(item => ({
+    id: item.id,
+    placement: item.placement ?? 'queued',
+    message: {
+      id: item.messageId ?? `${item.id}-message`,
+      role: 'user',
+      content: [{ type: 'text', text: item.text }],
+      source: { kind: 'user', rpcId: item.id },
+    },
+  }))
   let searchFailuresRemaining = options.searchFailures ?? 0
   let muxSocket = null
   let interactionStage = 'idle'
   const sendMux = (rpcId, method, payload) => {
     if (muxSocket === null) throw new Error(`native mux is not connected for ${method}`)
     muxSocket.send(JSON.stringify({ type: 'server-request', rpcId, method, payload }))
+  }
+  const sendQueueSnapshot = () => {
+    sendMux('queue-snapshot', 'session/queue', {
+      type: 'session/queue', sessionId: 'search-fixture', items: queueItems,
+    })
   }
   await page.route('**/plugins/events', route => route.fulfill({
     status: 200,
@@ -107,6 +123,30 @@ async function installNativeMock(page, options = {}) {
     }
     assert.equal(body.type, 'client-request', `unexpected native request envelope for ${body.method}`)
     requests.push(body.method)
+    if (options.queueControls && body.method === 'session.updateQueue') {
+      const action = body.payload?.action ?? {}
+      const itemId = body.payload?.itemId
+      queueUpdates.push({ itemId, action })
+      if (action.kind === 'edit') {
+        const text = action.content?.map(part => part.text ?? '').join('') ?? ''
+        const item = queueItems.find(candidate => candidate.id === itemId)
+        if (item !== undefined) item.message.content = [{ type: 'text', text }]
+      } else if (action.kind === 'remove') {
+        queueItems = queueItems.filter(item => item.id !== itemId)
+      } else if (action.kind === 'steer') {
+        const item = queueItems.find(candidate => candidate.id === itemId)
+        if (item !== undefined) item.placement = 'steering'
+      }
+      sendQueueSnapshot()
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          type: 'server-response', rpcId: body.rpcId,
+          result: { ok: true, value: { accepted: true } },
+        }),
+      })
+    }
     if (body.method === 'session.search' && searchFailuresRemaining > 0) {
       searchFailuresRemaining -= 1
       return route.fulfill({
@@ -129,7 +169,7 @@ async function installNativeMock(page, options = {}) {
           result: { ok: true, value: {
             items: [{
               sessionId: 'search-fixture', title: 'Search fixture', updatedAt: Date.now(),
-              running: false, blank: false, cwd: 'C:/shutu-search',
+              running: options.runningSession === true, blank: false, cwd: 'C:/shutu-search',
               projections: { asOfSeq: 0, values: { title: 'Search fixture', sessionListMetadata: { blank: false } } },
             }],
           } },
@@ -225,7 +265,11 @@ async function installNativeMock(page, options = {}) {
       }),
     })
   })
-  return { sockets, socketConnections, requests, sendMux, get interactionStage() { return interactionStage }, setInteractionStage: value => { interactionStage = value } }
+  return {
+    sockets, socketConnections, requests, queueUpdates, sendMux, sendQueueSnapshot,
+    get interactionStage() { return interactionStage },
+    setInteractionStage: value => { interactionStage = value },
+  }
 }
 
 async function waitForServer() {
@@ -477,6 +521,62 @@ async function runInteractionControls(browser) {
   return { responses: 2, resolved: true, console: 'clean' }
 }
 
+async function runQueueControls(browser) {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+  const issues = []
+  page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
+  page.on('pageerror', error => issues.push(error.message))
+  page.on('response', response => { if (response.status() >= 400) issues.push(`http ${response.status()}: ${response.url()}`) })
+  const fixture = await installNativeMock(page, {
+    seedSession: true, lifecycle: true, queueControls: true, runningSession: true,
+    queueItems: [
+      { id: 'queue-1', text: 'queued fixture message' },
+      { id: 'queue-2', text: 'remove fixture message' },
+    ],
+  })
+  await page.goto(baseUrl, { waitUntil: 'domcontentloaded' })
+  await waitForNativeShell(page)
+  const search = page.locator('button[aria-label="Search sessions"], button[aria-label="Search"], button[aria-label="搜索会话"], button[aria-label="搜索"]').first()
+  await search.click()
+  const input = page.locator('input[placeholder]').first()
+  await input.fill('fixture')
+  const result = page.locator('[role="tree"]').last().getByRole('treeitem').first()
+  await result.waitFor({ timeout: 15_000 })
+  await result.click()
+  await input.press('Escape')
+  await page.getByText('Search fixture', { exact: true }).last().waitFor({ timeout: 15_000 })
+  fixture.sendQueueSnapshot()
+
+  const queueDock = page.locator('[data-queue-dock=""]')
+  await queueDock.waitFor({ timeout: 15_000 })
+  await page.getByText(/2 queued messages|2 条排队消息/).waitFor({ timeout: 15_000 })
+  await queueDock.getByRole('button', { name: /2 queued messages|2 条排队消息/ }).click()
+
+  const firstRow = queueDock.locator('li').nth(0)
+  await firstRow.getByRole('button', { name: /Edit queued message|编辑排队消息/ }).click()
+  const editor = firstRow.locator('input[aria-label]')
+  await editor.fill('edited fixture message')
+  await firstRow.getByRole('button', { name: /Save queued message|保存排队消息/ }).click()
+  await waitForCondition(() => fixture.queueUpdates.some(update => update.itemId === 'queue-1' && update.action.kind === 'edit'))
+  await page.getByText('edited fixture message', { exact: true }).waitFor({ timeout: 15_000 })
+
+  await firstRow.getByRole('button', { name: /Steer queued message|插话发送/ }).click()
+  await waitForCondition(() => fixture.queueUpdates.some(update => update.itemId === 'queue-1' && update.action.kind === 'steer'))
+
+  const secondRow = queueDock.locator('li').filter({ hasText: 'remove fixture message' }).first()
+  await secondRow.getByRole('button', { name: /Remove queued message|删除排队消息/ }).click()
+  await waitForCondition(() => fixture.queueUpdates.some(update => update.itemId === 'queue-2' && update.action.kind === 'remove'))
+  await page.getByText('remove fixture message', { exact: true }).waitFor({ state: 'detached', timeout: 15_000 })
+  fixture.sendQueueSnapshot()
+  await queueDock.waitFor({ state: 'detached', timeout: 15_000 })
+  assert.deepEqual(issues, [])
+  await page.close()
+  return {
+    updates: fixture.queueUpdates.map(update => update.action.kind),
+    collapsed: true, edited: true, steered: true, removed: true, console: 'clean',
+  }
+}
+
 async function runMobile(browser) {
   const page = await browser.newPage({ viewport: { width: 390, height: 844 } })
   const issues = []
@@ -520,8 +620,9 @@ try {
     const searchErrorRecovery = await runSearchErrorRecovery(browser)
     const sessionLifecycle = await runSessionLifecycle(browser)
     const interactionControls = await runInteractionControls(browser)
+    const queueControls = await runQueueControls(browser)
     const mobile = await runMobile(browser)
-    console.log(JSON.stringify({ browser: 'playwright', native: 'ok', desktop, reconnectDesktop, darkDesktop, loadingDesktop, searchErrorRecovery, sessionLifecycle, interactionControls, mobile }))
+    console.log(JSON.stringify({ browser: 'playwright', native: 'ok', desktop, reconnectDesktop, darkDesktop, loadingDesktop, searchErrorRecovery, sessionLifecycle, interactionControls, queueControls, mobile }))
   } finally {
     await browser.close()
   }
