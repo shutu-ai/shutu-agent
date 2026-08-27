@@ -92,7 +92,7 @@
 - [x] P36-7.3b：100,000 条 fixture 记录 native DSH FPS/heap/DOM/Long Task 与控制台错误：61 帧窗口、heap 56→44MiB、DOM 821、Long Task 1,374ms、错误 0；持续增长与重连恢复仍待补齐。
 - [x] P36-7.3a：Playwright Chromium 对真实 75,950 条会话完成约 32.2 秒原生观测：heap 36→43MiB、最大 DOM 554、Trajectory 16 行、Long Task 1,788ms、控制台错误 0；持续增长和重连恢复仍待补齐。
 - [ ] P36-7.4：在原生 DSH UI 替换完成后重新设定并通过性能阈值。
-- [ ] P36-8.1：生成包含 DSH 原生 dist、Go 服务、协议适配层和版本元数据的自包含交付包。
+- [x] P36-8.1：生成包含 DSH 原生 dist、Go 服务、协议适配层和版本元数据的自包含交付包。
 - [x] P36-8.1a：提交 `28b824c` 生成 Windows 自包含包，包含 native dist、Go 二进制、配置/提示词和 `release.json`，并通过 dist/manifest 校验。
 - [x] P36-8.1b：当前 HEAD `de4faaa` 重新生成 `release/shutu-agent-p36-current`，包含 111 个 native dist 资源、Go 二进制、配置/提示词和当前 revision 元数据，并通过发布包校验。
 - [ ] P36-8.2：验证本机及目标 Windows/Linux 环境的启动、健康检查、API、WebSocket 和静态资源。
@@ -309,7 +309,7 @@
 
 ### P36-8：原生 UI 生产交付与目标环境验证
 
-- [ ] 生成包含 DSH 原生 dist、Go 服务、协议适配层和版本元数据的自包含交付包。
+- [x] 生成包含 DSH 原生 dist、Go 服务、协议适配层和版本元数据的自包含交付包。
 - [ ] 验证本机、目标 Windows/Linux 环境的启动、健康检查、API、WebSocket 和静态资源。
 - [ ] 验证升级、数据目录复用、回滚和失败恢复。
 - [ ] 完成目标环境部署记录、验收报告和回滚操作手册。
