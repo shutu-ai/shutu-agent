@@ -70,6 +70,7 @@
 - [x] P36-5.4c：Playwright 原生冷启动验证 Host/session/workspace/settings/preset/credentials 与 Cordis inventory 能力握手、双 WebSocket 建立及零控制台错误。
 - [x] P36-5.4d：Playwright 已加载会话 fixture 验证 DSH model catalog 打开、provider/model 列表渲染和切换，实际观察 `session.models`/`session.selectModel` 请求并保持零控制台错误。
 - [x] P36-5.4e：Playwright 已加载会话 fixture 注入 DSH `session/jobs` 快照和 `subagent.list` 目录，验证后台任务运行/失败状态、子代理目录项渲染及零控制台错误。
+- [x] P36-5.4f：Playwright 已加载会话 fixture 验证 DSH slash skill 菜单与 `@` 文件引用候选，实际观察 `skill.list`、`fileReferences/list` 和 `sessionReferenceResolver/candidates` 请求及零控制台错误。
 - [ ] P36-5.5：完成 export、feedback、错误恢复、重连和 session 状态提示。
 - [x] P36-5.5a：原生 Remote 接入 `messageFeedback/list|put|delete` 的 messageId/version CAS；斜杠命令支持图片附件。
 - [x] P36-5.5b：`session.cancel` 对无活动 turn 幂等返回 accepted，对未知会话返回结构化 `session-not-found`。

@@ -310,6 +310,13 @@ async function installNativeMock(page, options = {}) {
         body: JSON.stringify({ type: 'server-response', rpcId: body.rpcId, result: { ok: true, value: extendedSubagents } }),
       })
     }
+    if (options.extendedCapabilities && body.method === 'commands/list') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ type: 'server-response', rpcId: body.rpcId, result: { ok: true, value: [] } }),
+      })
+    }
     if (options.extendedCapabilities && body.method === 'skill.list') {
       return route.fulfill({
         status: 200,
@@ -459,21 +466,10 @@ async function waitForNativeShell(page, allowLoaded = false) {
   await page.locator('button').first().waitFor()
   assert.equal(await page.title(), 'DeepSeek Harness')
   assert.equal(await page.locator('.shutu-shell').count(), 0, 'legacy Shutu shell is still mounted')
-  return
-  const shellBody = await page.locator('body').innerText()
-  assert.match(shellBody, /鎺㈢储鏈嚦涔嬪/)
-  return
-  if (allowLoaded) {
-    await page.locator('button').first().waitFor()
-    assert.equal(await page.title(), 'DeepSeek Harness')
-    assert.equal(await page.locator('.shutu-shell').count(), 0, 'legacy Shutu shell is still mounted')
-    return
+  if (!allowLoaded) {
+    const newSession = page.getByRole('button', { name: '新建会话' }).first()
+    await newSession.waitFor()
   }
-  await page.getByRole('button', { name: '新建会话' }).first().waitFor()
-  assert.equal(await page.title(), 'DeepSeek Harness')
-  const body = await page.locator('body').innerText()
-  assert.match(body, /探索未至之境/)
-  assert.equal(await page.locator('.shutu-shell').count(), 0, 'legacy Shutu shell is still mounted')
 }
 
 async function runDesktop(browser) {
@@ -850,9 +846,28 @@ async function runExtendedCapabilityMatrix(browser) {
   await tree.getByRole('treeitem', { name: /Renderer worker/ }).waitFor({ timeout: 15_000 })
   assert.match(await tree.innerText(), /Renderer worker/)
   assert.ok(requests.includes('subagent.list'), 'native subagent catalog did not request subagent.list')
+
+  // Slash skills and @ references are resolved by their native DSH providers.
+  // The composer remains the source of truth; no legacy Shutu menu is involved.
+  await page.keyboard.press('Escape')
+  const composer = page.locator('textarea').first()
+  await composer.focus()
+  await composer.fill('/fixture')
+  const skillMenu = page.getByRole('listbox').last()
+  await skillMenu.waitFor({ timeout: 15_000 })
+  await skillMenu.getByRole('option').filter({ hasText: 'fixture-skill' }).waitFor({ timeout: 15_000 })
+  assert.ok(requests.includes('skill.list'), 'native slash skill menu did not request skill.list')
+
+  await composer.fill('@src')
+  const referenceMenu = page.getByRole('listbox').last()
+  await referenceMenu.waitFor({ timeout: 15_000 })
+  await referenceMenu.getByRole('option').filter({ hasText: 'src/main.ts' }).waitFor({ timeout: 15_000 })
+  assert.ok(requests.includes('fileReferences/list'), 'native @ reference menu did not request fileReferences/list')
+  assert.ok(requests.includes('sessionReferenceResolver/candidates'), 'native @ reference menu did not request sessionReferenceResolver/candidates')
+
   assert.deepEqual(issues, [])
   await page.close()
-  return { jobs: true, subagents: true, console: 'clean' }
+  return { jobs: true, subagents: true, skills: true, fileReferences: true, console: 'clean' }
 }
 
 async function runSearchErrorRecovery(browser) {
