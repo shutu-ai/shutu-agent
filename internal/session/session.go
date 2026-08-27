@@ -273,10 +273,12 @@ type Event struct {
 // real Web turns can receive tool/interaction callbacks from worker goroutines
 // while the main loop is committing its ordered results.
 type Log struct {
-	mu     sync.RWMutex
-	events []Event
-	seq    uint64
-	sink   func(Event) error // optional durable sink (D8), called after each append
+	mu                  sync.RWMutex
+	events              []Event
+	seq                 uint64
+	sink                func(Event) error // optional durable sink (D8), called after each append
+	derivedHistory      []llm.Message
+	derivedHistoryValid bool
 }
 
 // New returns an empty in-memory log.
@@ -303,6 +305,8 @@ func (l *Log) Restore(events []Event) error {
 	defer l.mu.Unlock()
 	l.events = nil
 	l.seq = 0
+	l.derivedHistory = nil
+	l.derivedHistoryValid = false
 	var last uint64
 	for _, ev := range events {
 		if ev.Seq <= last {
@@ -333,6 +337,17 @@ func (l *Log) Append(typ string, data any) (Event, error) {
 			l.events = l.events[:len(l.events)-1]
 			l.seq--
 			return Event{}, fmt.Errorf("session: persist %s event: %w", typ, err)
+		}
+	}
+	if l.derivedHistoryValid {
+		// A replacement marker can rewrite an arbitrary earlier range. Any
+		// ordinary event can be folded incrementally, avoiding a full replay of
+		// a large append-only log on every live turn.
+		if isSurfaceReplacementEvent(ev) {
+			l.derivedHistory = nil
+			l.derivedHistoryValid = false
+		} else {
+			l.derivedHistory = append(l.derivedHistory, derive([]Event{ev})...)
 		}
 	}
 	return ev, nil
@@ -377,10 +392,52 @@ func (l *Log) NextTurn() int {
 // assistant/message row that closes the step.
 func (l *Log) DeriveHistory() []llm.Message {
 	l.mu.RLock()
+	if l.derivedHistoryValid {
+		out := cloneMessages(l.derivedHistory)
+		l.mu.RUnlock()
+		return out
+	}
 	events := make([]Event, len(l.events))
 	copy(events, l.events)
 	l.mu.RUnlock()
-	return derive(events)
+	msgs := derive(events)
+
+	// Publishing the cache is conditional: concurrent appenders may have
+	// advanced the log while the snapshot was being folded. Returning the
+	// snapshot remains correct, but the stale result must not be reused.
+	l.mu.Lock()
+	if len(events) == len(l.events) && (len(events) == 0 || events[len(events)-1].Seq == l.seq) {
+		l.derivedHistory = cloneMessages(msgs)
+		l.derivedHistoryValid = true
+	}
+	l.mu.Unlock()
+	return msgs
+}
+
+func isSurfaceReplacementEvent(ev Event) bool {
+	if ev.Type != EventUserMessage {
+		return false
+	}
+	var data struct {
+		SurfaceOp *SurfaceReplace `json:"surfaceOp,omitempty"`
+	}
+	return json.Unmarshal(ev.Data, &data) == nil && data.SurfaceOp != nil && data.SurfaceOp.Op == surfaceReplaceOp
+}
+
+func cloneMessages(in []llm.Message) []llm.Message {
+	out := make([]llm.Message, len(in))
+	for i, msg := range in {
+		out[i] = msg
+		if msg.Content != nil {
+			out[i].Content = make([]llm.ContentBlock, len(msg.Content))
+			copy(out[i].Content, msg.Content)
+		}
+		if msg.ToolCalls != nil {
+			out[i].ToolCalls = make([]llm.ToolCall, len(msg.ToolCalls))
+			copy(out[i].ToolCalls, msg.ToolCalls)
+		}
+	}
+	return out
 }
 
 func derive(events []Event) []llm.Message {

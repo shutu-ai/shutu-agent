@@ -836,6 +836,46 @@ func TestDeriveHistoryWithoutReplaceUnchanged(t *testing.T) {
 	}
 }
 
+func TestDeriveHistoryMemoFoldsIncrementalEventsAndInvalidatesReplacement(t *testing.T) {
+	l := New()
+	if _, err := l.Append(EventUserMessage, NewUserMessage("hello")); err != nil {
+		t.Fatal(err)
+	}
+	first := l.DeriveHistory()
+	if !l.derivedHistoryValid {
+		t.Fatal("DeriveHistory did not publish its cache")
+	}
+	first[0].Content[0].Text = "mutated caller copy"
+	second := l.DeriveHistory()
+	if got := second[0].Text(); got != "hello" {
+		t.Fatalf("cached history leaked mutable content: %q", got)
+	}
+
+	if _, err := l.Append(EventAssistantChunk, NewAssistantChunk("ignored")); err != nil {
+		t.Fatal(err)
+	}
+	if !l.derivedHistoryValid || len(l.derivedHistory) != 1 {
+		t.Fatalf("streaming chunk changed derived cache: valid=%v history=%+v", l.derivedHistoryValid, l.derivedHistory)
+	}
+	if _, err := l.Append(EventAssistantMessage, NewAssistantMessage("answer", nil, "stop")); err != nil {
+		t.Fatal(err)
+	}
+	if got := l.DeriveHistory(); len(got) != 2 || got[1].Text() != "answer" {
+		t.Fatalf("incremental append history = %+v", got)
+	}
+
+	if _, err := l.Append(EventUserMessage, NewUserMessageReplace("summary", 1, 3)); err != nil {
+		t.Fatal(err)
+	}
+	if l.derivedHistoryValid {
+		t.Fatal("replacement marker did not invalidate derived cache")
+	}
+	got := l.DeriveHistory()
+	if len(got) != 1 || got[0].Text() != "summary" {
+		t.Fatalf("replacement-derived history = %+v", got)
+	}
+}
+
 func TestDeriveHistoryReplaceShadowingMixedEvents(t *testing.T) {
 	l := New()
 	// Shadowed range spans user, assistant (with a tool call) and tool/result.

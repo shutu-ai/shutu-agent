@@ -402,6 +402,19 @@ not resolve the issue. `deepseek-v4-flash` remains the default; the open work
 belongs to runtime/history serialization and sustained stream behavior, not an
 automatic model replacement.
 
+## P36-7.2 / P36-7.3 incremental history-cache follow-up (2026-08-27)
+
+The session log now memoizes derived model history and incrementally folds
+ordinary appended events; a `surfaceOp.replace` marker invalidates the cache.
+Unit tests cover caller-copy isolation, streaming chunks, ordinary messages and
+replacement invalidation. On the same 106,685-event real session, the current
+binary admitted the prompt in `10ms`, but a 60.9-second observation still saw
+only 2 live frames (`0.03`/s) and one `847ms` event-to-UI sample. Static FPS
+(`47–60.4`), heap (`36→49MiB`), DOM (`1,044`), Long Tasks (`1,401ms`),
+reconnect (`463ms`) and console errors (`0`) were healthy. This is a useful
+runtime improvement and a negative high-density-stream result; P36-7.2/7.3
+remain open until a genuine 100k continuous stream meets the gate.
+
 ## P36-6.3 Cross-engine accessibility evidence (2026-08-27)
 
 Playwright Firefox and WebKit binaries were installed in the user-level browser cache and the full native accessibility fixture was rerun alongside Chromium. Desktop `1280x900` and mobile `390x844` passed in all three engines: two Conversation/Trajectory tabs exposed valid selection state and panel labels, visible controls had accessible names, Settings focus trapping passed for Tab/Shift+Tab, Escape restored the trigger focus, touch-target counts were reported, and console errors were zero. Real screen-reader speech output remains the only P36-6.3 evidence not executable in this environment.
