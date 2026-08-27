@@ -93,6 +93,7 @@
 - [x] P36-6.3b：Playwright 验证 Settings 弹层由键盘 Escape 关闭后焦点恢复到触发按钮。
 - [x] P36-6.3c：host-owned accessibility bridge 为 DSH 原生 `role=dialog` 增加打开时首控件聚焦及 Tab/Shift+Tab 循环，3 项 jsdom 单测与 Playwright 桌面/移动 smoke 均通过。
 - [x] P36-6.3d：Playwright 已加载会话桌面/移动矩阵验证 Conversation/Trajectory 命名控件、tabpanel 语义、设置弹层首焦点、Tab/Shift+Tab 环回、Escape 焦点恢复及零控制台错误。
+- [x] P36-6.3e：Chromium accessibility matrix 进一步验证可见交互控件均有名称、Conversation/Trajectory tab 的 `aria-selected`、tabpanel 的 `aria-labelledby` 引用和 24px 以上触控目标，并在桌面/移动端保持零控制台错误；多内核/读屏器实机仍待目标环境。
 - [x] P36-6.4：为每个当前接入的 DSH 核心页面保留截图和交互证据。
 - [x] P36-6.4a：密集 native Chromium fixture 保存 Search、Conversation、Trajectory 和 Inspector 核心页面截图，并通过真实交互路径验证搜索、消息反馈、分支、轨迹和请求详情。
 - [x] P36-6.4b：同一 native loaded-session fixture 保存 Workspace、Jobs、Subagent 和 Settings/Models 核心页面截图，并通过原生列表/目录/设置交互验证页面可达、内容渲染和零控制台错误。

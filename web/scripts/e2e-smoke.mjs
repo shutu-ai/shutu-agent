@@ -800,14 +800,31 @@ async function runAccessibilityMatrix(browser) {
     await result.click()
     await input.press('Escape')
     await page.getByText('Search fixture', { exact: true }).last().waitFor({ timeout: 15_000 })
-    const semantics = await page.evaluate(() => ({
-      tabs: [...document.querySelectorAll('[role="tab"], button')].filter(element => { const name = element.textContent?.trim() ?? ''; return name.length > 0 && name.length <= 3 }).map(element => ({ role: element.getAttribute('role'), selected: element.getAttribute('aria-selected'), controls: element.getAttribute('aria-controls'), name: element.textContent?.trim() ?? '' })),
-      panels: [...document.querySelectorAll('[role="tabpanel"]')].map(element => ({ labelledBy: element.getAttribute('aria-labelledby') })),
-      buttons: [...document.querySelectorAll('button')].filter(element => { const box = element.getBoundingClientRect(); return box.width > 0 && box.height > 0 }).map(element => ({ width: element.getBoundingClientRect().width, height: element.getBoundingClientRect().height, label: element.getAttribute('aria-label') ?? element.textContent?.trim() ?? '' })),
-    }))
+    const semantics = await page.evaluate(() => {
+      const visible = element => {
+        const box = element.getBoundingClientRect()
+        return box.width > 0 && box.height > 0
+      }
+      const label = element => element.getAttribute('aria-label')?.trim()
+        || element.getAttribute('title')?.trim()
+        || (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement ? element.placeholder.trim() : '')
+        || element.textContent?.trim()
+        || ''
+      const tabs = [...document.querySelectorAll('[role="tab"]')].filter(visible).map(element => ({
+        name: label(element), selected: element.getAttribute('aria-selected'), controls: element.getAttribute('aria-controls'),
+      }))
+      const panels = [...document.querySelectorAll('[role="tabpanel"]')].filter(visible).map(element => ({
+        labelledBy: element.getAttribute('aria-labelledby'),
+        labelTargetExists: element.getAttribute('aria-labelledby') === null || document.getElementById(element.getAttribute('aria-labelledby')) !== null,
+      }))
+      const controls = [...document.querySelectorAll('button, [role="tab"], [role="treeitem"], input, textarea, select, a[href]')]
+        .filter(visible).map(element => ({ label: label(element), width: element.getBoundingClientRect().width, height: element.getBoundingClientRect().height }))
+      return { tabs, panels, controls, unnamedControls: controls.filter(control => control.label.length === 0).length }
+    })
     assert.ok(semantics.tabs.length >= 2, `${viewport.name} did not expose conversation tabs`)
-    assert.ok(semantics.tabs.every(tab => tab.name.length > 0), `${viewport.name} conversation tab names are incomplete`)
-    assert.ok(semantics.panels.every(panel => panel.labelledBy !== null), `${viewport.name} tabpanel semantics are incomplete`)
+    assert.ok(semantics.tabs.every(tab => tab.name.length > 0 && (tab.selected === 'true' || tab.selected === 'false')), `${viewport.name} conversation tab semantics are incomplete`)
+    assert.ok(semantics.panels.every(panel => panel.labelledBy !== null && panel.labelTargetExists), `${viewport.name} tabpanel semantics are incomplete`)
+    assert.equal(semantics.unnamedControls, 0, `${viewport.name} has an unnamed visible interactive control: ${JSON.stringify(semantics.controls.filter(control => control.label.length === 0))}`)
     const settingsButton = page.locator('button').filter({ hasText: /^设置$/ }).first()
     await settingsButton.focus()
     await settingsButton.click()
@@ -827,7 +844,7 @@ async function runAccessibilityMatrix(browser) {
     await page.waitForTimeout(100)
     assert.equal(await settingsButton.evaluate(element => document.activeElement === element), true, `${viewport.name} Escape did not restore focus`)
     assert.deepEqual(issues, [])
-    results.push({ viewport: `${viewport.width}x${viewport.height}`, tabs: semantics.tabs.length, focusableCount, touchTargets: semantics.buttons.length, console: 'clean' })
+    results.push({ viewport: `${viewport.width}x${viewport.height}`, tabs: semantics.tabs.length, focusableCount, namedControls: semantics.controls.length, touchTargets: semantics.controls.filter(control => control.width >= 24 && control.height >= 24).length, console: 'clean' })
     await page.close()
   }
   return results
