@@ -234,6 +234,10 @@ and Long Tasks `2,041ms`; the enforced gate failed on the Long Task budget.
 This second negative sample confirms that the 100k high-density gate is still
 open rather than a missing measurement.
 
+The structured results for the positive, static, negative-continuous and WSL
+runs are preserved in
+`docs/evidence/p36-real-baseline-2026-08-27.json`.
+
 ## P36-8.2 WSL2 rerun after native turn fix (2026-08-27)
 
 The newly rebuilt `GOOS=linux GOARCH=amd64 CGO_ENABLED=0` binary was launched
