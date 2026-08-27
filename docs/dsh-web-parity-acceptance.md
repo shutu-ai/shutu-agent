@@ -100,6 +100,8 @@ The fixture now includes assistant text alongside reasoning, tool calls/results,
 
 `npm.cmd run e2e` passed against the native dist. The desktop browser recorded `host.describe`, `session.list`, `workspace.list`, `settings.describe`, `agentPreset.list`, `credentials.describe`, `dynamicCordisRunner/inventory`, and `dynamicCordisRunner/syncInspectManifest`; `/api/events.host` and `/api/events.mux` both connected, with no console errors or warnings. The fixture is intentionally empty-data, so loaded capability content and target-production provider/skill catalogs remain open work.
 
+The loaded capability fixture returned a DSH-shaped two-model catalog. Playwright opened the native model menu, drilled into the provider group, selected the alternate model, and observed both `session.models` and `session.selectModel` requests with zero browser errors. This closes fixture-level model catalog/selection evidence; subagent, jobs, skills, file references, attachments, permissions, providers and settings content still require dedicated loaded/host-backed coverage.
+
 ## P36-5.5 Native export media evidence (2026-08-27)
 
 `go test ./internal/webserver -run 'TestSessionExport(HeadMatchesDownloadHeadersWithoutBody|IncludesDescendantLineage|IncludesDeduplicatedMedia)$' -count=1` passed. Root and descendant logs are exported together with one deduplicated image payload under `media/<attachmentId>.png`; missing or unavailable attachment storage fails the export before the response is sent.

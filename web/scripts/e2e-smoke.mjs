@@ -290,6 +290,24 @@ async function installNativeMock(page, options = {}) {
         }),
       })
     }
+    if (options.capabilityControls && body.method === 'session.models') {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ type: 'server-response', rpcId: body.rpcId, result: { ok: true, value: {
+          current: { provider: 'fixture-provider', model: 'fixture-model', reasoningEffort: 'balanced' }, routable: true,
+          groups: [{ id: 'fixture-provider', name: 'Fixture provider', models: [{ id: 'fixture-model', name: 'Fixture model', reasoning: { defaultEffort: 'balanced', efforts: [{ id: 'balanced', name: 'Balanced' }] } }, { id: 'fixture-model-2', name: 'Another fixture model' }] }], failures: [],
+        } } }),
+      })
+    }
+    if (options.capabilityControls && body.method === 'session.selectModel') {
+      const payload = body.payload ?? {}
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ type: 'server-response', rpcId: body.rpcId, result: { ok: true, value: { selected: { provider: payload.provider ?? 'fixture-provider', model: payload.model ?? 'fixture-model', ...(payload.reasoningEffort === undefined ? {} : { reasoningEffort: payload.reasoningEffort }) } } } }),
+      })
+    }
     if (options.lifecycle && body.method === 'session.history') {
       const events = options.retryControls === true ? retryEvents : options.errorControls === true ? errorEvents : []
       return route.fulfill({
@@ -721,6 +739,38 @@ async function runAccessibilityMatrix(browser) {
   return results
 }
 
+async function runCapabilityMatrix(browser) {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+  const issues = []
+  page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
+  page.on('pageerror', error => issues.push(error.message))
+  const { requests } = await installNativeMock(page, { seedSession: true, lifecycle: true, capabilityControls: true })
+  await page.goto(baseUrl, { waitUntil: 'domcontentloaded' })
+  await waitForNativeShell(page, true)
+  const search = page.locator('button[aria-label="Search sessions"], button[aria-label="Search"], button[aria-label="搜索会话"], button[aria-label="搜索"]').first()
+  await search.click()
+  const input = page.locator('input[placeholder]').first()
+  await input.fill('fixture')
+  const result = page.locator('[role="tree"]').last().getByRole('treeitem').first()
+  await result.waitFor({ timeout: 15_000 })
+  await result.click()
+  await input.press('Escape')
+  await page.getByText('Search fixture', { exact: true }).last().waitFor({ timeout: 15_000 })
+  const model = page.getByRole('button').filter({ hasText: 'Fixture model' }).first()
+  await model.waitFor({ timeout: 15_000 })
+  await model.click()
+  const menu = page.getByRole('menu').last()
+  await menu.waitFor({ timeout: 15_000 })
+  await menu.getByRole('menuitem').first().click()
+  await menu.getByRole('menuitemradio').first().waitFor({ timeout: 15_000 })
+  await menu.getByRole('menuitemradio').last().click()
+  await waitForCondition(() => requests.includes('session.models') && requests.includes('session.selectModel'))
+  await page.keyboard.press('Escape')
+  assert.deepEqual(issues, [])
+  await page.close()
+  return { modelCatalog: true, modelSelection: true, console: 'clean' }
+}
+
 async function runSearchErrorRecovery(browser) {
   const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
   const issues = []
@@ -1038,6 +1088,7 @@ try {
     const errorStateMatrix = await runErrorStateMatrix(browser)
     const visualGeometryMatrix = await runVisualGeometryMatrixStable(browser)
     const accessibilityMatrix = await runAccessibilityMatrix(browser)
+    const capabilityMatrix = await runCapabilityMatrix(browser)
     const searchErrorRecovery = await runSearchErrorRecovery(browser)
     const sessionLifecycle = await runSessionLifecycle(browser)
     const interactionControls = await runInteractionControls(browser)
@@ -1045,7 +1096,7 @@ try {
     const cancelPlanGoalControls = await runCancelPlanGoalControls(browser)
     const retryControls = await runRetryControls(browser)
     const mobile = await runMobile(browser)
-    console.log(JSON.stringify({ browser: 'playwright', native: 'ok', desktop, reconnectDesktop, darkDesktop, loadingDesktop, errorStateMatrix, visualGeometryMatrix, accessibilityMatrix, searchErrorRecovery, sessionLifecycle, interactionControls, queueControls, cancelPlanGoalControls, retryControls, mobile }))
+    console.log(JSON.stringify({ browser: 'playwright', native: 'ok', desktop, reconnectDesktop, darkDesktop, loadingDesktop, errorStateMatrix, visualGeometryMatrix, accessibilityMatrix, capabilityMatrix, searchErrorRecovery, sessionLifecycle, interactionControls, queueControls, cancelPlanGoalControls, retryControls, mobile }))
   } finally {
     await browser.close()
   }
