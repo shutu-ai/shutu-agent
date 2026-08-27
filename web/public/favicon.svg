@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title>Shutu DSH</title>
+  <rect width="64" height="64" rx="16" fill="#0b131d" />
+  <path d="M17 18h30v8H25v5h16c5 0 8 3 8 8v2c0 6-3 9-9 9H17v-8h22c1 0 2-1 2-2v-1c0-1-1-2-2-2H25c-5 0-8-3-8-8v-2c0-6 3-9 9-9Z" fill="#9de9bd" />
+</svg>

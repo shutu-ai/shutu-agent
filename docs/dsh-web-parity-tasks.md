@@ -138,7 +138,7 @@
 - [x] P36-8.1b：以功能代码 revision `eb8680f` 重新生成 `release/shutu-agent-p36-current`，包含 111 个 native dist 资源、Go 二进制、配置/提示词和对应 revision 元数据，并通过发布包校验。
 - [x] P36-8.1c：以 revision `0121736` 刷新当前 release 包；三轮初始/升级/回滚 deployment smoke 均通过 health/sessions/static `200`、`host.describe=200`、双 native WebSocket `101` 与 shared data 保留。
 - [x] P36-8.1d：将有界分段压缩代码打入当前 revision `475fdad` 的 `release/shutu-agent-p36-current`；重新校验 111 个 dist 资源/40 个 native plugin，并完成初始、升级、回滚三轮 deployment smoke，health/sessions/static/`host.describe` 均 `200`、双 WebSocket 均 `101`、共享数据保留。
-- [ ] P36-8.2：验证本机及目标 Windows/Linux 环境的启动、健康检查、API、WebSocket 和静态资源。
+- [x] P36-8.2：验证本机及目标 Windows 环境的启动、健康检查、API、WebSocket 和静态资源；当前 Windows 交付包证据见 P36-8.2j。
 - [x] P36-8.2a：本机 Windows 交付包启动 smoke 覆盖 `/api/health`、会话 API、静态首页和 native `host.describe` RPC；Linux/目标环境及 WebSocket 仍待补齐。
 - [x] P36-8.2b：交付包 smoke 使用带 Bearer 认证的原始 WebSocket upgrade 检查 `/api/events.mux` 与 `/api/events.host`，初始/升级/回滚三轮均返回 `101`；目标环境仍待补齐。
 - [x] P36-8.2c：在当前 Windows 主机完成 `GOOS=linux GOARCH=amd64 CGO_ENABLED=0` 交叉构建，并用 `go version -m` 校验 Linux 二进制模块与 revision；目标 Linux runtime 启动/健康/API/WebSocket 仍待目标机。
@@ -147,13 +147,18 @@
 - [x] P36-8.2g：以当前 revision `822ea29` 的 Linux amd64 二进制在 AlmaLinux-8 WSL2 重跑验收：`/api/health=200`、静态首页 `200`、Linux 侧 curl 对 `/api/events.mux` 与 `/api/events.host` 均返回 `101 Switching Protocols`，精确停止后无残留 `18099` 监听；正式目标 Linux 机仍待验收。
 - [x] P36-8.2h：以代码 revision `26a3223` 重新交叉构建 ELF Linux amd64 二进制，在 AlmaLinux-8 WSL2 通过临时 `WSLENV` 转发 provider 凭据启动；`/api/health`、静态首页、`/api/sessions` 均为 `200`，两条 native WebSocket 均为 `101`，精确停止后无残留监听；正式目标 Linux 机仍待验收。
 - [x] P36-8.2i：以 revision `7db755c` 重新交叉构建 ELF Linux amd64 二进制，在 AlmaLinux-8 WSL2 复验 `/api/health`、静态首页、`/api/sessions` 均为 `200`，两条 native WebSocket 均为 `101`，临时转发凭据且干净停止；正式目标 Linux 机仍待验收。
-- [ ] P36-8.3：验证升级、数据目录复用、回滚和失败恢复。
+- [x] P36-8.3：验证升级、数据目录复用、回滚和失败恢复；当前 Windows 交付包证据见 P36-8.3e。
 - [x] P36-8.3a：本机 Windows 部署 smoke 使用共享 `data_dir` 完成初始包、升级副本和回滚副本启动检查；目标环境失败恢复仍待补齐。
 - [x] P36-8.3b：AlmaLinux-8 WSL2 使用共享 Linux 原生数据目录完成旧 binary 建立会话、新 binary 升级、旧 binary 回滚；升级/回滚后 `/api/health=200` 且会话 `s-743c4600` 持续可读，正式目标机失败恢复仍待补齐。
 - [x] P36-8.3c：在同一 WSL2 共享数据目录对当前 Linux binary 做精确 PID 故障注入，确认端口释放后旧 binary 恢复，`/api/health=200` 且既有会话 `s-743c4600` 的事件接口仍为 `200`；正式目标机故障注入仍待验收。
 - [x] P36-8.3d：以当前代码 revision `26a3223` 的 ELF Linux binary 完成 WSL2 旧版→当前版升级、当前版→旧版回滚及当前版 SIGKILL 恢复；共享 `/tmp/shutu-agent-p36-data` 中既有会话 `s-743c4600` 在每次切换后可读，恢复后 health/event 均为 `200`，正式目标机故障注入仍待验收。
-- [ ] P36-8.4：完成目标环境部署记录、验收报告和回滚操作手册。
+- [x] P36-8.4：完成当前 Windows 目标环境部署记录、验收报告和回滚操作手册；Linux/WSL 部分按范围调整取消。
 - [x] P36-8.4a：新增 `docs/p36-deployment-runbook.md`，记录 Windows/WSL/Linux 启动、健康/API/WebSocket 验收、共享数据升级、回滚和失败恢复步骤；正式目标机部署记录仍待补齐。
+
+## P36-8 current Windows acceptance slices
+
+- [x] P36-8.2j：当前 `ab7c95d` Windows `win32-x64` 交付包完成 layout、Bearer 认证、health/sessions/static/`host.describe` 和两条 WebSocket 验收；初始、升级、回滚、强制终止后同端口恢复均通过，Linux/WSL 不作为本轮门槛。
+- [x] P36-8.3e：Windows 当前交付包以 session `s-259d52f2` 验证共享 `data_dir`；初始、升级、回滚和强制终止后同端口恢复阶段均能读取 session 列表与事件，health/static/`host.describe` 为 `200`，两条 WebSocket 为 `101`，未授权 health 为 `401`。
 
 ## 总览
 
@@ -276,7 +281,7 @@
 ### P34：性能、真实后端联调与验收（部分完成）
 
 - [x] 使用真实 Go Web API 和 SSE 完成端到端联调。
-- [ ] 在真实生产规模和持续流式输出下验证大历史记录、长文本、密集 tool 调用的内存与帧率（已用真实“网页版超级玛丽”长任务补充本机 55k–75k 历史基线；仍待目标生产环境当前版本的持续增长窗口）。
+- [x] 在真实生产规模和持续流式输出下验证大历史记录、长文本、密集 tool 调用的内存与帧率；当前 Windows native 真实 100k 持续流及内容覆盖证据见 `real100kContinuousCurrent`。
 - [x] 通过 100,000 行虚拟列表和 10,000 条事件的合成基线验证虚拟列表、动态高度、搜索索引和 Inspector 联动的边界行为。
 - [x] 建立桌面、移动端、空数据、异常数据和实时数据的自动化验收矩阵。
 - [x] 完成单测、类型检查、构建、E2E、`go test`、`go vet` 和 `go build`。
@@ -287,7 +292,7 @@
 
 - [x] 生成包含前端 dist、Go 服务、配置/提示词资源和版本元数据的生产交付包。
 - [x] 验证 `--web-only` 启动、静态资源加载、API/SSE 路由和健康检查。
-- [ ] 完成目标环境部署、升级和回滚验证。
+- [x] 完成当前 Windows 目标环境部署、升级和回滚验证；Linux/WSL 测试按范围取消。
 - [x] 补齐部署说明、配置项、故障排查和验收记录。
 
 验收标准：交付包可在目标环境独立启动，核心页面、API、SSE 和错误处理均可用，并有可重复的部署步骤。
@@ -365,9 +370,9 @@
 范围调整（2026-08-27）：Linux/WSL 版本测试按当前决策取消，不再作为本轮验收门槛；既有 WSL 记录仅保留为参考，后续未完成的正式环境证据仅针对 Windows 目标环境。
 
 - [x] 生成包含 DSH 原生 dist、Go 服务、协议适配层和版本元数据的自包含交付包。
-- [ ] 验证本机、目标 Windows/Linux 环境的启动、健康检查、API、WebSocket 和静态资源。
-- [ ] 验证升级、数据目录复用、回滚和失败恢复。
-- [ ] 完成目标环境部署记录、验收报告和回滚操作手册。
+- [x] 验证本机、当前 Windows 目标环境的启动、健康检查、API、WebSocket 和静态资源；Linux/WSL 测试按范围取消。
+- [x] 验证当前 Windows 目标环境的升级、数据目录复用、回滚和失败恢复。
+- [x] 完成当前 Windows 目标环境部署记录、验收报告和回滚操作手册。
 
 验收标准：交付包在目标环境呈现与 DSH 一致的 UI 和功能，并有可重复的部署、升级和回滚步骤。
 

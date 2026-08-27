@@ -441,6 +441,32 @@ the stale-upstream duplicate-start noise from the earlier measurement. Full
 machine-readable evidence is in `real100kContinuousCurrent` and
 `real100kContentFollowUpCurrent`.
 
+## P36-8 Windows release/deployment acceptance (2026-08-27)
+
+The current commit `ab7c95d` was rebuilt as `release/shutu-agent-p36-current`
+with a `win32-x64` manifest, native `web/dist/index.html`, all dist assets, and
+prompt resources. The strengthened `scripts/deployment-smoke.mjs` created a
+durable session and exercised the package through initial start, upgrade,
+rollback, forced termination, and same-port recovery. Every phase returned
+health/sessions/static/`host.describe` `200`, both native WebSocket upgrades
+returned `101`, and an unauthenticated health request returned `401` while the
+Bearer-authenticated request returned `200`. The same session's list and events
+remained readable after upgrade, rollback, and forced-stop recovery.
+
+This closes the current Windows target evidence for P36-8.2, P36-8.3, and
+P36-8.4. Linux/WSL testing is intentionally out of scope for this run; the
+existing local WSL records remain historical reference evidence only. The
+machine-readable result is `windowsDeploymentCurrent` in
+`docs/evidence/p36-real-baseline-2026-08-27.json`.
+
 ## P36-6.3 Cross-engine accessibility evidence (2026-08-27)
 
 Playwright Firefox and WebKit binaries were installed in the user-level browser cache and the full native accessibility fixture was rerun alongside Chromium. Desktop `1280x900` and mobile `390x844` passed in all three engines: two Conversation/Trajectory tabs exposed valid selection state and panel labels, visible controls had accessible names, Settings focus trapping passed for Tab/Shift+Tab, Escape restored the trigger focus, touch-target counts were reported, and console errors were zero. Real screen-reader speech output remains the only P36-6.3 evidence not executable in this environment.
+
+A Windows 11 Narrator process was also started and its Speech recap clipboard
+channel was verified independently. During the headed Chrome probe, however,
+the recap continued to report the browser URL/previous-window phrase instead of
+the focused DSH control; the DOM focus and ARIA state remained correct. This
+probe is intentionally not accepted as real speech evidence. A human must run
+the documented Narrator keyboard/voice scenario and confirm the spoken control
+name, state, and type before P36-6.3 can be checked.

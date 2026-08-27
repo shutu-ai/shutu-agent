@@ -1,5 +1,6 @@
 import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { connect } from 'node:net'
 import { spawn } from 'node:child_process'
 import { join, resolve } from 'node:path'
@@ -10,9 +11,23 @@ const packageRoot = resolve(process.env.SHUTU_RELEASE_PACKAGE ?? join(root, 'rel
 const binaryName = process.platform === 'win32' ? 'shutu-agent.exe' : 'shutu-agent'
 const token = 'p35-deployment-smoke-token'
 const ports = [18131, 18132]
+const currentCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim()
 
-if (!existsSync(join(packageRoot, 'bin', binaryName))) {
-  throw new Error(`release package is missing ${join(packageRoot, 'bin', binaryName)}`)
+async function verifyPackageLayout() {
+  for (const relativePath of [
+    join('bin', binaryName),
+    join('web', 'dist', 'index.html'),
+    join('config', 'prompts'),
+    'release.json',
+  ]) {
+    if (!existsSync(join(packageRoot, relativePath))) {
+      throw new Error(`release package is missing ${join(packageRoot, relativePath)}`)
+    }
+  }
+  const manifest = JSON.parse(await readFile(join(packageRoot, 'release.json'), 'utf8'))
+  if (manifest.commit !== currentCommit || manifest.target !== `${process.platform}-${process.arch}`) {
+    throw new Error(`release manifest does not identify the current Windows build: ${JSON.stringify(manifest)}`)
+  }
 }
 
 function delay(milliseconds) {
@@ -28,6 +43,54 @@ async function configurePackage(directory, port, dataDirectory) {
     .replace(/^  token:.*$/m, `  token: "${token}"`)
     .replace(/^data_dir:.*$/m, `data_dir: ${dataPath}`)
   await writeFile(configPath, configured, 'utf8')
+}
+
+async function authorizedJSON(port, path, init = {}) {
+  const response = await fetch(`http://127.0.0.1:${port}${path}`, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      ...(init.headers ?? {}),
+    },
+  })
+  const text = await response.text()
+  let body = null
+  try {
+    body = text ? JSON.parse(text) : null
+  } catch {
+    // Keep the raw response for the assertion below.
+  }
+  return { response, body, text }
+}
+
+async function createDurableSession(port) {
+  const { response, body, text } = await authorizedJSON(port, '/api/session.create', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      type: 'client-request',
+      rpcId: `deployment-create-${port}`,
+      method: 'session.create',
+      payload: {},
+    }),
+  })
+  const sessionId = body?.result?.value?.sessionId
+  if (response.status !== 200 || body?.result?.ok !== true || typeof sessionId !== 'string' || sessionId.length === 0) {
+    throw new Error(`session.create failed: status=${response.status} body=${text}`)
+  }
+  return sessionId
+}
+
+async function verifyDurableSession(port, sessionId) {
+  const sessions = await authorizedJSON(port, '/api/sessions')
+  const events = await authorizedJSON(port, `/api/sessions/${encodeURIComponent(sessionId)}/events`)
+  if (sessions.response.status !== 200 || !Array.isArray(sessions.body) || !sessions.body.some(item => item.id === sessionId)) {
+    throw new Error(`persisted session missing after restart: ${sessionId}; status=${sessions.response.status} body=${sessions.text}`)
+  }
+  if (events.response.status !== 200) {
+    throw new Error(`persisted session events unavailable after restart: ${sessionId}; status=${events.response.status} body=${events.text}`)
+  }
+  return { sessions: sessions.response.status, events: events.response.status }
 }
 
 function start(directory) {
@@ -46,8 +109,15 @@ function start(directory) {
   return { child, getOutput: () => output }
 }
 
-async function stop(processHandle) {
+async function stop(processHandle, force = false) {
   if (processHandle === undefined || processHandle.child.exitCode !== null) return
+  if (force) {
+    processHandle.child.kill('SIGKILL')
+    await new Promise(resolvePromise => {
+      processHandle.child.once('exit', resolvePromise)
+    })
+    return
+  }
   processHandle.child.kill()
   await new Promise(resolvePromise => {
     const timer = setTimeout(() => {
@@ -123,6 +193,7 @@ async function waitForHealthy(processHandle, port) {
       throw new Error(`web-only exited before health check: ${processHandle.getOutput()}`)
     }
     try {
+      const unauthorizedHealth = await fetch(`${url}/api/health`)
       const health = await fetch(`${url}/api/health`, { headers })
       const sessions = await fetch(`${url}/api/sessions`, { headers })
       const staticShell = await fetch(`${url}/`, { headers })
@@ -131,7 +202,7 @@ async function waitForHealthy(processHandle, port) {
         headers: { ...headers, 'content-type': 'application/json' },
         body: JSON.stringify({ type: 'client-request', rpcId: `deployment-${port}`, method: 'host.describe', payload: {} }),
       })
-      if (health.status === 200 && sessions.status === 200 && staticShell.status === 200 && native.status === 200) {
+      if (unauthorizedHealth.status === 401 && health.status === 200 && sessions.status === 200 && staticShell.status === 200 && native.status === 200) {
         const envelope = await native.json()
         if (envelope.type !== 'server-response' || envelope.rpcId !== `deployment-${port}` || envelope.result?.ok !== true) {
           throw new Error(`native host.describe returned an invalid response: ${JSON.stringify(envelope)}`)
@@ -139,7 +210,7 @@ async function waitForHealthy(processHandle, port) {
         const mux = await websocketUpgrade(port, '/api/events.mux')
         const host = await websocketUpgrade(port, '/api/events.host')
         if (!mux || !host) throw new Error('native WebSocket upgrade did not return 101')
-        return { health: health.status, sessions: sessions.status, staticShell: staticShell.status, hostDescribe: native.status, webSockets: { mux: 101, host: 101 } }
+        return { unauthorizedHealth: unauthorizedHealth.status, health: health.status, sessions: sessions.status, staticShell: staticShell.status, hostDescribe: native.status, webSockets: { mux: 101, host: 101 } }
       }
     } catch {
       // The process may still be binding its listener.
@@ -152,6 +223,7 @@ async function waitForHealthy(processHandle, port) {
 const temporaryRoot = await mkdtemp(join(root, 'release', '.deployment-smoke-'))
 let active
 try {
+  await verifyPackageLayout()
   const sharedData = join(temporaryRoot, 'shared-data')
   const versions = await Promise.all(ports.map(async (port, index) => {
     const directory = join(temporaryRoot, `version-${index + 1}`)
@@ -162,20 +234,30 @@ try {
 
   active = start(versions[0])
   const initial = await waitForHealthy(active, ports[0])
+  const sessionId = await createDurableSession(ports[0])
+  const initialPersistence = await verifyDurableSession(ports[0], sessionId)
   await stop(active)
   active = undefined
 
   active = start(versions[1])
   const upgrade = await waitForHealthy(active, ports[1])
+  const upgradePersistence = await verifyDurableSession(ports[1], sessionId)
   await stop(active)
   active = undefined
 
   active = start(versions[0])
   const rollback = await waitForHealthy(active, ports[0])
+  const rollbackPersistence = await verifyDurableSession(ports[0], sessionId)
+  await stop(active, true)
+  active = undefined
+
+  active = start(versions[0])
+  const recovery = await waitForHealthy(active, ports[0])
+  const recoveryPersistence = await verifyDurableSession(ports[0], sessionId)
   await stop(active)
   active = undefined
 
-  console.log(JSON.stringify({ package: packageRoot, initial, upgrade, rollback, sharedData: true }))
+  console.log(JSON.stringify({ package: packageRoot, initial, upgrade, rollback, recovery, sessionId, persistence: { initial: initialPersistence, upgrade: upgradePersistence, rollback: rollbackPersistence, recovery: recoveryPersistence }, forcedStopRecovery: true, sharedData: true }))
 } finally {
   await stop(active)
   await removeTemporaryRoot(temporaryRoot)

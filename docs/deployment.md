@@ -71,10 +71,10 @@ Invoke-WebRequest http://127.0.0.1:18099/api/health
 
 ## 目标环境验收清单
 
-- [ ] `release.json` 的 commit 与发布提交一致。
-- [ ] `web/dist/index.html` 和 assets 存在。
-- [ ] `--web-only --config config.yaml` 能启动。
-- [ ] `/api/health` 返回 200。
-- [ ] 会话列表、Conversation、Trajectory、SSE 和历史分页可用。
-- [ ] 配置 token 后未授权请求返回 401，授权请求正常。
-- [ ] 前端控制台无错误，移动端首屏可用。
+- [x] 当前 Windows 交付包的 `release.json` commit 与发布提交一致。
+- [x] 当前 Windows 交付包的 `web/dist/index.html` 和 assets 存在。
+- [x] 当前 Windows 交付包可用 `--web-only --config config.yaml` 启动。
+- [x] 当前 Windows 交付包 `/api/health` 返回 200。
+- [x] 当前 Windows 交付包的会话列表、Conversation、Trajectory、SSE 和历史分页已由 release/E2E 与 deployment smoke 验证。
+- [x] 当前 Windows 交付包配置 token 后未授权请求返回 401，授权请求正常。
+- [x] 当前 Windows 交付包前端控制台无错误，移动端首屏可用；证据见 native E2E 矩阵。
