@@ -160,6 +160,8 @@ The same WSL2 setup completed an upgrade/rollback smoke with a shared Linux-nati
 
 The release pipeline was rerun after the native roster guard was added: Vite transformed `973` modules, generated a manifest with `40` linked native plugins, `npm run verify` passed, all `45` frontend tests passed, and the complete Playwright DSH interaction matrix passed without console errors. This is local release evidence; it does not close target-host deployment or high-density production-performance gates.
 
+The E2E screenshots were rerun into `docs/p36-visual-baseline/` and include light/dark desktop, mobile, loading/error, workspace, jobs, subagents, settings, and geometry captures. The rendered captures show the DSH native shell; a pixel-diff against an independently launched DSH reference remains open for P36-6.
+
 ## P36-7.1 / P36-7.2 / P36-7.3 Native 100k fixture evidence (2026-08-27)
 
 `SHUTU_PERF_CONTINUOUS_SECONDS=5 npm.cmd run performance` passed with a controlled native mux stream injected after connection: `continuousFrames=46`, the settled sample kept `61` frames, `DOM=887`, and zero browser errors. The injected events are a transport/rendering fixture, not a production Super Mario stream, so real continuous history growth, event-to-UI latency and reconnect recovery remain open.
