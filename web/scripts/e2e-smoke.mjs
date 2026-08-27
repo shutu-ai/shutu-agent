@@ -73,6 +73,15 @@ async function installNativeMock(page, options = {}) {
   let searchFailuresRemaining = options.searchFailures ?? 0
   let muxSocket = null
   let interactionStage = 'idle'
+  const retryEvents = [
+    { seq: 1, type: 'turn/start', time: 1_700_000_000_001, data: { turn: 1 } },
+    { seq: 2, type: 'step/start', time: 1_700_000_000_002, data: { turn: 1, step: 1 } },
+    { seq: 3, type: 'llm/retry', time: 1_700_000_000_003, data: {
+      retryId: 'retry-fixture', turn: 1, step: 1, provider: 'fixture-provider',
+      mode: 'normal', policyKey: 'fixture-normal', retry: 1, maxRetries: 3,
+      delayMs: 2_000, failure: { code: 'TRANSPORT', message: 'temporary fixture failure' },
+    } },
+  ]
   const sendMux = (rpcId, method, payload) => {
     if (muxSocket === null) throw new Error(`native mux is not connected for ${method}`)
     muxSocket.send(JSON.stringify({ type: 'server-request', rpcId, method, payload }))
@@ -85,6 +94,14 @@ async function installNativeMock(page, options = {}) {
   const sendProjection = (key, value, seq = 1) => {
     sendMux(`${key}-projection`, 'session/projection', {
       type: 'session/projection', sessionId: 'search-fixture', key, value, seq,
+    })
+  }
+  const sendRetryStarted = () => {
+    sendMux('retry-started', 'session/event', {
+      type: 'session/event', sessionId: 'search-fixture', event: {
+        seq: 4, type: 'llm/retry-started', time: 1_700_000_000_004,
+        data: { retryId: 'retry-fixture', turn: 1, step: 1, retry: 1 },
+      },
     })
   }
   await page.route('**/plugins/events', route => route.fulfill({
@@ -262,6 +279,7 @@ async function installNativeMock(page, options = {}) {
       })
     }
     if (options.lifecycle && body.method === 'session.history') {
+      const events = options.retryControls === true ? retryEvents : []
       return route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -270,7 +288,8 @@ async function installNativeMock(page, options = {}) {
           rpcId: body.rpcId,
           result: { ok: true, value: {
             header: { version: 0, id: 'search-fixture', createdAt: Date.now(), cwd: 'C:/shutu-search' },
-            events: [], hasMore: false, surface: { nodes: [], replacements: [] },
+            events: events.map(event => ({ event })), hasMore: false,
+            surface: { nodes: events.map(event => event.seq), replacements: [] },
             projections: {
               asOfSeq: 0,
               values: {
@@ -336,7 +355,7 @@ async function installNativeMock(page, options = {}) {
   })
   return {
     sockets, socketConnections, requests, queueUpdates, sendMux, sendQueueSnapshot,
-    goalActions, sendProjection,
+    goalActions, sendProjection, sendRetryStarted,
     get interactionStage() { return interactionStage },
     setInteractionStage: value => { interactionStage = value },
   }
@@ -706,6 +725,37 @@ async function runCancelPlanGoalControls(browser) {
   }
 }
 
+async function runRetryControls(browser) {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+  const issues = []
+  page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
+  page.on('pageerror', error => issues.push(error.message))
+  page.on('response', response => { if (response.status() >= 400) issues.push(`http ${response.status()}: ${response.url()}`) })
+  const fixture = await installNativeMock(page, { seedSession: true, lifecycle: true, retryControls: true })
+  await page.goto(baseUrl, { waitUntil: 'domcontentloaded' })
+  await waitForNativeShell(page)
+  const search = page.locator('button[aria-label="Search sessions"], button[aria-label="Search"], button[aria-label="搜索会话"], button[aria-label="鎼滅储浼氳瘽"], button[aria-label="鎼滅储"]').first()
+  await search.click()
+  const input = page.locator('input[placeholder]').first()
+  await input.fill('fixture')
+  const result = page.locator('[role="tree"]').last().getByRole('treeitem').first()
+  await result.waitFor({ timeout: 15_000 })
+  await result.click()
+  await input.press('Escape')
+  await page.getByText('Search fixture', { exact: true }).last().waitFor({ timeout: 15_000 })
+
+  const retry = page.locator('details').filter({ hasText: /Retrying model request|正在重试模型请求/ }).last()
+  await retry.waitFor({ timeout: 15_000 })
+  assert.match(await retry.innerText(), /1\/3|temporary fixture failure/)
+  await retry.locator('summary').click()
+  assert.match(await retry.innerText(), /Retry delay|重试延迟/)
+  fixture.sendRetryStarted()
+  await page.getByText(/Retried model request|已重试模型请求/).last().waitFor({ timeout: 15_000 })
+  assert.deepEqual(issues, [])
+  await page.close()
+  return { scheduled: true, started: true, details: true, console: 'clean' }
+}
+
 function goalStateForFixture() {
   return {
     id: 'goal-1', revision: 1, objective: 'Ship the fixture', phase: 'active', maxGoalRounds: 4,
@@ -758,8 +808,9 @@ try {
     const interactionControls = await runInteractionControls(browser)
     const queueControls = await runQueueControls(browser)
     const cancelPlanGoalControls = await runCancelPlanGoalControls(browser)
+    const retryControls = await runRetryControls(browser)
     const mobile = await runMobile(browser)
-    console.log(JSON.stringify({ browser: 'playwright', native: 'ok', desktop, reconnectDesktop, darkDesktop, loadingDesktop, searchErrorRecovery, sessionLifecycle, interactionControls, queueControls, cancelPlanGoalControls, mobile }))
+    console.log(JSON.stringify({ browser: 'playwright', native: 'ok', desktop, reconnectDesktop, darkDesktop, loadingDesktop, searchErrorRecovery, sessionLifecycle, interactionControls, queueControls, cancelPlanGoalControls, retryControls, mobile }))
   } finally {
     await browser.close()
   }

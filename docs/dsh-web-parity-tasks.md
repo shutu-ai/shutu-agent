@@ -60,6 +60,7 @@
 - [x] P36-5.2f：Playwright 原生 mux fixture 注入 `approval/requested` 与 `question/requested`，实际完成“允许一次”、选项选择和提交，验证两次 `/api/respond` 及 resolved 回帧、Composer 接管释放和零控制台错误。
 - [x] P36-5.2g：Playwright 原生 mux fixture 注入 `session/queue`，验证队列折叠/展开、文本编辑、运行中 steer、删除及队列快照收空，并断言 `session.updateQueue` 的 DSH action union。
 - [x] P36-5.2h：Playwright 原生 loaded-session fixture 验证 Composer `session.cancel`、Plan mode `/plan off` 以及 Goal 编辑/暂停/恢复/清除，使用 DSH projection 驱动状态变化并保持零控制台错误。
+- [x] P36-5.2i：Playwright 原生 loaded-session fixture 注入 DSH `llm/retry`/`llm/retry-started` 事件，验证重试调度状态、次数/延迟/失败详情展开及 started 状态切换，并保持零控制台错误。
 - [ ] P36-5.3：完成 Tool 折叠、请求详情、Trajectory、搜索、历史分页和滚动定位。
 - [x] P36-5.3c：Playwright 密集事件 fixture 验证搜索命中、请求详情、Trajectory、`beforeSeq` 历史分页、Turn 折叠/展开及虚拟行渲染。
 - [ ] P36-5.4：完成子代理、后台任务、技能、文件引用、附件、模型、权限、Provider 和设置。
