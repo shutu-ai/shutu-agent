@@ -209,6 +209,69 @@ func TestNativeSessionCancelIsIdempotentWhenNoTurnIsRunning(t *testing.T) {
 	}
 }
 
+type cancelMetadataGateStore struct {
+	store.Store
+	metadataStarted chan struct{}
+	releaseMetadata chan struct{}
+}
+
+func (s *cancelMetadataGateStore) GetSessionMeta(ctx context.Context, sessionID string) (store.SessionMeta, error) {
+	close(s.metadataStarted)
+	<-s.releaseMetadata
+	return s.Store.GetSessionMeta(ctx, sessionID)
+}
+
+func TestNativeSessionCancelStopsBeforeMetadataRead(t *testing.T) {
+	base, err := store.OpenSQLite(filepath.Join(t.TempDir(), "cancel.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = base.Close() })
+	seedSession(t, base, "cancel-fast", nil)
+	wrapped := &cancelMetadataGateStore{
+		Store:           base,
+		metadataStarted: make(chan struct{}),
+		releaseMetadata: make(chan struct{}),
+	}
+	srv, err := New(wrapped, "tok", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stopCalled := make(chan struct{})
+	srv.SetTurnStopper(func(string) error {
+		close(stopCalled)
+		return nil
+	})
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- doReqBody(t, srv.Handler(), http.MethodPost, "/api/session.cancel", "tok", `{
+			"type":"client-request","rpcId":"cancel-fast","method":"session.cancel",
+			"payload":{"sessionId":"cancel-fast"}
+		}`)
+	}()
+	select {
+	case <-stopCalled:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("cancel did not reach the in-memory stopper")
+	}
+	select {
+	case rec := <-done:
+		response := nativeResponse(t, rec.Body.Bytes())
+		if rec.Code != http.StatusOK || !response.Result.OK {
+			t.Fatalf("fast cancel = %d %+v", rec.Code, response)
+		}
+	case <-time.After(500 * time.Millisecond):
+		close(wrapped.releaseMetadata)
+		t.Fatal("cancel waited for metadata after the stopper accepted it")
+	}
+	select {
+	case <-wrapped.metadataStarted:
+		t.Fatal("cancel read metadata after the stopper accepted it")
+	default:
+	}
+}
+
 type nativeCommandTestManager struct {
 	list    []NativeCommand
 	execute func(context.Context, string, string, []llm.ImageRef) (NativeCommandExecution, bool, error)

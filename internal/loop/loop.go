@@ -6,6 +6,7 @@ package loop
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -159,10 +160,16 @@ func (l *Loop) Run(ctx context.Context, userText string) (runErr error) {
 		// that are turn-scoped opt out after step one; stable snapshots opt out
 		// when the same visible message already exists.
 		for _, inj := range l.effectiveInjectors() {
+			if err := ctx.Err(); err != nil {
+				return fmt.Errorf("loop: cancelled: %w", err)
+			}
 			if inj.OncePerTurn && step > 0 {
 				continue
 			}
 			for _, message := range l.safeInject(inj, ctx, userText) {
+				if err := ctx.Err(); err != nil {
+					return fmt.Errorf("loop: cancelled: %w", err)
+				}
 				if inj.Deduplicate && l.visibleMessageExists(message) {
 					continue
 				}
@@ -243,8 +250,24 @@ func contextSource(injectorName string) (kind, plugin string) {
 }
 
 func (l *Loop) visibleMessageExists(message llm.Message) bool {
-	for _, existing := range l.log.DeriveHistory() {
-		if existing.Role == llm.RoleUser && existing.Text() == message.Text() {
+	want := message.Text()
+	if want == "" {
+		return false
+	}
+	// Stable pre-step snapshots only need to know whether an equivalent user
+	// text was already persisted. Re-deriving the whole model surface here is
+	// unnecessarily expensive for restored long sessions (especially after
+	// repeated compaction replacements), so inspect the append-only user rows
+	// directly. This preserves the old text equality semantics without making
+	// cancellation wait for a full history fold.
+	for _, event := range l.log.Events() {
+		if event.Type != session.EventUserMessage {
+			continue
+		}
+		var data struct {
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(event.Data, &data) == nil && data.Text == want {
 			return true
 		}
 	}

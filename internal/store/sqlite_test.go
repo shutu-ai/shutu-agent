@@ -54,6 +54,20 @@ func TestListSessionsIsNotStarvedByHistoryReadCursor(t *testing.T) {
 	case <-time.After(750 * time.Millisecond):
 		t.Fatal("ListSessions was starved by an open history read cursor")
 	}
+
+	metaDone := make(chan error, 1)
+	go func() {
+		_, err := st.GetSessionMeta(context.Background(), "concurrent")
+		metaDone <- err
+	}()
+	select {
+	case err := <-metaDone:
+		if err != nil {
+			t.Fatalf("GetSessionMeta while history cursor is open: %v", err)
+		}
+	case <-time.After(750 * time.Millisecond):
+		t.Fatal("GetSessionMeta was starved by an open history read cursor")
+	}
 }
 
 // buildLog appends a representative mini-conversation through a session.Log

@@ -362,6 +362,40 @@ func longSession(t *testing.T) *session.Log {
 	return l
 }
 
+func TestDefaultCompactionEstimatorSkipsReplacedSurface(t *testing.T) {
+	log := session.New()
+	if _, err := log.Append(session.EventUserMessage, session.NewUserMessage(strings.Repeat("u", 20))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := log.Append(session.EventAssistantMessage, session.NewAssistantMessage(strings.Repeat("a", 20), nil, "stop")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := log.Append(session.EventUserMessage, session.NewUserMessageReplace("summary", 1, 2)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := log.Append(session.EventUserMessage, session.NewUserMessage("tail")); err != nil {
+		t.Fatal(err)
+	}
+	want := len("summary")/4 + len("tail")/4
+	if got := defaultCompactionEstimator(log); got != want {
+		t.Fatalf("surface estimate = %d, want %d after replacing seq 1..2", got, want)
+	}
+}
+
+func TestCompactionInjectorStopsBeforeEstimateWhenCancelled(t *testing.T) {
+	app := makeCompactApp(true)
+	app.log = threeTurnLog(t)
+	app.compaction = byteTokensEngine(&compactStubLLM{text: "S"})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if msgs := app.compactionInjector(byteTokens).Inject(ctx, "hello"); msgs != nil {
+		t.Fatalf("injected %+v after cancellation, want nil", msgs)
+	}
+	if got := countEvent(app.log, session.EventCompactionStart); got != 0 {
+		t.Fatalf("compaction/start count = %d after cancellation, want 0", got)
+	}
+}
+
 // TestCompactionInjectorTriggersAndLogsExactlyOnce verifies the pre-step
 // injector's pressure path (dispatch-m5c-2b §2/§3): when the estimated surface
 // exceeds the threshold it calls CompactIfNeeded (summary marker + fold), logs

@@ -13,8 +13,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 
 	"github.com/jabing/shutu-agent/internal/compaction"
@@ -37,15 +39,133 @@ const compactedNotice = "Context notice: earlier conversation context was auto-c
 // the wiring's pressure pre-check consistent with the engine's own gate.
 type compactionEstimator func(log *session.Log) int
 
-// defaultCompactionEstimator mirrors compaction.defaultTokenEstimate over the
-// derived history (content + tool-call name/arguments), exactly like
-// BasicEngine.estimateTokens.
+// defaultCompactionEstimator mirrors the zero-dependency estimator over the
+// model-visible surface, but does so without calling DeriveHistory. Replaying a
+// restored 100k-event session through the surface folder is much more work than
+// the pressure gate needs and used to make the first pre-step unresponsive.
 func defaultCompactionEstimator(log *session.Log) int {
+	if log == nil {
+		return 0
+	}
+	events := log.Events()
+	replacements := make([]surfaceEstimateRange, 0)
+	for _, event := range events {
+		if event.Type != session.EventUserMessage {
+			continue
+		}
+		var data struct {
+			SurfaceOp *struct {
+				Op    string `json:"op"`
+				Start int64  `json:"start"`
+				End   int64  `json:"end"`
+			} `json:"surfaceOp,omitempty"`
+		}
+		if json.Unmarshal(event.Data, &data) == nil && data.SurfaceOp != nil &&
+			data.SurfaceOp.Op == "replace" && data.SurfaceOp.Start >= 0 && data.SurfaceOp.End >= data.SurfaceOp.Start {
+			replacements = append(replacements, surfaceEstimateRange{start: uint64(data.SurfaceOp.Start), end: uint64(data.SurfaceOp.End)})
+		}
+	}
+	sort.Slice(replacements, func(i, j int) bool { return replacements[i].start < replacements[j].start })
+	replacements = mergeSurfaceEstimateRanges(replacements)
 	total := 0
-	for _, m := range log.DeriveHistory() {
-		total += len(m.Text()) / 4
-		for _, tc := range m.ToolCalls {
-			total += len(tc.Name)/4 + len(tc.Arguments)/4
+	for _, event := range events {
+		if surfaceEstimateShadowed(replacements, event.Seq) {
+			continue
+		}
+		total += estimateSurfaceEvent(event)
+	}
+	return total
+}
+
+type surfaceEstimateRange struct{ start, end uint64 }
+
+func mergeSurfaceEstimateRanges(ranges []surfaceEstimateRange) []surfaceEstimateRange {
+	if len(ranges) < 2 {
+		return ranges
+	}
+	out := ranges[:1]
+	for _, next := range ranges[1:] {
+		last := &out[len(out)-1]
+		if next.start <= last.end+1 {
+			if next.end > last.end {
+				last.end = next.end
+			}
+			continue
+		}
+		out = append(out, next)
+	}
+	return out
+}
+
+func surfaceEstimateShadowed(ranges []surfaceEstimateRange, seq uint64) bool {
+	index := sort.Search(len(ranges), func(index int) bool { return ranges[index].end >= seq })
+	return index < len(ranges) && ranges[index].start <= seq
+}
+
+func estimateSurfaceEvent(event session.Event) int {
+	var total int
+	add := func(text string) { total += len(text) / 4 }
+	textBlocks := func(blocks []llm.ContentBlock) {
+		for _, block := range blocks {
+			if block.Kind == llm.BlockText || block.Kind == llm.BlockReasoning {
+				add(block.Text)
+			}
+		}
+	}
+	switch event.Type {
+	case session.EventUserMessage:
+		var data struct {
+			Text    string             `json:"text"`
+			Content []llm.ContentBlock `json:"content,omitempty"`
+		}
+		if json.Unmarshal(event.Data, &data) == nil {
+			if len(data.Content) > 0 {
+				textBlocks(data.Content)
+			} else {
+				add(data.Text)
+			}
+		}
+	case session.EventAssistantMessage:
+		var data struct {
+			Text      string         `json:"text"`
+			Reasoning string         `json:"reasoning,omitempty"`
+			ToolCalls []llm.ToolCall `json:"toolCalls,omitempty"`
+		}
+		if json.Unmarshal(event.Data, &data) == nil {
+			add(data.Text)
+			add(data.Reasoning)
+			for _, call := range data.ToolCalls {
+				add(call.Name)
+				add(call.Arguments)
+			}
+		}
+	case session.EventToolResult:
+		var data struct {
+			Output  string             `json:"output,omitempty"`
+			Content []llm.ContentBlock `json:"content,omitempty"`
+			Message *struct {
+				Content []struct {
+					Text string `json:"text,omitempty"`
+				} `json:"content,omitempty"`
+			} `json:"message,omitempty"`
+		}
+		if json.Unmarshal(event.Data, &data) == nil {
+			if len(data.Content) > 0 {
+				textBlocks(data.Content)
+			} else if data.Message != nil {
+				for _, block := range data.Message.Content {
+					add(block.Text)
+				}
+			} else {
+				add(data.Output)
+			}
+		}
+	case "tool/error":
+		var data struct {
+			Error string `json:"error,omitempty"`
+		}
+		if json.Unmarshal(event.Data, &data) == nil {
+			add(data.Error)
 		}
 	}
 	return total
@@ -133,16 +253,24 @@ func (a *app) compactionPreStep(est compactionEstimator) func(context.Context, s
 		if a.compaction == nil {
 			return nil
 		}
-		if !a.overPressure(est) {
+		over, ok := a.overPressureContext(ctx, est)
+		if !ok || !over {
 			return nil
 		}
 		// dsh gives pressure compaction one follow-up attempt when the first
 		// summary did not bring the surface below the pressure threshold.
 		var res *compaction.Result
-		for attempt := 0; attempt < 2 && a.overPressure(est); attempt++ {
+		for attempt := 0; attempt < 2; attempt++ {
+			over, ok = a.overPressureContext(ctx, est)
+			if !ok || !over {
+				break
+			}
 			result, err := a.compactAndLog(ctx, "surface token estimate exceeded threshold", "pressure",
 				func() (*compaction.Result, error) {
-					return a.compaction.CompactIfNeeded(ctx, a.log, compaction.TriggerPressure)
+					// The pressure gate has already derived the surface above. Use the
+					// unconditional path so BasicEngine does not derive the same
+					// 100k-event history a second time before it can observe cancel.
+					return a.compaction.CompactNow(ctx, a.log)
 				})
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "[compaction failed open]", err)
@@ -185,6 +313,30 @@ func (a *app) overPressure(est compactionEstimator) bool {
 		threshold = config.DefaultCompactionTokenThreshold
 	}
 	return threshold > 0 && est(a.log) > threshold
+}
+
+// overPressureContext runs the potentially expensive production-history
+// estimator behind a cancellation boundary. A large restored session can make
+// DeriveHistory take noticeable time; a canceled turn must not wait for that
+// read before the loop can append its canceled lifecycle tail. The estimator
+// only reads a snapshot, so letting it finish in the background is safe and the
+// buffered result prevents a goroutine leak once it returns.
+func (a *app) overPressureContext(ctx context.Context, est compactionEstimator) (bool, bool) {
+	if err := ctx.Err(); err != nil {
+		return false, false
+	}
+	done := make(chan int, 1)
+	go func() { done <- est(a.log) }()
+	select {
+	case <-ctx.Done():
+		return false, false
+	case tokens := <-done:
+		threshold := a.cfg.Compaction.TokenThreshold
+		if threshold <= 0 {
+			threshold = config.DefaultCompactionTokenThreshold
+		}
+		return threshold > 0 && tokens > threshold, true
+	}
 }
 
 // compactAndLog runs one compaction attempt through the engine and appends the

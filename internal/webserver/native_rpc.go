@@ -1291,17 +1291,23 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 		if req.SessionID == "" {
 			return nativeRPCFailure("bad-request", "sessionId is required", nil)
 		}
-		if _, err := s.store.LoadSession(r.Context(), req.SessionID); err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				return nativeRPCFailure("session-not-found", "session not found", map[string]any{"sessionId": req.SessionID})
-			}
-			return nativeStoreFailure(err)
-		}
 		if s.stopFn == nil {
 			return nativeRPCFailure("not-supported", "turn stopper not wired", nil)
 		}
-		if err := s.stopFn(req.SessionID); err != nil && !strings.Contains(err.Error(), "no turn running") {
-			return nativeRPCFailure("cancel-failed", err.Error(), nil)
+		// Cancellation is a control-plane operation. Ask the in-memory turn
+		// owner first: validating a running 100k-event session through SQLite can
+		// wait behind the append writer and make the stop button appear frozen.
+		// Only the idle/no-turn path needs the durable existence check below.
+		if err := s.stopFn(req.SessionID); err != nil {
+			if !strings.Contains(err.Error(), "no turn running") {
+				return nativeRPCFailure("cancel-failed", err.Error(), nil)
+			}
+			if _, metaErr := s.store.GetSessionMeta(r.Context(), req.SessionID); metaErr != nil {
+				if errors.Is(metaErr, store.ErrNotFound) {
+					return nativeRPCFailure("session-not-found", "session not found", map[string]any{"sessionId": req.SessionID})
+				}
+				return nativeStoreFailure(metaErr)
+			}
 		}
 		return nativeRPCSuccess(map[string]any{"accepted": true})
 	case "workspace.list":
