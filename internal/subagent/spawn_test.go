@@ -149,14 +149,14 @@ func TestSpawnFullRound(t *testing.T) {
 		t.Fatalf("child log for %s not found", run.ID)
 	}
 	events := childLog.Events()
-	if len(events) != 8 {
-		t.Fatalf("child events = %d, want 8 (turn/step lifecycle + user, chunks, assistant)", len(events))
+	if len(events) != 7 {
+		t.Fatalf("child events = %d, want 7 (turn/step lifecycle + user, aggregated chunk, assistant)", len(events))
 	}
 	if events[1].Type != session.EventUserMessage {
 		t.Fatalf("child user event = %q, want user/message", events[1].Type)
 	}
-	if events[5].Type != session.EventAssistantMessage {
-		t.Fatalf("assistant child event = %q, want assistant/message", events[5].Type)
+	if events[4].Type != session.EventAssistantMessage {
+		t.Fatalf("assistant child event = %q, want assistant/message", events[4].Type)
 	}
 	hist := childLog.DeriveHistory()
 	if len(hist) != 2 || hist[0].Role != llm.RoleUser || hist[0].Text() != "summarize the docs" ||
