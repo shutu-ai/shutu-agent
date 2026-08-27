@@ -292,5 +292,46 @@
     "durableSession": { "sessionId": "s-69662534", "sharedData": true, "eventsReadableAfter": ["upgrade", "rollback", "recovery"], "forcedStopRecovery": true },
     "thresholdGate": "passed",
     "scope": "current Windows target; Linux/WSL test intentionally canceled"
+  },
+  "windowsScreenReaderCurrent": {
+    "reader": "NVDA",
+    "version": "2026.1.1",
+    "mode": "official installer temporary copy; no system installation",
+    "binarySha256": "6E0289EB5A3AA076EB97EA99C5D5465CB48B5ECC6A3257DC3D811F881A1747C9",
+    "signature": { "status": "Valid", "subject": "NV Access Limited" },
+    "os": "Windows 11 build 26200",
+    "browser": "Google Chrome for Testing",
+    "service": "http://127.0.0.1:18099",
+    "source": "NVDA Speech Viewer RichEdit ValuePattern captured through Windows UI Automation",
+    "scenarios": {
+      "conversation": {
+        "focusType": "ControlType.TabItem",
+        "speech": "对话 选项卡 已选择，2 之 1 项"
+      },
+      "tabToTrajectory": {
+        "focusType": "ControlType.TabItem",
+        "speech": "轨迹 选项卡，2 之 2 项"
+      },
+      "shiftTabToConversation": {
+        "focusType": "ControlType.TabItem",
+        "speech": "对话 选项卡 已选择，2 之 1 项"
+      },
+      "settingsDialog": {
+        "triggerSpeech": "设置 按钮 已折叠 打开对话框",
+        "firstFocus": { "name": "关闭", "type": "ControlType.Button", "speech": "关闭 按钮" },
+        "tabFocus": { "name": "标准模式", "type": "ControlType.Button", "speech": "标准模式 菜单按钮 已折叠 子菜单" },
+        "shiftTabFocus": { "name": "关闭", "type": "ControlType.Button", "speech": "关闭 按钮" },
+        "escapeRestored": { "name": "设置", "type": "ControlType.Button", "speech": "设置 按钮 已折叠 打开对话框" }
+      },
+      "composer": { "name": "给智能体发消息", "type": "ControlType.Edit", "speech": "给智能体发消息 编辑框 多行 空白" },
+      "loadedActions": [
+        { "name": "Session log", "type": "ControlType.Button", "speech": "Session log 按钮" },
+        { "name": "加载更早", "type": "ControlType.Button", "speech": "加载更早 按钮" },
+        { "name": "复制", "type": "ControlType.Button", "speech": "复制 按钮" },
+        { "name": "好的回答", "type": "ControlType.Button", "speech": "好的回答 切换按钮 未按下" }
+      ]
+    },
+    "thresholdGate": "passed",
+    "scope": "current Windows target; Linux/WSL testing canceled"
   }
 }

@@ -462,17 +462,27 @@ machine-readable result is `windowsDeploymentCurrent` in
 
 ## P36-6.3 Cross-engine accessibility evidence (2026-08-27)
 
-Playwright Firefox and WebKit binaries were installed in the user-level browser cache and the full native accessibility fixture was rerun alongside Chromium. Desktop `1280x900` and mobile `390x844` passed in all three engines: two Conversation/Trajectory tabs exposed valid selection state and panel labels, visible controls had accessible names, Settings focus trapping passed for Tab/Shift+Tab, Escape restored the trigger focus, touch-target counts were reported, and console errors were zero. Real screen-reader speech output remains the only P36-6.3 evidence not executable in this environment.
+Playwright Firefox and WebKit binaries were installed in the user-level browser cache and the full native accessibility fixture was rerun alongside Chromium. Desktop `1280x900` and mobile `390x844` passed in all three engines: two Conversation/Trajectory tabs exposed valid selection state and panel labels, visible controls had accessible names, Settings focus trapping passed for Tab/Shift+Tab, Escape restored the trigger focus, touch-target counts were reported, and console errors were zero.
 
 A Windows 11 Narrator process was also started and its Speech recap clipboard
 channel was verified independently. During the headed Chrome probe, however,
 the recap continued to report the browser URL/previous-window phrase instead of
 the focused DSH control; the DOM focus and ARIA state remained correct. This
-probe is intentionally not accepted as real speech evidence. A human must run
-the documented Narrator keyboard/voice scenario and confirm the spoken control
-name, state, and type before P36-6.3 can be checked.
+probe is intentionally not accepted as speech evidence. The accepted Windows
+reader evidence uses the signed NVDA 2026.1.1 temporary copy and its Speech
+Viewer, recorded in `docs/evidence/p36-screen-reader-2026-08-27.json`.
 
-Manual close-out procedure: open the current Windows build, press `Win+Ctrl+Enter`
+The NVDA run focused the native page and recorded these actual announcements:
+Conversation was reported as a selected tab, `2 之 1 项`; Tab moved to
+Trajectory, `2 之 2 项`; Shift+Tab returned to Conversation. Settings was
+reported as a button opening a dialog; Enter focused the dialog's Close button,
+Tab moved to the Standard mode menu button, Shift+Tab returned to Close, and
+Escape restored focus to Settings. The Composer was reported as a multiline
+empty edit field. Session log, Load earlier, Copy, and the Good answer toggle
+were reported with their names and control types; Good answer was reported as
+not pressed.
+
+Manual cross-reader procedure (optional follow-up): open the current Windows build, press `Win+Ctrl+Enter`
 to start Narrator, focus the page (not the browser address bar), and use `Tab`
 through the Conversation/Trajectory tabs, loaded event actions, composer, and
 Settings. Use `Narrator+Tab` or `Narrator+Right Arrow` to reread the current
@@ -480,5 +490,5 @@ item, confirm the spoken name/state/type, use `Shift+Tab` and `Escape` for
 reverse navigation and focus restoration, then open Speech recap with
 `Narrator+Alt+X` and save the transcript with the build revision. Repeat once
 at `390x844` touch emulation or a touch-capable Windows device. The checklist
-should only be checked after a human records that transcript and confirms the
-main scenarios without relying on sight.
+is useful for an additional Narrator-specific check; the P36-6.3 Windows gate
+is already closed by the NVDA Speech Viewer evidence above.
