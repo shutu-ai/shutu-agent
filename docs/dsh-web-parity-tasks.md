@@ -69,6 +69,7 @@
 - [ ] P36-6.1：建立桌面/移动端、深色/浅色、空数据/加载/错误状态截图基线。
 - [x] P36-6.1a：通过 Playwright 保存原生 DSH 空数据桌面/移动基线截图；截图目录支持 `SHUTU_E2E_ARTIFACT_DIR`，本轮命令与结果记录在 `docs/dsh-web-parity-acceptance.md`。
 - [x] P36-6.1b：通过 Playwright Chromium `colorScheme: dark` 保存原生 DSH 空数据桌面基线，并复用溢出、双 WebSocket、无障碍名称和控制台检查。
+- [x] P36-6.1c：通过 Playwright 延迟 `session.list` 请求保存原生 DSH 桌面加载态截图，并验证加载完成后恢复正常 shell、双 WebSocket 和零控制台错误。
 - [ ] P36-6.2：对比布局尺寸、字体、间距、颜色、边框、滚动条、焦点和弹层行为。
 - [ ] P36-6.3：验证 Tab、快捷键、Escape、读屏语义、ARIA、焦点恢复和触控目标。
 - [x] P36-6.3a：Playwright 验证原生设置 Escape 关闭、侧边栏 Enter 键切换、桌面/移动按钮可访问名称及移动端可见按钮不低于 24px；完整 Tab/读屏/焦点矩阵仍待补齐。

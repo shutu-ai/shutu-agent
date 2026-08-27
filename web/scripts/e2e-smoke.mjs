@@ -48,7 +48,7 @@ function valueFor(method) {
   }
 }
 
-async function installNativeMock(page) {
+async function installNativeMock(page, options = {}) {
   const sockets = new Set()
   const requests = []
   await page.route('**/plugins/events', route => route.fulfill({
@@ -65,6 +65,9 @@ async function installNativeMock(page) {
     const body = JSON.parse(route.request().postData() ?? '{}')
     assert.equal(body.type, 'client-request', `unexpected native request envelope for ${body.method}`)
     requests.push(body.method)
+    if (body.method === 'session.list' && options.sessionListDelayMs) {
+      await new Promise(resolvePromise => setTimeout(resolvePromise, options.sessionListDelayMs))
+    }
     return route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -158,6 +161,22 @@ async function runDarkDesktop(browser) {
   return { viewport: '1280x900', colorScheme: 'dark', overflow, console: 'clean' }
 }
 
+async function runLoadingDesktop(browser) {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+  const issues = []
+  page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
+  page.on('pageerror', error => issues.push(error.message))
+  const { sockets } = await installNativeMock(page, { sessionListDelayMs: 1_000 })
+  await page.goto(baseUrl, { waitUntil: 'domcontentloaded' })
+  await page.waitForTimeout(250)
+  await page.screenshot({ path: resolve(artifactDirectory, 'shutu-native-loading-desktop.png') })
+  await waitForNativeShell(page)
+  assert.ok(sockets.has('/api/events.mux'), 'loading native mux WebSocket was not opened')
+  assert.deepEqual(issues, [])
+  await page.close()
+  return { viewport: '1280x900', state: 'loading', console: 'clean' }
+}
+
 async function runMobile(browser) {
   const page = await browser.newPage({ viewport: { width: 390, height: 844 } })
   const issues = []
@@ -196,8 +215,9 @@ try {
   try {
     const desktop = await runDesktop(browser)
     const darkDesktop = await runDarkDesktop(browser)
+    const loadingDesktop = await runLoadingDesktop(browser)
     const mobile = await runMobile(browser)
-    console.log(JSON.stringify({ browser: 'playwright', native: 'ok', desktop, darkDesktop, mobile }))
+    console.log(JSON.stringify({ browser: 'playwright', native: 'ok', desktop, darkDesktop, loadingDesktop, mobile }))
   } finally {
     await browser.close()
   }

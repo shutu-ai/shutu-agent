@@ -90,4 +90,8 @@ npm.cmd run real-performance -- s-f15a7e57 180
 
 ## P36-6.1 Native dark baseline evidence (2026-08-27)
 
-`SHUTU_E2E_ARTIFACT_DIR=../docs/evidence/dsh-native-2026-08-27 npm.cmd run e2e` passed with a separate Chromium `colorScheme: dark` page. The dark desktop screenshot is `docs/evidence/dsh-native-2026-08-27/shutu-native-dark-desktop.png`; it has zero horizontal overflow, both native WebSockets, no unnamed-button regression, and no console errors or warnings. Loading/error states and the full light/dark matrix remain open.
+`SHUTU_E2E_ARTIFACT_DIR=../docs/evidence/dsh-native-2026-08-27 npm.cmd run e2e` passed with a separate Chromium `colorScheme: dark` page. The dark desktop screenshot is `docs/evidence/dsh-native-2026-08-27/shutu-native-dark-desktop.png`; it has zero horizontal overflow, both native WebSockets, no unnamed-button regression, and no console errors or warnings. A stable user-visible error state and the full light/dark matrix remain open.
+
+## P36-6.1 Native loading evidence (2026-08-27)
+
+The same Playwright run delayed the native `session.list` response for 1 second and captured `docs/evidence/dsh-native-2026-08-27/shutu-native-loading-desktop.png` during the low-opacity loading state. The request then settled into the normal DSH shell with no page errors. A stable user-visible error-state surface remains open because the upstream shell currently falls back to its empty shell for this fixture failure.
