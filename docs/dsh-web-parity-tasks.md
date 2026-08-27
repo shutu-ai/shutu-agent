@@ -271,14 +271,14 @@
 
 验收标准：交付包可在目标环境独立启动，核心页面、API、SSE 和错误处理均可用，并有可重复的部署步骤。
 
-### P36-1：DSH 原生前端构建入口（部分完成）
+### P36-1：DSH 原生前端构建入口（已完成）
 
 - [x] 在 `shutu-agent` 内建立独立的 React/Cordis/Vite 原生入口；`SHUTU_DSH_NATIVE=1` 时不再以当前单体 `App` 作为 UI 根节点。
 - [x] 以只读方式接入 DSH client package 的 boot、module loader、uiRenderer、slot 和 plugin manifest 入口约定；运行时 boot manifest/插件下发由 P36-2 补齐。
 - [x] 解决当前 bundle 的依赖、dist 和 source map 闭包；`npm.cmd run build:native` 可生成 native dist，运行时不读取 `deepseek-harness` 源目录。
 - [x] 建立 DSH 版本/来源清单，确保后续 DSH 参考变化可追踪；native build 生成 `dist/dsh-native-manifest.json`。
 
-验收标准：构建入口和 DSH boot 调用链已具备；待 P36-2 提供 `window.__ModuleLoader__`、`window.__DSH_BOOT__` 和插件 bundle 后，才能在浏览器中完成原生 UI 启动验收。
+验收标准：构建入口、DSH boot 调用链、native dist、模块图和插件 bundle 均已具备，并已通过浏览器启动及 dist 验证。
 
 ### P36-2：DSH Web API/RPC/WebSocket 适配层
 
@@ -287,11 +287,11 @@
 - [x] 实现 `/api/events.mux`、`/api/events.host` 的 downlink-only WebSocket 升级和 session subscription/event frame。
 - [x] native bundle 自带 `client-modules` bootstrap，并在入口安装最小 `__ModuleLoader__` / `__DSH_BOOT__` graph。
 - [x] 实现 `session.attachment` 的会话引用校验、Base64 读取和 DSH `ImageAttachmentRef` 映射；实现 `session.models` 标准方法入口。
-- [ ] 实现会话、工作区、设置、模型、权限、文件、附件、命令、技能、队列、审批和导出接口。
-- [ ] 补齐 host downlink 事件、连接状态、断线重连、续传，以及剩余设置/模型/权限/文件/附件/命令/技能/队列/审批/导出接口。
+- [x] 实现会话、工作区、设置、模型、权限、文件、附件、命令、技能、队列、审批和导出接口。
+- [x] 补齐 host downlink 事件、连接状态、断线重连、续传，以及剩余设置/模型/权限/文件/附件/命令/技能/队列/审批/导出接口。
 - [x] 已建立 Go handler、核心契约测试和 WebSocket subscription baseline 测试；replay fixture 与完整协议覆盖留待后续补齐。
 
-验收标准：核心 RPC/downlink 已具备；待 P36-3/P36-4 补齐原生插件依赖的方法和插件事件后，DSH 原生 client 才能完成完整启动、打开、发送和恢复验收。
+验收标准：核心 RPC/downlink、插件依赖方法、插件事件、完整启动、打开、发送和恢复路径均已通过 native E2E/契约验证。
 
 ### P36-3：DSH Session/Conversation 数据模型适配
 
@@ -302,12 +302,12 @@
 
 验收标准：DSH 原生 Conversation、Tool、Trajectory 和 Inspector 组件可以直接消费 Shutu 适配后的 DSH 数据。
 
-### P36-4：DSH 原生 UI 插件与视觉替换
+### P36-4：DSH 原生 UI 插件与视觉替换（已完成）
 
-- [ ] 接入 DSH layout、theme、brand、sidebar、workspace 和 conversation 插件。
-- [ ] 接入 DSH tool、trajectory、composer、command、input trigger、reference 和 skill 插件。
-- [ ] 接入 DSH subagent、jobs、model、permission、plan、goal、settings、attachment 和 question 插件。
-- [ ] 移除当前 Shutu 自定义主布局、颜色 token、组件层级和页面导航作为最终渲染路径。
+- [x] 接入 DSH layout、theme、brand、sidebar、workspace 和 conversation 插件。
+- [x] 接入 DSH tool、trajectory、composer、command、input trigger、reference 和 skill 插件。
+- [x] 接入 DSH subagent、jobs、model、permission、plan、goal、settings、attachment 和 question 插件。
+- [x] 移除当前 Shutu 自定义主布局、颜色 token、组件层级和页面导航作为最终渲染路径。
 
 验收标准：页面 DOM 结构、布局、主题 token、组件文案和视觉行为与 DSH 原生 Web 一致。
 
