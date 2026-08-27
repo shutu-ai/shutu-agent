@@ -6,16 +6,222 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/jabing/shutu-agent/internal/jobs"
 	"github.com/jabing/shutu-agent/internal/terminal"
 	"github.com/jabing/shutu-agent/internal/tools"
 )
+
+const minimalPersistentShellType = "minimal-persistent-shell"
+
+// persistentShellTool is the minimal-preset projection of DSH's
+// tool-bash-persistent/tool-pwsh-persistent. One owner gets one long-lived
+// interactive process; the model sees only the command argument.
+type persistentShellTool struct {
+	app         *app
+	name        string
+	shell       string
+	description string
+}
+
+func (t persistentShellTool) Name() string        { return t.name }
+func (t persistentShellTool) Description() string { return t.description }
+
+func (persistentShellTool) Schema() map[string]any {
+	return objectSchema(map[string]any{
+		"command": map[string]any{
+			"type":        "string",
+			"minLength":   1,
+			"description": "The shell command to run.",
+		},
+	}, []string{"command"})
+}
+
+func (persistentShellTool) OutputSchema() map[string]any {
+	return map[string]any{"type": "string"}
+}
+
+func (t persistentShellTool) Execute(ctx context.Context, args any) (string, error) {
+	var in struct {
+		Command string `json:"command"`
+	}
+	if err := tools.DecodeArgs(args, &in); err != nil {
+		return "", fmt.Errorf("%s: %w", t.name, err)
+	}
+	if strings.TrimSpace(in.Command) == "" {
+		return "", fmt.Errorf("%s: command must be a non-empty string", t.name)
+	}
+	rec, err := t.app.minimalPersistentShell(t.name, t.shell)
+	if err != nil {
+		return "", err
+	}
+	rec.mu.Lock()
+	result, writeErr := rec.sess.Write(persistentShellCommand(t.shell, in.Command), true)
+	rec.mu.Unlock()
+	if writeErr != nil {
+		t.app.removeModelTerminal(rec)
+		return "", fmt.Errorf("%s: %w", t.name, writeErr)
+	}
+	if result.Status.Kind == "exited" {
+		t.app.removeModelTerminal(rec)
+		return persistentShellExitResult(result.Viewport, result.Status.ExitCode), nil
+	}
+	if result.Wait == terminal.WaitTimeout {
+		t.app.removeModelTerminal(rec)
+		return "Your command timed out. Below is partial output:\n" + result.Viewport +
+			"\nThe persistent " + t.name + " shell was reset; the next call starts from the workspace with a fresh current directory and environment.", nil
+	}
+	return persistentShellResult(result.Viewport), nil
+}
+
+func persistentShellCommand(shell, command string) string {
+	nonceBytes := make([]byte, 8)
+	_, _ = rand.Read(nonceBytes)
+	nonce := fmt.Sprintf("%x-%d", nonceBytes, time.Now().UnixNano())
+	start := "__SHUTU_PERSISTENT_START_" + nonce + "__"
+	end := "__SHUTU_PERSISTENT_END_" + nonce + ":"
+	if isPowerShell(shell) {
+		body := strings.ReplaceAll(command, "`", "``")
+		body = strings.ReplaceAll(body, "\"", "`\"")
+		body = strings.ReplaceAll(body, "$", "`$")
+		body = strings.ReplaceAll(body, "\r", "")
+		body = strings.ReplaceAll(body, "\n", "`n")
+		return fmt.Sprintf("Write-Output '%s'; $LASTEXITCODE = $null; $__ok = $false; try { Invoke-Expression \"%s\"; $__ok = $? } catch { $__ok = $false }; $__s = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } elseif ($__ok) { 0 } else { 1 }; Write-Output ('%s' + $__s)", start, body, end)
+	}
+	quoted := strings.ReplaceAll(command, "\\", "\\\\")
+	quoted = strings.ReplaceAll(quoted, "'", "\\'")
+	quoted = strings.ReplaceAll(quoted, "\r", "\\r")
+	quoted = strings.ReplaceAll(quoted, "\n", "\\n")
+	return fmt.Sprintf("printf '%%s\\n' '%s'; eval -- $'%s'; __shutu_status=$?; printf '%%s%%s\\n' '%s' \"$__shutu_status\"", start, quoted, end)
+}
+
+func persistentShellResult(viewport string) string {
+	start := strings.LastIndex(viewport, "__SHUTU_PERSISTENT_START_")
+	if start < 0 {
+		return viewport
+	}
+	lineEnd := strings.Index(viewport[start:], "\n")
+	if lineEnd < 0 {
+		return ""
+	}
+	contentStart := start + lineEnd + 1
+	endRel := strings.Index(viewport[contentStart:], "__SHUTU_PERSISTENT_END_")
+	if endRel < 0 {
+		return strings.TrimSpace(viewport[contentStart:])
+	}
+	end := contentStart + endRel
+	body := strings.TrimRight(viewport[contentStart:end], "\r\n")
+	statusLine := viewport[end:]
+	if newline := strings.Index(statusLine, "\n"); newline >= 0 {
+		status := strings.TrimSpace(statusLine[:newline])
+		if colon := strings.LastIndex(status, ":"); colon >= 0 {
+			code := strings.TrimSpace(status[colon+1:])
+			if code != "" && code != "0" {
+				body += "\n[exit code: " + code + "]"
+			}
+		}
+	}
+	return body
+}
+
+func persistentShellExitResult(viewport string, code int) string {
+	body := persistentShellResult(viewport)
+	status := fmt.Sprintf("[shell exited: code %d]", code)
+	if body == "" {
+		body = status
+	} else {
+		body += "\n" + status
+	}
+	return body + "\nThe persistent shell was reset; the next call starts from the workspace with a fresh current directory and environment."
+}
+
+func isPowerShell(shell string) bool {
+	base := strings.ToLower(filepath.Base(shell))
+	return base == "pwsh" || base == "pwsh.exe" || base == "powershell" || base == "powershell.exe"
+}
+
+func (a *app) registerMinimalPersistentShell() error {
+	shell := a.cfg.Terminal.Shell
+	if runtime.GOOS == "windows" {
+		if shell == "" {
+			shell = "pwsh"
+			if _, err := exec.LookPath(shell); err != nil {
+				shell = "powershell.exe"
+			}
+		}
+	} else if shell == "" {
+		shell = "/bin/bash"
+	}
+	name := "bash"
+	description := "Run commands in a persistent bash shell. State, including the current directory and exported environment variables, persists across calls for this agent."
+	if runtime.GOOS == "windows" {
+		name = "pwsh"
+		description = "Run commands in a persistent PowerShell shell. State, including the current directory and exported environment variables, persists across calls for this agent."
+	}
+	a.modelTermMu.Lock()
+	if a.modelTerms == nil {
+		a.modelTerms = make(map[string]*modelTerminalRecord)
+	}
+	a.modelTermMu.Unlock()
+	return a.reg.Register(persistentShellTool{app: a, name: name, shell: shell, description: description})
+}
+
+func (a *app) minimalPersistentShell(name, shell string) (*modelTerminalRecord, error) {
+	a.modelTermMu.Lock()
+	defer a.modelTermMu.Unlock()
+	for _, rec := range a.modelTerms {
+		if rec.owner == a.currentID && rec.typ == minimalPersistentShellType && !rec.closing {
+			return rec, nil
+		}
+	}
+	sess, err := terminal.NewSession(terminal.SessionOpts{
+		Shell: shell, Args: append([]string(nil), a.cfg.Terminal.Args...), Workdir: a.sessionCWD(),
+		IdleMS: persistentShellIdleMS(a.cfg.Terminal.ReadIdleMS), TimeoutMS: a.cfg.Terminal.ReadTimeoutMS,
+		ScrollbackMaxBytes: a.cfg.Terminal.ScrollbackMaxBytes, ScrollbackLines: a.cfg.Terminal.ScrollbackLines,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("%s: start persistent shell: %w", name, err)
+	}
+	rec := &modelTerminalRecord{owner: a.currentID, typ: minimalPersistentShellType, cwd: a.sessionCWD(), sess: sess}
+	a.modelTerms[sess.ID()] = rec
+	return rec, nil
+}
+
+func persistentShellIdleMS(configured int) int {
+	// Windows PowerShell emits its startup banner asynchronously when stdin is
+	// a redirected pipe. A one-second quiet window gives the first command the
+	// same readiness margin as DSH's terminal backend, even when a deployment
+	// uses a very small interactive-terminal idle setting.
+	if configured < 1000 {
+		return 1000
+	}
+	return configured
+}
+
+func (a *app) removeModelTerminal(rec *modelTerminalRecord) {
+	if rec == nil {
+		return
+	}
+	a.modelTermMu.Lock()
+	if current, ok := a.modelTerms[rec.sess.ID()]; ok && current == rec {
+		delete(a.modelTerms, rec.sess.ID())
+	}
+	rec.closing = true
+	a.modelTermMu.Unlock()
+	rec.mu.Lock()
+	_ = rec.sess.Close()
+	rec.mu.Unlock()
+}
 
 type modelTerminalRecord struct {
 	owner   string

@@ -22,8 +22,11 @@ func shellCommand(opts SessionOpts) *exec.Cmd {
 	switch strings.ToLower(filepath.Base(shell)) {
 	case "cmd.exe", "cmd":
 		args = append(args, "/Q", "/K", "chcp 65001 >nul")
-	case "powershell.exe", "powershell":
-		args = append(args, "-NoLogo", "-NoExit", "-Command", "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8")
+	case "powershell.exe", "powershell", "pwsh.exe", "pwsh":
+		// Keep the process in the interactive stdin loop. Supplying -Command
+		// here executes the bootstrap script but does not reliably transition
+		// Windows PowerShell back to reading a redirected stdin pipe.
+		args = append(args, "-NoLogo", "-NoExit")
 	}
 	return exec.Command(shell, args...)
 }

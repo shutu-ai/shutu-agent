@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -93,6 +94,48 @@ func TestRegisterTerminalEnabledRegistersPwsh(t *testing.T) {
 	schema, _ = json.Marshal(toolSchema(app.reg, "pwsh"))
 	if !strings.Contains(string(schema), "run_in_background") {
 		t.Fatalf("schema with jobs must advertise run_in_background: %s", schema)
+	}
+}
+
+func TestMinimalRegistersOnlyPersistentPlatformShell(t *testing.T) {
+	app := makeTermApp(true)
+	app.cfg.Mode = config.ModeMinimal
+	if err := app.registerTerminal(); err != nil {
+		t.Fatalf("registerTerminal: %v", err)
+	}
+	want := "bash"
+	if runtime.GOOS == "windows" {
+		want = "pwsh"
+	}
+	if !containsStr(specNames(app.reg), want) {
+		t.Fatalf("minimal registered tools = %v, want %q", specNames(app.reg), want)
+	}
+	for _, name := range []string{"terminal_open", "terminal_list", "terminal_read", "terminal_send", "terminal_signal", "terminal_close"} {
+		if containsStr(specNames(app.reg), name) {
+			t.Fatalf("minimal must not register generic %s; DSH exposes the persistent shell directly", name)
+		}
+	}
+	defer app.closeModelTerminalSessions()
+	app.reg.SetPolicy(tools.Policy{Enabled: []string{want}, Timeout: time.Minute})
+	firstCommand := "export SHUTU_PERSISTENT_STATE=kept; echo persistent-shell-ready"
+	secondCommand := "echo $SHUTU_PERSISTENT_STATE"
+	if runtime.GOOS == "windows" {
+		firstCommand = "$env:SHUTU_PERSISTENT_STATE = 'kept'; Write-Output persistent-shell-ready"
+		secondCommand = "Write-Output $env:SHUTU_PERSISTENT_STATE"
+	}
+	first, err := app.reg.Execute(context.Background(), want, json.RawMessage(fmt.Sprintf(`{"command":%q}`, firstCommand)))
+	if err != nil {
+		t.Fatalf("first persistent shell call: %v", err)
+	}
+	if !strings.Contains(first.Output, "persistent-shell-ready") {
+		t.Fatalf("first output = %q", first.Output)
+	}
+	second, err := app.reg.Execute(context.Background(), want, json.RawMessage(fmt.Sprintf(`{"command":%q}`, secondCommand)))
+	if err != nil {
+		t.Fatalf("second persistent shell call: %v", err)
+	}
+	if !strings.Contains(second.Output, "kept") {
+		t.Fatalf("second output = %q", second.Output)
 	}
 }
 

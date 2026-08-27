@@ -34,6 +34,9 @@ func (a *app) registerTerminal() error {
 	if !config.Enabled(a.cfg.Terminal.Enabled) {
 		return nil
 	}
+	if a.cfg.Mode == config.ModeMinimal {
+		return a.registerMinimalPersistentShell()
+	}
 	if runtime.GOOS != "windows" {
 		bash := tools.NewRunCommandForWorkdirAndJobs(a.sessionCWD, func() jobs.Registry {
 			return a.jobs
