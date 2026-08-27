@@ -88,7 +88,7 @@
 - [x] P36-6.1b：通过 Playwright Chromium `colorScheme: dark` 保存原生 DSH 空数据桌面基线，并复用溢出、双 WebSocket、无障碍名称和控制台检查。
 - [x] P36-6.1c：通过 Playwright 延迟 `session.list` 请求保存原生 DSH 桌面加载态截图，并验证加载完成后恢复正常 shell、双 WebSocket 和零控制台错误。
 - [x] P36-6.1d：通过 Playwright 注入 DSH `turn/end` 错误事件，保存桌面/移动错误态截图，验证“本轮运行失败”状态、错误详情、零横向溢出和零控制台错误。
-- [ ] P36-6.2：对比布局尺寸、字体、间距、颜色、边框、滚动条、焦点和弹层行为。
+- [x] P36-6.2：对比布局尺寸、字体、间距、颜色、边框、滚动条、焦点和弹层行为；独立 DSH 构建像素差异已收敛到桌面构建/version 标签，移动端字节级一致，证据见 `docs/evidence/p36-pixel-2026-08-27/`。
 - [x] P36-6.2a：Playwright 原生几何矩阵覆盖桌面/移动端主区边界、滚动容器、字体/颜色采样、设置弹层视口边界及 Escape 焦点恢复，并保存 JSON/截图证据。
 - [ ] P36-6.3：验证 Tab、快捷键、Escape、读屏语义、ARIA、焦点恢复和触控目标。
 - [x] P36-6.3a：Playwright 验证原生设置 Escape 关闭、侧边栏 Enter 键切换、桌面/移动按钮可访问名称；DSH 原生移动端紧凑图标尺寸按视觉基线保留，完整 Tab/读屏/焦点矩阵仍待补齐。
@@ -156,7 +156,7 @@
 | P36-3 | DSH Session/Conversation 数据模型适配 | P0 | 部分完成（native history/live projection） | P36-2 |
 | P36-4 | DSH 原生 UI 插件与视觉替换 | P0 | 已完成首轮实现 | P36-1、P36-3 |
 | P36-5 | DSH 全量交互与状态能力 | P0 | 已完成原生 UI 矩阵 | P36-2、P36-4 |
-| P36-6 | 视觉、响应式、键盘与无障碍验收 | P1 | 部分完成（待独立像素差异与目标无障碍矩阵） | P36-4、P36-5 |
+| P36-6 | 视觉、响应式、键盘与无障碍验收 | P1 | 部分完成（仅待真实读屏器播报） | P36-4、P36-5 |
 | P36-7 | 真实任务性能与持续流式验收 | P1 | 部分完成（待 100k 级高密度持续流） | P36-5、P36-6 |
 | P36-8 | 原生 UI 生产交付与目标环境验证 | P1 | 部分完成（待正式目标机验收） | P36-7 |
 
@@ -325,7 +325,7 @@
 ### P36-6：视觉、响应式、键盘与无障碍验收
 
 - [x] 建立 DSH 桌面/移动端、深色/浅色、空数据/加载/错误状态截图基线。
-- [ ] 对比布局尺寸、字体、间距、颜色、边框、滚动条、焦点和弹层行为。
+- [x] 对比布局尺寸、字体、间距、颜色、边框、滚动条、焦点和弹层行为；独立 DSH 像素差异已记录，桌面差异仅为构建/version 标签，移动端字节级一致。
 - [ ] 验证 Tab、快捷键、Escape、读屏语义、ARIA、焦点恢复和触控目标。
 - [x] 为每个 DSH 核心页面保留截图和交互证据。
 
@@ -382,4 +382,4 @@ P24–P35 已完成首轮实现；P34/P35 的真实环境事项与 P36-1–P36-8
 
 - [x] P36-4a: `verify-dist.mjs` now requires the complete native DSH client roster plus Typert, Cordis runner, UI Cordis, export, and native Remote bridge entries; a release dist with a partial plugin graph fails verification.
 - [x] P36-8.2e: `npm.cmd run release` completed with 973 modules transformed, 40 native plugins in the manifest, dist verification passed, 45 frontend tests passed, and the full Playwright DSH interaction matrix passed; formal target-host evidence remains open.
-- [x] P36-6.1a: Playwright generated a committed native visual baseline for light/dark desktop, mobile, loading/error states, and core workspace/jobs/subagents/settings surfaces under `docs/p36-visual-baseline/`; independent DSH pixel-diff remains open.
+- [x] P36-6.1a: Playwright generated a committed native visual baseline for light/dark desktop, mobile, loading/error states, and core workspace/jobs/subagents/settings surfaces under `docs/p36-visual-baseline/`; independent DSH pixel-diff evidence is committed under `docs/evidence/p36-pixel-2026-08-27/`.

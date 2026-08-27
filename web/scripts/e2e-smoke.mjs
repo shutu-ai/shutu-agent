@@ -12,8 +12,10 @@ const distIndex = resolve(webRoot, 'dist/index.html')
 const { chromium, firefox, webkit } = createRequire(import.meta.url)(resolve(dshRoot, 'apps/web/node_modules/playwright'))
 const host = '127.0.0.1'
 const port = Number(process.env.SHUTU_E2E_PORT ?? 18117)
-const baseUrl = `http://${host}:${port}/`
+const baseUrl = process.env.SHUTU_E2E_BASE_URL ?? `http://${host}:${port}/`
+const ownsServer = process.env.SHUTU_E2E_SKIP_SERVER !== '1'
 const artifactDirectory = resolve(process.env.SHUTU_E2E_ARTIFACT_DIR ?? process.env.TEMP ?? process.env.TMP ?? '.')
+const pixelCaptureDirectory = resolve(process.env.SHUTU_PIXEL_CAPTURE_DIR ?? artifactDirectory)
 mkdirSync(artifactDirectory, { recursive: true })
 
 if (!existsSync(vite)) {
@@ -44,7 +46,7 @@ function valueFor(method) {
     case 'dynamicCordisRunner/inventory':
       return []
     case 'dynamicCordisRunner/syncInspectManifest':
-      return { ok: true }
+      return null
     default:
       return {}
   }
@@ -521,10 +523,10 @@ async function waitForCondition(check, timeoutMs = 15_000) {
 
 async function waitForNativeShell(page, allowLoaded = false) {
   await page.locator('button').first().waitFor()
-  assert.match(await page.title(), /DeepSeek Harness/)
+  assert.match(await page.title(), /DeepSeek Harness|DSH Local Build/)
   assert.equal(await page.locator('.shutu-shell').count(), 0, 'legacy Shutu shell is still mounted')
   if (!allowLoaded) {
-    const newSession = page.getByRole('button', { name: '新建会话' }).first()
+    const newSession = page.getByRole('button', { name: /新建会话|新会话|New session/i }).first()
     await newSession.waitFor()
   }
 }
@@ -1324,15 +1326,46 @@ async function runMobile(browser) {
   return { viewport: '390x844', overflow, console: 'clean' }
 }
 
-const server = spawn(process.execPath, [vite, 'preview', '--host', host, '--port', String(port)], {
+async function runPixelCapture(browser) {
+  mkdirSync(pixelCaptureDirectory, { recursive: true })
+  const captures = []
+  for (const variant of [
+    { name: 'light-desktop', viewport: { width: 1280, height: 900 } },
+    { name: 'dark-desktop', viewport: { width: 1280, height: 900 }, colorScheme: 'dark' },
+    { name: 'light-mobile', viewport: { width: 390, height: 844 } },
+  ]) {
+    const page = await browser.newPage({ viewport: variant.viewport, ...(variant.colorScheme === undefined ? {} : { colorScheme: variant.colorScheme }) })
+    const issues = []
+    page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
+    page.on('pageerror', error => issues.push(error.message))
+    await installNativeMock(page)
+    await page.goto(baseUrl, { waitUntil: 'domcontentloaded' })
+    await waitForNativeShell(page, true)
+    await page.waitForTimeout(750)
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
+    assert.ok(overflow <= 1, `${variant.name} page has horizontal overflow: ${overflow}px`)
+    const path = resolve(pixelCaptureDirectory, `reference-${variant.name}.png`)
+    await page.screenshot({ path })
+    assert.deepEqual(issues, [])
+    captures.push({ name: variant.name, path, viewport: `${variant.viewport.width}x${variant.viewport.height}`, overflow, console: 'clean' })
+    await page.close()
+  }
+  return captures
+}
+
+const server = ownsServer ? spawn(process.execPath, [vite, 'preview', '--host', host, '--port', String(port)], {
   cwd: webRoot,
   stdio: 'ignore',
   windowsHide: true,
-})
+}) : null
 try {
   await waitForServer()
   const browser = await chromium.launch({ headless: true })
   try {
+    if (process.env.SHUTU_PIXEL_CAPTURE === '1') {
+      console.log(JSON.stringify({ browser: 'playwright', baseUrl, pixelCapture: await runPixelCapture(browser) }))
+      process.exitCode = 0
+    } else {
     const desktop = await runDesktop(browser)
     const reconnectDesktop = await runReconnectDesktop(browser)
     const darkDesktop = await runDarkDesktop(browser)
@@ -1351,9 +1384,10 @@ try {
     const retryControls = await runRetryControls(browser)
     const mobile = await runMobile(browser)
     console.log(JSON.stringify({ browser: 'playwright', native: 'ok', desktop, reconnectDesktop, darkDesktop, loadingDesktop, errorStateMatrix, visualGeometryMatrix, accessibilityMatrix, crossBrowserAccessibilityMatrix, capabilityMatrix, extendedCapabilityMatrix, searchErrorRecovery, sessionLifecycle, interactionControls, queueControls, cancelPlanGoalControls, retryControls, mobile }))
+    }
   } finally {
     await browser.close()
   }
 } finally {
-  server.kill()
+  server?.kill()
 }

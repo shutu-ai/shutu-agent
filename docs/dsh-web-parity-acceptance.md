@@ -160,7 +160,7 @@ The same WSL2 setup completed an upgrade/rollback smoke with a shared Linux-nati
 
 The release pipeline was rerun after the native roster guard was added: Vite transformed `973` modules, generated a manifest with `40` linked native plugins, `npm run verify` passed, all `45` frontend tests passed, and the complete Playwright DSH interaction matrix passed without console errors. This is local release evidence; it does not close target-host deployment or high-density production-performance gates.
 
-The E2E screenshots were rerun into `docs/p36-visual-baseline/` and include light/dark desktop, mobile, loading/error, workspace, jobs, subagents, settings, and geometry captures. The rendered captures show the DSH native shell; a pixel-diff against an independently launched DSH reference remains open for P36-6.
+The E2E screenshots were rerun into `docs/p36-visual-baseline/` and include light/dark desktop, mobile, loading/error, workspace, jobs, subagents, settings, and geometry captures. The rendered captures show the DSH native shell; the independent DSH pixel-diff is recorded under `docs/evidence/p36-pixel-2026-08-27/` and is byte-identical on mobile, with only the desktop build/version label differing.
 
 ## P36-7.1 / P36-7.2 / P36-7.3 Native 100k fixture evidence (2026-08-27)
 
@@ -206,7 +206,31 @@ After the 105k session's in-flight test turn was canceled and the exact native s
 
 ## P36-6.2 / P36-6.3 environment boundary (2026-08-27)
 
-The current `deepseek-harness/apps/web` checkout contains source and dependencies but no built DSH `dist` or assembled `dsh web` boot manifest; its Vite configuration intentionally rejects standalone serving. It therefore cannot provide an independent reference capture without building/running the read-only source checkout, so the committed native screenshots and geometry JSON remain evidence rather than a claimed pixel diff. Firefox and WebKit are now installed in the local Playwright cache; NVDA and JAWS executables remain absent. WSL2 is available with AlmaLinux-8 and has already passed the Linux native startup/API/WebSocket and local upgrade/rollback smoke, but it does not supply the missing reference UI or screen-reader engines. These are environment prerequisites for the remaining P36-6.2/P36-6.3 and formal P36-8.2–P36-8.4 acceptance items.
+The read-only `deepseek-harness` checkout was copied to an isolated temporary
+reference directory, built, and launched with `dsh web` on port 18100. The
+same Playwright native fixture then captured both builds. `npm.cmd run
+pixel-diff` reports a byte-identical mobile capture and desktop differences
+only in the independent build/version label (light `0.1628%`, dark `0.1619%`,
+both bounding boxes `x=49..219,y=28..45`). The committed captures and JSON are
+under `docs/evidence/p36-pixel-2026-08-27/`; geometry/focus/overlay evidence
+remains in the preceding P36-6.2a/P36-6.3 sections. Firefox and WebKit are
+installed in the local Playwright cache; NVDA and JAWS executables remain
+absent. WSL2 is available with AlmaLinux-8 and has already passed the Linux
+native startup/API/WebSocket and local upgrade/rollback smoke, but it does not
+provide a real screen-reader engine. Real screen-reader speech remains the
+only unexecuted P36-6.3 environment check.
+
+## P36-6.2 independent DSH pixel evidence (2026-08-27)
+
+The reference was produced from a clean temporary copy of the read-only DSH
+source: `pnpm.cmd install --ignore-scripts`, `pnpm.cmd run build`, and
+`pnpm.cmd dsh web --no-open --port 18100`. The shutu and DSH pages were driven
+by the same `/api/**` and native WebSocket fixture. `web/scripts/e2e-smoke.mjs`
+supports `SHUTU_E2E_BASE_URL`, `SHUTU_E2E_SKIP_SERVER`, and
+`SHUTU_PIXEL_CAPTURE=1`; `web/scripts/pixel-diff.mjs` decodes the PNGs without
+third-party image tooling. The report proves the rendered shell, responsive
+layout, font/color/border/scrollbar placement, and dynamic label boundary; the
+existing geometry and focus/overlay matrices prove the interaction portions.
 
 ## P36-6.3 Cross-engine accessibility evidence (2026-08-27)
 

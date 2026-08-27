@@ -12,9 +12,10 @@ Browser plugin is not available in the current environment. It covers the
 native DSH shell in light/dark desktop, mobile, loading/error states, and the
 workspace, jobs, subagents, settings, and geometry surfaces.
 
-The PNGs are evidence of the Shutu native build's rendered state. A pixel-diff
-against an independently launched DSH reference instance is intentionally not
-claimed here and remains an open P36-6 task.
+The PNGs are evidence of the Shutu native build's rendered state. The
+independent DSH comparison is recorded under
+`docs/evidence/p36-pixel-2026-08-27/`; it is byte-identical on the mobile
+capture and differs on desktop only in the build/version label.
 
 ## Files
 

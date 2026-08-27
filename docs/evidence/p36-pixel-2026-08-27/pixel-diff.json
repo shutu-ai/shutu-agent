@@ -1,0 +1,36 @@
+{
+  "threshold": 8,
+  "variants": {
+    "light-desktop": {
+      "width": 1280,
+      "height": 900,
+      "differingPixels": 1875,
+      "totalPixels": 1152000,
+      "diffRatio": 0.0016276041666666667,
+      "meanAbsoluteChannelDifference": 0.17745638020833332,
+      "maxChannelDifference": 240,
+      "boundingBox": { "x": 49, "y": 28, "width": 171, "height": 18 }
+    },
+    "dark-desktop": {
+      "width": 1280,
+      "height": 900,
+      "differingPixels": 1865,
+      "totalPixels": 1152000,
+      "diffRatio": 0.0016189236111111111,
+      "meanAbsoluteChannelDifference": 0.16918988715277777,
+      "maxChannelDifference": 223,
+      "boundingBox": { "x": 49, "y": 28, "width": 171, "height": 18 }
+    },
+    "light-mobile": {
+      "width": 390,
+      "height": 844,
+      "differingPixels": 0,
+      "totalPixels": 329160,
+      "diffRatio": 0,
+      "meanAbsoluteChannelDifference": 0,
+      "maxChannelDifference": 0,
+      "boundingBox": null
+    }
+  },
+  "interpretation": "All desktop differences are confined to the independent build/version label at x=49..219,y=28..45; the mobile capture is byte-identical."
+}
