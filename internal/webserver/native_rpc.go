@@ -19,6 +19,7 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -3256,9 +3257,22 @@ func (s *Server) nativeSessionPrompt(r *http.Request, raw json.RawMessage) nativ
 			return nativeRPCFailure("prompt-failed", err.Error(), nil)
 		}
 	}
-	if err := s.msgFn(r.Context(), req.SessionID, text, images); err != nil {
-		return nativeRPCFailure("prompt-failed", err.Error(), nil)
-	}
+	// DSH treats session.prompt as an admission RPC: the response confirms that
+	// the host accepted the turn, while the turn lifecycle and its chunks arrive
+	// on the mux stream. Do not hold the RPC open for the model/tool loop; doing
+	// so serializes follow-up native calls (including session.list) behind a long
+	// task and makes the UI appear stalled. The request context is detached after
+	// admission because a browser navigation or fetch timeout must not cancel an
+	// accepted turn. webMessage owns the process lifetime and explicit stop path.
+	turnCtx := context.WithoutCancel(r.Context())
+	go func() {
+		if err := s.msgFn(turnCtx, req.SessionID, text, images); err != nil {
+			// Errors are persisted/published by the composition-root message
+			// handler. Keep a transport log as a last-resort diagnostic for
+			// handlers that fail before they can append a turn/end event.
+			log.Printf("native session.prompt %s: %v", req.SessionID, err)
+		}
+	}()
 	return nativeRPCSuccess(map[string]any{"accepted": true})
 }
 

@@ -411,16 +411,62 @@ func TestNativeRPCSessionHistoryAndPrompt(t *testing.T) {
 		t.Fatalf("native user message = %+v", userData)
 	}
 
-	var gotSession, gotText string
+	gotPrompt := make(chan string, 1)
 	srv.SetMessageHandler(func(_ context.Context, sessionID, text string, _ []llm.ImageRef) error {
-		gotSession, gotText = sessionID, text
+		gotPrompt <- sessionID + ":" + text
 		return nil
 	})
 	rec = doReqBody(t, srv.Handler(), "POST", "/api/session.prompt", "tok", `{"type":"client-request","rpcId":"prompt-1","method":"session.prompt","payload":{"sessionId":"native-session","mode":"queue","content":[{"type":"text","text":"send me"}]}}`)
 	response = nativeResponse(t, rec.Body.Bytes())
-	if !response.Result.OK || gotSession != "native-session" || gotText != "send me" {
-		t.Fatalf("session.prompt response=%+v callback=(%q,%q)", response, gotSession, gotText)
+	if !response.Result.OK {
+		t.Fatalf("session.prompt response=%+v", response)
 	}
+	select {
+	case got := <-gotPrompt:
+		if got != "native-session:send me" {
+			t.Fatalf("session.prompt callback=%q", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("session.prompt was not dispatched after admission")
+	}
+}
+
+func TestNativeSessionPromptReturnsBeforeTurnCompletes(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	if err := st.CreateSession(context.Background(), "native-admission", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	srv.SetMessageHandler(func(ctx context.Context, _ string, _ string, _ []llm.ImageRef) error {
+		close(started)
+		if ctx.Done() != nil {
+			t.Error("native prompt handler inherited request cancellation")
+		}
+		<-release
+		return nil
+	})
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- doReqBody(t, srv.Handler(), "POST", "/api/session.prompt", "tok", `{"type":"client-request","rpcId":"admission-1","method":"session.prompt","payload":{"sessionId":"native-admission","mode":"steer","content":[{"type":"text","text":"long task"}]}}`)
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("native prompt handler did not start")
+	}
+	select {
+	case rec := <-done:
+		response := nativeResponse(t, rec.Body.Bytes())
+		if !response.Result.OK {
+			t.Fatalf("admission response = %+v", response)
+		}
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("session.prompt waited for the turn to complete")
+	}
+	close(release)
 }
 
 func TestNativeSessionPromptPersistsBase64ImagesAndUsesQueueForText(t *testing.T) {
@@ -433,18 +479,26 @@ func TestNativeSessionPromptPersistsBase64ImagesAndUsesQueueForText(t *testing.T
 		t.Fatal(err)
 	}
 	srv.SetAttachmentStore(att)
-	var gotImages []llm.ImageRef
+	gotImages := make(chan []llm.ImageRef, 1)
 	srv.SetMessageHandler(func(_ context.Context, sessionID, text string, images []llm.ImageRef) error {
 		if sessionID != "native-prompt" || text != "describe this" {
-			t.Fatalf("prompt callback = %q/%q", sessionID, text)
+			return fmt.Errorf("prompt callback = %q/%q", sessionID, text)
 		}
-		gotImages = images
+		gotImages <- images
 		return nil
 	})
 	rec := doReqBody(t, srv.Handler(), "POST", "/api/session.prompt", "tok", `{"type":"client-request","rpcId":"image-1","method":"session.prompt","payload":{"sessionId":"native-prompt","mode":"queue","content":[{"type":"text","text":"describe this"},{"type":"image","mediaType":"image/png","data":"data:image/png;base64,aGVsbG8="}]}}`)
 	response := nativeResponse(t, rec.Body.Bytes())
-	if !response.Result.OK || len(gotImages) != 1 || gotImages[0].MediaType != "image/png" || gotImages[0].Bytes != 5 {
-		t.Fatalf("image prompt response=%+v images=%+v", response, gotImages)
+	if !response.Result.OK {
+		t.Fatalf("image prompt response=%+v", response)
+	}
+	select {
+	case images := <-gotImages:
+		if len(images) != 1 || images[0].MediaType != "image/png" || images[0].Bytes != 5 {
+			t.Fatalf("image prompt images=%+v", images)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("image prompt was not dispatched after admission")
 	}
 
 	var queued string
