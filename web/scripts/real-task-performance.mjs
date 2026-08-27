@@ -36,6 +36,7 @@ async function nativeRPC(method, payload = {}) {
 }
 
 function triggerRealTask() {
+  const startedAt = Date.now()
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), Math.max(30_000, (durationSeconds + 10) * 1_000))
   return fetch(`${baseUrl}/api/session.prompt`, {
@@ -54,10 +55,13 @@ function triggerRealTask() {
       },
     }),
   }).then(async response => {
-    if (!response.ok) return `http-${response.status}`
+    if (!response.ok) return { status: `http-${response.status}`, elapsedMs: Date.now() - startedAt }
     const envelope = await response.json()
-    return envelope.result?.ok ? 'accepted' : `rejected:${envelope.result?.error?.code ?? 'unknown'}`
-  }).catch(error => `pending:${error.name}`).finally(() => clearTimeout(timeout))
+    return {
+      status: envelope.result?.ok ? 'accepted' : `rejected:${envelope.result?.error?.code ?? 'unknown'}`,
+      elapsedMs: Date.now() - startedAt,
+    }
+  }).catch(error => ({ status: `pending:${error.name}`, elapsedMs: Date.now() - startedAt })).finally(() => clearTimeout(timeout))
 }
 
 async function sessionSummary() {
@@ -178,9 +182,13 @@ try {
   await installBrowserMetrics(page)
   process.stderr.write(`observer-ready native session=${sessionId}\n`)
   let triggerStatus = null
+  let promptAdmissionMs = null
   if (triggerPrompt) {
     triggerStatus = 'dispatched'
-    void triggerRealTask().then(status => { triggerStatus = status })
+    void triggerRealTask().then(result => {
+      triggerStatus = result.status
+      promptAdmissionMs = result.elapsedMs
+    })
     process.stderr.write(`dispatched native session prompt mode=${triggerMode}\n`)
   }
 
@@ -215,7 +223,9 @@ try {
     streamEventFrames: stream.eventFrames,
     streamFirstEventSeq: stream.firstEventSeq,
     streamLastEventSeq: stream.lastEventSeq,
+    streamEventsPerSecond: Math.round(stream.eventFrames / Math.max(1, samples.at(-1)?.elapsedSeconds ?? 0) * 100) / 100,
     triggerStatus,
+    promptAdmissionMs,
     eventToUiMs: stream.latencies.length > 0 ? {
       min: Math.min(...stream.latencies),
       avg: Math.round(stream.latencies.reduce((sum, value) => sum + value, 0) / stream.latencies.length * 10) / 10,
