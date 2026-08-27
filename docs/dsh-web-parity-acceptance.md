@@ -270,6 +270,15 @@ identified by its exact Linux PID, then terminated and verified to have no
 remaining `18099` listener. This advances P36-8.2 for the current revision but
 is still local WSL2 evidence, not the formal target Linux host.
 
+The current binary was also rerun against the known streaming Super Mario
+session `s-f556a6f2` for `60.8s`. The real steer task delivered `509` target
+frames (`8.37` frames/s), minimum/average FPS `50/59.9`, heap `37→127MiB`,
+DOM peak `1,710`, Long Tasks `1,634ms`, reconnect recovery `486ms`, and zero
+console errors. The stream and protocol checks were healthy, but the enforced
+gate failed on a `632ms` event→UI maximum. This is recorded as a negative
+regression sample: normal real streaming remains functional, while the
+latency/heap envelope is not claimed as a P36-7.3 pass.
+
 The WSL shared-data failure-recovery check then started the old Linux binary,
 verified health and the existing `s-743c4600` event endpoint at `200`, started
 the current Linux binary and verified the same checks, injected a SIGKILL to

@@ -73,6 +73,22 @@
     "thresholdGate": "failed-event-to-ui-and-insufficient-stream-density",
     "reason": "The bounded compaction path returned normally without the former unbounded-request stall, but the real model turn produced only two live frames during the observation window."
   },
+  "realContinuousRegression": {
+    "codeRevision": "822ea29",
+    "sessionId": "s-f556a6f2",
+    "durationSeconds": 60.8,
+    "streamFrames": 509,
+    "streamEventsPerSecond": 8.37,
+    "eventToUiMs": { "min": 8, "avg": 30.5, "max": 632, "samples": 110 },
+    "fps": { "min": 50, "avg": 59.9 },
+    "heapMiB": { "start": 37, "max": 127 },
+    "domNodesMax": 1710,
+    "longTaskMs": 1634,
+    "reconnectMs": 486,
+    "consoleErrors": 0,
+    "thresholdGate": "failed-event-to-ui",
+    "reason": "The normal real stream remained healthy, but this run exceeded the 500ms event-to-UI threshold during the model/compaction workload."
+  },
   "wsl2": {
     "distribution": "AlmaLinux-8",
     "binary": "GOOS=linux GOARCH=amd64 CGO_ENABLED=0",

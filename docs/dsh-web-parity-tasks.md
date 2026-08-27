@@ -107,6 +107,7 @@
 - [ ] P36-7.2：验证 reasoning/token/tool 持续流、长文本、代码块和密集工具调用。
 - [x] P36-7.2d：真实超级玛丽会话修复隐式首轮 `turn/start=0` 的 wire projection 错位后，连续 60 秒收到 618 个 mux 帧，历史累计含 22 条 assistant/message、22 个 reasoning block、29 次 tool call、token usage 和 42,755 字符输出；与 100k fixture 组合完成内容类型覆盖，零控制台错误。
 - [x] P36-7.2e：自动压缩增加 `summary_input_tokens` 有界分段/递归汇总；大历史仍只追加一个 DSH `surfaceOp.replace` 检查点，单元测试覆盖多分块、工具消息边界、单条超大消息和递归收敛。
+- [x] P36-7.2f：新压缩版本在普通真实超级玛丽会话回归中保持 509 个 mux 帧、8.37 帧/s、无控制台错误和无非法 turn；本轮门禁因 event→UI 峰值 `632ms` 失败，作为负向基线保留，不替代 P36-7.3 高密度通过条件。
 - [x] P36-7.2a：100,000 条 fixture 覆盖 reasoning、token usage、tool call/result、长文本和 TypeScript code block，并通过原生 Trajectory 展示与分页验证。
 - [x] P36-7.2b：真实超级玛丽新会话连续流产生 1,418 个 assistant chunk、8 条 assistant message、12 次 tool call/result、token usage 与 plan/interaction 事件；35.4 秒收到 376 个 mux 帧（10.62 帧/s），真实 UI 零错误渲染和长文本/代码混合内容仍待补齐。
 - [x] P36-7.2c：修复负 turn projection 后，真实会话连续流复测 12.6 秒无控制台错误，收到 678 个 mux 帧（53.81 帧/s）；真实 UI 高密度渲染稳定性和长文本/代码混合内容仍待补齐。
