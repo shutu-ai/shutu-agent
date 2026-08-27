@@ -279,6 +279,18 @@ identified by its exact Linux PID, then terminated and verified to have no
 remaining `18099` listener. This advances P36-8.2 for the current revision but
 is still local WSL2 evidence, not the formal target Linux host.
 
+## P36-7.2 / P36-7.3 current frontend stream regression (2026-08-27)
+
+After the native event-card memoization and callback-stability change at
+`26a3223`, a real Super Mario steer run was repeated against
+`s-f556a6f2`. The 60.8-second observer received 559 target mux frames
+(`9.19` frames/s), with event-to-UI latency `4–389ms`, FPS `37–59.7`, heap
+`43→108MiB`, DOM peak `1,092`, 12 Long Tasks totaling `1,641ms`, reconnect
+recovery `379ms`, and zero console errors. The enforced gate passed all
+thresholds. Reasoning/tool/token output remains covered by the real session
+and long/code content by the 100k fixture; the real 100k high-density model
+stream remains intentionally open.
+
 The current binary was also rerun against the known streaming Super Mario
 session `s-f556a6f2` for `60.8s`. The real steer task delivered `509` target
 frames (`8.37` frames/s), minimum/average FPS `50/59.9`, heap `37→127MiB`,

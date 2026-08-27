@@ -89,6 +89,32 @@
     "thresholdGate": "failed-event-to-ui",
     "reason": "The normal real stream remained healthy, but this run exceeded the 500ms event-to-UI threshold during the model/compaction workload."
   },
+  "realContinuousMemoizedCurrent": {
+    "codeRevision": "26a3223",
+    "sessionId": "s-f556a6f2",
+    "durationSeconds": 60.8,
+    "baselineEventSeq": 2893,
+    "streamEventSeq": [2889, 3456],
+    "streamFrames": 559,
+    "streamEventsPerSecond": 9.19,
+    "promptAdmissionMs": 18,
+    "eventToUiMs": { "min": 4, "avg": 25.2, "max": 389, "samples": 101 },
+    "fps": { "min": 37, "avg": 59.7 },
+    "heapMiB": { "start": 43, "max": 108 },
+    "domNodesMax": 1092,
+    "longTasks": 12,
+    "longTaskMs": 1641,
+    "reconnectMs": 379,
+    "consoleErrors": 0,
+    "thresholdGate": "passed",
+    "contentEvidence": {
+      "targetSessionEventsObserved": 563,
+      "trajectoryRows": 34,
+      "logicalRowCount": 63,
+      "search": "网页开发",
+      "promptMode": "steer"
+    }
+  },
   "wsl2": {
     "distribution": "AlmaLinux-8",
     "binary": "GOOS=linux GOARCH=amd64 CGO_ENABLED=0",
