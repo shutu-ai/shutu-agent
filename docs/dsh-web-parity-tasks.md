@@ -274,13 +274,13 @@
 ### P36-1：DSH 原生前端构建入口（已完成）
 
 - [x] 在 `shutu-agent` 内建立独立的 React/Cordis/Vite 原生入口；`SHUTU_DSH_NATIVE=1` 时不再以当前单体 `App` 作为 UI 根节点。
-- [x] 以只读方式接入 DSH client package 的 boot、module loader、uiRenderer、slot 和 plugin manifest 入口约定；运行时 boot manifest/插件下发由 P36-2 补齐。
+- [x] 以只读方式接入 DSH client package 的 boot、module loader、uiRenderer、slot 和 plugin manifest 入口约定；运行时 boot manifest 与插件下发已由 P36-2 接通。
 - [x] 解决当前 bundle 的依赖、dist 和 source map 闭包；`npm.cmd run build:native` 可生成 native dist，运行时不读取 `deepseek-harness` 源目录。
 - [x] 建立 DSH 版本/来源清单，确保后续 DSH 参考变化可追踪；native build 生成 `dist/dsh-native-manifest.json`。
 
 验收标准：构建入口、DSH boot 调用链、native dist、模块图和插件 bundle 均已具备，并已通过浏览器启动及 dist 验证。
 
-### P36-2：DSH Web API/RPC/WebSocket 适配层
+### P36-2：DSH Web API/RPC/WebSocket 适配层（已完成）
 
 - [x] 实现 DSH client connection 所需的 RPC 请求/响应和错误协议；新增 `client-request` / `server-response` envelope、`rpcId` 回显和结构化错误。
 - [x] 接入核心会话/工作区方法：`host.describe`、`session.list/search/create/history/rename/prompt/cancel`、`workspace.list`。
@@ -293,7 +293,7 @@
 
 验收标准：核心 RPC/downlink、插件依赖方法、插件事件、完整启动、打开、发送和恢复路径均已通过 native E2E/契约验证。
 
-### P36-3：DSH Session/Conversation 数据模型适配
+### P36-3：DSH Session/Conversation 数据模型适配（已完成）
 
 - [x] 将 Go 事件映射为 DSH Session header、surface、Conversation node 和 request/tool/turn 关系。
 - [x] 对齐 stable ID、seq、父子关系、分页游标、实时 frame 和 compaction 语义。
