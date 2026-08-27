@@ -315,3 +315,8 @@ P24–P35 已完成首轮实现；P34/P35 的真实环境事项与 P36-1–P36-8
 ## P36 当前实现进度（2026-08-26）
 
 本轮完成 P36-3 的首轮原生事件投影：`session.history` 与 `events.mux` 共用 DSH `SessionEvent` 转换器，统一消息 ID、turn/step、surfaceOp/sourceEventSeqs、tool-result、retry、Markdown/code text、reasoning、图片 attachment、未知 content block、subagent identity/timing、contextBreakdown、sessionListMetadata、Session header lineage、surface snapshot、DSH message-boundary 分页与未知事件的 ignorable 标记，并补充 replay/live、compaction、retry、subagent、contextBreakdown、session-list、imageLimits、header/surface、content block、分页 replacement/source-group 测试。P36-3 仍保留未勾选项：真实原生 UI 端到端验收。
+
+## P36 native loaded-session verification slices
+
+- [x] P36-5.3a: Playwright Chromium native fixture verifies session search opens a loaded session and the DSH Trajectory tab renders a bounded virtual table over dense tool, reasoning, code, and long-text history.
+- [x] P36-5.3b: The native fixture serves tail-paged `session.history`; `Load earlier history` sends `beforeSeq`, prepends logical rows, and preserves the virtualized rendering/error-free browser state.

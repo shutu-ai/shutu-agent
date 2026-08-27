@@ -67,7 +67,7 @@ function valueFor(method) {
     case 'host.describe': return { attachedSessions: 1, canOpenPath: false, cwd: 'C:/shutu-perf', home: '', model: 'perf', version: 'perf' }
     case 'session.list': return { items: [{ sessionId: 'perf', title: 'Native performance fixture', updatedAt: Date.now(), running: false, blank: false, cwd: 'C:/shutu-perf', projections }] }
     case 'workspace.list': return { items: [{ workspaceId: 'perf-ws', path: 'C:/shutu-perf', title: 'Performance', sessionIds: ['perf'], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }], archivedSessionIds: [] }
-    case 'session.history': return { header: { version: 0, id: 'perf', createdAt: 1787746887000, cwd: 'C:/shutu-perf' }, events: events.map(event => ({ event })), hasMore: false, surface: { nodes: events.filter(event => event.surfaceOp === 'append').map(event => event.seq), replacements: [] }, projections }
+    case 'session.history': return historyPage()
     case 'session.search': return { items: [{ sessionId: 'perf', snippet: 'tool result 777' }], hasMore: false }
     case 'settings.describe': return { hasDocument: false, namespaces: [] }
     case 'credentials.describe': return { credentials: {} }
@@ -77,6 +77,25 @@ function valueFor(method) {
     case 'dynamicCordisRunner/inventory': return []
     case 'dynamicCordisRunner/syncInspectManifest': return { ok: true }
     default: return {}
+  }
+}
+
+/** Serve the same tail-paged history shape as the native host contract. */
+function historyPage(payload = {}) {
+  const requestedBefore = Number.isFinite(Number(payload.beforeSeq)) ? Number(payload.beforeSeq) : null
+  const boundary = requestedBefore === null
+    ? -1
+    : events.findIndex(event => event.seq >= requestedBefore)
+  const end = requestedBefore === null || boundary === -1 ? events.length : boundary
+  const pageSize = Math.max(24, Math.min(180, Number(payload.maxMessages) || 50))
+  const start = Math.max(0, end - pageSize)
+  const page = events.slice(start, end)
+  return {
+    header: { version: 0, id: 'perf', createdAt: 1787746887000, cwd: 'C:/shutu-perf' },
+    events: page.map(event => ({ event })),
+    hasMore: start > 0,
+    surface: { nodes: events.filter(event => event.surfaceOp === 'append').map(event => event.seq), replacements: [] },
+    ...(requestedBefore === null ? { projections } : {}),
   }
 }
 
@@ -91,15 +110,18 @@ async function waitForServer() {
 
 async function installNativeMock(page) {
   const sockets = new Set()
+  const requests = []
   await page.route('**/plugins/events', route => route.fulfill({ status: 200, contentType: 'text/event-stream', body: 'retry: 3000\n\n' }))
   await page.routeWebSocket('**/api/events.*', ws => { sockets.add(new URL(ws.url()).pathname); ws.onMessage(() => {}) })
   await page.route('**/api/**', async route => {
     if (route.request().method() !== 'POST') return route.fallback()
     const body = JSON.parse(route.request().postData() ?? '{}')
     assert.equal(body.type, 'client-request')
-    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ type: 'server-response', rpcId: body.rpcId, result: { ok: true, value: valueFor(body.method) } }) })
+    requests.push({ method: body.method, payload: body.payload })
+    const value = body.method === 'session.history' ? historyPage(body.payload) : valueFor(body.method)
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ type: 'server-response', rpcId: body.rpcId, result: { ok: true, value } }) })
   })
-  return sockets
+  return { sockets, requests }
 }
 
 async function sample(page) {
@@ -130,7 +152,7 @@ try {
   const browser = await chromium.launch({ headless: true, args: ['--enable-precise-memory-info'] })
   try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
-    const sockets = await installNativeMock(page)
+    const { sockets, requests } = await installNativeMock(page)
     const errors = []
     page.on('console', message => { if (message.type() === 'error') errors.push(message.text()) })
     page.on('pageerror', error => errors.push(error.message))
@@ -153,6 +175,15 @@ try {
     const trajectory = page.locator('[data-trajectory-scroll]')
     await trajectory.waitFor({ timeout: 60_000 })
     await page.locator('[data-trajectory-scroll] table[data-scroll-ready="true"]').waitFor({ timeout: 60_000 })
+    const initialRowCount = Number(await page.locator('[data-trajectory-scroll] table').getAttribute('aria-rowcount'))
+    const loadEarlier = page.locator('[data-history-load] button')
+    await loadEarlier.waitFor({ timeout: 15_000 })
+    await loadEarlier.evaluate(button => button.click())
+    await page.waitForFunction((minimum) => {
+      const table = document.querySelector('[data-trajectory-scroll] table')
+      return table !== null && Number(table.getAttribute('aria-rowcount') ?? 0) > minimum
+    }, initialRowCount, { timeout: 15_000 })
+    assert.ok(requests.some(request => request.method === 'session.history' && request.payload?.beforeSeq !== undefined), 'native history pagination did not send beforeSeq')
     await page.evaluate(() => {
       window.__perf = { frames: 0, longTasks: 0, longTaskMs: 0 }
       const state = window.__perf
