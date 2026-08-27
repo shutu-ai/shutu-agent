@@ -443,15 +443,16 @@ machine-readable evidence is in `real100kContinuousCurrent` and
 
 ## P36-8 Windows release/deployment acceptance (2026-08-27)
 
-The current commit `ab7c95d` was rebuilt as `release/shutu-agent-p36-current`
+The current commit `52a5e33` was rebuilt as `release/shutu-agent-p36-current`
 with a `win32-x64` manifest, native `web/dist/index.html`, all dist assets, and
 prompt resources. The strengthened `scripts/deployment-smoke.mjs` created a
 durable session and exercised the package through initial start, upgrade,
 rollback, forced termination, and same-port recovery. Every phase returned
 health/sessions/static/`host.describe` `200`, both native WebSocket upgrades
 returned `101`, and an unauthenticated health request returned `401` while the
-Bearer-authenticated request returned `200`. The same session's list and events
-remained readable after upgrade, rollback, and forced-stop recovery.
+Bearer-authenticated request returned `200`. The same session `s-69662534`'s
+list and events remained readable after upgrade, rollback, and forced-stop
+recovery.
 
 This closes the current Windows target evidence for P36-8.2, P36-8.3, and
 P36-8.4. Linux/WSL testing is intentionally out of scope for this run; the

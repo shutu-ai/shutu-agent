@@ -157,8 +157,8 @@
 
 ## P36-8 current Windows acceptance slices
 
-- [x] P36-8.2j：当前 `ab7c95d` Windows `win32-x64` 交付包完成 layout、Bearer 认证、health/sessions/static/`host.describe` 和两条 WebSocket 验收；初始、升级、回滚、强制终止后同端口恢复均通过，Linux/WSL 不作为本轮门槛。
-- [x] P36-8.3e：Windows 当前交付包以 session `s-259d52f2` 验证共享 `data_dir`；初始、升级、回滚和强制终止后同端口恢复阶段均能读取 session 列表与事件，health/static/`host.describe` 为 `200`，两条 WebSocket 为 `101`，未授权 health 为 `401`。
+- [x] P36-8.2j：当前 `52a5e33` Windows `win32-x64` 交付包完成 layout、Bearer 认证、health/sessions/static/`host.describe` 和两条 WebSocket 验收；初始、升级、回滚、强制终止后同端口恢复均通过，Linux/WSL 不作为本轮门槛。
+- [x] P36-8.3e：Windows 当前交付包以 session `s-69662534` 验证共享 `data_dir`；初始、升级、回滚和强制终止后同端口恢复阶段均能读取 session 列表与事件，health/static/`host.describe` 为 `200`，两条 WebSocket 为 `101`，未授权 health 为 `401`。
 
 ## 总览
 

@@ -279,7 +279,7 @@
     "contentRequirement": "direct long text plus a JavaScript fenced code block"
   },
   "windowsDeploymentCurrent": {
-    "revision": "ab7c95dc445e4c4b5de0fea7c0dfdc46bf4d7f30",
+    "revision": "52a5e3382b1da68cf9f8ee5f71165b8da13b84430",
     "package": "release/shutu-agent-p36-current",
     "target": "win32-x64",
     "layout": { "releaseJson": true, "distIndex": true, "distAssets": true, "promptResources": true },
@@ -289,7 +289,7 @@
       "rollback": { "unauthorizedHealth": 401, "health": 200, "sessions": 200, "staticShell": 200, "hostDescribe": 200, "webSockets": { "mux": 101, "host": 101 } },
       "recovery": { "unauthorizedHealth": 401, "health": 200, "sessions": 200, "staticShell": 200, "hostDescribe": 200, "webSockets": { "mux": 101, "host": 101 } }
     },
-    "durableSession": { "sessionId": "s-259d52f2", "sharedData": true, "eventsReadableAfter": ["upgrade", "rollback", "recovery"], "forcedStopRecovery": true },
+    "durableSession": { "sessionId": "s-69662534", "sharedData": true, "eventsReadableAfter": ["upgrade", "rollback", "recovery"], "forcedStopRecovery": true },
     "thresholdGate": "passed",
     "scope": "current Windows target; Linux/WSL test intentionally canceled"
   }
