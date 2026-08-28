@@ -2,6 +2,7 @@ package subagent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -249,16 +250,36 @@ func TestSpawnContinuableSend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	time.Sleep(20 * time.Millisecond)
+	deadline := time.Now().Add(time.Second)
+	for len(model.calls) < 1 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if len(model.calls) != 1 {
+		t.Fatalf("initial turn calls = %d, want 1", len(model.calls))
+	}
+	if err := run.SendQuiet(context.Background(), "background context"); err != nil {
+		t.Fatalf("quiet send: %v", err)
+	}
+	time.Sleep(30 * time.Millisecond)
+	if len(model.calls) != 1 {
+		t.Fatalf("quiet send woke child: calls = %d, want 1", len(model.calls))
+	}
 	if err := run.Send(context.Background(), "follow up"); err != nil {
 		t.Fatalf("send: %v", err)
 	}
-	deadline := time.Now().Add(time.Second)
+	deadline = time.Now().Add(time.Second)
 	for len(model.calls) < 2 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	if err := run.Cancel("done"); err != nil {
 		t.Fatalf("cancel: %v", err)
+	}
+	if len(model.calls) < 2 {
+		t.Fatalf("follow-up calls = %d, want 2", len(model.calls))
+	}
+	last := model.calls[1].Messages[len(model.calls[1].Messages)-1].Text()
+	if !strings.Contains(last, "background context") || !strings.Contains(last, "follow up") {
+		t.Fatalf("waking turn did not receive quiet context and follow-up: %q", last)
 	}
 	res, err := run.Result(context.Background())
 	if err != nil {
@@ -273,6 +294,46 @@ func TestSpawnContinuableSend(t *testing.T) {
 	}
 	if got := len(log.DeriveHistory()); got != 4 {
 		t.Fatalf("derived messages = %d, want 4", got)
+	}
+	if err := prov.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+}
+
+func TestContinuableChildGetsOnlyScopedReportTool(t *testing.T) {
+	model := &scriptedLLM{steps: [][]llm.StreamEvent{
+		{{Kind: llm.StreamFinish, FinishReason: "tool_calls", ToolCalls: []llm.ToolCall{{ID: "report-1", Name: "report", Arguments: `{"output":"finding"}`}}}},
+		{{Kind: llm.StreamTextDelta, Text: "finished"}, {Kind: llm.StreamFinish, FinishReason: "stop"}},
+	}}
+	parentTools := tools.New()
+	reports := make(chan string, 1)
+	prov := NewSpawnProvider(Deps{
+		LLM: model, Tools: parentTools, Prompt: prompt.New("x"), Model: "m",
+		Report: func(childID, parentID, output string) (string, error) {
+			reports <- childID + ":" + parentID + ":" + output
+			return "report-message-1", nil
+		},
+	})
+	run, err := prov.Start(context.Background(), StartRequest{Prompt: "investigate", ParentSessionID: "parent", Continuable: true})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	select {
+	case got := <-reports:
+		if got != run.ID+":parent:finding" {
+			t.Fatalf("report delivery = %q", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("continuable child did not execute its scoped report tool")
+	}
+	if _, err := parentTools.Execute(context.Background(), "report", json.RawMessage(`{"output":"leak"}`)); err == nil {
+		t.Fatal("report leaked into the parent registry")
+	}
+	if err := run.Cancel("test complete"); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	if _, err := run.Result(context.Background()); err != nil {
+		t.Fatalf("result: %v", err)
 	}
 	if err := prov.Close(); err != nil {
 		t.Fatalf("close: %v", err)

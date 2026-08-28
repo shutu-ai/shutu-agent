@@ -103,6 +103,9 @@ type Run struct {
 	// Send queues one follow-up user message for a live continuable child.
 	// Providers may reject it when the child is one-shot or already settled.
 	Send func(ctx context.Context, message string) error
+	// SendQuiet queues context for the next explicitly waking turn. It never
+	// wakes an idle child; providers may leave it nil when unsupported.
+	SendQuiet func(ctx context.Context, message string) error
 	// Cancel requests cancellation of a live subagent with a reason; it is
 	// idempotent and fails with an error once the subagent has settled.
 	Cancel func(reason string) error

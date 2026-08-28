@@ -28,6 +28,7 @@ func (a *app) registerSubagent() error {
 	if !config.Enabled(a.cfg.Subagent.Enabled) {
 		return nil
 	}
+	var reportTools *subagent.SubagentTools
 	deps := subagent.Deps{
 		// Log is the parent/host log the provider is bound to; it is never
 		// appended to by the provider (each child owns an independent log) —
@@ -39,6 +40,12 @@ func (a *app) registerSubagent() error {
 		Prompt: a.prompt,
 		Model:  a.cfg.Model,
 		Store:  a.store,
+		Report: func(childID, parentID, output string) (string, error) {
+			if reportTools == nil {
+				return "", fmt.Errorf("report: subagent tools are not ready")
+			}
+			return reportTools.ReportFromChild(childID, output)
+		},
 	}
 	prov := subagent.NewSpawnProvider(deps)
 	rt := subagent.NewRuntime()
@@ -80,6 +87,7 @@ func (a *app) registerSubagent() error {
 	}
 	st := subagent.NewSubagentToolsWithContinuable(rt, a.cfg.Subagent.MaxDepth, func() string { return a.currentID }, onEvent, true)
 	st.SetJobs(a.jobs)
+	reportTools = st
 	a.subagentTools = st
 	for _, t := range []tools.Tool{
 		st.Spawn(),

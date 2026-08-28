@@ -40,6 +40,9 @@ type Deps struct {
 	// Store durably records the independent child session when provided. It is
 	// optional so library users and existing tests can remain in-memory.
 	Store store.Store
+	// Report accepts a child-scoped report and returns its parent message id.
+	// It is optional so the provider remains usable without host delivery.
+	Report func(childID, parentID, output string) (string, error)
 }
 
 // SpawnProvider spawns a brand-new child session + child loop for every Start.
@@ -68,7 +71,7 @@ type childRun struct {
 	log         *session.Log
 	cancel      context.CancelFunc // cancels the child loop context (set in Start)
 	done        chan struct{}      // closed once the child settles
-	inbox       chan string        // follow-up messages for continuable children
+	inbox       chan string        // waking follow-up messages
 	continuable bool
 	seedSeq     uint64 // parent-history watermark for fork result derivation
 
@@ -78,6 +81,7 @@ type childRun struct {
 	structured    any
 	structuredSet bool
 	settled       bool
+	quietInbox    []string // accepted context waiting for a waking follow-up
 }
 
 // NewSpawnProvider returns a SpawnProvider bound to the given core components.
@@ -213,10 +217,11 @@ func (p *SpawnProvider) Start(ctx context.Context, req StartRequest) (*Run, erro
 
 	go p.runChild(child, req, runCtx)
 	return &Run{
-		ID:     id,
-		Result: p.resultFunc(child),
-		Send:   p.sendFunc(child),
-		Cancel: p.cancelFunc(child),
+		ID:        id,
+		Result:    p.resultFunc(child),
+		Send:      p.sendFunc(child),
+		SendQuiet: p.sendQuietFunc(child),
+		Cancel:    p.cancelFunc(child),
 	}, nil
 }
 
@@ -284,7 +289,7 @@ func (p *SpawnProvider) Resume(ctx context.Context, sessionID, message string, c
 	}
 	p.mu.Unlock()
 	go p.runChild(child, StartRequest{Prompt: message, Continuable: continuable}, runCtx)
-	return &Run{ID: sessionID, Result: p.resultFunc(child), Send: p.sendFunc(child), Cancel: p.cancelFunc(child)}, nil
+	return &Run{ID: sessionID, Result: p.resultFunc(child), Send: p.sendFunc(child), SendQuiet: p.sendQuietFunc(child), Cancel: p.cancelFunc(child)}, nil
 }
 
 func parseSpawnID(id string) int {
@@ -313,8 +318,18 @@ func (p *SpawnProvider) runChild(child *childRun, req StartRequest, runCtx conte
 		model = req.Model
 	}
 	childTools := p.deps.Tools
-	if req.OutputSchema != nil {
+	if req.Continuable && p.deps.Report != nil && childTools != nil {
 		childTools = p.deps.Tools.Clone()
+		if err := childTools.Register(newChildReportTool(child.id, child.parent, p.deps.Report)); err != nil {
+			p.settle(child, Result{StopReason: StopError})
+			return
+		}
+		childTools.Allow(ToolReportName)
+	}
+	if req.OutputSchema != nil {
+		if childTools == p.deps.Tools {
+			childTools = p.deps.Tools.Clone()
+		}
 		if err := childTools.Register(structuredOutputTool{
 			schema: req.OutputSchema,
 			capture: func(value any) error {
@@ -349,11 +364,24 @@ func (p *SpawnProvider) runChild(child *childRun, req StartRequest, runCtx conte
 		}
 		select {
 		case message = <-child.inbox:
+			message = child.withQuiet(message)
 		case <-runCtx.Done():
 			p.settle(child, p.deriveResult(child, runCtx.Err()))
 			return
 		}
 	}
+}
+
+func (c *childRun) withQuiet(message string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.quietInbox) == 0 {
+		return message
+	}
+	parts := append([]string(nil), c.quietInbox...)
+	c.quietInbox = nil
+	parts = append(parts, message)
+	return strings.Join(parts, "\n\n")
 }
 
 // settle records the first terminal result for a child. First-wins: a Close
@@ -415,6 +443,9 @@ func (p *SpawnProvider) sendFunc(child *childRun) func(context.Context, string) 
 		if strings.TrimSpace(message) == "" {
 			return fmt.Errorf("subagent: message is empty")
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		child.mu.Lock()
 		settled := child.settled
 		continuable := child.continuable
@@ -433,6 +464,34 @@ func (p *SpawnProvider) sendFunc(child *childRun) func(context.Context, string) 
 		default:
 			return fmt.Errorf("subagent: %s: message queue is full", child.id)
 		}
+	}
+}
+
+// sendQuietFunc accepts context without putting a wake-up item on the inbox.
+// A later follow-up consumes the queued context together with its message.
+func (p *SpawnProvider) sendQuietFunc(child *childRun) func(context.Context, string) error {
+	return func(ctx context.Context, message string) error {
+		if strings.TrimSpace(message) == "" {
+			return fmt.Errorf("subagent: message is empty")
+		}
+		child.mu.Lock()
+		settled := child.settled
+		continuable := child.continuable
+		if !settled && continuable {
+			if len(child.quietInbox) >= 16 {
+				child.mu.Unlock()
+				return fmt.Errorf("subagent: %s: quiet message queue is full", child.id)
+			}
+			child.quietInbox = append(child.quietInbox, message)
+		}
+		child.mu.Unlock()
+		if settled {
+			return fmt.Errorf("subagent: %s: already finished", child.id)
+		}
+		if !continuable {
+			return fmt.Errorf("%w: %s", ErrNotContinuable, child.id)
+		}
+		return nil
 	}
 }
 

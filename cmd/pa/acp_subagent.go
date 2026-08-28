@@ -15,6 +15,7 @@ import (
 // mutable registry, prompt, log and current session.
 func newACPSubagent(a *app, id string, log *session.Log, registry *tools.Registry, pb *prompt.Builder) (subagent.Runtime, *subagent.SubagentTools, error) {
 	rt := subagent.NewRuntime()
+	var reportTools *subagent.SubagentTools
 	deps := subagent.Deps{
 		Log:    log,
 		LLM:    a.currentLLM(),
@@ -22,6 +23,12 @@ func newACPSubagent(a *app, id string, log *session.Log, registry *tools.Registr
 		Prompt: pb,
 		Model:  a.cfg.Model,
 		Store:  a.store,
+		Report: func(childID, parentID, output string) (string, error) {
+			if reportTools == nil {
+				return "", fmt.Errorf("report: subagent tools are not ready")
+			}
+			return reportTools.ReportFromChild(childID, output)
+		},
 	}
 	prov := subagent.NewSpawnProvider(deps)
 	if err := rt.RegisterProvider(prov); err != nil {
@@ -55,6 +62,7 @@ func newACPSubagent(a *app, id string, log *session.Log, registry *tools.Registr
 	}
 	st := subagent.NewSubagentToolsWithContinuable(rt, a.cfg.Subagent.MaxDepth, func() string { return id }, onEvent, true)
 	st.SetJobs(a.jobs)
+	reportTools = st
 	return rt, st, nil
 }
 

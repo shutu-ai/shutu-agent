@@ -30,7 +30,8 @@ func (SubagentListAgentsTool) OutputSchema() map[string]any {
 	}
 	return map[string]any{"type": "array", "items": map[string]any{"oneOf": []any{child, diagnostic}}}
 }
-func (SubagentReportTool) OutputSchema() map[string]any { return map[string]any{"type": "string"} }
+func (SubagentReportTool) OutputSchema() map[string]any { return reportOutputSchema() }
+func (childReportTool) OutputSchema() map[string]any    { return reportOutputSchema() }
 func (SubagentResumeTool) OutputSchema() map[string]any { return map[string]any{"type": "string"} }
 func (SubagentSendTool) OutputSchema() map[string]any {
 	return objectSchema(map[string]any{"messageId": map[string]any{"type": "string"}}, []string{"messageId"})
@@ -52,6 +53,10 @@ func (SubagentMessageTool) OutputSchema() map[string]any {
 }
 func (SubagentWaitTool) OutputSchema() map[string]any {
 	return map[string]any{"type": "object", "additionalProperties": true}
+}
+
+func reportOutputSchema() map[string]any {
+	return objectSchema(map[string]any{"messageId": map[string]any{"type": "string"}}, []string{"messageId"})
 }
 
 func delegationOutputSchema(continuable bool) map[string]any {

@@ -64,6 +64,31 @@ func TestDSHAgentControlSurface(t *testing.T) {
 	}
 }
 
+func TestChildReportToolUsesCanonicalChildScopedContract(t *testing.T) {
+	var got struct{ child, parent, output string }
+	tool := newChildReportTool("child-1", "parent-1", func(child, parent, output string) (string, error) {
+		got = struct{ child, parent, output string }{child, parent, output}
+		return "child-1-message-1", nil
+	})
+	if tool.Name() != "report" {
+		t.Fatalf("report tool name = %q", tool.Name())
+	}
+	properties := tool.Schema()["properties"].(map[string]any)
+	if len(properties) != 1 || properties["output"] == nil {
+		t.Fatalf("report schema properties = %#v, want output only", properties)
+	}
+	result, err := tool.ExecuteResult(context.Background(), json.RawMessage(`{"output":"actionable finding"}`))
+	if err != nil {
+		t.Fatalf("report execute: %v", err)
+	}
+	if result.Value.(map[string]any)["messageId"] != "child-1-message-1" {
+		t.Fatalf("report result = %#v", result.Value)
+	}
+	if got.child != "child-1" || got.parent != "parent-1" || got.output != "actionable finding" {
+		t.Fatalf("report delivery = %#v", got)
+	}
+}
+
 // eventLog records emitted subagent/* event types (and payloads) for tool
 // tests.
 type eventLog struct {

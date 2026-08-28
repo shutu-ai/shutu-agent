@@ -58,7 +58,7 @@ const (
 	ToolFollowupName   = "followup_task"
 	ToolWaitName       = "wait_agent"
 	ToolInterruptName  = "interrupt_agent"
-	ToolReportName     = "subagent_report"
+	ToolReportName     = "report"
 	ToolResumeName     = "subagent_resume"
 )
 
@@ -176,6 +176,23 @@ func (t *SubagentTools) Interrupt() SubagentInterruptTool { return SubagentInter
 
 // Report returns the explicit child-to-parent report event tool.
 func (t *SubagentTools) Report() SubagentReportTool { return SubagentReportTool{t: t} }
+
+// ReportFromChild validates the exact child identity and records a report on
+// its direct parent. The provider uses this as the child-scoped report seam.
+func (t *SubagentTools) ReportFromChild(childID, output string) (string, error) {
+	childID = strings.TrimSpace(childID)
+	output = strings.TrimSpace(output)
+	if childID == "" || output == "" {
+		return "", fmt.Errorf("%s: child id and output are required", ToolReportName)
+	}
+	info, _, ok := t.lookup(childID)
+	if !ok || info == nil || strings.TrimSpace(info.parent) == "" {
+		return "", fmt.Errorf("%s: direct parent is not live; report was not delivered", ToolReportName)
+	}
+	messageID := t.nextMessageID(childID)
+	t.emit(session.EventSubagentReport, session.NewSubagentReport(childID, info.parent, output))
+	return messageID, nil
+}
 
 // Resume returns the persisted-child cold-resume tool.
 func (t *SubagentTools) Resume() SubagentResumeTool { return SubagentResumeTool{t: t} }
@@ -599,7 +616,14 @@ func (t SubagentMessageTool) ExecuteResult(ctx context.Context, args any) (agent
 	if info.run.Send == nil {
 		return agenttools.ToolResult{}, fmt.Errorf("%s: %w", t.name, ErrNotContinuable)
 	}
-	if err := info.run.Send(ctx, a.Message); err != nil {
+	send := info.run.Send
+	if !t.wakeup && info.run.SendQuiet != nil {
+		send = info.run.SendQuiet
+	}
+	if send == nil {
+		return agenttools.ToolResult{}, fmt.Errorf("%s: %w", t.name, ErrNotContinuable)
+	}
+	if err := send(ctx, a.Message); err != nil {
 		return agenttools.ToolResult{}, fmt.Errorf("%s: %w", t.name, err)
 	}
 	t.t.signalChange()
@@ -830,35 +854,79 @@ func (t SubagentInterruptTool) ExecuteResult(ctx context.Context, args any) (age
 // the event payload itself remains a simple opaque session fact.
 type SubagentReportTool struct{ t *SubagentTools }
 
+// childReportTool is installed only in a continuable child registry. Its
+// identity is minted by the provider, so the model cannot choose a sender or
+// recipient.
+type childReportTool struct {
+	childID string
+	parent  string
+	deliver func(childID, parentID, output string) (string, error)
+}
+
+func newChildReportTool(childID, parent string, deliver func(string, string, string) (string, error)) childReportTool {
+	return childReportTool{childID: childID, parent: parent, deliver: deliver}
+}
+
+func (childReportTool) Name() string { return ToolReportName }
+func (childReportTool) Description() string {
+	return "report a self-contained result to the direct parent without ending this turn"
+}
+func (childReportTool) Schema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"output": map[string]any{"type": "string", "minLength": 1, "description": "actionable content for the direct parent"},
+		},
+		"required": []string{"output"}, "additionalProperties": false,
+	}
+}
+func (t childReportTool) Execute(ctx context.Context, args any) (string, error) {
+	result, err := t.ExecuteResult(ctx, args)
+	if err != nil {
+		return "", err
+	}
+	return result.Output, nil
+}
+func (t childReportTool) ExecuteResult(ctx context.Context, args any) (agenttools.ToolResult, error) {
+	var input struct {
+		Output string `json:"output"`
+	}
+	if err := agenttools.DecodeArgs(args, &input); err != nil {
+		return agenttools.ToolResult{}, fmt.Errorf("%s: %w", ToolReportName, err)
+	}
+	if strings.TrimSpace(input.Output) == "" {
+		return agenttools.ToolResult{}, fmt.Errorf("%s: output is required", ToolReportName)
+	}
+	if err := ctx.Err(); err != nil {
+		return agenttools.ToolResult{}, err
+	}
+	if t.deliver == nil {
+		return agenttools.ToolResult{}, fmt.Errorf("%s: direct parent is not live; report was not delivered", ToolReportName)
+	}
+	messageID, err := t.deliver(t.childID, t.parent, input.Output)
+	if err != nil {
+		return agenttools.ToolResult{}, fmt.Errorf("%s: %w", ToolReportName, err)
+	}
+	value := map[string]any{"messageId": messageID}
+	return agenttools.ToolResult{Value: value, Output: valueJSON(value)}, nil
+}
+
 func (SubagentReportTool) Name() string { return ToolReportName }
 func (SubagentReportTool) Description() string {
-	return "send a bounded report from a subagent to its parent session"
+	return "report a self-contained result to the direct parent without ending this turn"
 }
 func (SubagentReportTool) Schema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"id":      map[string]any{"type": "string", "minLength": 1},
-			"content": map[string]any{"type": "string", "minLength": 1},
+			"output": map[string]any{"type": "string", "minLength": 1, "description": "actionable content for the direct parent"},
 		},
-		"required":             []string{"id", "content"},
+		"required":             []string{"output"},
 		"additionalProperties": false,
 	}
 }
 func (t SubagentReportTool) Execute(ctx context.Context, args any) (string, error) {
-	var a struct {
-		ID      string `json:"id"`
-		Content string `json:"content"`
-	}
-	if err := agenttools.DecodeArgs(args, &a); err != nil {
-		return "", fmt.Errorf("%s: %w", ToolReportName, err)
-	}
-	info, _, _ := t.t.lookup(a.ID)
-	if info == nil {
-		return "", fmt.Errorf("%s: unknown subagent %q", ToolReportName, a.ID)
-	}
-	t.t.emit(session.EventSubagentReport, session.NewSubagentReport(a.ID, info.parent, a.Content))
-	return "reported", nil
+	return "", fmt.Errorf("%s: only available inside a continuable child scope", ToolReportName)
 }
 
 // SubagentResumeTool reactivates a persisted local child session after a
