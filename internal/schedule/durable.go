@@ -53,7 +53,15 @@ type DurableCreateRequest struct {
 	Prompt       string
 	AfterSeconds *int64
 	At           string
+	AtLocal      *LocalAtInput
 	EverySeconds *int64
+}
+
+// LocalAtInput is the DSH local-calendar selector for schedule_create.
+type LocalAtInput struct {
+	Date     string
+	Time     string
+	TimeZone string
 }
 
 // DurableChange is the strict v1 event vocabulary. A delete/one-shot dispatch
@@ -78,6 +86,7 @@ var (
 	ErrInvalidPrompt      = errors.New("schedule: invalid prompt")
 	ErrInvalidSelector    = errors.New("schedule: exactly one selector is required")
 	ErrNotFuture          = errors.New("schedule: target must be in the future")
+	ErrInvalidTimeZone    = errors.New("schedule: invalid time zone")
 	ErrFrequencyTooHigh   = errors.New("schedule: every interval is below five minutes")
 	ErrScheduleNotFound   = errors.New("schedule: durable schedule not found")
 	ErrCorruptScheduleLog = errors.New("schedule: corrupt schedule/change log")
@@ -147,6 +156,9 @@ func (s *DurableScheduler) Create(ctx context.Context, req DurableCreateRequest,
 	if strings.TrimSpace(req.At) != "" {
 		selectors++
 	}
+	if req.AtLocal != nil {
+		selectors++
+	}
 	if req.EverySeconds != nil {
 		selectors++
 	}
@@ -164,6 +176,13 @@ func (s *DurableScheduler) Create(ctx context.Context, req DurableCreateRequest,
 		record.ScheduledAt = now.Add(time.Duration(*req.AfterSeconds) * time.Second)
 	case strings.TrimSpace(req.At) != "":
 		target, err := parseFutureInstant(req.At, now)
+		if err != nil {
+			return DurableRecord{}, err
+		}
+		record.Kind = DurableAt
+		record.ScheduledAt = target
+	case req.AtLocal != nil:
+		target, err := parseFutureLocalInstant(*req.AtLocal, now)
 		if err != nil {
 			return DurableRecord{}, err
 		}
@@ -428,15 +447,99 @@ func unmarshalDurableChange(data []byte, into *DurableChange) error {
 }
 
 func parseFutureInstant(value string, now time.Time) (time.Time, error) {
-	target, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(value))
+	value = strings.TrimSpace(value)
+	if !validOffsetDateTime(value) {
+		return time.Time{}, fmt.Errorf("%w: invalid at instant", ErrInvalidSpec)
+	}
+	target, err := time.Parse(time.RFC3339Nano, value)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("%w: invalid at instant: %v", ErrInvalidSpec, err)
 	}
 	target = target.UTC()
+	if target.Year() < 1 || target.Year() > 9999 {
+		return time.Time{}, fmt.Errorf("%w: scheduled time is outside four-digit year range", ErrInvalidSpec)
+	}
 	if !target.After(now) {
 		return time.Time{}, ErrNotFuture
 	}
 	return target, nil
+}
+
+func validOffsetDateTime(value string) bool {
+	if len(value) < 20 || value[4] != '-' || value[7] != '-' || value[10] != 'T' || value[13] != ':' || value[16] != ':' {
+		return false
+	}
+	for _, index := range []int{0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18} {
+		if value[index] < '0' || value[index] > '9' {
+			return false
+		}
+	}
+	zoneAt := strings.IndexAny(value[19:], "Z+-")
+	if zoneAt < 0 {
+		return false
+	}
+	zoneAt += 19
+	if zoneAt > 19 {
+		if value[19] != '.' {
+			return false
+		}
+		fraction := value[20:zoneAt]
+		if len(fraction) < 1 || len(fraction) > 3 || !allDigits(fraction) {
+			return false
+		}
+	}
+	zone := value[zoneAt:]
+	if zone == "Z" {
+		return true
+	}
+	return len(zone) == 6 && (zone[0] == '+' || zone[0] == '-') && zone[3] == ':' && allDigits(zone[1:3]) && allDigits(zone[4:6])
+}
+
+func allDigits(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, c := range value {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func parseFutureLocalInstant(input LocalAtInput, now time.Time) (time.Time, error) {
+	if len(input.Date) != 10 || input.Date[4] != '-' || input.Date[7] != '-' || !allDigits(input.Date[:4]+input.Date[5:7]+input.Date[8:]) {
+		return time.Time{}, fmt.Errorf("%w: local at requires date YYYY-MM-DD", ErrInvalidSpec)
+	}
+	if len(input.Time) < 8 || len(input.Time) > 12 || input.Time[2] != ':' || input.Time[5] != ':' || (len(input.Time) > 8 && input.Time[8] != '.') || !allDigits(input.Time[:2]+input.Time[3:5]+input.Time[6:8]) {
+		return time.Time{}, fmt.Errorf("%w: local at requires time HH:mm:ss with optional milliseconds", ErrInvalidSpec)
+	}
+	if len(input.Time) > 8 && (len(input.Time[9:]) < 1 || len(input.Time[9:]) > 3 || !allDigits(input.Time[9:])) {
+		return time.Time{}, fmt.Errorf("%w: local at has invalid fractional seconds", ErrInvalidSpec)
+	}
+	if input.TimeZone == "" || strings.TrimSpace(input.TimeZone) != input.TimeZone || (input.TimeZone != "UTC" && !strings.Contains(input.TimeZone, "/")) {
+		return time.Time{}, ErrInvalidTimeZone
+	}
+	loc, err := time.LoadLocation(input.TimeZone)
+	if err != nil {
+		return time.Time{}, ErrInvalidTimeZone
+	}
+	layout := "2006-01-02T15:04:05"
+	if len(input.Time) > 8 {
+		layout += "." + strings.Repeat("9", len(input.Time)-9)
+	}
+	parsed, err := time.ParseInLocation(layout, input.Date+"T"+input.Time, loc)
+	if err != nil || parsed.Format("2006-01-02T15:04:05") != input.Date+"T"+input.Time[:8] {
+		return time.Time{}, fmt.Errorf("%w: local at is not a real calendar date and time", ErrInvalidSpec)
+	}
+	parsed = parsed.UTC()
+	if parsed.Year() < 1 || parsed.Year() > 9999 {
+		return time.Time{}, fmt.Errorf("%w: scheduled time is outside four-digit year range", ErrInvalidSpec)
+	}
+	if !parsed.After(now) {
+		return time.Time{}, ErrNotFuture
+	}
+	return parsed, nil
 }
 
 func cloneDurableRecord(record DurableRecord) DurableRecord {

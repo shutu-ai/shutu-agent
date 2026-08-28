@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jabing/shutu-agent/internal/session"
+	agenttools "github.com/jabing/shutu-agent/internal/tools"
 )
 
 func TestDurableSchedulerFoldAndDispatch(t *testing.T) {
@@ -49,6 +50,31 @@ func TestDurableSchedulerFoldAndDispatch(t *testing.T) {
 	}
 	if len(views) != 0 {
 		t.Fatalf("restored dispatched one-shot: %+v", views)
+	}
+}
+
+func TestDurableScheduleToolSupportsDSHLocalAtAndStructuredView(t *testing.T) {
+	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	scheduler := NewDurableScheduler(nil)
+	toolSet := NewDurableScheduleTools(scheduler, func() time.Time { return now })
+	reg := agenttools.New()
+	reg.SetPolicy(agenttools.Policy{Enabled: []string{ToolCreateName}})
+	if err := reg.Register(toolSet.Create()); err != nil {
+		t.Fatalf("register schedule_create: %v", err)
+	}
+	result, err := reg.Execute(context.Background(), ToolCreateName, json.RawMessage(`{"prompt":"Tokyo reminder","at":{"date":"2026-08-25","time":"21:00:00","time_zone":"Asia/Tokyo"}}`))
+	if err != nil {
+		t.Fatalf("schedule_create: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("schedule_create returned error result: %+v", result)
+	}
+	value, ok := result.Value.(map[string]any)
+	if !ok || value["kind"] != "at" || value["deliveryMode"] != "session-local" {
+		t.Fatalf("schedule_create value = %#v, want DSH at view", result.Value)
+	}
+	if value["scheduledAt"] != "2026-08-25T12:00:00Z" {
+		t.Fatalf("scheduledAt = %#v, want UTC target", value["scheduledAt"])
 	}
 }
 
