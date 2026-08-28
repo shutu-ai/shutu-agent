@@ -83,7 +83,7 @@ func NewTool(config Config, workspaceRoot func() string) *Tool {
 func (Tool) Name() string { return ToolName }
 
 func (Tool) Description() string {
-	return "query a configured language server for precise definitions, references, implementations, or hover information; file_path is inside the active session workspace and line/character are one-based UTF-16"
+	return "Query a language server for precise code navigation. operation is one of goToDefinition, findReferences, goToImplementation, hover. line and character are one-based UTF-16 cursor coordinates. findReferences includes the declaration."
 }
 
 func (Tool) Schema() map[string]any {
@@ -91,15 +91,28 @@ func (Tool) Schema() map[string]any {
 		"type": "object", "additionalProperties": false,
 		"properties": map[string]any{
 			"operation": map[string]any{"type": "string", "enum": operations, "description": "goToDefinition, findReferences, goToImplementation, or hover"},
-			"file_path": map[string]any{"type": "string", "minLength": 1, "description": "source file relative to the session workspace or an absolute path inside it"},
-			"line":      map[string]any{"type": "integer", "minimum": 1, "description": "one-based source line"},
-			"character": map[string]any{"type": "integer", "minimum": 1, "description": "one-based UTF-16 character"},
+			"file_path": map[string]any{"type": "string", "description": "The source file to query, relative to the workspace or absolute."},
+			"line":      map[string]any{"type": "integer", "description": "One-based line of the cursor."},
+			"character": map[string]any{"type": "integer", "description": "One-based UTF-16 column of the cursor."},
 		},
 		"required": []string{"operation", "file_path", "line", "character"},
 	}
 }
 
 func (t *Tool) Execute(ctx context.Context, args any) (string, error) {
+	_, output, err := t.execute(ctx, args)
+	return output, err
+}
+
+func (t *Tool) ExecuteResult(ctx context.Context, args any) (agenttools.ToolResult, error) {
+	value, output, err := t.execute(ctx, args)
+	if err != nil {
+		return agenttools.ToolResult{}, err
+	}
+	return agenttools.ToolResult{Value: value, Output: output}, nil
+}
+
+func (t *Tool) execute(ctx context.Context, args any) (any, string, error) {
 	var in struct {
 		Operation string `json:"operation"`
 		FilePath  string `json:"file_path"`
@@ -107,43 +120,43 @@ func (t *Tool) Execute(ctx context.Context, args any) (string, error) {
 		Character int    `json:"character"`
 	}
 	if err := agenttools.DecodeArgs(args, &in); err != nil {
-		return "", fmt.Errorf("lsp: %w", err)
+		return nil, "", fmt.Errorf("lsp: %w", err)
 	}
 	if !contains(operations, in.Operation) {
-		return "", fmt.Errorf("lsp: unsupported operation %q", in.Operation)
+		return nil, "", fmt.Errorf("lsp: unsupported operation %q", in.Operation)
 	}
 	if strings.TrimSpace(in.FilePath) == "" || in.Line < 1 || in.Character < 1 {
-		return "", errors.New("lsp: file_path, line, and character are required and must be positive")
+		return nil, "", errors.New("lsp: file_path, line, and character are required and must be positive")
 	}
 	root := ""
 	if t.root != nil {
 		root = strings.TrimSpace(t.root())
 	}
 	if root == "" {
-		return "", errors.New("lsp: active session workspace cwd is unavailable")
+		return nil, "", errors.New("lsp: active session workspace cwd is unavailable")
 	}
 	root, path, err := resolveInside(root, in.FilePath)
 	if err != nil {
-		return "", fmt.Errorf("lsp: %w", err)
+		return nil, "", fmt.Errorf("lsp: %w", err)
 	}
 	info, err := os.Stat(path)
 	if err != nil {
-		return "", fmt.Errorf("lsp: source file: %w", err)
+		return nil, "", fmt.Errorf("lsp: source file: %w", err)
 	}
 	if info.IsDir() {
-		return "", fmt.Errorf("lsp: source path is a directory")
+		return nil, "", fmt.Errorf("lsp: source path is a directory")
 	}
 	if info.Size() > int64(t.config.MaxDocumentBytes) {
-		return "", fmt.Errorf("lsp: source file exceeds %d-byte limit", t.config.MaxDocumentBytes)
+		return nil, "", fmt.Errorf("lsp: source file exceeds %d-byte limit", t.config.MaxDocumentBytes)
 	}
 	source, err := os.ReadFile(path)
 	if err != nil {
-		return "", fmt.Errorf("lsp: read source: %w", err)
+		return nil, "", fmt.Errorf("lsp: read source: %w", err)
 	}
 	ext := strings.ToLower(filepath.Ext(path))
 	language := t.config.ExtensionToLang[ext]
 	if language == "" {
-		return "", fmt.Errorf("lsp: no configured language-server route for %q", filepath.Ext(path))
+		return nil, "", fmt.Errorf("lsp: no configured language-server route for %q", filepath.Ext(path))
 	}
 	position := position{Line: in.Line - 1, Character: in.Character - 1}
 	uri := fileURI(path)
@@ -151,23 +164,23 @@ func (t *Tool) Execute(ctx context.Context, args any) (string, error) {
 	defer cancel()
 	client, err := newClient(queryCtx, t.config.Command, t.config.Args, root)
 	if err != nil {
-		return "", fmt.Errorf("lsp: start server: %w", err)
+		return nil, "", fmt.Errorf("lsp: start server: %w", err)
 	}
 	defer client.close()
 	if err := client.initialize(queryCtx, root); err != nil {
-		return "", fmt.Errorf("lsp: initialize: %w", err)
+		return nil, "", fmt.Errorf("lsp: initialize: %w", err)
 	}
 	if err := client.notify("textDocument/didOpen", map[string]any{
 		"textDocument": map[string]any{"uri": uri, "languageId": language, "version": 1, "text": string(source)},
 	}); err != nil {
-		return "", fmt.Errorf("lsp: open document: %w", err)
+		return nil, "", fmt.Errorf("lsp: open document: %w", err)
 	}
 	result, err := client.query(queryCtx, in.Operation, uri, position)
 	if err != nil {
-		return "", fmt.Errorf("lsp: query: %w", err)
+		return nil, "", fmt.Errorf("lsp: query: %w", err)
 	}
 	if in.Operation == "hover" {
-		return renderHover(result, t.config.MaxResultChars), nil
+		return hoverValue(result), renderHover(result, t.config.MaxResultChars), nil
 	}
 	locations := parseLocations(result)
 	if in.Operation == "findReferences" {
@@ -177,7 +190,46 @@ func (t *Tool) Execute(ctx context.Context, args any) (string, error) {
 			locations = mergeLocations(locations, parseLocations(definition))
 		}
 	}
-	return renderLocations(in.Operation, locations, root, t.config.MaxLocations, t.config.MaxResultChars), nil
+	return locationsValue(locations, fileURI(root)), renderLocations(in.Operation, locations, root, t.config.MaxLocations, t.config.MaxResultChars), nil
+}
+
+func locationsValue(locations []location, workspaceURI string) map[string]any {
+	items := make([]any, 0, len(locations))
+	for _, item := range locations {
+		items = append(items, map[string]any{
+			"uri": item.URI,
+			"range": map[string]any{
+				"start": map[string]any{"line": item.Range.Start.Line, "character": item.Range.Start.Character},
+				"end":   map[string]any{"line": item.Range.End.Line, "character": item.Range.End.Character},
+			},
+		})
+	}
+	return map[string]any{"kind": "locations", "locations": items, "resolvedWorkspaceUri": workspaceURI}
+}
+
+func hoverValue(raw json.RawMessage) map[string]any {
+	if len(raw) == 0 || string(raw) == "null" {
+		return map[string]any{"kind": "hover", "hover": nil}
+	}
+	var value struct {
+		Contents json.RawMessage `json:"contents"`
+		Range    *lspRange       `json:"range"`
+	}
+	if json.Unmarshal(raw, &value) != nil {
+		return map[string]any{"kind": "hover", "hover": nil}
+	}
+	contents := hoverText(value.Contents)
+	if contents == "" {
+		return map[string]any{"kind": "hover", "hover": nil}
+	}
+	hover := map[string]any{"contents": contents}
+	if value.Range != nil {
+		hover["range"] = map[string]any{
+			"start": map[string]any{"line": value.Range.Start.Line, "character": value.Range.Start.Character},
+			"end":   map[string]any{"line": value.Range.End.Line, "character": value.Range.End.Character},
+		}
+	}
+	return map[string]any{"kind": "hover", "hover": hover}
 }
 
 func resolveInside(root, name string) (string, string, error) {

@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	agenttools "github.com/jabing/shutu-agent/internal/tools"
 )
 
 func TestResolveInsideRejectsEscape(t *testing.T) {
@@ -45,6 +47,29 @@ func TestToolExecuteWithFakeStdioServer(t *testing.T) {
 	out, err := tool.Execute(context.Background(), mustJSON(map[string]any{"operation": "goToDefinition", "file_path": "main.go", "line": 2, "character": 6}))
 	if err != nil || !strings.Contains(out, "main.go:2:1") {
 		t.Fatalf("lsp output = %q, err=%v", out, err)
+	}
+}
+
+func TestLSPRegistryPreservesDSHStructuredLocations(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "main.go")
+	if err := os.WriteFile(path, []byte("package main\nfunc main() {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LSP_HELPER", "1")
+	tool := NewTool(Config{Command: os.Args[0], Args: []string{"-test.run=TestLSPHelperProcess"}, ExtensionToLang: map[string]string{".go": "go"}, Timeout: 5 * time.Second}, func() string { return root })
+	reg := agenttools.New()
+	reg.SetPolicy(agenttools.Policy{Enabled: []string{ToolName}})
+	if err := reg.Register(tool); err != nil {
+		t.Fatalf("register lsp: %v", err)
+	}
+	result, err := reg.Execute(context.Background(), ToolName, mustJSON(map[string]any{"operation": "goToDefinition", "file_path": "main.go", "line": 2, "character": 6}))
+	if err != nil || result.IsError {
+		t.Fatalf("lsp registry result = %+v, err=%v", result, err)
+	}
+	value, ok := result.Value.(map[string]any)
+	if !ok || value["kind"] != "locations" || value["resolvedWorkspaceUri"] == nil {
+		t.Fatalf("lsp value = %#v, want DSH locations object", result.Value)
 	}
 }
 
