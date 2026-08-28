@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/jabing/shutu-agent/internal/config"
+	"github.com/jabing/shutu-agent/internal/jobs"
 	"github.com/jabing/shutu-agent/internal/session"
 	"github.com/jabing/shutu-agent/internal/tools"
 )
@@ -26,7 +27,7 @@ func makeJobsApp(enabled bool) *app {
 // (in production config.applyDefaults + PolicyFromConfig do this).
 func jobsPolicy() tools.Policy {
 	return tools.Policy{
-		Enabled:     []string{"job_start", "job_output", "job_kill", "job_list"},
+		Enabled:     []string{"job_output", "job_kill", "job_list"},
 		Timeout:     0, // no per-tool deadline in tests
 		OutputLimit: 0,
 	}
@@ -78,12 +79,12 @@ func TestRegisterJobsEnabledRegistersAndValidates(t *testing.T) {
 	for _, s := range specs {
 		names = append(names, s.Name)
 	}
-	for _, want := range []string{"job_start", "job_output", "job_kill", "job_list"} {
+	for _, want := range []string{"job_output", "job_kill", "job_list"} {
 		if !containsStr(names, want) {
 			t.Fatalf("registered tools %v lack %q", names, want)
 		}
 	}
-	for _, removed := range []string{"job_status", "job_cancel", "job_wait", "job_read"} {
+	for _, removed := range []string{"job_start", "job_status", "job_cancel", "job_wait", "job_read"} {
 		if containsStr(names, removed) {
 			t.Fatalf("removed legacy tool %q is still advertised", removed)
 		}
@@ -99,8 +100,6 @@ func TestRegisterJobsEnabledRegistersAndValidates(t *testing.T) {
 	}{
 		{"job_output", `{}`},                            // missing required job_id
 		{"job_output", `{"job_id":123}`},                // job_id must be a string
-		{"job_start", `{}`},                             // missing required command
-		{"job_start", `{"command":""}`},                 // empty command
 		{"job_kill", `{}`},                              // missing required job_id
 		{"job_output", `{"job_id":"x","timeout_ms":0}`}, // timeout must be >= 1
 		{"job_list", `{"extra":1}`},                     // additional properties rejected
@@ -110,25 +109,18 @@ func TestRegisterJobsEnabledRegistersAndValidates(t *testing.T) {
 		}
 	}
 
-	// A valid call flows through: start a real command, then observe it.
-	res, err := app.reg.Execute(context.Background(), "job_start", json.RawMessage(`{"command":"echo d7-ok"}`))
+	// Producers start jobs through the internal registry; the model observes
+	// them only through DSH's job_output/job_list/job_kill surface.
+	jobID, err := app.jobs.Start(context.Background(), jobs.JobStart{
+		Kind: jobs.Kind("bash"), Label: "d7-ok", OwnerSession: "s-test",
+		Run: func(context.Context) (jobs.JobOutcome, error) {
+			return jobs.JobOutcome{Status: jobs.StatusCompleted, Output: "d7-ok"}, nil
+		},
+	})
 	if err != nil {
-		t.Fatalf("job_start via registry: %v", err)
+		t.Fatalf("internal job start: %v", err)
 	}
-	if !strings.Contains(res.Output, "started job ") {
-		t.Fatalf("job_start output = %q, want started job ...", res.Output)
-	}
-	if _, err := app.reg.Execute(context.Background(), "job_output", json.RawMessage(`{"job_id":"bash-1","wait":true}`)); err != nil {
+	if _, err := app.reg.Execute(context.Background(), "job_output", json.RawMessage(`{"job_id":"`+jobID+`","wait":true}`)); err != nil {
 		t.Fatalf("job_output via registry: %v", err)
-	}
-	// The job/start event was appended to the session log (D3).
-	foundStart := false
-	for _, ev := range app.log.Events() {
-		if ev.Type == session.EventJobStart {
-			foundStart = true
-		}
-	}
-	if !foundStart {
-		t.Fatal("job/start event missing from the session log after job_start")
 	}
 }

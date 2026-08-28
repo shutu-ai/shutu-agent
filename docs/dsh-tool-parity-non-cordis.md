@@ -17,7 +17,7 @@
 ## 任务顺序
 
 - [ ] P-NC-1：将 Agent 控制工具对齐为 DSH 官方名称和边界：`subagent`、`spawn_teammate`、`list_agents`、`wait_agent`、`interrupt_agent`、`send_message`、`followup_task`、`report`。不实现 `team_task_*`。
-- [ ] P-NC-2：对齐 Job 工具 `job_output`、`job_kill`、`job_list` 的 schema、输出、取消和 owner 隔离；旧 `job_start/status/cancel/wait/read` 不进入模型工具面。
+- [x] P-NC-2：对齐 Job 工具 `job_output`、`job_kill`、`job_list` 的 schema、输出、取消和 owner 隔离；旧 `job_start/status/cancel/wait/read` 不进入模型工具面。
 - [ ] P-NC-3：清理旧 Plan/Eval/Spill 工具模型面，仅保留 DSH 的 `create_goal`、`get_goal`、`update_goal`、`todo_write`；内部实现可以继续作为存储/运行时复用。
 - [ ] P-NC-4：对齐交互工具，仅保留 `ask_user_question` 的 DSH 模型面，并核对问题结构、回答结构、取消/超时行为。
 - [ ] P-NC-5：对齐文件、Shell 和终端工具：`read`、`write`、`edit`、`str_replace_editor`、平台 Shell、`terminal_*`；移除模型面旧 `run_command` 和重复文件列表工具。

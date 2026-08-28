@@ -40,7 +40,6 @@ func (a *app) registerJobs() error {
 	}
 	jt := jobs.NewJobTools(a.jobs, func() string { return a.currentID }, onEvent)
 	for _, t := range []tools.Tool{
-		jt.Start(),
 		jt.DshOutput(),
 		jt.DshKill(),
 		jt.DshList(),
