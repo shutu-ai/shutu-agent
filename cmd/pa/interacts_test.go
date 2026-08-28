@@ -118,12 +118,16 @@ func TestRegisterInteractsEnabledRegistersToolsAndEvents(t *testing.T) {
 		args string
 	}{
 		{"ask_user_question", `{}`},                                        // missing required questions
-		{"ask_user_question", `{"questions":[]}`},                          // minItems
 		{"ask_user_question", `{"questions":[{"id":123,"question":"p"}]}`}, // id must be a string
 	} {
 		if _, err := a.reg.Execute(context.Background(), tc.name, json.RawMessage(tc.args)); err == nil {
 			t.Errorf("%s with args %s must be rejected (D7)", tc.name, tc.args)
 		}
+	}
+	// DSH leaves the empty-batch rejection to the user-questions service rather
+	// than advertising a minItems constraint in the model schema.
+	if result, err := a.reg.Execute(context.Background(), "ask_user_question", json.RawMessage(`{"questions":[]}`)); err != nil || !result.IsError {
+		t.Fatalf("ask_user_question with an empty batch = result=%+v err=%v, want execution error", result, err)
 	}
 
 	// A valid question blocks until the human response is resolved, matching DSH.

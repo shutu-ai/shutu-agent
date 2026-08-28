@@ -164,32 +164,39 @@ type AskUserQuestionTool struct{ t *InteractTools }
 
 func (AskUserQuestionTool) Name() string { return ToolAskUserQuestionName }
 func (AskUserQuestionTool) Description() string {
-	return "ask the user one or more structured questions and wait for the answer"
+	return "Ask the user a concise question when you need confirmation, a choice, or missing information before proceeding. Send one or more questions, each with a stable id that will be echoed in the answer."
 }
 func (AskUserQuestionTool) Schema() map[string]any {
 	return map[string]any{
 		"type": "object", "properties": map[string]any{
 			"questions": map[string]any{
-				"type": "array", "minItems": 1,
+				"type": "array", "description": "Questions to ask the user before continuing.",
 				"items": map[string]any{
 					"type": "object", "properties": map[string]any{
-						"id": map[string]any{"type": "string"}, "question": map[string]any{"type": "string"},
-						"header":       map[string]any{"type": "string"},
-						"multi_select": map[string]any{"type": "boolean"}, "options": map[string]any{
-							"type": "array", "items": map[string]any{"type": "object", "properties": map[string]any{
-								"label": map[string]any{"type": "string"}, "description": map[string]any{"type": "string"},
-							}, "required": []string{"label"}, "additionalProperties": true},
+						"id":       map[string]any{"type": "string", "description": "Stable id for this question; echoed in the answer."},
+						"question": map[string]any{"type": "string", "description": "The specific question to ask the user."},
+						"header":   map[string]any{"type": "string", "description": "Optional short heading for the question, such as Confirm or Choose Mode."},
+						"options": map[string]any{
+							"type":        "array",
+							"description": "Optional choices to show the user. If you recommend one, put it first and append (Recommended) to that label.",
+							"items": map[string]any{
+								"type": "object", "properties": map[string]any{
+									"label":       map[string]any{"type": "string", "description": "Short user-facing option label."},
+									"description": map[string]any{"type": "string", "description": "One sentence explaining the tradeoff or impact."},
+								}, "required": []string{"label"}, "additionalProperties": true,
+							},
 						},
+						"multi_select": map[string]any{"type": "boolean", "description": "Whether the user may select more than one option. Defaults to false."},
 					}, "required": []string{"id", "question"}, "additionalProperties": true,
 				},
 			},
-		}, "required": []string{"questions"}, "additionalProperties": false,
+		}, "required": []string{"questions"},
 	}
 }
 
 func (t AskUserQuestionTool) Execute(ctx context.Context, args any) (string, error) {
 	var input struct {
-		Questions []Question `json:"questions"`
+		Questions []askUserQuestionInput `json:"questions"`
 	}
 	if err := agenttools.DecodeArgs(args, &input); err != nil {
 		return "", fmt.Errorf("ask_user_question: %w", err)
@@ -197,7 +204,14 @@ func (t AskUserQuestionTool) Execute(ctx context.Context, args any) (string, err
 	if len(input.Questions) == 0 {
 		return "", fmt.Errorf("ask_user_question: at least one question is required")
 	}
-	if err := validateQuestions(input.Questions); err != nil {
+	questions := make([]Question, 0, len(input.Questions))
+	for _, item := range input.Questions {
+		questions = append(questions, Question{
+			ID: item.ID, Question: item.Question, Header: item.Header,
+			Options: item.Options, MultiSelect: item.MultiSelect,
+		})
+	}
+	if err := validateQuestions(questions); err != nil {
 		return "", fmt.Errorf("ask_user_question: %w", err)
 	}
 	structured, ok := t.t.e.(StructuredRequester)
@@ -205,7 +219,7 @@ func (t AskUserQuestionTool) Execute(ctx context.Context, args any) (string, err
 		return "", fmt.Errorf("ask_user_question: structured questions are unavailable")
 	}
 	rawArgs, _ := json.Marshal(args)
-	req, err := structured.RequestWithQuestions(ctx, "Please answer the following questions.", ToolAskUserQuestionName, boundArgs(string(rawArgs)), input.Questions)
+	req, err := structured.RequestWithQuestions(ctx, "Please answer the following questions.", ToolAskUserQuestionName, boundArgs(string(rawArgs)), questions)
 	if err != nil {
 		return "", fmt.Errorf("ask_user_question: %w", err)
 	}
@@ -218,11 +232,14 @@ func (t AskUserQuestionTool) Execute(ctx context.Context, args any) (string, err
 					t.t.emit(session.EventInteractCancel, session.NewInteractCancel(req.ID))
 				}
 			}
+			// DSH intentionally exposes both caller cancellation and a
+			// deadline as the same stable model-facing abort error.
+			return "", errors.New("ask_user_question was aborted before the user answered")
 		}
 		return "", fmt.Errorf("ask_user_question: %w", err)
 	}
 	if resolved.Status == StatusCanceled {
-		return "", fmt.Errorf("ask_user_question: user cancelled the questions")
+		return "", errors.New("the user cancelled ask_user_question")
 	}
 	if resolved.Status != StatusApproved {
 		return "", fmt.Errorf("ask_user_question: user rejected the questions")
@@ -230,7 +247,47 @@ func (t AskUserQuestionTool) Execute(ctx context.Context, args any) (string, err
 	if resolved.Answer == "" {
 		return `{"answers":[]}`, nil
 	}
-	return resolved.Answer, nil
+	answer, err := canonicalAnswer(resolved.Answer)
+	if err != nil {
+		return "", fmt.Errorf("ask_user_question: invalid answer: %w", err)
+	}
+	return answer, nil
+}
+
+// askUserQuestionInput intentionally contains only the DSH model-facing
+// fields. The DSH tool accepts additional item properties for forward
+// compatibility but projects the known fields before calling its provider;
+// fields such as the legacy `detail` must not leak into the UI seam.
+type askUserQuestionInput struct {
+	ID          string           `json:"id"`
+	Question    string           `json:"question"`
+	Header      string           `json:"header"`
+	Options     []QuestionOption `json:"options"`
+	MultiSelect bool             `json:"multi_select"`
+}
+
+type askUserQuestionAnswer struct {
+	ID       string   `json:"id"`
+	Selected []string `json:"selected"`
+	Custom   *string  `json:"custom,omitempty"`
+}
+
+type askUserQuestionAnswerPayload struct {
+	Answers []askUserQuestionAnswer `json:"answers"`
+}
+
+// canonicalAnswer mirrors the DSH tool's provider-to-model projection: only
+// id, selected, and an explicitly present custom answer are returned.
+func canonicalAnswer(raw string) (string, error) {
+	var payload askUserQuestionAnswerPayload
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return "", err
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
 }
 
 func validateQuestions(questions []Question) error {
