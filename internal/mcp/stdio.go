@@ -183,34 +183,46 @@ func (c *stdioClient) ListTools(ctx context.Context) ([]Tool, error) {
 	if !c.started {
 		return nil, ErrNotStarted
 	}
-	res, err := c.doRequestLocked(ctx, "tools/list", map[string]any{})
-	if err != nil {
-		return nil, err
-	}
-	var list struct {
-		Tools []struct {
-			Name         string         `json:"name"`
-			Description  string         `json:"description"`
-			InputSchema  map[string]any `json:"inputSchema"`
-			OutputSchema map[string]any `json:"outputSchema"`
-			Execution    struct {
-				TaskSupport string `json:"taskSupport"`
-			} `json:"execution"`
-		} `json:"tools"`
-	}
-	if err := json.Unmarshal(res, &list); err != nil {
-		return nil, fmt.Errorf("%w: invalid tools/list result: %v", ErrProtocol, err)
-	}
-	tools := make([]Tool, 0, len(list.Tools))
-	for _, t := range list.Tools {
-		schema := t.InputSchema
-		if schema == nil {
-			schema = map[string]any{}
+	tools := make([]Tool, 0)
+	cursor := ""
+	for {
+		params := map[string]any{}
+		if cursor != "" {
+			params["cursor"] = cursor
 		}
-		tools = append(tools, Tool{
-			Name: t.Name, Description: t.Description, InputSchema: schema,
-			OutputSchema: t.OutputSchema, TaskSupport: t.Execution.TaskSupport,
-		})
+		res, err := c.doRequestLocked(ctx, "tools/list", params)
+		if err != nil {
+			return nil, err
+		}
+		var list struct {
+			Tools []struct {
+				Name         string         `json:"name"`
+				Description  string         `json:"description"`
+				InputSchema  map[string]any `json:"inputSchema"`
+				OutputSchema map[string]any `json:"outputSchema"`
+				Execution    struct {
+					TaskSupport string `json:"taskSupport"`
+				} `json:"execution"`
+			} `json:"tools"`
+			NextCursor string `json:"nextCursor"`
+		}
+		if err := json.Unmarshal(res, &list); err != nil {
+			return nil, fmt.Errorf("%w: invalid tools/list result: %v", ErrProtocol, err)
+		}
+		for _, t := range list.Tools {
+			schema := t.InputSchema
+			if schema == nil {
+				schema = map[string]any{}
+			}
+			tools = append(tools, Tool{
+				Name: t.Name, Description: t.Description, InputSchema: schema,
+				OutputSchema: t.OutputSchema, TaskSupport: t.Execution.TaskSupport,
+			})
+		}
+		if list.NextCursor == "" || list.NextCursor == cursor {
+			break
+		}
+		cursor = list.NextCursor
 	}
 	return tools, nil
 }

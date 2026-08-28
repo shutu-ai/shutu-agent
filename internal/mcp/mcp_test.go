@@ -69,6 +69,18 @@ func TestHelperServer(t *testing.T) {
 				// client times out, then kills us via Close.
 				time.Sleep(time.Hour)
 			}
+			if mode == "pages" {
+				var params struct {
+					Cursor string `json:"cursor"`
+				}
+				_ = json.Unmarshal(msg.Params, &params)
+				if params.Cursor == "page-2" {
+					fakeResult(out, msg.ID, map[string]any{"tools": []any{map[string]any{"name": "second", "inputSchema": map[string]any{"type": "object"}}}})
+				} else {
+					fakeResult(out, msg.ID, map[string]any{"tools": []any{map[string]any{"name": "first", "inputSchema": map[string]any{"type": "object"}}}, "nextCursor": "page-2"})
+				}
+				continue
+			}
 			fakeResult(out, msg.ID, map[string]any{
 				"tools": []any{
 					map[string]any{
@@ -79,6 +91,8 @@ func TestHelperServer(t *testing.T) {
 							"properties": map[string]any{"text": map[string]any{"type": "string"}},
 							"required":   []any{"text"},
 						},
+						"outputSchema": map[string]any{"type": "object", "properties": map[string]any{"answer": map[string]any{"type": "string"}}},
+						"execution":    map[string]any{"taskSupport": "optional"},
 					},
 					map[string]any{
 						"name":        "noschema",
@@ -102,8 +116,9 @@ func TestHelperServer(t *testing.T) {
 			case "echo":
 				text, _ := params.Arguments["text"].(string)
 				fakeResult(out, msg.ID, map[string]any{
-					"content": []any{map[string]any{"type": "text", "text": "echo:" + text}},
-					"isError": false,
+					"content":           []any{map[string]any{"type": "text", "text": "echo:" + text}},
+					"structuredContent": map[string]any{"answer": text},
+					"isError":           false,
 				})
 			case "erris":
 				fakeResult(out, msg.ID, map[string]any{
@@ -224,6 +239,9 @@ func TestClientListTools(t *testing.T) {
 	if ty, _ := echo.InputSchema["type"].(string); ty != "object" {
 		t.Fatalf("echo.InputSchema['type'] = %v, want 'object'", echo.InputSchema["type"])
 	}
+	if echo.OutputSchema == nil || echo.OutputSchema["type"] != "object" || echo.TaskSupport != "optional" {
+		t.Fatalf("echo output/task metadata = %#v/%q, want output schema and optional task support", echo.OutputSchema, echo.TaskSupport)
+	}
 	ns, ok := byName["noschema"]
 	if !ok {
 		t.Fatalf("tools = %v, want a 'noschema' tool", tools)
@@ -233,6 +251,21 @@ func TestClientListTools(t *testing.T) {
 	}
 	if len(ns.InputSchema) != 0 {
 		t.Fatalf("noschema.InputSchema = %v, want empty", ns.InputSchema)
+	}
+}
+
+func TestClientListToolsDrainsPagination(t *testing.T) {
+	c := newFakeClient(t, "pages", 0)
+	defer c.Close()
+	if err := c.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	tools, err := c.ListTools(context.Background())
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	if len(tools) != 2 || tools[0].Name != "first" || tools[1].Name != "second" {
+		t.Fatalf("paginated tools = %#v, want first and second", tools)
 	}
 }
 
@@ -261,6 +294,9 @@ func TestClientCallSuccess(t *testing.T) {
 	}
 	if got, _ := item["text"].(string); got != "echo:hi" {
 		t.Fatalf("Content[0]['text'] = %q, want %q", got, "echo:hi")
+	}
+	if !res.StructuredContentSet || res.StructuredContent.(map[string]any)["answer"] != "hi" {
+		t.Fatalf("StructuredContent = %#v (set=%v), want answer=hi", res.StructuredContent, res.StructuredContentSet)
 	}
 }
 

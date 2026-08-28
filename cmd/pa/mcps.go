@@ -13,11 +13,14 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	agenttools "github.com/jabing/shutu-agent/internal/tools"
 	"strings"
 
+	"github.com/jabing/shutu-agent/internal/attachment"
 	"github.com/jabing/shutu-agent/internal/config"
+	"github.com/jabing/shutu-agent/internal/llm"
 	"github.com/jabing/shutu-agent/internal/mcp"
 )
 
@@ -73,13 +76,15 @@ func (a *app) bridgeMcpServer(ctx context.Context, f mcp.Factory, srv config.Mcp
 	for _, tl := range tools {
 		name := mcp.PublicToolName(srv.Name, tl.Name)
 		bt := bridgedMcpTool{
-			client:      client,
-			name:        name,
-			tool:        tl.Name,
-			desc:        tl.Description,
-			schema:      normalizeSchema(tl.InputSchema),
-			output:      normalizeOutputSchema(tl.OutputSchema),
-			taskSupport: tl.TaskSupport,
+			client:        client,
+			name:          name,
+			tool:          tl.Name,
+			desc:          tl.Description,
+			schema:        normalizeSchema(tl.InputSchema),
+			output:        normalizeOutputSchema(tl.OutputSchema),
+			taskSupport:   tl.TaskSupport,
+			attachments:   a.attachStore,
+			maxImageBytes: a.cfg.LLM.Multimodal.MaxImageBytes,
 		}
 		if err := a.reg.Register(bt); err != nil {
 			return fmt.Errorf("pa: register bridged mcp tool %q: %w", name, err)
@@ -100,13 +105,15 @@ func (a *app) bridgeMcpServer(ctx context.Context, f mcp.Factory, srv config.Mcp
 // verbatim; the registry's D7 gate validates those arguments against the
 // server's own input schema, which is passed through to Schema().
 type bridgedMcpTool struct {
-	client      mcp.Client
-	name        string
-	tool        string
-	desc        string
-	schema      map[string]any
-	output      map[string]any
-	taskSupport string
+	client        mcp.Client
+	name          string
+	tool          string
+	desc          string
+	schema        map[string]any
+	output        map[string]any
+	taskSupport   string
+	attachments   *attachment.Store
+	maxImageBytes int
 }
 
 func (t bridgedMcpTool) Name() string           { return t.name }
@@ -153,7 +160,76 @@ func (t bridgedMcpTool) ExecuteResult(ctx context.Context, args any) (agenttools
 	}
 	// Same rendering as mcp_call (mcp.FormatCallResult), so a server tool's
 	// result reads identically through either path.
-	return agenttools.ToolResult{Value: value, Output: mcp.FormatCallResult(res)}, nil
+	return agenttools.ToolResult{Value: value, Output: mcp.FormatCallResult(res), Content: projectMcpContent(t.name, res.Content, t.attachments, t.maxImageBytes)}, nil
+}
+
+// projectMcpContent preserves DSH's rich result boundary: text remains text,
+// supported MCP image blocks are durably stored as ImageRef values, and
+// unsupported or unadmitted blocks become explicit diagnostic text while the
+// canonical Value above still retains the raw protocol content.
+func projectMcpContent(toolName string, items []any, store *attachment.Store, maxImageBytes int) []llm.ContentBlock {
+	blocks := make([]llm.ContentBlock, 0, len(items))
+	for _, item := range items {
+		obj, ok := item.(map[string]any)
+		if !ok {
+			blocks = append(blocks, llm.Text("[unsupported MCP content block: expected an object]"))
+			continue
+		}
+		typ, _ := obj["type"].(string)
+		switch typ {
+		case "text":
+			text, _ := obj["text"].(string)
+			blocks = append(blocks, llm.Text(text))
+		case "image":
+			blocks = append(blocks, projectMcpImage(obj, store, maxImageBytes))
+		case "resource_link":
+			name, _ := obj["name"].(string)
+			uri, _ := obj["uri"].(string)
+			if name == "" || uri == "" {
+				blocks = append(blocks, llm.Text("[resource link unavailable: the MCP block is missing its name or URI]"))
+			} else {
+				blocks = append(blocks, llm.Text(fmt.Sprintf("Resource link: %s (%s)", name, uri)))
+			}
+		case "audio":
+			mime, _ := obj["mimeType"].(string)
+			blocks = append(blocks, llm.Text(fmt.Sprintf("[audio result unsupported: %s; raw audio data remains available to programmatic callers]", fallbackMcpString(mime, "unknown media type"))))
+		case "resource":
+			blocks = append(blocks, llm.Text("[embedded resource unsupported; raw resource data remains available to programmatic callers]"))
+		default:
+			blocks = append(blocks, llm.Text(fmt.Sprintf("[unsupported MCP content type: %s]", typ)))
+		}
+	}
+	if len(blocks) == 0 {
+		return []llm.ContentBlock{llm.Text(fmt.Sprintf("(%s returned no model-visible content)", toolName))}
+	}
+	return blocks
+}
+
+func projectMcpImage(obj map[string]any, store *attachment.Store, maxImageBytes int) llm.ContentBlock {
+	mime, _ := obj["mimeType"].(string)
+	data, _ := obj["data"].(string)
+	if store == nil {
+		return llm.Text(fmt.Sprintf("[image unavailable: %s; no attachment store is mounted; raw image data remains available to programmatic callers]", fallbackMcpString(mime, "unknown media type")))
+	}
+	if attachment.MediaTypeForExtension("."+strings.TrimPrefix(mime, "image/")) == "" {
+		return llm.Text(fmt.Sprintf("[image unavailable: %s; the declared media type is not PNG, JPEG, WebP, or GIF; raw image data remains available to programmatic callers]", fallbackMcpString(mime, "unknown media type")))
+	}
+	decoded, err := base64.StdEncoding.DecodeString(data)
+	if err != nil || data == "" || base64.StdEncoding.EncodeToString(decoded) != data {
+		return llm.Text(fmt.Sprintf("[image unavailable: %s; the image data is not canonical base64; raw image data remains available to programmatic callers]", fallbackMcpString(mime, "unknown media type")))
+	}
+	ref, err := store.SaveImage(mime, decoded, maxImageBytes)
+	if err != nil {
+		return llm.Text(fmt.Sprintf("[image unavailable: %s; image admission rejected the result: %v; raw image data remains available to programmatic callers]", fallbackMcpString(mime, "unknown media type"), err))
+	}
+	return llm.ContentBlock{Kind: llm.BlockImage, Image: ref}
+}
+
+func fallbackMcpString(value, fallback string) string {
+	if value == "" {
+		return fallback
+	}
+	return value
 }
 
 // normalizeSchema adapts a server-provided inputSchema for registration in the
