@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jabing/shutu-agent/internal/config"
+	"github.com/jabing/shutu-agent/internal/interact"
 	"github.com/jabing/shutu-agent/internal/session"
 	"github.com/jabing/shutu-agent/internal/tools"
 )
@@ -50,7 +52,7 @@ func makeInteractApp(enabled bool, sensitive []string) *app {
 // gate can run them (in production config.applyDefaults + PolicyFromConfig do
 // this).
 func interactPolicy(extra ...string) tools.Policy {
-	return tools.Policy{Enabled: append([]string{"interact_ask", "interact_status"}, extra...)}
+	return tools.Policy{Enabled: append([]string{"ask_user_question"}, extra...)}
 }
 
 // TestRegisterInteractsDisabledRegistersNothing verifies the D10 gate: with
@@ -86,7 +88,7 @@ func TestRegisterInteractsDisabledRegistersNothing(t *testing.T) {
 }
 
 // TestRegisterInteractsEnabledRegistersToolsAndEvents verifies the enabled
-// path: the Provider + Engine are created, both interact_* tools are
+// path: the Provider + Engine are created, the DSH question tool is
 // registered, D7 rejects bad arguments at the Execute gate, valid calls flow
 // through (ask → status), and the interact/* events land in the session log
 // (D3).
@@ -104,7 +106,7 @@ func TestRegisterInteractsEnabledRegistersToolsAndEvents(t *testing.T) {
 	for _, s := range a.reg.Specs() {
 		names = append(names, s.Name)
 	}
-	for _, want := range []string{"interact_ask", "interact_status"} {
+	for _, want := range []string{"ask_user_question"} {
 		if !containsStr(names, want) {
 			t.Fatalf("registered tools %v lack %q", names, want)
 		}
@@ -115,40 +117,50 @@ func TestRegisterInteractsEnabledRegistersToolsAndEvents(t *testing.T) {
 		name string
 		args string
 	}{
-		{"interact_ask", `{}`},                       // missing required prompt
-		{"interact_ask", `{"prompt":123}`},           // prompt must be a string
-		{"interact_ask", `{"prompt":"p","extra":1}`}, // additional properties rejected
-		{"interact_status", `{}`},                    // missing required id
-		{"interact_status", `{"id":123}`},            // id must be a string
-		{"interact_status", `{"id":"x","extra":1}`},  // additional properties rejected
+		{"ask_user_question", `{}`},                                        // missing required questions
+		{"ask_user_question", `{"questions":[]}`},                          // minItems
+		{"ask_user_question", `{"questions":[{"id":123,"question":"p"}]}`}, // id must be a string
 	} {
 		if _, err := a.reg.Execute(context.Background(), tc.name, json.RawMessage(tc.args)); err == nil {
 			t.Errorf("%s with args %s must be rejected (D7)", tc.name, tc.args)
 		}
 	}
 
-	// A valid ask flows through and lands interact/request (D3).
-	res, err := a.reg.Execute(context.Background(), "interact_ask", json.RawMessage(`{"prompt":"proceed?"}`))
-	if err != nil {
-		t.Fatalf("interact_ask via registry: %v", err)
+	// A valid question blocks until the human response is resolved, matching DSH.
+	result := make(chan error, 1)
+	go func() {
+		_, err := a.reg.Execute(context.Background(), "ask_user_question", json.RawMessage(`{"questions":[{"id":"confirm","question":"Proceed?","options":[{"label":"yes"}]}]}`))
+		result <- err
+	}()
+	var req interact.Request
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
+		items, _ := a.interacts.List(context.Background())
+		if len(items) == 1 {
+			req = items[0]
+			break
+		}
+		time.Sleep(time.Millisecond)
 	}
-	if !strings.Contains(res.Output, "req-1") {
-		t.Fatalf("interact_ask output = %q, want it to carry req-1", res.Output)
+	if req.ID == "" {
+		t.Fatal("ask_user_question did not create a request")
+	}
+	resolver, ok := a.interacts.(interact.AnswerResolver)
+	if !ok {
+		t.Fatal("interaction engine does not support structured answers")
+	}
+	if _, err := resolver.ResolveWithAnswer(context.Background(), req.ID, interact.StatusApproved, `{"answers":[{"id":"confirm","selected":["yes"]}]}`); err != nil {
+		t.Fatalf("resolve question: %v", err)
+	}
+	if err := <-result; err != nil {
+		t.Fatalf("ask_user_question via registry: %v", err)
 	}
 	if !hasEvent(a.log, session.EventInteractRequest) {
-		t.Fatal("interact/request event missing from the session log after interact_ask")
+		t.Fatal("interact/request event missing from the session log after ask_user_question")
 	}
-	// interact_status reports the request's status and lands interact/status
-	// (D3).
-	if _, err := a.reg.Execute(context.Background(), "interact_status", json.RawMessage(`{"id":"req-1"}`)); err != nil {
-		t.Fatalf("interact_status via registry: %v", err)
-	}
-	if !hasEvent(a.log, session.EventInteractStatus) {
-		t.Fatal("interact/status event missing from the session log after interact_status")
-	}
-	// An unknown id errors.
-	if res, err := a.reg.Execute(context.Background(), "interact_status", json.RawMessage(`{"id":"req-99"}`)); err != nil || !res.IsError {
-		t.Fatalf("interact_status of an unknown id must return a structured error: result=%+v err=%v", res, err)
+	for _, removed := range []string{"interact_ask", "interact_status"} {
+		if _, err := a.reg.Execute(context.Background(), removed, json.RawMessage(`{}`)); err == nil {
+			t.Fatalf("removed legacy tool %q is still executable", removed)
+		}
 	}
 	// The interact/* rows never derive into model messages (log-only).
 	if msgs := a.log.DeriveHistory(); len(msgs) != 0 {

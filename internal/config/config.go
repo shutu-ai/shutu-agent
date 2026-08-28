@@ -1423,7 +1423,7 @@ var todoToolNames = []string{"todo_write"}
 // They are registered and whitelisted only when interact is enabled; keeping
 // the names here makes the "interact.enabled ⇒ 工具自动白名单" rule a single,
 // tested fact shared by applyDefaults and the composition root.
-var interactToolNames = []string{"interact_ask", "ask_user_question", "interact_status"}
+var interactToolNames = []string{"ask_user_question"}
 
 // codeToolNames are the code-sandbox consumer tools (dispatch-m6e-2 §2).
 // run_code is registered and whitelisted only when code is enabled; keeping the

@@ -174,13 +174,13 @@ func (AskUserQuestionTool) Schema() map[string]any {
 				"items": map[string]any{
 					"type": "object", "properties": map[string]any{
 						"id": map[string]any{"type": "string"}, "question": map[string]any{"type": "string"},
-						"detail": map[string]any{"type": "string"}, "header": map[string]any{"type": "string"},
+						"header":       map[string]any{"type": "string"},
 						"multi_select": map[string]any{"type": "boolean"}, "options": map[string]any{
 							"type": "array", "items": map[string]any{"type": "object", "properties": map[string]any{
 								"label": map[string]any{"type": "string"}, "description": map[string]any{"type": "string"},
-							}, "required": []string{"label"}, "additionalProperties": false},
+							}, "required": []string{"label"}, "additionalProperties": true},
 						},
-					}, "required": []string{"id", "question"}, "additionalProperties": false,
+					}, "required": []string{"id", "question"}, "additionalProperties": true,
 				},
 			},
 		}, "required": []string{"questions"}, "additionalProperties": false,

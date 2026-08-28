@@ -93,11 +93,7 @@ func (a *app) registerInteracts() error {
 		}
 	}
 	st := interact.NewInteractTools(eng, onEvent)
-	for _, t := range []tools.Tool{
-		st.Ask(),
-		st.AskUserQuestion(),
-		st.Status(),
-	} {
+	for _, t := range []tools.Tool{st.AskUserQuestion()} {
 		if err := a.reg.Register(t); err != nil {
 			return fmt.Errorf("pa: register %s: %w", t.Name(), err)
 		}
