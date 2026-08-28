@@ -2,6 +2,7 @@ package fs
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,26 @@ import (
 
 	"github.com/jabing/shutu-agent/internal/session"
 )
+
+func TestDecodeWebPConfigReadsVP8XCanvas(t *testing.T) {
+	data := make([]byte, 30)
+	copy(data[0:4], "RIFF")
+	binary.LittleEndian.PutUint32(data[4:8], uint32(len(data)-8))
+	copy(data[8:12], "WEBP")
+	copy(data[12:16], "VP8X")
+	binary.LittleEndian.PutUint32(data[16:20], 10)
+	// VP8X stores width-1 and height-1 as three-byte little-endian values.
+	data[24], data[25], data[26] = 0x3f, 0x01, 0x00 // 320px
+	data[27], data[28], data[29] = 0xef, 0x00, 0x00 // 240px
+
+	config, err := decodeWebPConfig(data)
+	if err != nil {
+		t.Fatalf("decode WebP config: %v", err)
+	}
+	if config.Width != 320 || config.Height != 240 {
+		t.Fatalf("WebP config = %dx%d, want 320x240", config.Width, config.Height)
+	}
+}
 
 // eventRec is one event emitted through the FsTools onEvent sink.
 type eventRec struct {

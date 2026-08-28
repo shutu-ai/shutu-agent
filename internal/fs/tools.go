@@ -25,10 +25,18 @@
 package fs
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	agenttools "github.com/jabing/shutu-agent/internal/tools"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"os"
 	"path/filepath"
 	"strings"
@@ -214,14 +222,14 @@ type FsReadImageTool struct {
 func (FsReadImageTool) Name() string { return ToolReadImageName }
 
 func (FsReadImageTool) Description() string {
-	return "read an image inside the allowed fs root and provide it to a vision-capable model"
+	return "Read a PNG/JPEG/WebP/GIF file and return the image itself. Requires the current model to accept image input."
 }
 
 func (FsReadImageTool) Schema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"file_path": map[string]any{"type": "string"},
+			"file_path": map[string]any{"type": "string", "description": "Path to the image file, resolved by the filesystem backend."},
 		},
 		"required":             []string{"file_path"},
 		"additionalProperties": false,
@@ -263,12 +271,86 @@ func (t FsReadImageTool) ExecuteResult(ctx context.Context, args any) (agenttool
 		full = filepath.Join(t.t.f.Root(), full)
 	}
 	ref := llm.ImageRef{
+		ID:        imageAttachmentID(data),
 		MediaType: mediaType,
 		Bytes:     int64(len(data)),
 		Path:      filepath.Clean(full),
 	}
+	config, decodeErr := decodeImageConfig(data, mediaType)
+	if decodeErr != nil {
+		return agenttools.ToolResult{}, fmt.Errorf("read_image: invalid image data: %w", decodeErr)
+	}
+	ref.Width, ref.Height = config.Width, config.Height
 	t.t.emit(session.EventFsRead, session.NewFsRead(a.FilePath, len(data)))
-	return agenttools.ToolResult{Output: "image " + a.FilePath, Content: []llm.ContentBlock{{Kind: llm.BlockImage, Image: ref}}}, nil
+	value := map[string]any{
+		"path": a.FilePath,
+		"image": map[string]any{
+			"attachmentId": ref.ID, "mediaType": ref.MediaType, "bytes": ref.Bytes,
+			"width": ref.Width, "height": ref.Height, "name": filepath.Base(a.FilePath),
+		},
+	}
+	output := fmt.Sprintf("<path>%s</path>\n<type>image</type>\n<content>\n%s image, %dx%d px, %d bytes\n</content>", a.FilePath, ref.MediaType, ref.Width, ref.Height, ref.Bytes)
+	return agenttools.ToolResult{Value: value, Output: output, Content: []llm.ContentBlock{{Kind: llm.BlockImage, Image: ref}}}, nil
+}
+
+func imageAttachmentID(data []byte) string {
+	digest := sha256.Sum256(data)
+	return "image-" + hex.EncodeToString(digest[:])
+}
+
+func decodeImageConfig(data []byte, mediaType string) (image.Config, error) {
+	if mediaType != "image/webp" {
+		config, _, err := image.DecodeConfig(bytes.NewReader(data))
+		return config, err
+	}
+	return decodeWebPConfig(data)
+}
+
+// decodeWebPConfig reads the canvas dimensions from the three WebP container
+// variants without adding a decoder dependency. The image bytes themselves
+// remain opaque and are still passed to the provider unchanged.
+func decodeWebPConfig(data []byte) (image.Config, error) {
+	if len(data) < 16 || string(data[:4]) != "RIFF" || string(data[8:12]) != "WEBP" {
+		return image.Config{}, errors.New("invalid WebP container")
+	}
+	for offset := 12; offset+8 <= len(data); {
+		fourCC := string(data[offset : offset+4])
+		size := int(binary.LittleEndian.Uint32(data[offset+4 : offset+8]))
+		start, end := offset+8, offset+8+size
+		if end > len(data) {
+			return image.Config{}, errors.New("truncated WebP chunk")
+		}
+		chunk := data[start:end]
+		switch fourCC {
+		case "VP8X":
+			if len(chunk) < 10 {
+				return image.Config{}, errors.New("truncated WebP VP8X chunk")
+			}
+			width := 1 + (int(chunk[4]) | int(chunk[5])<<8 | int(chunk[6])<<16)
+			height := 1 + (int(chunk[7]) | int(chunk[8])<<8 | int(chunk[9])<<16)
+			return image.Config{Width: width, Height: height}, nil
+		case "VP8L":
+			if len(chunk) < 5 || chunk[0] != 0x2f {
+				return image.Config{}, errors.New("invalid WebP VP8L chunk")
+			}
+			bits := uint32(chunk[1]) | uint32(chunk[2])<<8 | uint32(chunk[3])<<16 | uint32(chunk[4])<<24
+			width := 1 + int(bits&0x3fff)
+			height := 1 + int((bits>>14)&0x3fff)
+			return image.Config{Width: width, Height: height}, nil
+		case "VP8 ":
+			if len(chunk) < 10 || chunk[3] != 0x9d || chunk[4] != 0x01 || chunk[5] != 0x2a {
+				return image.Config{}, errors.New("invalid WebP VP8 chunk")
+			}
+			width := int(binary.LittleEndian.Uint16(chunk[6:8]) & 0x3fff)
+			height := int(binary.LittleEndian.Uint16(chunk[8:10]) & 0x3fff)
+			return image.Config{Width: width, Height: height}, nil
+		}
+		offset = end
+		if size%2 != 0 {
+			offset++
+		}
+	}
+	return image.Config{}, errors.New("WebP dimensions not found")
 }
 
 func (t *FsTools) checkWriteObservation(ctx context.Context, path string) error {
