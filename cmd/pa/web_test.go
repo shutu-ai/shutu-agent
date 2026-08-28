@@ -69,11 +69,9 @@ func TestRegisterWebEnabledRegistersAndValidates(t *testing.T) {
 		}
 	}
 
-	// D7: bad arguments are rejected before any tool code runs.
+	// D7: schema-invalid arguments are rejected before any tool code runs.
 	for _, tc := range []struct{ name, args string }{
 		{"web_search", `{}`},                                // missing required queries
-		{"web_search", `{"queries":[]}`},                    // minItems: 1
-		{"web_search", `{"queries":["a","b","c","d","e"]}`}, // maxItems: 4 (default)
 		{"web_search", `{"queries":["a"],"extra":1}`},       // additional properties rejected
 		{"web_search", `{"queries":[1]}`},                   // items must be strings
 		{"web_fetch", `{}`},                                 // missing required url
@@ -82,6 +80,19 @@ func TestRegisterWebEnabledRegistersAndValidates(t *testing.T) {
 	} {
 		if _, err := a.reg.Execute(context.Background(), tc.name, json.RawMessage(tc.args)); err == nil {
 			t.Errorf("%s with args %s must be rejected (D7)", tc.name, tc.args)
+		}
+	}
+	// DSH keeps the web_search cardinality checks in the tool execution
+	// contract rather than advertising JSON-Schema min/maxItems. The registry
+	// therefore returns a structured tool error (err=nil) for these two validly
+	// shaped but semantically invalid calls.
+	for _, args := range []string{
+		`{"queries":[]}`,
+		`{"queries":["a","b","c","d","e"]}`,
+	} {
+		res, err := a.reg.Execute(context.Background(), "web_search", json.RawMessage(args))
+		if err != nil || !res.IsError {
+			t.Errorf("web_search with args %s must return a tool error: result=%+v err=%v", args, res, err)
 		}
 	}
 
