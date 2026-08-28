@@ -12,6 +12,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 
@@ -32,13 +33,22 @@ func (a *app) registerRalph() error {
 		return nil
 	}
 	spawn := func(ctx context.Context, prompt string) (string, error) {
-		run, err := a.subagents.Start(ctx, "spawn", subagent.StartRequest{Prompt: prompt, ParentSessionID: a.currentID})
+		run, err := a.subagents.Start(ctx, "spawn", subagent.StartRequest{
+			Prompt: prompt, ParentSessionID: a.currentID, OutputSchema: ralph.RoundReportSchema(),
+		})
 		if err != nil {
 			return "", err
 		}
 		res, err := run.Result(ctx)
 		if err != nil {
 			return "", err
+		}
+		if res.Structured != nil {
+			encoded, encodeErr := json.Marshal(res.Structured)
+			if encodeErr != nil {
+				return "", fmt.Errorf("encode structured Ralph report: %w", encodeErr)
+			}
+			return string(encoded), nil
 		}
 		return res.Output, nil
 	}

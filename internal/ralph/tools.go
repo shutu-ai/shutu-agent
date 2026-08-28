@@ -45,7 +45,7 @@ func (t *RalphTool) emit(typ string, data any) {
 func (RalphTool) Name() string { return RalphToolName }
 
 func (RalphTool) Description() string {
-	return "对不可变目标运行多轮 fresh-agent 循环，返回最终报告（完成/阻塞/轮上限）"
+	return "Run a foreground fresh-agent Ralph loop toward one immutable objective. Use only when the direct human explicitly asks for Ralph or fresh-agent iteration. Each Ralph round starts a fresh child with no parent conversation or prior child session; the shared workspace is long-term memory, and only a bounded structured report crosses rounds. The call returns when a worker reports completion or a concrete blocker, or at the round limit. Ordinary long-running same-session work belongs to goal tools."
 }
 
 func (RalphTool) Schema() map[string]any {
@@ -58,9 +58,8 @@ func (RalphTool) Schema() map[string]any {
 				"description": "immutable objective to drive the loop",
 			},
 			"maxRounds": map[string]any{
-				"type":        "integer",
-				"minimum":     1,
-				"description": "loop cap (default 256; deployment maximum 256)",
+				"type":        "number",
+				"description": "Optional positive safe-integer round cap, bounded by the deployment ceiling.",
 			},
 		},
 		"required":             []string{"objective"},
