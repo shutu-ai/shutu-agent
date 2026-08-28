@@ -504,8 +504,34 @@ func (s *Server) handleNativeRespond(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(nativeRPCReceipt{Accepted: false, Reason: "bad-response"})
 		return
 	}
-	if !response.Result.OK || s.resolveInteractionFn == nil {
+	if s.resolveInteractionFn == nil {
 		_ = json.NewEncoder(w).Encode(nativeRPCReceipt{Accepted: false, Reason: "not-pending"})
+		return
+	}
+	interactionID := strings.TrimSpace(response.RPCID)
+	if !response.Result.OK {
+		// The DSH QuestionComposer dismiss action uses a cancelled error
+		// envelope without a value/sessionId. Recover the session from the
+		// native mux correlation established when the request was published.
+		if response.Result.Error == nil || response.Result.Error.Code != "cancelled" {
+			_ = json.NewEncoder(w).Encode(nativeRPCReceipt{Accepted: false, Reason: "not-pending"})
+			return
+		}
+		sessionID := s.nativeInteractionSession(interactionID)
+		if sessionID == "" {
+			_ = json.NewEncoder(w).Encode(nativeRPCReceipt{Accepted: false, Reason: "not-pending"})
+			return
+		}
+		if err := s.resolveInteractionFn(r.Context(), sessionID, interactionID, interact.StatusCanceled, ""); err != nil {
+			reason := "not-pending"
+			if !errors.Is(err, interact.ErrUnknownRequest) && !errors.Is(err, interact.ErrAlreadyResolved) {
+				reason = "resolve-failed"
+			}
+			_ = json.NewEncoder(w).Encode(nativeRPCReceipt{Accepted: false, Reason: reason})
+			return
+		}
+		s.forgetNativeInteraction(interactionID)
+		_ = json.NewEncoder(w).Encode(nativeRPCReceipt{Accepted: true})
 		return
 	}
 	value, ok := response.Result.Value.(map[string]any)
@@ -518,7 +544,6 @@ func (s *Server) handleNativeRespond(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(nativeRPCReceipt{Accepted: false, Reason: "bad-response"})
 		return
 	}
-	interactionID := strings.TrimSpace(response.RPCID)
 	status := interact.StatusApproved
 	answer := ""
 	if approvalID := nativeString(value["approvalId"]); approvalID != "" {
@@ -553,7 +578,34 @@ func (s *Server) handleNativeRespond(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(nativeRPCReceipt{Accepted: false, Reason: reason})
 		return
 	}
+	s.forgetNativeInteraction(interactionID)
 	_ = json.NewEncoder(w).Encode(nativeRPCReceipt{Accepted: true})
+}
+
+func (s *Server) rememberNativeInteraction(id, sessionID string) {
+	id, sessionID = strings.TrimSpace(id), strings.TrimSpace(sessionID)
+	if id == "" || sessionID == "" {
+		return
+	}
+	s.nativeInteractionMu.Lock()
+	if s.nativeInteractionSessions == nil {
+		s.nativeInteractionSessions = make(map[string]string)
+	}
+	s.nativeInteractionSessions[id] = sessionID
+	s.nativeInteractionMu.Unlock()
+}
+
+func (s *Server) nativeInteractionSession(id string) string {
+	s.nativeInteractionMu.RLock()
+	sessionID := s.nativeInteractionSessions[strings.TrimSpace(id)]
+	s.nativeInteractionMu.RUnlock()
+	return sessionID
+}
+
+func (s *Server) forgetNativeInteraction(id string) {
+	s.nativeInteractionMu.Lock()
+	delete(s.nativeInteractionSessions, strings.TrimSpace(id))
+	s.nativeInteractionMu.Unlock()
 }
 
 func nativeRPCSuccess(value any) nativeRPCResult { return nativeRPCResult{OK: true, Value: value} }
@@ -3842,6 +3894,7 @@ func (s *Server) handleNativeMuxWebSocket(w http.ResponseWriter, r *http.Request
 			interactionKindsMu.Lock()
 			interactionKinds[id] = kind
 			interactionKindsMu.Unlock()
+			s.rememberNativeInteraction(id, sessionID)
 		}
 		if method == "" {
 			return
@@ -3851,6 +3904,7 @@ func (s *Server) handleNativeMuxWebSocket(w http.ResponseWriter, r *http.Request
 			interactionKindsMu.Lock()
 			delete(interactionKinds, id)
 			interactionKindsMu.Unlock()
+			s.forgetNativeInteraction(id)
 		}
 	}
 	// Queue snapshots are refreshed by notifyNativeMux after the queue RPC
@@ -3919,6 +3973,7 @@ func (s *Server) handleNativeMuxWebSocket(w http.ResponseWriter, r *http.Request
 					interactionKindsMu.Lock()
 					interactionKinds[id] = kind
 					interactionKindsMu.Unlock()
+					s.rememberNativeInteraction(id, meta.ID)
 					_ = writeWithID(method, payload, id)
 				}
 			}
@@ -4265,9 +4320,13 @@ func nativePendingInteractionFrame(sessionID string, item interact.Request) (str
 				entry["multiSelect"] = true
 			}
 			if len(question.Options) > 0 {
-				options := make([]map[string]string, 0, len(question.Options))
+				options := make([]map[string]any, 0, len(question.Options))
 				for _, option := range question.Options {
-					options = append(options, map[string]string{"label": option.Label, "description": option.Description})
+					entry := map[string]any{"label": option.Label}
+					if option.Description != "" {
+						entry["description"] = option.Description
+					}
+					options = append(options, entry)
 				}
 				entry["options"] = options
 			}

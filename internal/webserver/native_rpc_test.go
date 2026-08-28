@@ -132,6 +132,33 @@ func TestNativeRespondBridgesDSHApprovalAndQuestionResponses(t *testing.T) {
 	}
 }
 
+func TestNativeRespondBridgesDSHQuestionCancellation(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+	var gotSession, gotID, gotAnswer string
+	var gotStatus interact.ApprovalStatus
+	srv.SetInteractionManager(
+		func(context.Context, string) ([]interact.Request, error) { return nil, nil },
+		func(_ context.Context, sessionID, id string, status interact.ApprovalStatus, answer string) error {
+			gotSession, gotID, gotStatus, gotAnswer = sessionID, id, status, answer
+			return nil
+		},
+	)
+	// DSH's cancellation envelope has no value/sessionId. The native mux
+	// correlation is the only source for the owning session at this endpoint.
+	srv.rememberNativeInteraction("question-cancel", "session-1")
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/respond", "tok", `{"type":"client-response","rpcId":"question-cancel","result":{"ok":false,"error":{"code":"cancelled","message":"the user closed this question request","details":{}}}}`)
+	var receipt nativeRPCReceipt
+	if err := json.Unmarshal(rec.Body.Bytes(), &receipt); err != nil {
+		t.Fatalf("decode cancellation receipt: %v; body=%s", err, rec.Body.Bytes())
+	}
+	if !receipt.Accepted || gotSession != "session-1" || gotID != "question-cancel" || gotStatus != interact.StatusCanceled || gotAnswer != "" {
+		t.Fatalf("question cancellation = receipt=%+v callback=%q/%q/%q/%q", receipt, gotSession, gotID, gotStatus, gotAnswer)
+	}
+	if got := srv.nativeInteractionSession("question-cancel"); got != "" {
+		t.Fatalf("resolved native interaction correlation = %q, want removed", got)
+	}
+}
+
 func TestNativePendingInteractionFrameUsesDSHQuestionShape(t *testing.T) {
 	method, raw, id, kind, ok := nativePendingInteractionFrame("s1", interact.Request{
 		ID: "q-1", Questions: []interact.Question{{
@@ -149,6 +176,9 @@ func TestNativePendingInteractionFrameUsesDSHQuestionShape(t *testing.T) {
 	questions, ok := value["questions"].([]map[string]any)
 	if !ok || len(questions) != 1 || questions[0]["multiSelect"] != true || questions[0]["multi_select"] != nil {
 		t.Fatalf("question shape = %#v", value["questions"])
+	}
+	if _, present := questions[0]["options"].([]map[string]any)[0]["description"]; !present {
+		t.Fatal("question option description should be retained when present")
 	}
 }
 

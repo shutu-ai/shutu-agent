@@ -179,6 +179,11 @@ type Server struct {
 	// and a resolve command.
 	interactionFn        func(ctx context.Context, sessionID string) ([]interact.Request, error)
 	resolveInteractionFn func(ctx context.Context, sessionID, id string, status interact.ApprovalStatus, answer string) error
+	// DSH question cancellation responses intentionally carry no sessionId.
+	// The native mux records the owning session when it publishes a pending
+	// interaction so /api/respond can resolve a later cancellation.
+	nativeInteractionMu       sync.RWMutex
+	nativeInteractionSessions map[string]string
 }
 
 // ProviderEdit is the M11 provider-management payload shared by POST and DELETE
@@ -374,10 +379,11 @@ func New(st store.Store, token, addr string) (*Server, error) {
 		addr = "127.0.0.1:8080"
 	}
 	s := &Server{
-		store:     st,
-		tokenHash: sha256.Sum256([]byte(token)),
-		authOn:    token != "",
-		addr:      addr,
+		store:                     st,
+		tokenHash:                 sha256.Sum256([]byte(token)),
+		authOn:                    token != "",
+		addr:                      addr,
+		nativeInteractionSessions: make(map[string]string),
 		nativeSettings: map[string]nativeSettingsDocument{
 			// Shutu is not the DSH developer-preview distribution. Mark the
 			// DSH product welcome notice as acknowledged so the native UI opens

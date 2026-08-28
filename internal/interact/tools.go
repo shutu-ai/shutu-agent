@@ -175,7 +175,7 @@ func (AskUserQuestionTool) Schema() map[string]any {
 					"type": "object", "properties": map[string]any{
 						"id":       map[string]any{"type": "string", "description": "Stable id for this question; echoed in the answer."},
 						"question": map[string]any{"type": "string", "description": "The specific question to ask the user."},
-						"header":   map[string]any{"type": "string", "description": "Optional short heading for the question, such as Confirm or Choose Mode."},
+						"header":   map[string]any{"type": "string", "description": "Optional short heading for the question, such as \"Confirm\" or \"Choose Mode\"."},
 						"options": map[string]any{
 							"type":        "array",
 							"description": "Optional choices to show the user. If you recommend one, put it first and append (Recommended) to that label.",
