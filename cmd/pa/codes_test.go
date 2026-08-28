@@ -83,6 +83,16 @@ func TestRegisterCodeEnabledRegistersAndValidates(t *testing.T) {
 	if !found {
 		t.Fatal("run_code not registered when code.enabled=true")
 	}
+	for _, spec := range a.reg.Specs() {
+		if spec.Name != "run_code" {
+			continue
+		}
+		// PTC's transport itself is an object-valued tool. The text shown in
+		// res.Output is only its presentation projection.
+		if spec.Parameters["type"] != "object" {
+			t.Fatalf("run_code parameters = %#v, want object", spec.Parameters)
+		}
+	}
 
 	// D7: bad arguments are rejected before any tool code runs.
 	for _, tc := range []struct{ name, args string }{
