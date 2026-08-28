@@ -26,6 +26,7 @@ import (
 	agenttools "github.com/jabing/shutu-agent/internal/tools"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -114,7 +115,7 @@ type WebSearchTool struct {
 func (WebSearchTool) Name() string { return ToolSearchName }
 
 func (WebSearchTool) Description() string {
-	return "search the web for current information; returns an optional summary answer and a list of source URLs"
+	return "Search the web for current information. Provide 1–4 queries in the required queries array. Returns an optional summary answer and a list of source URLs."
 }
 
 func (t WebSearchTool) Schema() map[string]any {
@@ -124,8 +125,6 @@ func (t WebSearchTool) Schema() map[string]any {
 			"queries": map[string]any{
 				"type":        "array",
 				"items":       map[string]any{"type": "string"},
-				"minItems":    1,
-				"maxItems":    t.t.opts.SearchMaxQueries,
 				"description": fmt.Sprintf("required search queries; accepts 1\u2013%d items and merges their results", t.t.opts.SearchMaxQueries),
 			},
 		},
@@ -135,15 +134,37 @@ func (t WebSearchTool) Schema() map[string]any {
 }
 
 func (t WebSearchTool) Execute(ctx context.Context, args any) (string, error) {
+	result, err := t.execute(ctx, args)
+	if err != nil {
+		return "", err
+	}
+	return formatSearchOutput(result), nil
+}
+
+func (t WebSearchTool) ExecuteResult(ctx context.Context, args any) (agenttools.ToolResult, error) {
+	result, err := t.execute(ctx, args)
+	if err != nil {
+		return agenttools.ToolResult{}, err
+	}
+	value := map[string]any{"sources": projectSources(result.Sources), "truncated": result.Truncated}
+	if result.Content != "" {
+		value["content"] = result.Content
+	}
+	return agenttools.ToolResult{Value: value, Output: formatSearchOutput(result)}, nil
+}
+
+func (WebSearchTool) ConcurrencySafe(args any) bool { return true }
+
+func (t WebSearchTool) execute(ctx context.Context, args any) (WebSearchResult, error) {
 	var a struct {
 		Queries []string `json:"queries"`
 	}
 	if err := agenttools.DecodeArgs(args, &a); err != nil {
-		return "", fmt.Errorf("web_search: %w", err)
+		return WebSearchResult{}, fmt.Errorf("web_search: %w", err)
 	}
 	queries, err := parseSearchArgs(a.Queries, t.t.opts.SearchMaxQueries)
 	if err != nil {
-		return "", fmt.Errorf("web_search: %w", err)
+		return WebSearchResult{}, fmt.Errorf("web_search: %w", err)
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(t.t.opts.SearchTimeoutMs)*time.Millisecond)
 	defer cancel()
@@ -157,23 +178,66 @@ func (t WebSearchTool) Execute(ctx context.Context, args any) (string, error) {
 		})
 	} else {
 		// 多查询：顺序扇出（D5，无后台 goroutine），首个错误即中止。
-		items := make([]searchItem, 0, len(queries))
-		for _, q := range queries {
-			res, serr := t.t.engine.Search(ctx, t.t.opts.SearchID, WebSearchRequest{
-				Query:      q,
-				MaxResults: t.t.opts.SearchMaxResults,
-			})
-			if serr != nil {
-				return "", mapSearchError(serr, t.t.opts.SearchID)
-			}
-			items = append(items, searchItem{query: q, result: res})
+		items, serr := t.searchQueries(ctx, queries)
+		if serr != nil {
+			return WebSearchResult{}, mapSearchError(serr, t.t.opts.SearchID)
 		}
 		result = mergeSearchResults(items, t.t.opts.SearchMaxResults)
 	}
 	if err != nil {
-		return "", mapSearchError(err, t.t.opts.SearchID)
+		return WebSearchResult{}, mapSearchError(err, t.t.opts.SearchID)
 	}
-	return formatSearchOutput(result), nil
+	return result, nil
+}
+
+func (t WebSearchTool) searchQueries(ctx context.Context, queries []string) ([]searchItem, error) {
+	searchCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	items := make([]searchItem, len(queries))
+	errs := make(chan error, len(queries))
+	var wg sync.WaitGroup
+	for index, query := range queries {
+		index, query := index, query
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			res, err := t.t.engine.Search(searchCtx, t.t.opts.SearchID, WebSearchRequest{Query: query, MaxResults: t.t.opts.SearchMaxResults})
+			if err != nil {
+				select {
+				case errs <- err:
+				default:
+				}
+				cancel()
+				return
+			}
+			items[index] = searchItem{query: query, result: res}
+		}()
+	}
+	wg.Wait()
+	select {
+	case err := <-errs:
+		return nil, err
+	default:
+		return items, nil
+	}
+}
+
+func projectSources(sources []WebSearchSource) []any {
+	out := make([]any, 0, len(sources))
+	for _, source := range sources {
+		item := map[string]any{"url": source.URL}
+		if source.Title != "" {
+			item["title"] = source.Title
+		}
+		if source.Snippet != "" {
+			item["snippet"] = source.Snippet
+		}
+		if source.PublishedAt != "" {
+			item["publishedAt"] = source.PublishedAt
+		}
+		out = append(out, item)
+	}
+	return out
 }
 
 // parseSearchArgs 净化并校验 web_search 参数（派发 §4）：去掉空/全空白串、
@@ -195,7 +259,7 @@ func parseSearchArgs(queries []string, maxQueries int) ([]string, error) {
 	seen := make(map[string]bool)
 	for _, q := range queries {
 		if strings.TrimSpace(q) == "" {
-			continue
+			return nil, fmt.Errorf("each query must be a non-empty string")
 		}
 		if seen[q] {
 			continue
@@ -345,7 +409,7 @@ type WebFetchTool struct {
 func (WebFetchTool) Name() string { return ToolFetchName }
 
 func (WebFetchTool) Description() string {
-	return "fetch the content of a specific HTTP(S) URL and return it decoded to text"
+	return "Fetch the content of a specific HTTP(S) URL and return it decoded to text."
 }
 
 func (WebFetchTool) Schema() map[string]any {
@@ -363,23 +427,47 @@ func (WebFetchTool) Schema() map[string]any {
 }
 
 func (t WebFetchTool) Execute(ctx context.Context, args any) (string, error) {
+	res, err := t.execute(ctx, args)
+	if err != nil {
+		return "", err
+	}
+	return formatFetchOutput(res, t.t.opts.FetchMaxOutputChars), nil
+}
+
+func (t WebFetchTool) ExecuteResult(ctx context.Context, args any) (agenttools.ToolResult, error) {
+	res, err := t.execute(ctx, args)
+	if err != nil {
+		return agenttools.ToolResult{}, err
+	}
+	value := map[string]any{
+		"url":        res.URL,
+		"statusCode": res.StatusCode,
+		"body":       map[string]any{"kind": res.Body.Kind, "content": res.Body.Content},
+		"truncated":  res.Truncated,
+	}
+	return agenttools.ToolResult{Value: value, Output: formatFetchOutput(res, t.t.opts.FetchMaxOutputChars)}, nil
+}
+
+func (WebFetchTool) ConcurrencySafe(args any) bool { return true }
+
+func (t WebFetchTool) execute(ctx context.Context, args any) (WebFetchResult, error) {
 	var a struct {
 		URL string `json:"url"`
 	}
 	if err := agenttools.DecodeArgs(args, &a); err != nil {
-		return "", fmt.Errorf("web_fetch: %w", err)
+		return WebFetchResult{}, fmt.Errorf("web_fetch: %w", err)
 	}
 	if strings.TrimSpace(a.URL) == "" {
-		return "", fmt.Errorf("web_fetch: empty url")
+		return WebFetchResult{}, fmt.Errorf("web_fetch: empty url")
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(t.t.opts.FetchTimeoutMs)*time.Millisecond)
 	defer cancel()
 
 	res, err := t.t.engine.Fetch(ctx, t.t.opts.FetchID, WebFetchRequest{URL: a.URL})
 	if err != nil {
-		return "", mapFetchError(err, t.t.opts.FetchID)
+		return WebFetchResult{}, mapFetchError(err, t.t.opts.FetchID)
 	}
-	return formatFetchOutput(res, t.t.opts.FetchMaxOutputChars), nil
+	return res, nil
 }
 
 // formatFetchOutput 渲染抓取结果为模型可读文本（派发 §4）：

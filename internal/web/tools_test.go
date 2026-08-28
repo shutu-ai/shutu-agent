@@ -80,8 +80,8 @@ func TestParseSearchArgs(t *testing.T) {
 		t.Errorf("dedupe = %q, want a,b", got)
 	}
 	// 空白串丢弃（保留原始查询文本）。
-	if got := strings.Join(parseOrErr(t, []string{" a ", "", "b", "  "}, 4), ","); got != " a ,b" {
-		t.Errorf("blank drop = %q, want \" a ,b\"", got)
+	if _, err := parseSearchArgs([]string{" a ", "", "b"}, 4); err == nil {
+		t.Error("blank query must be rejected")
 	}
 	// 超 maxQueries 拒绝（对 raw 数组长度，D7 之前工具层先挡一道）。
 	if _, err := parseSearchArgs([]string{"a", "b", "c", "d", "e"}, 4); err == nil {
@@ -99,6 +99,15 @@ func parseOrErr(t *testing.T, in []string, max int) []string {
 		t.Fatalf("parseSearchArgs(%v): %v", in, err)
 	}
 	return out
+}
+
+func containsQuery(queries []string, want string) bool {
+	for _, query := range queries {
+		if query == want {
+			return true
+		}
+	}
+	return false
 }
 
 // TestWebSearchSingleQueryPassthrough 覆盖单查询：透传 provider 结果、只发一次
@@ -124,6 +133,29 @@ func TestWebSearchSingleQueryPassthrough(t *testing.T) {
 	want := "Sources:\n- [The Go Programming Language](https://go.dev/) \u2014 official docs\n\nCite the relevant URLs above as markdown links in your answer."
 	if out != want {
 		t.Errorf("output = %q, want %q", out, want)
+	}
+}
+
+func TestWebSearchRegistryPreservesDSHStructuredOutput(t *testing.T) {
+	engine := NewEngine()
+	if err := engine.RegisterSearchProvider(&stubSearchProvider{results: map[string]WebSearchResult{
+		"golang": {Content: "official", Sources: []WebSearchSource{{URL: "https://go.dev", Title: "Go"}}},
+	}}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	wt := NewWebTools(engine, Options{SearchID: "fake-search"}, nil)
+	reg := tools.New()
+	reg.SetPolicy(tools.Policy{Enabled: []string{ToolSearchName}})
+	if err := reg.Register(wt.Search()); err != nil {
+		t.Fatalf("register tool: %v", err)
+	}
+	result, err := reg.Execute(context.Background(), ToolSearchName, json.RawMessage(`{"queries":["golang"]}`))
+	if err != nil || result.IsError {
+		t.Fatalf("web_search result = %+v, err=%v", result, err)
+	}
+	value, ok := result.Value.(map[string]any)
+	if !ok || value["sources"] == nil || value["truncated"] != false {
+		t.Fatalf("web_search value = %#v, want DSH object", result.Value)
 	}
 }
 
@@ -188,8 +220,8 @@ func TestWebSearchMultiQueryMerge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	if len(fake.queries) != 2 || fake.queries[0] != "golang" || fake.queries[1] != "web" {
-		t.Fatalf("queries sent = %v, want [golang web] (顺序扇出)", fake.queries)
+	if len(fake.queries) != 2 || !containsQuery(fake.queries, "golang") || !containsQuery(fake.queries, "web") {
+		t.Fatalf("queries sent = %v, want both queries (concurrent fan-out)", fake.queries)
 	}
 	want := "### golang\n\nanswer1\n\n### web\n\nanswer2\n\n" +
 		"Sources:\n- [A-One](https://ex.com/a1)\n- [B-One](https://ex.com/b1)\n- [E-One](https://ex.com/e1)\n- [C-One](https://ex.com/c1)\n- [F-One](https://ex.com/f1)\n\n" +
@@ -275,8 +307,8 @@ func TestWebSearchOverMaxQueriesRejectedByD7(t *testing.T) {
 	schema := wt.Search().Schema()
 	props, _ := schema["properties"].(map[string]any)
 	queries, _ := props["queries"].(map[string]any)
-	if max, _ := queries["maxItems"].(int); max != 2 {
-		t.Errorf("schema maxItems = %v, want 2", queries["maxItems"])
+	if queries["maxItems"] != nil || queries["minItems"] != nil {
+		t.Errorf("DSH schema leaves query-count validation to execution, schema = %v", queries)
 	}
 
 	// 注册表校验路径：3 个查询 > maxQueries=2 被 D7 拒绝，不进入工具实现。
@@ -285,8 +317,8 @@ func TestWebSearchOverMaxQueriesRejectedByD7(t *testing.T) {
 	if err := reg.Register(wt.Search()); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if _, err := reg.Execute(context.Background(), "web_search", json.RawMessage(`{"queries":["a","b","c"]}`)); err == nil {
-		t.Fatal("3 queries with maxQueries=2 must be rejected at the D7 gate")
+	if res, err := reg.Execute(context.Background(), "web_search", json.RawMessage(`{"queries":["a","b","c"]}`)); err != nil || !res.IsError {
+		t.Fatalf("3 queries with maxQueries=2 must return a structured execution error: result=%+v err=%v", res, err)
 	}
 	// 2 个查询通过 D7（进入实现；无 provider → ErrNoProvider，证明校验已放行）。
 	if res, err := reg.Execute(context.Background(), "web_search", json.RawMessage(`{"queries":["a","b"]}`)); err != nil || !res.IsError {
@@ -311,6 +343,29 @@ func TestWebFetchTextOutput(t *testing.T) {
 	want := "https://example.com/page\nHTTP 200\n\nplain body"
 	if out != want {
 		t.Errorf("output = %q, want %q", out, want)
+	}
+}
+
+func TestWebFetchRegistryPreservesDSHStructuredOutput(t *testing.T) {
+	engine := NewEngine()
+	if err := engine.RegisterFetchProvider(&stubFetchProvider{result: WebFetchResult{
+		URL: "https://example.com/page", StatusCode: 200, Body: WebFetchBody{Kind: "text", Content: "plain body"},
+	}}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	wt := NewWebTools(engine, Options{FetchID: "fake-fetch"}, nil)
+	reg := tools.New()
+	reg.SetPolicy(tools.Policy{Enabled: []string{ToolFetchName}})
+	if err := reg.Register(wt.Fetch()); err != nil {
+		t.Fatalf("register tool: %v", err)
+	}
+	result, err := reg.Execute(context.Background(), ToolFetchName, json.RawMessage(`{"url":"https://example.com/page"}`))
+	if err != nil || result.IsError {
+		t.Fatalf("web_fetch result = %+v, err=%v", result, err)
+	}
+	value, ok := result.Value.(map[string]any)
+	if !ok || value["body"] == nil || value["truncated"] != false {
+		t.Fatalf("web_fetch value = %#v, want DSH object", result.Value)
 	}
 }
 
