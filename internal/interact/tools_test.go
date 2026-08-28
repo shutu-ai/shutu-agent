@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/jabing/shutu-agent/internal/tools"
 )
 
 // eventRecord captures one (type, payload) pair forwarded through the onEvent
@@ -332,6 +333,50 @@ func TestAskUserQuestionProjectsDSHAnswerAndIgnoresExtraQuestionFields(t *testin
 	}
 	if got.output != `{"answers":[{"id":"mode","selected":["safe"],"custom":""}]}` {
 		t.Fatalf("answer projection = %s, want DSH fields only", got.output)
+	}
+}
+
+func TestAskUserQuestionRegistryPreservesStructuredOutput(t *testing.T) {
+	e := NewEngine(nil)
+	defer e.Close()
+	its := NewInteractTools(e, nil)
+	reg := tools.New()
+	reg.SetPolicy(tools.Policy{Enabled: []string{ToolAskUserQuestionName}})
+	if err := reg.Register(its.AskUserQuestion()); err != nil {
+		t.Fatalf("register ask_user_question: %v", err)
+	}
+	result := make(chan tools.ToolResult, 1)
+	errs := make(chan error, 1)
+	go func() {
+		got, err := reg.Execute(context.Background(), ToolAskUserQuestionName, json.RawMessage(`{"questions":[{"id":"mode","question":"Mode?"}]}`))
+		result <- got
+		errs <- err
+	}()
+	var req Request
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
+		items, _ := e.List(context.Background())
+		if len(items) == 1 {
+			req = items[0]
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if req.ID == "" {
+		t.Fatal("ask_user_question did not create a request")
+	}
+	if _, err := e.ResolveWithAnswer(context.Background(), req.ID, StatusApproved, `{"answers":[{"id":"mode","selected":[],"custom":"safe"}]}`); err != nil {
+		t.Fatalf("resolve question: %v", err)
+	}
+	if err := <-errs; err != nil {
+		t.Fatalf("registry ask_user_question: %v", err)
+	}
+	got := <-result
+	if got.IsError {
+		t.Fatalf("registry ask_user_question returned error result: %+v", got)
+	}
+	value, ok := got.Value.(map[string]any)
+	if !ok || value["answers"] == nil {
+		t.Fatalf("registry ask_user_question value = %#v, want structured object", got.Value)
 	}
 }
 

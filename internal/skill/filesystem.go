@@ -141,6 +141,8 @@ func (f *Filesystem) Get(ctx context.Context, c Candidate) (*Definition, error) 
 		Content:        parsed.content,
 		Source:         c.Source,
 		Path:           c.Path,
+		Provider:       f.Name(),
+		ResourceBase:   &ResourceBase{Kind: "directory", Path: filepath.Dir(c.Path)},
 		ModelInvocable: parsed.modelInvocable,
 		UserInvocable:  parsed.userInvocable,
 		Invocation: &InvocationPolicy{

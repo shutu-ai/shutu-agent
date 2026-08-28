@@ -254,6 +254,22 @@ func (t AskUserQuestionTool) Execute(ctx context.Context, args any) (string, err
 	return answer, nil
 }
 
+// ExecuteResult preserves the structured answer object when the tool is
+// dispatched through tools.Registry. Execute is retained as the string seam
+// for direct callers, but a JSON string is not a structured ToolResult value
+// and would fail the DSH output schema at the registry boundary.
+func (t AskUserQuestionTool) ExecuteResult(ctx context.Context, args any) (agenttools.ToolResult, error) {
+	raw, err := t.Execute(ctx, args)
+	if err != nil {
+		return agenttools.ToolResult{}, err
+	}
+	var value any
+	if err := json.Unmarshal([]byte(raw), &value); err != nil {
+		return agenttools.ToolResult{}, fmt.Errorf("ask_user_question: encode result: %w", err)
+	}
+	return agenttools.ToolResult{Value: value, Output: raw}, nil
+}
+
 // askUserQuestionInput intentionally contains only the DSH model-facing
 // fields. The DSH tool accepts additional item properties for forward
 // compatibility but projects the known fields before calling its provider;

@@ -23,6 +23,7 @@ import (
 	"context"
 	"fmt"
 	agenttools "github.com/jabing/shutu-agent/internal/tools"
+	"strings"
 
 	"github.com/jabing/shutu-agent/internal/session"
 )
@@ -66,7 +67,7 @@ type SkillLoadTool struct {
 func (SkillLoadTool) Name() string { return ToolName }
 
 func (SkillLoadTool) Description() string {
-	return "load the full instructions of one available skill by name; the catalog of available skills is injected at the start of each turn"
+	return "Load the full instructions for an available skill. Call this with the exact skill name from the session skill catalog before acting on a task that names or clearly matches that skill."
 }
 
 func (SkillLoadTool) Schema() map[string]any {
@@ -109,7 +110,72 @@ func (t SkillLoadTool) Execute(ctx context.Context, args any) (string, error) {
 	// to 200 runes in the payload by session.NewSkillLoad. The full returned
 	// text is what the loop logs as tool/result.
 	t.t.emit(session.EventSkillLoad, session.NewSkillLoad(def.Name, def.Source, body))
-	return RenderSkillContent(def.Name, body), nil
+	return renderLoadedSkill(def, body), nil
+}
+
+// ExecuteResult returns DSH's canonical object value while retaining the
+// rendered <skill_content> projection in Output for the model transcript.
+func (t SkillLoadTool) ExecuteResult(ctx context.Context, args any) (agenttools.ToolResult, error) {
+	var a struct {
+		Name string `json:"name"`
+	}
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
+		return agenttools.ToolResult{}, fmt.Errorf("skill: %w", err)
+	}
+	if !IsSkillName(a.Name) {
+		return agenttools.ToolResult{}, fmt.Errorf("skill: invalid skill name %q (kebab-case expected)", a.Name)
+	}
+	def, err := t.t.reg.Get(ctx, a.Name)
+	if err != nil {
+		return agenttools.ToolResult{}, fmt.Errorf("skill: %w", err)
+	}
+	if def == nil {
+		return agenttools.ToolResult{}, fmt.Errorf("skill: unknown skill %q", a.Name)
+	}
+	if !DefinitionModelInvocable(def) {
+		return agenttools.ToolResult{}, fmt.Errorf("skill: %q is not available for model invocation", a.Name)
+	}
+	body := TruncateSkillBody(def.Content, t.t.bodyMaxChars)
+	value := map[string]any{
+		"name":     def.Name,
+		"provider": def.Provider,
+		"content":  body,
+	}
+	if value["provider"] == "" {
+		value["provider"] = def.Source
+	}
+	if base := resourceBaseValue(def.ResourceBase); base != nil {
+		value["resourceBase"] = base
+	}
+	t.t.emit(session.EventSkillLoad, session.NewSkillLoad(def.Name, def.Source, body))
+	rendered := renderLoadedSkill(def, body)
+	return agenttools.ToolResult{Value: value, Output: rendered}, nil
+}
+
+func resourceBaseValue(base *ResourceBase) map[string]any {
+	if base == nil || base.Kind == "" {
+		return nil
+	}
+	value := map[string]any{"kind": base.Kind}
+	switch base.Kind {
+	case "directory":
+		value["path"] = base.Path
+	case "url":
+		value["url"] = base.URL
+	case "opaque":
+		value["description"] = base.Description
+	default:
+		return nil
+	}
+	return value
+}
+
+func renderLoadedSkill(def *Definition, body string) string {
+	provider := def.Provider
+	if provider == "" {
+		provider = def.Source
+	}
+	return RenderSkillContentWithResource(def.Name, provider, def.ResourceBase, body)
 }
 
 // TruncateSkillBody shortens body to at most max runes, never splitting a
@@ -133,9 +199,36 @@ func TruncateSkillBody(body string, max int) string {
 // carries no character that needs escaping. Skills are trusted local content
 // returned as instruction text — never executed.
 func RenderSkillContent(name, body string) string {
-	return "<skill_content name=\"" + name + "\">\n" +
+	return RenderSkillContentWithResource(name, "", nil, body)
+}
+
+// RenderSkillContentWithResource mirrors DSH's resource-aware skill renderer.
+func RenderSkillContentWithResource(name, provider string, base *ResourceBase, body string) string {
+	resourceLines := []string{}
+	if base == nil || base.Kind == "" {
+		resourceLines = []string{"Resources for this skill are managed by provider \"" + escapeText(provider) + "\".", "Load referenced resources only as needed."}
+	} else {
+		switch base.Kind {
+		case "directory":
+			resourceLines = []string{"Base directory for this skill: " + escapeText(base.Path), "Resolve relative paths mentioned by this skill against the base directory before using them. Load referenced resources only as needed."}
+		case "url":
+			resourceLines = []string{"Base URL for this skill: " + escapeText(base.URL), "Resolve relative URLs mentioned by this skill against the base URL before using them. Load referenced resources only as needed."}
+		case "opaque":
+			resourceLines = []string{"Resources for this skill: " + escapeText(base.Description), "Load referenced resources only as needed."}
+		}
+	}
+	return "<skill_content name=\"" + escapeAttr(name) + "\">\n" +
+		"<skill_resources>\n" + strings.Join(resourceLines, "\n") + "\n</skill_resources>\n\n" +
 		"<skill_instructions>\n" +
 		body +
 		"\n</skill_instructions>\n" +
 		"</skill_content>"
+}
+
+func escapeAttr(value string) string {
+	return strings.NewReplacer("&", "&amp;", "\"", "&quot;", "<", "&lt;").Replace(value)
+}
+
+func escapeText(value string) string {
+	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(value)
 }

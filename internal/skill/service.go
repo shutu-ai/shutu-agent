@@ -81,17 +81,31 @@ func CandidateModelInvocable(c Candidate) bool {
 // UserInvocable come from the skill's invocation frontmatter
 // (disable-model-invocation / user-invocable); both default to true.
 type Definition struct {
-	Name           string
-	Description    string
-	Content        string
-	Source         string
-	Path           string
+	Name        string
+	Description string
+	Content     string
+	Source      string
+	Path        string
+	// Provider and ResourceBase are the DSH model-facing provenance fields.
+	// Providers that predate these fields may leave them empty; the registry
+	// fills Provider from the owning provider name.
+	Provider       string
+	ResourceBase   *ResourceBase
 	ModelInvocable bool
 	UserInvocable  bool
 	// Invocation is non-nil when the provider explicitly supplied invocation
 	// metadata. A nil value preserves the dsh default (both enabled) for
 	// providers that only implement the original body-loading seam.
 	Invocation *InvocationPolicy
+}
+
+// ResourceBase describes how a loaded skill resolves relative resources.
+// It is the Go representation of DSH's directory/url/opaque union.
+type ResourceBase struct {
+	Kind        string
+	Path        string
+	URL         string
+	Description string
 }
 
 // DefinitionModelInvocable reports the dsh-compatible default for definitions
@@ -254,6 +268,9 @@ func (r *registry) Get(ctx context.Context, name string) (*Definition, error) {
 		}
 		if def.Name != name {
 			return nil, fmt.Errorf("skill: provider %q returned definition %q for skill %q", w.provider.Name(), def.Name, name)
+		}
+		if def.Provider == "" {
+			def.Provider = w.provider.Name()
 		}
 		return def, nil
 	}

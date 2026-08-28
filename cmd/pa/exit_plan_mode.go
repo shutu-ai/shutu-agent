@@ -120,6 +120,21 @@ func (t exitPlanModeTool) Execute(ctx context.Context, args any) (string, error)
 	return `{"approved":true}`, nil
 }
 
+// ExecuteResult keeps the approved response as an object for the registry's
+// output-schema validation. The legacy Execute string method remains useful
+// for direct unit callers, but must not be the model-facing transport.
+func (t exitPlanModeTool) ExecuteResult(ctx context.Context, args any) (tools.ToolResult, error) {
+	raw, err := t.Execute(ctx, args)
+	if err != nil {
+		return tools.ToolResult{}, err
+	}
+	var value any
+	if err := json.Unmarshal([]byte(raw), &value); err != nil {
+		return tools.ToolResult{}, fmt.Errorf("exit_plan_mode: encode result: %w", err)
+	}
+	return tools.ToolResult{Value: value, Output: raw}, nil
+}
+
 func boundPlanArgs(args string) string {
 	runes := []rune(args)
 	if len(runes) > 200 {

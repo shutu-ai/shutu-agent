@@ -81,6 +81,40 @@ func TestExitPlanModeUsesDSHSchemaAndLeavesPlanModeAfterApproval(t *testing.T) {
 	}
 }
 
+func TestExitPlanModeRegistryPreservesStructuredOutput(t *testing.T) {
+	a := makeExitPlanApp()
+	defer a.interacts.Close()
+	if _, err := a.log.Append(session.EventPlanMode, session.NewPlanMode(true)); err != nil {
+		t.Fatalf("activate plan mode: %v", err)
+	}
+	a.reg.SetPolicy(tools.Policy{Enabled: []string{exitPlanModeName}})
+	if err := a.reg.Register(exitPlanModeTool{app: a}); err != nil {
+		t.Fatalf("register exit_plan_mode: %v", err)
+	}
+	result := make(chan tools.ToolResult, 1)
+	errs := make(chan error, 1)
+	go func() {
+		got, err := a.reg.Execute(context.Background(), exitPlanModeName, json.RawMessage(`{"plan":"# Release"}`))
+		result <- got
+		errs <- err
+	}()
+	req := waitForInteraction(t, a.interacts)
+	if _, err := a.interacts.(interact.AnswerResolver).ResolveWithAnswer(context.Background(), req.ID, interact.StatusApproved, `{"answers":[{"id":"plan-review","selected":["Approve"]}]}`); err != nil {
+		t.Fatalf("approve plan: %v", err)
+	}
+	if err := <-errs; err != nil {
+		t.Fatalf("registry exit_plan_mode: %v", err)
+	}
+	got := <-result
+	if got.IsError {
+		t.Fatalf("registry exit_plan_mode returned error result: %+v", got)
+	}
+	value, ok := got.Value.(map[string]any)
+	if !ok || value["approved"] != true {
+		t.Fatalf("registry exit_plan_mode value = %#v, want approved object", got.Value)
+	}
+}
+
 func TestExitPlanModeRejectsInactiveOrMalformedPlans(t *testing.T) {
 	a := makeExitPlanApp()
 	defer a.interacts.Close()
