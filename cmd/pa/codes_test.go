@@ -110,6 +110,16 @@ func TestRegisterCodeEnabledRegistersAndValidates(t *testing.T) {
 	if !strings.Contains(res.Output, "hi") {
 		t.Fatalf("run_code output = %q, want it to carry hi", res.Output)
 	}
+	value, ok := res.Value.(map[string]any)
+	if !ok {
+		t.Fatalf("run_code value = %#v, want DSH object envelope", res.Value)
+	}
+	if _, ok := value["logs"].([]any); !ok {
+		t.Fatalf("run_code logs = %#v, want JSON array", value["logs"])
+	}
+	if value["result"] == nil {
+		t.Fatalf("run_code value = %#v, want returned result", value)
+	}
 	if !hasEvent(a.log, session.EventCodeRun) {
 		t.Fatal("code/run event missing from the session log after run_code")
 	}

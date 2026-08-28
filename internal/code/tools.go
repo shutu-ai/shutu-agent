@@ -164,6 +164,18 @@ func (t CodeRunTool) Schema() map[string]any {
 	}
 }
 
+func (t CodeRunTool) OutputSchema() map[string]any {
+	if t.t.runtime == nil {
+		return map[string]any{"type": "string"}
+	}
+	return map[string]any{
+		"type":                 "object",
+		"properties":           map[string]any{"logs": map[string]any{"type": "array", "items": map[string]any{"type": "string"}}, "result": map[string]any{}},
+		"required":             []string{"logs"},
+		"additionalProperties": false,
+	}
+}
+
 func (t CodeRunTool) Execute(ctx context.Context, args any) (string, error) {
 	if t.t.runtime != nil {
 		return t.executeProgram(ctx, args)
@@ -217,22 +229,22 @@ func (t CodeRunTool) Execute(ctx context.Context, args any) (string, error) {
 	return formatResult(res), nil
 }
 
-func (t CodeRunTool) executeProgram(ctx context.Context, args any) (string, error) {
+func (t CodeRunTool) executeProgramResult(ctx context.Context, args any) (ProgramResult, error) {
 	var a struct {
 		Code        string `json:"code"`
 		Description string `json:"description"`
 	}
 	if err := agenttools.DecodeArgs(args, &a); err != nil {
-		return "", fmt.Errorf("run_code: %w", err)
+		return ProgramResult{}, fmt.Errorf("run_code: %w", err)
 	}
 	if strings.TrimSpace(a.Code) == "" {
-		return "", fmt.Errorf("run_code: empty TypeScript program")
+		return ProgramResult{}, fmt.Errorf("run_code: empty TypeScript program")
 	}
 	if strings.TrimSpace(a.Description) == "" {
-		return "", fmt.Errorf("run_code: description is required")
+		return ProgramResult{}, fmt.Errorf("run_code: description is required")
 	}
 	if t.t.binding == nil {
-		return "", fmt.Errorf("run_code: TypeScript tool binding is not configured")
+		return ProgramResult{}, fmt.Errorf("run_code: TypeScript tool binding is not configured")
 	}
 	cwd := t.t.DefaultCwd
 	if t.t.DefaultCwdFunc != nil {
@@ -265,17 +277,51 @@ func (t CodeRunTool) executeProgram(ctx context.Context, args any) (string, erro
 		Binding:      binding,
 	})
 	if err != nil {
-		return "", fmt.Errorf("run_code: %w", err)
+		return ProgramResult{}, fmt.Errorf("run_code: %w", err)
 	}
 	if result.Failure != nil {
-		message := fmt.Sprintf("run_code failed (%s): %s", result.Failure.Kind, result.Failure.Message)
+		message := fmt.Sprintf("code run failed (%s): %s", result.Failure.Kind, result.Failure.Message)
 		if len(result.Logs) > 0 {
 			message += "\nCaptured output:\n" + strings.Join(result.Logs, "\n")
 		}
-		return "", fmt.Errorf("%s", message)
+		return ProgramResult{}, fmt.Errorf("%s", message)
 	}
 	t.t.emit(session.EventCodeRun, session.NewCodeRun("typescript", 0, false, result.Truncated))
+	return result, nil
+}
+
+func (t CodeRunTool) executeProgram(ctx context.Context, args any) (string, error) {
+	result, err := t.executeProgramResult(ctx, args)
+	if err != nil {
+		return "", err
+	}
 	return formatProgramResult(result), nil
+}
+
+// ExecuteResult exposes DSH Code Mode's canonical outer value. Logs and the
+// optional completion value stay typed for the SDK; Output remains the human
+// readable projection used by the conversation and trajectory.
+func (t CodeRunTool) ExecuteResult(ctx context.Context, args any) (agenttools.ToolResult, error) {
+	if t.t.runtime == nil {
+		raw, err := t.Execute(ctx, args)
+		if err != nil {
+			return agenttools.ToolResult{}, err
+		}
+		return agenttools.ToolResult{Value: raw, Output: raw}, nil
+	}
+	result, err := t.executeProgramResult(ctx, args)
+	if err != nil {
+		return agenttools.ToolResult{}, err
+	}
+	logs := make([]any, len(result.Logs))
+	for i, line := range result.Logs {
+		logs[i] = line
+	}
+	value := map[string]any{"logs": logs}
+	if result.HasValue {
+		value["result"] = result.Value
+	}
+	return agenttools.ToolResult{Value: value, Output: formatProgramResult(result)}, nil
 }
 
 func formatProgramResult(result ProgramResult) string {
