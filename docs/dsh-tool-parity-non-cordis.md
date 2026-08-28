@@ -14,9 +14,15 @@ Explicitly excluded from this migration:
 - [x] P-NC-3: Remove legacy model-facing Plan/Eval/Spill tools; retain only goal/todo model tools and internal services.
 - [x] P-NC-4: Align `ask_user_question`, including question/answer schema and cancellation behavior.
 - [x] P-NC-5: Align file, shell, and terminal tools: `read`, `write`, `edit`, `str_replace_editor`, platform Shell, and `terminal_*`; remove model-facing `run_command` and duplicate file-list tools.
-- [ ] P-NC-6: Align remaining independent tools: `exit_plan_mode`, `get_time`, `skill`, `web_*`, `schedule_*`, `lsp`, `read_image`, `ralph`, `workflow`, and dynamic MCP tools.
-- [ ] P-NC-7: Verify `run_code` PTC/standard projection, cancellation, timeout, streaming output, and error protocol.
-- [ ] P-NC-8: Add final catalog snapshots for standard/minimal/PTC and full regression coverage.
+- [x] P-NC-6: Align remaining independent tools: `exit_plan_mode`, `get_time`, `skill`, `web_*`, `schedule_*`, `lsp`, `read_image`, `ralph`, `workflow`, and dynamic MCP tools.
+- [x] P-NC-7: Verify `run_code` PTC/standard projection, cancellation, timeout, streaming output, and error protocol.
+- [x] P-NC-8: Add final catalog snapshots for standard/minimal/PTC and full regression coverage.
+
+## Completion evidence
+
+- `go test ./...` passes across all Shutu packages.
+- The mode snapshots are recorded in [`dsh-tool-catalog-snapshots.md`](dsh-tool-catalog-snapshots.md).
+- `deepseek-harness` remains reference-only; no source or generated artifact in that checkout was changed.
 
 ## Reference catalog (excluding the explicit exclusions)
 
