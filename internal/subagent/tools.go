@@ -24,25 +24,39 @@ package subagent
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	agenttools "github.com/jabing/shutu-agent/internal/tools"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/jabing/shutu-agent/internal/jobs"
 	"github.com/jabing/shutu-agent/internal/session"
 )
 
+func valueJSON(value any) string {
+	b, err := json.Marshal(value)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
+}
+
 // Tool names (whitelisted when subagent.enabled; see config.subagentToolNames).
 const (
 	ToolSpawnName      = "subagent"
-	ToolForkName       = "subagent_fork"
+	ToolTeammateName   = "spawn_teammate"
+	ToolForkName       = "subagent_fork" // internal/provider compatibility; never model-visible
 	ToolStatusName     = "subagent_status"
 	ToolCancelName     = "subagent_cancel"
 	ToolListName       = "subagent_list"
 	ToolListAgentsName = "list_agents"
 	ToolSendName       = "send_message"
+	ToolFollowupName   = "followup_task"
+	ToolWaitName       = "wait_agent"
 	ToolInterruptName  = "interrupt_agent"
 	ToolReportName     = "subagent_report"
 	ToolResumeName     = "subagent_resume"
@@ -81,6 +95,7 @@ type SubagentTools struct {
 	settled    map[string]Result
 	jobs       jobs.Registry
 	messageSeq uint64
+	changeCh   chan struct{}
 }
 
 // NewSubagentTools returns the shared subagent-tool bundle bound to a Runtime.
@@ -106,12 +121,20 @@ func NewSubagentToolsWithContinuable(r Runtime, defaultMaxDepth int, owner func(
 		endTracker:         newSubagentEndTracker(),
 		children:           map[string]*childInfo{},
 		settled:            map[string]Result{},
+		changeCh:           make(chan struct{}),
 	}
 }
 
 // Spawn returns the subagent tool.
 func (t *SubagentTools) Spawn() SubagentSpawnTool {
 	return SubagentSpawnTool{t: t, provider: defaultProviderName, continuable: t.defaultContinuable}
+}
+
+// SpawnTeammate returns the DSH Agent Teams-compatible durable delegation
+// surface. Team tasks are intentionally not implemented; this tool only
+// creates a named continuable child and returns its member projection.
+func (t *SubagentTools) SpawnTeammate() SubagentTeammateTool {
+	return SubagentTeammateTool{t: t}
 }
 
 // Fork returns the DSH-named continuable delegation tool.
@@ -132,6 +155,21 @@ func (t *SubagentTools) ListAgents() SubagentListAgentsTool { return SubagentLis
 
 // Send returns the continuable-child message tool.
 func (t *SubagentTools) Send() SubagentSendTool { return SubagentSendTool{t: t} }
+
+// DshSend returns the DSH-shaped send_message surface. The legacy Send tool
+// remains available to package callers but is not registered by cmd/pa.
+func (t *SubagentTools) DshSend() SubagentMessageTool {
+	return SubagentMessageTool{t: t, name: ToolSendName, wakeup: false}
+}
+
+// FollowupTask returns the DSH-shaped waking follow-up surface.
+func (t *SubagentTools) FollowupTask() SubagentMessageTool {
+	return SubagentMessageTool{t: t, name: ToolFollowupName, wakeup: true}
+}
+
+// WaitAgent returns the DSH-shaped change waiter. It observes child changes
+// and never starts or wakes a child.
+func (t *SubagentTools) WaitAgent() SubagentWaitTool { return SubagentWaitTool{t: t} }
 
 // Interrupt returns the dsh-compatible interrupt alias for cancellation.
 func (t *SubagentTools) Interrupt() SubagentInterruptTool { return SubagentInterruptTool{t: t} }
@@ -224,6 +262,15 @@ func (t *SubagentTools) emit(typ string, data any) {
 	}
 }
 
+// signalChange wakes one or more wait_agent callers without retaining an
+// unbounded notification queue. Every observer re-reads authoritative state.
+func (t *SubagentTools) signalChange() {
+	t.mu.Lock()
+	close(t.changeCh)
+	t.changeCh = make(chan struct{})
+	t.mu.Unlock()
+}
+
 // register records a freshly started child and spawns the settle-await
 // goroutine that caches its terminal Result. The goroutine never touches any
 // session log (D5) — it only fills the bundle's settle cache, which the serial
@@ -232,6 +279,7 @@ func (t *SubagentTools) register(childID string, info *childInfo) {
 	t.mu.Lock()
 	t.children[childID] = info
 	t.mu.Unlock()
+	t.signalChange()
 	go t.awaitSettle(childID, info.run)
 }
 
@@ -256,6 +304,7 @@ func (t *SubagentTools) awaitSettle(childID string, run *Run) {
 	t.mu.Lock()
 	t.settled[childID] = res
 	t.mu.Unlock()
+	t.signalChange()
 }
 
 // lookup returns the child record and, when the settle cache already holds its
@@ -414,6 +463,244 @@ func labelOrPrompt(label, prompt string) string {
 		return strings.TrimSpace(label)
 	}
 	return promptHead(prompt)
+}
+
+// SubagentTeammateTool is the DSH-named durable child creator. It mirrors the
+// spawn_teammate contract without exposing the excluded shared team-task
+// board: a teammate is a named continuable child with a fresh or forked
+// context.
+type SubagentTeammateTool struct{ t *SubagentTools }
+
+func (SubagentTeammateTool) Name() string { return ToolTeammateName }
+func (SubagentTeammateTool) Description() string {
+	return "create one named, durable teammate; context fresh starts clean or fork inherits completed parent turns"
+}
+func (SubagentTeammateTool) Schema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"name":        map[string]any{"type": "string", "minLength": 1, "description": "unique teammate name"},
+			"description": map[string]any{"type": "string", "minLength": 1, "description": "short delegated responsibility"},
+			"prompt":      map[string]any{"type": "string", "minLength": 1, "description": "complete initial task"},
+			"context":     map[string]any{"type": "string", "enum": []string{"fresh", "fork"}},
+		},
+		"required":             []string{"name", "description", "prompt"},
+		"additionalProperties": false,
+	}
+}
+func (t SubagentTeammateTool) Execute(ctx context.Context, args any) (string, error) {
+	result, err := t.ExecuteResult(ctx, args)
+	if err != nil {
+		return "", err
+	}
+	return result.Output, nil
+}
+func (t SubagentTeammateTool) ExecuteResult(ctx context.Context, args any) (agenttools.ToolResult, error) {
+	var a struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Prompt      string `json:"prompt"`
+		Context     string `json:"context"`
+	}
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
+		return agenttools.ToolResult{}, fmt.Errorf("%s: %w", ToolTeammateName, err)
+	}
+	a.Name = strings.TrimSpace(a.Name)
+	a.Description = strings.TrimSpace(a.Description)
+	a.Prompt = strings.TrimSpace(a.Prompt)
+	if a.Name == "" || a.Description == "" || a.Prompt == "" {
+		return agenttools.ToolResult{}, fmt.Errorf("%s: name, description and prompt are required", ToolTeammateName)
+	}
+	parent := t.t.callerSession()
+	if parent == "" {
+		return agenttools.ToolResult{}, fmt.Errorf("%s: requires a calling agent", ToolTeammateName)
+	}
+	contextKind := a.Context
+	if contextKind == "" {
+		contextKind = "fresh"
+	}
+	provider := defaultProviderName
+	inherit := false
+	if contextKind == "fork" {
+		provider = "fork"
+		inherit = true
+	}
+	run, err := t.t.rt.Start(ctx, provider, StartRequest{
+		Label: a.Name + ": " + a.Description, Prompt: a.Prompt,
+		ParentSessionID: parent, MaxDepth: t.t.defaultMaxDepth,
+		Continuable: true, InheritParentContext: inherit,
+	})
+	if err != nil {
+		return agenttools.ToolResult{}, fmt.Errorf("%s: %w", ToolTeammateName, err)
+	}
+	t.t.register(run.ID, &childInfo{run: run, provider: provider, label: a.Name + ": " + a.Description, parent: parent})
+	t.t.emit(session.EventSubagentStart, session.NewSubagentStart(run.ID, provider, parent, a.Description))
+	member := map[string]any{
+		"id": run.ID, "name": a.Name, "role": "teammate", "status": "running",
+		"description": a.Description, "provider": provider, "context": contextKind,
+		"diagnostics": []string{},
+	}
+	return agenttools.ToolResult{
+		Value:  map[string]any{"member": member},
+		Output: fmt.Sprintf("started teammate %s (%s)", a.Name, run.ID),
+	}, nil
+}
+
+// SubagentMessageTool is the DSH target/message contract shared by
+// send_message and followup_task. Target accepts a direct child id or its
+// teammate name/label; authority remains limited to direct children.
+type SubagentMessageTool struct {
+	t      *SubagentTools
+	name   string
+	wakeup bool
+}
+
+func (SubagentMessageTool) Schema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"target":  map[string]any{"type": "string", "minLength": 1, "description": "direct teammate id or name"},
+			"message": map[string]any{"type": "string", "minLength": 1, "description": "self-contained message for the target"},
+		},
+		"required":             []string{"target", "message"},
+		"additionalProperties": false,
+	}
+}
+func (t SubagentMessageTool) Name() string { return t.name }
+func (t SubagentMessageTool) Description() string {
+	if t.wakeup {
+		return "send a durable follow-up task to a direct teammate and start a turn when needed"
+	}
+	return "send durable information to a direct teammate without changing the task"
+}
+func (t SubagentMessageTool) Execute(ctx context.Context, args any) (string, error) {
+	result, err := t.ExecuteResult(ctx, args)
+	if err != nil {
+		return "", err
+	}
+	return result.Output, nil
+}
+func (t SubagentMessageTool) ExecuteResult(ctx context.Context, args any) (agenttools.ToolResult, error) {
+	var a struct {
+		Target  string `json:"target"`
+		Message string `json:"message"`
+	}
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
+		return agenttools.ToolResult{}, fmt.Errorf("%s: %w", t.name, err)
+	}
+	parent := t.t.callerSession()
+	if parent == "" {
+		return agenttools.ToolResult{}, fmt.Errorf("%s: requires a calling agent", t.name)
+	}
+	info, err := t.t.directChild(a.Target, parent)
+	if err != nil {
+		return agenttools.ToolResult{}, fmt.Errorf("%s: %w", t.name, err)
+	}
+	if info.run.Send == nil {
+		return agenttools.ToolResult{}, fmt.Errorf("%s: %w", t.name, ErrNotContinuable)
+	}
+	if err := info.run.Send(ctx, a.Message); err != nil {
+		return agenttools.ToolResult{}, fmt.Errorf("%s: %w", t.name, err)
+	}
+	t.t.signalChange()
+	messageID := t.t.nextMessageID(info.run.ID)
+	return agenttools.ToolResult{
+		Value:  map[string]any{"messageId": messageID, "status": "queued"},
+		Output: fmt.Sprintf("message queued for %s as %s", info.run.ID, messageID),
+	}, nil
+}
+
+func (t *SubagentTools) directChild(target, parent string) (*childInfo, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return nil, errors.New("target is required")
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for id, info := range t.children {
+		if info == nil || info.parent != parent {
+			continue
+		}
+		if id == target || info.label == target || strings.HasPrefix(info.label, target+": ") {
+			return info, nil
+		}
+	}
+	return nil, fmt.Errorf("unknown direct teammate %q", target)
+}
+
+// SubagentWaitTool observes child changes without waking inactive children.
+type SubagentWaitTool struct{ t *SubagentTools }
+
+func (SubagentWaitTool) Name() string { return ToolWaitName }
+func (SubagentWaitTool) Description() string {
+	return "wait for the next teammate status, mailbox, or child change; never wakes inactive children"
+}
+func (SubagentWaitTool) Schema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"timeout_ms": map[string]any{"type": "integer", "minimum": 10000, "maximum": 3600000, "description": "wait duration; defaults to 30000"},
+		},
+		"additionalProperties": false,
+	}
+}
+func (t SubagentWaitTool) Execute(ctx context.Context, args any) (string, error) {
+	result, err := t.ExecuteResult(ctx, args)
+	if err != nil {
+		return "", err
+	}
+	return result.Output, nil
+}
+func (t SubagentWaitTool) ExecuteResult(ctx context.Context, args any) (agenttools.ToolResult, error) {
+	var a struct {
+		TimeoutMS int `json:"timeout_ms"`
+	}
+	if err := agenttools.DecodeArgs(args, &a); err != nil {
+		return agenttools.ToolResult{}, fmt.Errorf("%s: %w", ToolWaitName, err)
+	}
+	if a.TimeoutMS == 0 {
+		a.TimeoutMS = 30000
+	}
+	if a.TimeoutMS < 10000 || a.TimeoutMS > 3600000 {
+		return agenttools.ToolResult{}, fmt.Errorf("%s: timeout_ms must be between 10000 and 3600000", ToolWaitName)
+	}
+	parent := t.t.callerSession()
+	if parent == "" {
+		return agenttools.ToolResult{}, fmt.Errorf("%s: requires a calling agent", ToolWaitName)
+	}
+	children, err := t.t.rt.ListChildren(ctx, parent)
+	if err != nil {
+		return agenttools.ToolResult{}, fmt.Errorf("%s: %w", ToolWaitName, err)
+	}
+	active := false
+	for _, child := range children {
+		if child.Running {
+			active = true
+			break
+		}
+	}
+	if !active {
+		value := map[string]any{"timedOut": false, "noProgress": map[string]any{
+			"reason":  "no-active-peer",
+			"message": "No other subagent is running. Re-list with list_agents, then use followup_task to wake an inactive child before waiting again.",
+		}}
+		return agenttools.ToolResult{Value: value, Output: valueJSON(value)}, nil
+	}
+	t.t.mu.Lock()
+	changes := t.t.changeCh
+	t.t.mu.Unlock()
+	timer := time.NewTimer(time.Duration(a.TimeoutMS) * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return agenttools.ToolResult{}, ctx.Err()
+	case <-changes:
+		value := map[string]any{"timedOut": false}
+		return agenttools.ToolResult{Value: value, Output: valueJSON(value)}, nil
+	case <-timer.C:
+		value := map[string]any{"timedOut": true}
+		return agenttools.ToolResult{Value: value, Output: valueJSON(value)}, nil
+	}
 }
 
 // SubagentForkTool is the DSH-named one-shot fork delegation entry. The

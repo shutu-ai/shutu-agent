@@ -1401,7 +1401,7 @@ var jobsToolNames = []string{"job_output", "job_kill", "job_list"}
 // are registered and whitelisted only when subagent is enabled; keeping the
 // names here makes the "subagent.enabled ⇒ 工具自动白名单" rule a single, tested
 // fact shared by applyDefaults and the composition root.
-var subagentToolNames = []string{"subagent", "subagent_fork", "send_message", "interrupt_agent", "list_agents"}
+var subagentToolNames = []string{"subagent", "spawn_teammate", "send_message", "followup_task", "wait_agent", "interrupt_agent", "list_agents"}
 
 // skillToolNames are the skill consumer tools (dispatch-m5d-2 §2). skill
 // is registered and whitelisted only when skill is enabled; keeping the name

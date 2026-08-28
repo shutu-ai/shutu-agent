@@ -61,8 +61,10 @@ func newACPSubagent(a *app, id string, log *session.Log, registry *tools.Registr
 func registerACPSubagentTools(registry *tools.Registry, st *subagent.SubagentTools) error {
 	for _, tool := range []tools.Tool{
 		st.Spawn(),
-		st.Fork(),
-		st.Send(),
+		st.SpawnTeammate(),
+		st.DshSend(),
+		st.FollowupTask(),
+		st.WaitAgent(),
 		st.Interrupt(),
 		st.ListAgents(),
 	} {

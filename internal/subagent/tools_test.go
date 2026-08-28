@@ -16,10 +16,53 @@ import (
 // set the composition root boxes into a tools.Registry.
 var (
 	_ = (*SubagentSpawnTool)(nil)
+	_ = (*SubagentTeammateTool)(nil)
+	_ = (*SubagentMessageTool)(nil)
+	_ = (*SubagentWaitTool)(nil)
 	_ = (*SubagentStatusTool)(nil)
 	_ = (*SubagentCancelTool)(nil)
 	_ = (*SubagentListTool)(nil)
 )
+
+func TestDSHAgentControlSurface(t *testing.T) {
+	model := &scriptedLLM{steps: [][]llm.StreamEvent{{
+		{Kind: llm.StreamTextDelta, Text: "child answer"},
+		{Kind: llm.StreamFinish, FinishReason: "stop"},
+	}}}
+	st := testBundle(t, model, 8, nil)
+	ctx := context.Background()
+
+	created, err := st.SpawnTeammate().ExecuteResult(ctx, json.RawMessage(`{"name":"researcher","description":"research","prompt":"inspect the docs"}`))
+	if err != nil {
+		t.Fatalf("spawn_teammate: %v", err)
+	}
+	member, ok := created.Value.(map[string]any)["member"].(map[string]any)
+	if !ok || member["name"] != "researcher" || member["role"] != "teammate" {
+		t.Fatalf("spawn_teammate value = %#v", created.Value)
+	}
+	id, _ := member["id"].(string)
+	if id == "" {
+		t.Fatal("spawn_teammate did not return a child id")
+	}
+
+	sent, err := st.DshSend().ExecuteResult(ctx, json.RawMessage(`{"target":"researcher","message":"please continue"}`))
+	if err != nil {
+		t.Fatalf("send_message: %v", err)
+	}
+	if sent.Value.(map[string]any)["status"] != "queued" {
+		t.Fatalf("send_message value = %#v, want queued", sent.Value)
+	}
+
+	empty := testBundle(t, model, 8, nil)
+	waited, err := empty.WaitAgent().ExecuteResult(ctx, json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("wait_agent: %v", err)
+	}
+	value := waited.Value.(map[string]any)
+	if value["timedOut"] != false || value["noProgress"] == nil {
+		t.Fatalf("wait_agent no-progress value = %#v", waited.Value)
+	}
+}
 
 // eventLog records emitted subagent/* event types (and payloads) for tool
 // tests.

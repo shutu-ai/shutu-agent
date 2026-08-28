@@ -83,8 +83,10 @@ func (a *app) registerSubagent() error {
 	a.subagentTools = st
 	for _, t := range []tools.Tool{
 		st.Spawn(),
-		st.Fork(),
-		st.Send(),
+		st.SpawnTeammate(),
+		st.DshSend(),
+		st.FollowupTask(),
+		st.WaitAgent(),
 		st.Interrupt(),
 		st.ListAgents(),
 	} {

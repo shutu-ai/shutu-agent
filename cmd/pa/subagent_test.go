@@ -57,11 +57,11 @@ func makeSubagentApp(enabled bool) *app {
 	}
 }
 
-// subagentPolicy whitelists the four subagent tools so registry Execute can
+// subagentPolicy whitelists the DSH Agent control tools so registry Execute can
 // run them (in production config.applyDefaults + PolicyFromConfig do this).
 func subagentPolicy() tools.Policy {
 	return tools.Policy{
-		Enabled:     []string{"subagent", "subagent_fork", "send_message", "interrupt_agent", "list_agents"},
+		Enabled:     []string{"subagent", "spawn_teammate", "send_message", "followup_task", "wait_agent", "interrupt_agent", "list_agents"},
 		Timeout:     0, // no per-tool deadline in tests
 		OutputLimit: 0,
 	}
@@ -120,7 +120,7 @@ func TestRegisterSubagentEnabledRegistersAndLogsEvents(t *testing.T) {
 	for _, s := range specs {
 		names = append(names, s.Name)
 	}
-	for _, want := range []string{"subagent", "subagent_fork", "send_message", "interrupt_agent", "list_agents"} {
+	for _, want := range []string{"subagent", "spawn_teammate", "send_message", "followup_task", "wait_agent", "interrupt_agent", "list_agents"} {
 		if !containsStr(names, want) {
 			t.Fatalf("registered tools %v lack %q", names, want)
 		}
@@ -131,11 +131,11 @@ func TestRegisterSubagentEnabledRegistersAndLogsEvents(t *testing.T) {
 		name string
 		args string
 	}{
-		{"subagent", `{}`},                                    // missing required prompt
-		{"subagent", `{"prompt":"x","extra":1}`},              // additional properties rejected
-		{"send_message", `{}`},                                // missing required subagent_id/message
-		{"send_message", `{"subagent_id":123,"message":"x"}`}, // id must be a string
-		{"interrupt_agent", `{"agent_id":false}`},             // wrong id type
+		{"subagent", `{}`},                               // missing required prompt
+		{"subagent", `{"prompt":"x","extra":1}`},         // additional properties rejected
+		{"send_message", `{}`},                           // missing required target/message
+		{"send_message", `{"target":123,"message":"x"}`}, // target must be a string
+		{"interrupt_agent", `{"agent_id":false}`},        // wrong id type
 	} {
 		if _, err := app.reg.Execute(context.Background(), tc.name, json.RawMessage(tc.args)); err == nil {
 			t.Errorf("%s with args %s must be rejected (D7)", tc.name, tc.args)
@@ -154,9 +154,9 @@ func TestRegisterSubagentEnabledRegistersAndLogsEvents(t *testing.T) {
 		t.Fatal("subagent/start event missing from the session log after subagent_spawn")
 	}
 
-	// The fork alias is also available and retains the same execution contract.
-	if _, err := app.reg.Execute(context.Background(), "subagent_fork", json.RawMessage(`{"description":"forked","prompt":"forked"}`)); err != nil {
-		t.Fatalf("subagent_fork via registry: %v", err)
+	// The DSH teammate contract creates a continuable named child.
+	if _, err := app.reg.Execute(context.Background(), "spawn_teammate", json.RawMessage(`{"name":"forked","description":"forked","prompt":"forked","context":"fork"}`)); err != nil {
+		t.Fatalf("spawn_teammate via registry: %v", err)
 	}
 }
 

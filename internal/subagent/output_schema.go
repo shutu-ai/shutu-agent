@@ -39,6 +39,20 @@ func (SubagentForkTool) OutputSchema() map[string]any   { return delegationOutpu
 func (SubagentStatusTool) OutputSchema() map[string]any { return map[string]any{"type": "string"} }
 
 func (SubagentSpawnTool) OutputSchema() map[string]any { return delegationOutputSchema(true) }
+func (SubagentTeammateTool) OutputSchema() map[string]any {
+	return map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{
+		"member": map[string]any{"type": "object", "additionalProperties": true},
+	}}
+}
+func (SubagentMessageTool) OutputSchema() map[string]any {
+	return map[string]any{"type": "object", "additionalProperties": false, "properties": map[string]any{
+		"messageId": map[string]any{"type": "string"},
+		"status":    map[string]any{"type": "string", "enum": []string{"accepted", "queued"}},
+	}}
+}
+func (SubagentWaitTool) OutputSchema() map[string]any {
+	return map[string]any{"type": "object", "additionalProperties": true}
+}
 
 func delegationOutputSchema(continuable bool) map[string]any {
 	variants := []any{
