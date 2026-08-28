@@ -1013,7 +1013,9 @@ func applyDefaults(cfg *Config) {
 			threshold := 3
 			cfg.Plan.BlockedAfterConsecutiveRounds = &threshold
 		}
-		for _, name := range append(append([]string{}, goalToolNames...), todoToolNames...) {
+		planNames := append(append([]string{}, goalToolNames...), todoToolNames...)
+		planNames = append(planNames, "exit_plan_mode")
+		for _, name := range planNames {
 			if !contains(cfg.Tools.Enabled, name) {
 				cfg.Tools.Enabled = append(cfg.Tools.Enabled, name)
 			}

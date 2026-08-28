@@ -16,6 +16,7 @@ func defaultOnCaps() []string {
 	var names []string
 	for _, group := range [][]string{jobsToolNames, subagentToolNames,
 		skillToolNames, scheduleToolNames, goalToolNames, todoToolNames,
+		[]string{"exit_plan_mode"},
 		interactToolNames, codeToolNames, mcpToolNames, fsToolNames,
 		[]string{"read_image"},
 		webToolNames, terminalToolNames, fsSearchToolNames,

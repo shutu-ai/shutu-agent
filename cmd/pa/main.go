@@ -479,6 +479,12 @@ func main() {
 	if app.interacts != nil {
 		defer app.interacts.Close()
 	}
+	if config.Enabled(app.cfg.Plan.Enabled) {
+		if err := app.reg.Register(exitPlanModeTool{app: app}); err != nil {
+			fmt.Fprintln(os.Stderr, "pa:", err)
+			os.Exit(1)
+		}
+	}
 	// The permission preset's "full" tier opens the whitelist to every
 	// registered (and therefore enabled) tool, applied only after all
 	// register* calls so reg.Specs() is complete (bridged MCP tools included).
