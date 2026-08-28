@@ -220,6 +220,46 @@ func TestRegisterMcpsBridgeFailureFailsLoudly(t *testing.T) {
 	}
 }
 
+func TestBridgedMcpToolPreservesStructuredResultAndOutputSchema(t *testing.T) {
+	f := newFakeMcpFactory()
+	f.toolsByCmd["fake-structured"] = []mcp.Tool{{
+		Name: "report", Description: "report", InputSchema: map[string]any{},
+		OutputSchema: map[string]any{"type": "object", "properties": map[string]any{"answer": map[string]any{"type": "string"}}, "required": []any{"answer"}, "additionalProperties": false},
+	}}
+	f.callByCmd["fake-structured"] = func(string, map[string]any) (mcp.CallResult, error) {
+		return mcp.CallResult{Content: []any{map[string]any{"type": "text", "text": "done"}}, StructuredContent: map[string]any{"answer": "42"}, StructuredContentSet: true}, nil
+	}
+	a := makeMcpApp(true, []config.McpServer{{Name: "structured", Cmd: "fake-structured"}}, f)
+	a.reg.SetPolicy(mcpPolicy())
+	if err := a.registerMcps(); err != nil {
+		t.Fatalf("registerMcps: %v", err)
+	}
+	res, err := a.reg.Execute(context.Background(), "mcp__structured__report", json.RawMessage(`{}`))
+	if err != nil || res.IsError {
+		t.Fatalf("execute structured MCP tool: result=%+v err=%v", res, err)
+	}
+	value, ok := res.Value.(map[string]any)
+	if !ok || value["structuredContent"].(map[string]any)["answer"] != "42" {
+		t.Fatalf("value = %#v, want structuredContent.answer=42", res.Value)
+	}
+	schema := a.reg.Specs()
+	_ = schema // OutputSchema is validated by Registry.Execute above.
+}
+
+func TestBridgedMcpToolRejectsRequiredTaskExecution(t *testing.T) {
+	f := newFakeMcpFactory()
+	f.toolsByCmd["fake-task"] = []mcp.Tool{{Name: "task", Description: "task", InputSchema: map[string]any{}, TaskSupport: "required"}}
+	a := makeMcpApp(true, []config.McpServer{{Name: "tasks", Cmd: "fake-task"}}, f)
+	a.reg.SetPolicy(mcpPolicy())
+	if err := a.registerMcps(); err != nil {
+		t.Fatalf("registerMcps: %v", err)
+	}
+	res, err := a.reg.Execute(context.Background(), "mcp__tasks__task", json.RawMessage(`{}`))
+	if err != nil || !res.IsError || !strings.Contains(res.Output, "task-based execution") {
+		t.Fatalf("task-required result=%+v err=%v, want structured unsupported error", res, err)
+	}
+}
+
 // startFailFactory wraps a fakeMcpFactory and makes every returned client's
 // Start fail, simulating an unspawnable server binary.
 type startFailFactory struct{ inner mcp.Factory }

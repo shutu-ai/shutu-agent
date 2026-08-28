@@ -5,4 +5,3 @@ func (acpMCPCallTool) OutputSchema() map[string]any  { return map[string]any{"ty
 func (acpMCPListTool) OutputSchema() map[string]any  { return map[string]any{"type": "string"} }
 func (acpMCPTool) OutputSchema() map[string]any      { return map[string]any{"type": "string"} }
 func (acpTerminalTool) OutputSchema() map[string]any { return map[string]any{"type": "string"} }
-func (bridgedMcpTool) OutputSchema() map[string]any  { return map[string]any{"type": "string"} }

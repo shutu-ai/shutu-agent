@@ -71,13 +71,15 @@ func (a *app) bridgeMcpServer(ctx context.Context, f mcp.Factory, srv config.Mcp
 	}
 	a.mcp = append(a.mcp, client)
 	for _, tl := range tools {
-		name := "mcp__" + srv.Name + "__" + tl.Name
+		name := mcp.PublicToolName(srv.Name, tl.Name)
 		bt := bridgedMcpTool{
-			client: client,
-			name:   name,
-			tool:   tl.Name,
-			desc:   tl.Description,
-			schema: normalizeSchema(tl.InputSchema),
+			client:      client,
+			name:        name,
+			tool:        tl.Name,
+			desc:        tl.Description,
+			schema:      normalizeSchema(tl.InputSchema),
+			output:      normalizeOutputSchema(tl.OutputSchema),
+			taskSupport: tl.TaskSupport,
 		}
 		if err := a.reg.Register(bt); err != nil {
 			return fmt.Errorf("pa: register bridged mcp tool %q: %w", name, err)
@@ -98,29 +100,60 @@ func (a *app) bridgeMcpServer(ctx context.Context, f mcp.Factory, srv config.Mcp
 // verbatim; the registry's D7 gate validates those arguments against the
 // server's own input schema, which is passed through to Schema().
 type bridgedMcpTool struct {
-	client mcp.Client
-	name   string
-	tool   string
-	desc   string
-	schema map[string]any
+	client      mcp.Client
+	name        string
+	tool        string
+	desc        string
+	schema      map[string]any
+	output      map[string]any
+	taskSupport string
 }
 
 func (t bridgedMcpTool) Name() string           { return t.name }
 func (t bridgedMcpTool) Description() string    { return t.desc }
 func (t bridgedMcpTool) Schema() map[string]any { return t.schema }
+func (t bridgedMcpTool) OutputSchema() map[string]any {
+	structured := map[string]any{}
+	required := []string{"content"}
+	if t.output != nil {
+		structured = t.output
+		required = append(required, "structuredContent")
+	}
+	return map[string]any{
+		"type":                 "object",
+		"properties":           map[string]any{"content": map[string]any{"type": "array", "items": map[string]any{}}, "structuredContent": structured},
+		"required":             required,
+		"additionalProperties": false,
+	}
+}
 
 func (t bridgedMcpTool) Execute(ctx context.Context, args any) (string, error) {
+	result, err := t.ExecuteResult(ctx, args)
+	return result.Output, err
+}
+
+func (t bridgedMcpTool) ExecuteResult(ctx context.Context, args any) (agenttools.ToolResult, error) {
+	if t.taskSupport == "required" {
+		return agenttools.ToolResult{}, fmt.Errorf("%s: MCP task-based execution is not supported", t.name)
+	}
 	var a map[string]any
 	if err := agenttools.DecodeArgs(args, &a); err != nil {
-		return "", fmt.Errorf("%s: %w", t.name, err)
+		return agenttools.ToolResult{}, fmt.Errorf("%s: %w", t.name, err)
 	}
 	res, err := t.client.Call(ctx, t.tool, a)
 	if err != nil {
-		return "", fmt.Errorf("%s: %w", t.name, err)
+		return agenttools.ToolResult{}, fmt.Errorf("%s: %w", t.name, err)
+	}
+	if res.IsError {
+		return agenttools.ToolResult{}, fmt.Errorf("%s: %s", t.name, mcp.FormatCallResult(res))
+	}
+	value := map[string]any{"content": res.Content}
+	if res.StructuredContentSet {
+		value["structuredContent"] = res.StructuredContent
 	}
 	// Same rendering as mcp_call (mcp.FormatCallResult), so a server tool's
 	// result reads identically through either path.
-	return mcp.FormatCallResult(res), nil
+	return agenttools.ToolResult{Value: value, Output: mcp.FormatCallResult(res)}, nil
 }
 
 // normalizeSchema adapts a server-provided inputSchema for registration in the
@@ -139,6 +172,17 @@ func normalizeSchema(s map[string]any) map[string]any {
 	}
 	if _, ok := out["type"]; !ok {
 		out["type"] = "object"
+	}
+	return out
+}
+
+func normalizeOutputSchema(s map[string]any) map[string]any {
+	if s == nil {
+		return nil
+	}
+	out := make(map[string]any, len(s))
+	for k, v := range s {
+		out[k] = v
 	}
 	return out
 }

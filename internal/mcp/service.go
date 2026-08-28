@@ -42,9 +42,14 @@ const DefaultTimeout = 30 * time.Second
 // the tool's JSON Schema (a "type":"object" schema with a "properties" map),
 // passed through verbatim from the server.
 type Tool struct {
-	Name        string
-	Description string
-	InputSchema map[string]any
+	Name         string
+	Description  string
+	InputSchema  map[string]any
+	OutputSchema map[string]any
+	// TaskSupport is the MCP execution.taskSupport declaration. Shutu's
+	// foreground bridge intentionally refuses "required", matching DSH's
+	// explicit unsupported-task error instead of silently changing semantics.
+	TaskSupport string
 }
 
 // CallResult is the outcome of one tools/call. Content is the server's content
@@ -52,8 +57,10 @@ type Tool struct {
 // server's isError flag — a normal tool execution that reports failure, not a
 // transport/protocol failure (those are returned as errors).
 type CallResult struct {
-	Content []any
-	IsError bool
+	Content              []any
+	StructuredContent    any
+	StructuredContentSet bool
+	IsError              bool
 }
 
 // Client is one MCP server connection (design.md §10 D2). Implementations are

@@ -189,9 +189,13 @@ func (c *stdioClient) ListTools(ctx context.Context) ([]Tool, error) {
 	}
 	var list struct {
 		Tools []struct {
-			Name        string         `json:"name"`
-			Description string         `json:"description"`
-			InputSchema map[string]any `json:"inputSchema"`
+			Name         string         `json:"name"`
+			Description  string         `json:"description"`
+			InputSchema  map[string]any `json:"inputSchema"`
+			OutputSchema map[string]any `json:"outputSchema"`
+			Execution    struct {
+				TaskSupport string `json:"taskSupport"`
+			} `json:"execution"`
 		} `json:"tools"`
 	}
 	if err := json.Unmarshal(res, &list); err != nil {
@@ -203,7 +207,10 @@ func (c *stdioClient) ListTools(ctx context.Context) ([]Tool, error) {
 		if schema == nil {
 			schema = map[string]any{}
 		}
-		tools = append(tools, Tool{Name: t.Name, Description: t.Description, InputSchema: schema})
+		tools = append(tools, Tool{
+			Name: t.Name, Description: t.Description, InputSchema: schema,
+			OutputSchema: t.OutputSchema, TaskSupport: t.Execution.TaskSupport,
+		})
 	}
 	return tools, nil
 }
@@ -232,13 +239,21 @@ func (c *stdioClient) Call(ctx context.Context, name string, args map[string]any
 		return CallResult{}, err
 	}
 	var callRes struct {
-		Content []any `json:"content"`
-		IsError bool  `json:"isError"`
+		Content           []any           `json:"content"`
+		StructuredContent json.RawMessage `json:"structuredContent"`
+		IsError           bool            `json:"isError"`
 	}
 	if err := json.Unmarshal(res, &callRes); err != nil {
 		return CallResult{}, fmt.Errorf("%w: invalid tools/call result: %v", ErrProtocol, err)
 	}
-	return CallResult{Content: callRes.Content, IsError: callRes.IsError}, nil
+	var structured any
+	set := len(callRes.StructuredContent) != 0
+	if set {
+		if err := json.Unmarshal(callRes.StructuredContent, &structured); err != nil {
+			return CallResult{}, fmt.Errorf("%w: invalid structuredContent: %v", ErrProtocol, err)
+		}
+	}
+	return CallResult{Content: callRes.Content, StructuredContent: structured, StructuredContentSet: set, IsError: callRes.IsError}, nil
 }
 
 // Close kills the server process and releases every pipe. It is idempotent:
