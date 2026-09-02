@@ -1,5 +1,6 @@
 import type { EventView } from './api'
 import { deriveTrajectoryTimeline, trajectoryTimelineFocusIndexes, type DshTimelineMode, type DshTimelineModel, type DshTurn } from '@shutu-dsh/trajectory'
+import { dshEventDetails, normalizeDshEvent } from './dsh-event-model'
 
 export type { DshTimelineMode }
 
@@ -101,11 +102,7 @@ export function summarizeDshTimeline(events: readonly EventView[]): DshTimelineM
 }
 
 function isStructuralEvent(event: EventView): boolean {
-  return event.type === 'turn/start' || event.type === 'turn/end' ||
-    event.type === 'step/start' || event.type === 'step/end' ||
-    event.type === 'assistant/chunk' || event.type === 'assistant/reasoning' ||
-    event.type === 'assistant/stream' ||
-    event.type.startsWith('llm/')
+  return normalizeDshEvent(event, null, null).structural
 }
 
 function isAssistantStreamEvent(event: EventView): boolean {
@@ -172,54 +169,7 @@ function isToolEvent(event: EventView): boolean {
 }
 
 function detailsOf(event: EventView): Record<string, unknown> {
-  return event.details && typeof event.details === 'object' ? event.details : {}
-}
-
-function stringDetail(event: EventView, ...keys: string[]): string | undefined {
-  const details = detailsOf(event)
-  for (const key of keys) {
-    const value = details[key]
-    if (typeof value === 'string' && value.trim() !== '') return value
-  }
-  return undefined
-}
-
-function numberDetail(event: EventView, ...keys: string[]): number | undefined {
-  const details = detailsOf(event)
-  for (const key of keys) {
-    const value = details[key]
-    if (typeof value === 'number' && Number.isFinite(value)) return value
-  }
-  return undefined
-}
-
-function recordId(event: EventView): string {
-  return `event:${event.seq}:v${event.version}`
-}
-
-function recordKind(event: EventView): DshTrajectoryRecordKind {
-  if (event.type.startsWith('turn/')) return 'turn'
-  if (event.type.startsWith('step/')) return 'step'
-  if (event.type.startsWith('llm/')) return 'request'
-  if (event.type === 'user/message') return 'user'
-  if (event.type === 'assistant/message') return 'assistant'
-  if (event.type === 'assistant/reasoning' || event.type === 'assistant/chunk') return 'reasoning'
-  if (event.type === 'tool/call' || event.type === 'tool/start') return 'tool-call'
-  if (event.type === 'tool/result' || event.type === 'tool/error') return 'tool-result'
-  if (event.type.startsWith('compaction/')) return 'compaction'
-  if (event.type.startsWith('system/') || event.context_message) return 'system'
-  return 'unknown'
-}
-
-function recordStatus(event: EventView): DshTrajectoryRecordStatus {
-  if (event.type.includes('error') || event.type.includes('failed') || event.compaction_error) return 'failed'
-  if (event.type.endsWith('/start') || event.type === 'llm/request_start' || event.type === 'tool/call' || event.type === 'assistant/chunk' || event.type === 'assistant/reasoning' || event.type === 'llm/retry') return 'running'
-  if (event.type.endsWith('/end') || event.type === 'llm/request_end' || event.type.endsWith('/result') || event.type === 'tool/error' || event.type === 'assistant/message' || event.type === 'compaction/summary') return 'completed'
-  return event.details?.status === 'running' ? 'running' : 'completed'
-}
-
-function recordText(event: EventView): string {
-  return event.tool_output || event.reasoning || event.summary || event.compaction_summary || ''
+  return dshEventDetails(event)
 }
 
 function tokenUsage(event: EventView): DshTrajectoryTokenUsage | undefined {
@@ -234,12 +184,6 @@ function tokenUsage(event: EventView): DshTrajectoryTokenUsage | undefined {
     ...(typeof source.cached_input_tokens === 'number' ? { cachedInputTokens: source.cached_input_tokens } : typeof source.cachedInputTokens === 'number' ? { cachedInputTokens: source.cachedInputTokens } : {}),
   }
   return Object.keys(usage).length === 0 ? undefined : usage
-}
-
-function requestKey(event: EventView, current: string | null): string | null {
-  const explicit = stringDetail(event, 'request_id', 'requestId', 'requestID', 'id')
-  if (explicit !== undefined) return `request:${explicit}`
-  return current
 }
 
 function recordLabel(event: EventView, kind: DshTrajectoryRecordKind): string {
@@ -263,13 +207,14 @@ export function projectDshTrajectoryRecords(events: readonly EventView[]): reado
   let currentAssistantId: string | null = null
 
   for (const event of events) {
-    const kind = recordKind(event)
-    const id = recordId(event)
-    if (event.type === 'turn/start') currentTurn = numberDetail(event, 'turn') ?? (currentTurn ?? 0) + 1
+    const facts = normalizeDshEvent(event, currentRequestId, currentTurn)
+    const kind = facts.kind as DshTrajectoryRecordKind
+    const id = facts.id
+    if (event.type === 'turn/start') currentTurn = facts.turn ?? (currentTurn ?? 0) + 1
     if (event.type === 'user/message' && !event.context_message && currentTurn === null) currentTurn = 0
-    const requestId: string | null = kind === 'request' ? requestKey(event, currentRequestId) : currentRequestId
+    const requestId: string | null = kind === 'request' ? facts.requestId : facts.requestId
     if (kind === 'request' && requestId !== null) currentRequestId = requestId
-    const callId = event.call_id || stringDetail(event, 'call_id', 'callId') || null
+    const callId = facts.callId
     const parentId = kind === 'tool-result' && callId !== null && callRecordById.has(callId)
       ? callRecordById.get(callId)!
       : kind === 'tool-call' && currentAssistantId !== null
@@ -280,17 +225,17 @@ export function projectDshTrajectoryRecords(events: readonly EventView[]): reado
     const startedAt = Date.parse(event.time)
     const normalized: Omit<DshTrajectoryRecord, 'childIds'> = {
       id, seq: event.seq, version: event.version, eventType: event.type, kind,
-      status: recordStatus(event), time: event.time, startedAt: Number.isFinite(startedAt) ? startedAt : null,
-      turn: numberDetail(event, 'turn') ?? currentTurn, requestId,
-      parentId, callId, label: recordLabel(event, kind), text: recordText(event),
+      status: facts.status as DshTrajectoryRecordStatus, time: event.time, startedAt: Number.isFinite(startedAt) ? startedAt : null,
+      turn: facts.turn ?? currentTurn, requestId,
+      parentId, callId, label: recordLabel(event, kind), text: facts.text,
       ...(event.tool_args ? { inputDetail: event.tool_args } : {}),
       ...(event.tool_output ? { outputDetail: event.tool_output } : {}),
-      isStructural: isStructuralEvent(event), isError: recordStatus(event) === 'failed',
+      isStructural: facts.structural, isError: facts.isError,
       ...(tokenUsage(event) ? { usage: tokenUsage(event) } : {}), event,
     }
     records.push(normalized)
     recordById.set(id, normalized)
-    if (kind === 'request' && requestId !== null && (event.type.endsWith('/start') || event.type === 'llm/request_start')) {
+	if (kind === 'request' && requestId !== null && (event.type.endsWith('/start') || event.type === 'llm/request_start' || event.type === 'request/header' || event.type === 'request/context')) {
       recordById.set(requestId, normalized)
     }
     if (kind === 'tool-call' && callId !== null) callRecordById.set(callId, id)

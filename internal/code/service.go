@@ -17,22 +17,25 @@
 //   - output quota: Stdout and Stderr are each capped at RunRequest.MaxOutput
 //     bytes (default 64KiB); overflow is truncated and Result.Truncated is
 //     set;
+//   - child resource ceilings: controlled POSIX shell runs inherit hard
+//     virtual-memory, file-size, and process-count limits; Windows uses the
+//     Job Object process-tree boundary where the host supports it;
 //   - sandbox cwd: execution happens in an isolated working directory,
 //     defaulting to <cwd base>/.sandbox and created on demand;
-//   - default no network (declarative): the child inherits the parent
-//     environment with credential-shaped entries removed, so no network
-//     credentials are injected. This is a boundary, not strong isolation —
-//     Windows has no network namespace, so denying network access at the OS
-//     level is out of scope (recorded here; a config-level declarative switch
-//     is deferred to M6e-2). A sandboxed child that knows where to connect can
-//     still reach the network on its own.
+//   - default no network: on Linux, the bubblewrap backend is advertised as
+//     network-isolated only after a functional network-namespace probe and
+//     executes non-full-access calls with --unshare-net. macOS Seatbelt is
+//     file-effect enforcing but does not claim network isolation. Hosts without
+//     an enforcing backend fail closed when controlled isolation is required.
+//     Credential-shaped environment entries are scrubbed on every host as an
+//     additional boundary.
 //
-// The local sandbox is controlled isolation, not a security boundary for
-// hostile code (same posture as M3's run_command, docs/decisions/
-// 2026-08-18-m3-sandbox-scope.md). A lingering grandchild that outlives the
-// direct child (e.g. ping spawned by cmd.exe after the direct child is
-// killed) is a documented residual risk — it never blocks Run because output
-// is captured to temp files, not pipes.
+// The local sandbox is an enforcing backend for Linux file/network modes when
+// bubblewrap is available, macOS file modes when Seatbelt is available, and
+// Windows file-effect modes when the ACL restricted-token probe passes. The
+// Windows ACL path does not claim network/read/process isolation. A lingering
+// grandchild is contained by the process-tree cleanup seam;
+// output is captured to temp files rather than pipes so it cannot block Run.
 //
 // On Windows the code runs through cmd /C as a single non-interactive command
 // line (same boundary as M3's run_command); embedded double quotes must be
@@ -48,6 +51,8 @@ package code
 import (
 	"context"
 	"errors"
+
+	"github.com/jabing/shutu-agent/internal/llm"
 	"time"
 )
 
@@ -72,20 +77,101 @@ type Result struct {
 // Code in the default sandbox cwd (<cwd base>/.sandbox) with a 30s timeout
 // and a 64KiB per-stream output cap.
 type RunRequest struct {
-	Lang      string        // "sh" (default) | future languages
-	Code      string        // command/script to execute (required, non-blank)
-	Cwd       string        // sandbox working dir (default <cwd base>/.sandbox)
-	Timeout   time.Duration // 0 → default 30s
-	MaxOutput int           // per-stream byte cap; 0 → default 64KiB
+	// Mode selects the requested filesystem authority. An empty mode means
+	// workspace-write for backwards compatibility; providers must reject modes
+	// they cannot enforce rather than silently widening authority.
+	Mode                    SandboxMode
+	Root                    string // policy root; Cwd must remain below it when set
+	RequireStrongIsolation  bool
+	RequireNetworkIsolation bool
+	AllowNetwork            bool
+	Lang                    string        // "sh" (default) | future languages
+	Code                    string        // command/script to execute (required, non-blank)
+	Cwd                     string        // sandbox working dir (default <cwd base>/.sandbox)
+	Timeout                 time.Duration // 0 → default 30s
+	MaxOutput               int           // per-stream byte cap; 0 → default 64KiB
+	// MaxMemoryBytes, MaxFileSizeBytes, and MaxProcesses are hard child
+	// limits for controlled shell modes. Zero selects the provider defaults;
+	// they are ignored for explicit danger-full-access runs.
+	MaxMemoryBytes   int64
+	MaxFileSizeBytes int64
+	MaxProcesses     int
+}
+
+// SandboxMode is the per-call authority tier requested from a sandbox.
+type SandboxMode string
+
+const (
+	// SandboxReadOnly is the canonical wire spelling used by DeepSeek Harness.
+	SandboxReadOnly SandboxMode = "read-only"
+	// SandboxReadOnlyLegacy remains accepted for existing Shutu config files;
+	// it is normalized before capability checks and execution.
+	SandboxReadOnlyLegacy SandboxMode = "readonly"
+	SandboxWorkspaceWrite SandboxMode = "workspace-write"
+	SandboxFullAccess     SandboxMode = "danger-full-access"
+)
+
+// IsolationLevel names the security contract actually supplied by a backend.
+// "containment" is a filesystem-effect fence against accidental escape; it is
+// not a claim of equivalence to an OS strong-isolation boundary.
+type IsolationLevel string
+
+const (
+	IsolationNone        IsolationLevel = "none"
+	IsolationContainment IsolationLevel = "containment"
+	IsolationStrong      IsolationLevel = "strong"
+)
+
+func normalizeSandboxMode(mode SandboxMode) SandboxMode {
+	if mode == SandboxReadOnlyLegacy {
+		return SandboxReadOnly
+	}
+	return mode
 }
 
 // ProgramBindingRequest describes one tool call made by a TypeScript Code
 // Mode program. The binding is deliberately name-based so this package stays
 // independent from the host tool registry and its session types.
 type ProgramBindingRequest struct {
-	CallID string
-	Name   string
-	Args   any
+	CallID    string
+	Namespace string
+	Name      string
+	Args      any
+}
+
+// ProgramBindingNamespace declares one program-visible binding object. Member
+// names are intentionally not enumerated: the host registry remains the
+// authority and can expose arbitrary property names such as "__proto__" or
+// "read-file" without prototype collisions.
+type ProgramBindingNamespace struct {
+	Global                  string
+	ErrorClassName          string
+	ErrorMemberNameProperty string
+}
+
+// ProgramBindingResult keeps the JSON value returned to TypeScript separate
+// from the rich content projection retained by the host's durable dispatch
+// event. This mirrors the reference bridge's value/content split.
+type ProgramBindingResult struct {
+	Value                     any
+	Content                   []map[string]any
+	Meta                      any
+	AdditionalContexts        []string
+	AdditionalContextMessages []llm.Message
+	ConcludesTurn             bool
+}
+
+func cloneCodeContextMessages(messages []llm.Message) []llm.Message {
+	if len(messages) == 0 {
+		return nil
+	}
+	out := make([]llm.Message, len(messages))
+	for i, message := range messages {
+		out[i] = message
+		out[i].Content = append([]llm.ContentBlock(nil), message.Content...)
+		out[i].ToolCalls = append([]llm.ToolCall(nil), message.ToolCalls...)
+	}
+	return out
 }
 
 // ProgramBinding is the host callback exposed to a Code Mode runtime. It must
@@ -96,31 +182,67 @@ type ProgramBinding func(context.Context, ProgramBindingRequest) (any, error)
 // ProgramRequest is one DSH-style TypeScript Code Mode execution. Code is the
 // body of an async function, so top-level await and return are supported.
 type ProgramRequest struct {
-	Code         string
-	Cwd          string
-	Timeout      time.Duration
-	MaxOutput    int
-	ParentCallID string
-	Binding      ProgramBinding
+	Code    string
+	Cwd     string
+	Timeout time.Duration
+	// ComputeMS is the measured busy-time budget for the TypeScript worker.
+	ComputeMS int
+	// MaxWallMS is the hard wall-clock ceiling, independent of awaited host
+	// bindings. Timeout remains the compatibility fallback when this is zero.
+	MaxWallMS int
+	MaxOutput int
+	// MaxOldGenerationSizeMB applies a process heap ceiling when non-zero. It
+	// is enforced by V8 for the subprocess backend; process-wide CPU is
+	// enforced separately by the platform process/job boundary or monitor.
+	MaxOldGenerationSizeMB int
+	ParentCallID           string
+	Binding                ProgramBinding
+	// Bindings declares the globals exposed to the program. An empty list keeps
+	// the legacy single `tools` namespace for standalone callers.
+	Bindings []ProgramBindingNamespace
+	// IsConcurrencySafe classifies a prepared host call. A supplied
+	// classifier that returns false (or panics) makes the call exclusive;
+	// leaving it nil retains the legacy runtime behavior for standalone users.
+	IsConcurrencySafe func(name string, args any) bool
+	// MaxParallelSubCalls bounds one consecutive safe group. Zero uses the
+	// runtime default of ten.
+	MaxParallelSubCalls int
 }
 
 // ProgramFailure is a model-facing runtime failure. Program failures are
 // returned as data by the runtime; only host misuse/startup failures use the
-// Go error return.
+// Go error return. Kind is one of the public CodeRuntime failure kinds below.
 type ProgramFailure struct {
 	Kind    string
 	Message string
 }
 
+// CodeRuntime failure kinds intentionally match the reference worker
+// contract. In particular, timeout/abort/worker-exit are settled outcomes,
+// not transport errors, so callers can persist and replay them uniformly.
+const (
+	ProgramFailureException     = "exception"
+	ProgramFailureTimeout       = "timeout"
+	ProgramFailureAbort         = "abort"
+	ProgramFailureWorkerExit    = "worker-exit"
+	ProgramFailureInvalidOutput = "invalid-output"
+	ProgramFailureOutputLimit   = "output-limit"
+)
+
 // ProgramResult is the DSH CodeRuntime result: ordered captured logs, an
 // optional lossless completion value, and an orthogonal failure field.
 type ProgramResult struct {
-	Value     any
-	HasValue  bool
-	Logs      []string
-	Failure   *ProgramFailure
-	Truncated bool
-	Duration  time.Duration
+	Value    any
+	HasValue bool
+	Logs     []string
+	// AdditionalContextMessages are deferred by nested bindings and exposed to
+	// the outer tool result in dispatch order. They are deliberately kept out
+	// of the JSON value returned to the TypeScript program.
+	AdditionalContextMessages []llm.Message
+	ConcludesTurn             bool
+	Failure                   *ProgramFailure
+	Truncated                 bool
+	Duration                  time.Duration
 }
 
 // ProgramRuntime executes TypeScript Code Mode programs against host-provided
@@ -152,6 +274,36 @@ type Provider interface {
 // delegates to the configured Provider — when no Provider is set, the local
 // subprocess sandbox (NewLocalProvider) is used. Close is idempotent and
 // releases the Provider.
+// SandboxCapabilities reports backend guarantees. It is optional for
+// compatibility; explicit isolation requirements fail closed if absent.
+type SandboxCapabilities struct {
+	Available        bool
+	Backend          string         `json:"backend,omitempty"`
+	IsolationLevel   IsolationLevel `json:"isolationLevel,omitempty"`
+	StrongIsolation  bool
+	NetworkIsolation bool
+	// SupportedModes is optional for old providers. A non-empty list is an
+	// allow-list; an omitted list retains the historical provider contract.
+	SupportedModes []SandboxMode
+}
+
+type capabilityReporter interface {
+	Capabilities() SandboxCapabilities
+}
+
+// SandboxDiagnostic is the stable audit-facing answer to "what is active?".
+// It deliberately distinguishes backend identity from security level so a
+// containment backend cannot be mistaken for strong OS isolation.
+type SandboxDiagnostic struct {
+	Available        bool           `json:"available"`
+	Backend          string         `json:"backend"`
+	IsolationLevel   IsolationLevel `json:"isolationLevel"`
+	StrongIsolation  bool           `json:"strongIsolation"`
+	NetworkIsolation bool           `json:"networkIsolation"`
+	Reason           string         `json:"reason,omitempty"`
+	Summary          string         `json:"summary"`
+}
+
 type Engine interface {
 	// Run executes req through the configured Provider and returns the
 	// outcome (see Provider.Run for the outcome-vs-error contract).
@@ -170,8 +322,9 @@ type closer interface {
 // Sentinel errors returned by the seam so callers can distinguish failures
 // without parsing message text.
 var (
-	ErrInvalidRequest  = errors.New("code: invalid request")
-	ErrUnsupportedLang = errors.New("code: unsupported language")
-	ErrEngineClosed    = errors.New("code: engine closed")
-	ErrProviderClosed  = errors.New("code: provider closed")
+	ErrInvalidRequest     = errors.New("code: invalid request")
+	ErrUnsupportedLang    = errors.New("code: unsupported language")
+	ErrEngineClosed       = errors.New("code: engine closed")
+	ErrProviderClosed     = errors.New("code: provider closed")
+	ErrSandboxUnavailable = errors.New("SANDBOX_UNAVAILABLE")
 )

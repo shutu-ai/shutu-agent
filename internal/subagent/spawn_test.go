@@ -25,6 +25,18 @@ type scriptedLLM struct {
 	calls []llm.ChatRequest
 }
 
+type captureMaxTokensLLM struct {
+	mu       sync.Mutex
+	requests []llm.ChatRequest
+}
+
+func (m *captureMaxTokensLLM) Stream(ctx context.Context, req llm.ChatRequest) (llm.StreamReader, error) {
+	m.mu.Lock()
+	m.requests = append(m.requests, req)
+	m.mu.Unlock()
+	return &scriptedReader{events: []llm.StreamEvent{{Kind: llm.StreamFinish, FinishReason: "stop"}}}, nil
+}
+
 func (s *scriptedLLM) Stream(ctx context.Context, req llm.ChatRequest) (llm.StreamReader, error) {
 	s.calls = append(s.calls, req)
 	if len(s.steps) == 0 {
@@ -97,6 +109,44 @@ func (m *errorLLM) Stream(ctx context.Context, req llm.ChatRequest) (llm.StreamR
 	return nil, m.err
 }
 
+type failingSessionCreateStore struct {
+	store.Store
+	err error
+}
+
+func (s failingSessionCreateStore) CreateSessionWithEvents(context.Context, string, time.Time, store.SessionHeader, []session.Event) error {
+	return s.err
+}
+
+type failingSessionCreateOptionsStore struct {
+	store.SessionCreateStore
+	store.Store
+	err error
+}
+
+func (s failingSessionCreateOptionsStore) CreateSessionWithOptions(context.Context, string, time.Time, store.SessionCreateOptions, []session.Event) error {
+	return s.err
+}
+
+type blockingSessionCreateStore struct {
+	store.Store
+	started chan struct{}
+}
+
+func (s blockingSessionCreateStore) CreateSessionWithEvents(ctx context.Context, _ string, _ time.Time, _ store.SessionHeader, _ []session.Event) error {
+	close(s.started)
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+type filteredTool struct{ name string }
+
+func (f filteredTool) Name() string                                 { return f.name }
+func (f filteredTool) Description() string                          { return f.name }
+func (f filteredTool) Schema() map[string]any                       { return map[string]any{"type": "object"} }
+func (f filteredTool) OutputSchema() map[string]any                 { return map[string]any{"type": "string"} }
+func (f filteredTool) Execute(context.Context, any) (string, error) { return f.name, nil }
+
 // TestSpawnFullRound runs one complete child-agent round with a fake LLM and
 // verifies the child owns an independent, replayable session (the parent log is
 // never polluted), the terminal result is returned, and ListChildren reflects
@@ -153,8 +203,8 @@ func TestSpawnFullRound(t *testing.T) {
 	if len(events) != 7 {
 		t.Fatalf("child events = %d, want 7 (turn/step lifecycle + user, aggregated chunk, assistant)", len(events))
 	}
-	if events[1].Type != session.EventUserMessage {
-		t.Fatalf("child user event = %q, want user/message", events[1].Type)
+	if events[2].Type != session.EventUserMessage {
+		t.Fatalf("child user event = %q, want user/message", events[2].Type)
 	}
 	if events[4].Type != session.EventAssistantMessage {
 		t.Fatalf("assistant child event = %q, want assistant/message", events[4].Type)
@@ -182,6 +232,258 @@ func TestSpawnFullRound(t *testing.T) {
 	}
 	if err := prov.Close(); err != nil {
 		t.Fatalf("close: %v", err)
+	}
+}
+
+func TestSpawnMaxTokensInheritsAndAllowsPerChildOverride(t *testing.T) {
+	model := &captureMaxTokensLLM{}
+	prov := NewSpawnProvider(Deps{
+		LLM: model, Tools: tools.New(), Prompt: prompt.New("child"), Model: "m", MaxTokens: 111,
+	})
+
+	parent, err := prov.Start(context.Background(), StartRequest{Prompt: "parent", MaxTokens: 111})
+	if err != nil {
+		t.Fatalf("start parent: %v", err)
+	}
+	if _, err := parent.Result(context.Background()); err != nil {
+		t.Fatalf("parent result: %v", err)
+	}
+	inherited, err := prov.Start(context.Background(), StartRequest{Prompt: "inherited", ParentSessionID: parent.ID})
+	if err != nil {
+		t.Fatalf("start inherited child: %v", err)
+	}
+	overridden, err := prov.Start(context.Background(), StartRequest{Prompt: "overridden", ParentSessionID: parent.ID, MaxTokens: 222})
+	if err != nil {
+		t.Fatalf("start overridden child: %v", err)
+	}
+	for _, run := range []*Run{inherited, overridden} {
+		if _, err := run.Result(context.Background()); err != nil {
+			t.Fatalf("child result: %v", err)
+		}
+	}
+
+	model.mu.Lock()
+	defer model.mu.Unlock()
+	seen := map[int]int{}
+	for _, request := range model.requests {
+		seen[request.MaxTokens]++
+	}
+	if seen[111] != 2 || seen[222] != 1 {
+		t.Fatalf("max token requests = %#v, want inherited 111 twice and override 222 once", seen)
+	}
+}
+
+func TestSpawnMaxTokensInheritsFromHostOwnedParent(t *testing.T) {
+	model := &captureMaxTokensLLM{}
+	prov := NewSpawnProvider(Deps{
+		LLM: model, Tools: tools.New(), Prompt: prompt.New("child"), Model: "m", MaxTokens: 111,
+		MaxTokensFor: func(_ context.Context, parent string) int {
+			if parent == "sdk-parent" {
+				return 333
+			}
+			return 0
+		},
+	})
+	run, err := prov.Start(context.Background(), StartRequest{Prompt: "host child", ParentSessionID: "sdk-parent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run.Result(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	model.mu.Lock()
+	defer model.mu.Unlock()
+	if len(model.requests) != 1 || model.requests[0].MaxTokens != 333 {
+		t.Fatalf("host-parent max tokens = %+v, want 333", model.requests)
+	}
+}
+
+func TestSpawnUsesParentSessionProviderAndModelResolvers(t *testing.T) {
+	global := &scriptedLLM{steps: [][]llm.StreamEvent{{{Kind: llm.StreamFinish, FinishReason: "stop"}}}}
+	selected := &scriptedLLM{steps: [][]llm.StreamEvent{{{Kind: llm.StreamTextDelta, Text: "session"}, {Kind: llm.StreamFinish, FinishReason: "stop"}}}}
+	var boundID string
+	var boundLog *session.Log
+	prov := NewSpawnProvider(Deps{
+		LLM: global, Model: "global-model", Tools: tools.New(), Prompt: prompt.New("child"),
+		BindSessionLog: func(id string, log *session.Log) { boundID, boundLog = id, log },
+		LLMFor: func(_ context.Context, parent string) llm.LLM {
+			if parent == "parent-session" {
+				return selected
+			}
+			return nil
+		},
+		ModelFor: func(_ context.Context, parent string) string {
+			if parent == "parent-session" {
+				return "session-model"
+			}
+			return ""
+		},
+	})
+	run, err := prov.Start(context.Background(), StartRequest{Prompt: "use selected runtime", ParentSessionID: "parent-session"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := run.Result(context.Background())
+	if err != nil || result.Output != "session" {
+		t.Fatalf("result = %+v, err=%v", result, err)
+	}
+	if boundID != run.ID || boundLog == nil {
+		t.Fatalf("child log binding = (%q, %p), want (%q, non-nil)", boundID, boundLog, run.ID)
+	}
+	if len(global.calls) != 0 || len(selected.calls) != 1 {
+		t.Fatalf("provider resolver calls: global=%d selected=%d", len(global.calls), len(selected.calls))
+	}
+	if selected.calls[0].Model != "session-model" {
+		t.Fatalf("child model = %q, want session-model", selected.calls[0].Model)
+	}
+	if err := prov.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestForkSeedsResolvedLiveParentCompletedPrefix(t *testing.T) {
+	parentLog := session.New()
+	appendEvent := func(typ string, data any) {
+		t.Helper()
+		if _, err := parentLog.Append(typ, data); err != nil {
+			t.Fatalf("append parent %s: %v", typ, err)
+		}
+	}
+	appendEvent(session.EventTurnStart, session.NewTurnStartAt(1))
+	appendEvent(session.EventStepStart, session.NewStepStartAt(1, 1))
+	appendEvent(session.EventUserMessage, session.NewUserMessageAt(1, 1, 0, llm.Message{
+		Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("parent context")},
+	}))
+	appendEvent(session.EventAssistantMessage, session.NewAssistantMessageAtWithUsage(1, 1, "parent answer", nil, "stop", "", llm.TokenUsage{}))
+	appendEvent(session.EventStepEnd, session.NewStepEndAt(1, 1, "completed", ""))
+	appendEvent(session.EventTurnEnd, session.NewTurnEndAt(1, "completed", ""))
+
+	model := &scriptedLLM{steps: [][]llm.StreamEvent{{
+		{Kind: llm.StreamTextDelta, Text: "child answer"},
+		{Kind: llm.StreamFinish, FinishReason: "stop"},
+	}}}
+	prov := NewForkProvider(Deps{
+		LLM: model, Tools: tools.New(), Prompt: prompt.New("child"), Model: "m",
+		ParentLogFor: func(_ context.Context, id string) *session.Log {
+			if id == "live-parent" {
+				return parentLog
+			}
+			return nil
+		},
+	})
+	run, err := prov.Start(context.Background(), StartRequest{
+		Prompt: "continue from parent", ParentSessionID: "live-parent", InheritParentContext: true,
+	})
+	if err != nil {
+		t.Fatalf("start fork: %v", err)
+	}
+	if _, err := run.Result(context.Background()); err != nil {
+		t.Fatalf("fork result: %v", err)
+	}
+	child, ok := prov.ChildLog(run.ID)
+	if !ok {
+		t.Fatalf("missing child log %q", run.ID)
+	}
+	events := child.Events()
+	turnEnds := 0
+	for _, event := range events {
+		if event.Type == session.EventTurnEnd {
+			turnEnds++
+		}
+	}
+	if turnEnds != 2 {
+		t.Fatalf("turn ends = %d, want seeded parent turn plus child turn", turnEnds)
+	}
+	history := child.DeriveHistory()
+	if len(history) != 4 || history[0].Text() != "parent context" || history[1].Text() != "parent answer" || history[2].Text() != "continue from parent" || history[3].Text() != "child answer" {
+		t.Fatalf("fork history = %+v, want completed parent prefix followed by child turn", history)
+	}
+	if err := prov.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+}
+
+func TestSpawnUsesParentSessionToolAndPromptResolvers(t *testing.T) {
+	model := &scriptedLLM{steps: [][]llm.StreamEvent{{{Kind: llm.StreamFinish, FinishReason: "stop"}}}}
+	global := tools.New()
+	if err := global.Register(filteredTool{name: "global-only"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := global.Register(filteredTool{name: "session-tool"}); err != nil {
+		t.Fatal(err)
+	}
+	scoped := global.Clone()
+	scoped.SetPolicy(tools.Policy{Enabled: []string{"session-tool"}})
+	prov := NewSpawnProvider(Deps{
+		LLM: model, Tools: global, Prompt: prompt.New("global prompt"), Model: "m",
+		ToolsFor: func(_ context.Context, parent string) *tools.Registry {
+			if parent == "parent-session" {
+				return scoped
+			}
+			return nil
+		},
+		PromptFor: func(_ context.Context, parent string) *prompt.Builder {
+			if parent == "parent-session" {
+				return prompt.New("session prompt")
+			}
+			return nil
+		},
+	})
+	run, err := prov.Start(context.Background(), StartRequest{Prompt: "scoped child", ParentSessionID: "parent-session"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run.Result(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(model.calls) != 1 || len(model.calls[0].Tools) != 1 || model.calls[0].Tools[0].Name != "session-tool" {
+		t.Fatalf("child tool surface = %+v", model.calls)
+	}
+	var system string
+	for _, message := range model.calls[0].Messages {
+		if message.Role == llm.RoleSystem {
+			system = message.Text()
+		}
+	}
+	if !strings.Contains(system, "session prompt") || strings.Contains(system, "global prompt") {
+		t.Fatalf("child prompt = %q", system)
+	}
+	if err := prov.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSpawnAppliesPersonaAndToolFilterToChildScope(t *testing.T) {
+	model := &scriptedLLM{steps: [][]llm.StreamEvent{{{Kind: llm.StreamFinish, FinishReason: "stop"}}}}
+	registry := tools.New()
+	if err := registry.Register(filteredTool{name: "visible"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Register(filteredTool{name: "hidden"}); err != nil {
+		t.Fatal(err)
+	}
+	prov := NewSpawnProvider(Deps{LLM: model, Tools: registry, Prompt: prompt.New("base persona"), Model: "m"})
+	run, err := prov.Start(context.Background(), StartRequest{Prompt: "do", Persona: "child persona", ToolFilter: []string{"visible"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run.Result(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(model.calls) != 1 {
+		t.Fatalf("model calls = %d", len(model.calls))
+	}
+	if len(model.calls[0].Tools) != 1 || model.calls[0].Tools[0].Name != "visible" {
+		t.Fatalf("child tools = %+v", model.calls[0].Tools)
+	}
+	var system string
+	for _, message := range model.calls[0].Messages {
+		if message.Role == llm.RoleSystem {
+			system = message.Text()
+		}
+	}
+	if !strings.Contains(system, "child persona") || strings.Contains(system, "base persona") {
+		t.Fatalf("child persona = %q", system)
 	}
 }
 
@@ -390,6 +692,264 @@ func TestSpawnPersistsChildLog(t *testing.T) {
 	}
 	if err := resumed.Close(); err != nil {
 		t.Fatalf("close resumed provider: %v", err)
+	}
+
+	// A new provider instance must continue the durable id sequence instead of
+	// attempting to recreate spawn-1 after a process restart.
+	coldStartModel := &scriptedLLM{steps: [][]llm.StreamEvent{{
+		{Kind: llm.StreamTextDelta, Text: "cold-start child"}, {Kind: llm.StreamFinish, FinishReason: "stop"},
+	}}}
+	coldStart := NewSpawnProvider(Deps{LLM: coldStartModel, Tools: tools.New(), Prompt: prompt.New("x"), Model: "m", Store: st})
+	newRun, err := coldStart.Start(context.Background(), StartRequest{Prompt: "new after restart", ParentSessionID: "p"})
+	if err != nil {
+		t.Fatalf("cold-start child: %v", err)
+	}
+	if newRun.ID == run.ID {
+		t.Fatalf("cold-start child reused durable id %q", newRun.ID)
+	}
+	if _, err := newRun.Result(context.Background()); err != nil {
+		t.Fatalf("cold-start child result: %v", err)
+	}
+	if err := coldStart.Close(); err != nil {
+		t.Fatalf("close cold-start provider: %v", err)
+	}
+}
+
+func TestForkPersistsSeedAndLineageAtomically(t *testing.T) {
+	st, err := store.OpenSQLite(t.TempDir() + "/agent.db")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+	parent := session.New()
+	appendParent := func(typ string, data any) {
+		t.Helper()
+		if _, err := parent.Append(typ, data); err != nil {
+			t.Fatalf("append parent %s: %v", typ, err)
+		}
+	}
+	appendParent(session.EventTurnStart, session.NewTurnStartAt(1))
+	appendParent(session.EventStepStart, session.NewStepStartAt(1, 1))
+	appendParent(session.EventUserMessage, session.NewUserMessageAt(1, 1, 0, llm.Message{
+		Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("seed me")},
+	}))
+	appendParent(session.EventAssistantMessage, session.NewAssistantMessageAtWithUsage(1, 1, "seed answer", nil, "stop", "", llm.TokenUsage{}))
+	appendParent(session.EventStepEnd, session.NewStepEndAt(1, 1, "completed", ""))
+	appendParent(session.EventTurnEnd, session.NewTurnEndAt(1, "completed", ""))
+
+	model := &scriptedLLM{steps: [][]llm.StreamEvent{{
+		{Kind: llm.StreamTextDelta, Text: "fork answer"},
+		{Kind: llm.StreamFinish, FinishReason: "stop"},
+	}}}
+	prov := NewForkProvider(Deps{
+		LLM: model, Tools: tools.New(), Prompt: prompt.New("child"), Model: "m", Store: st,
+		ParentLogFor: func(_ context.Context, id string) *session.Log {
+			if id == "parent" {
+				return parent
+			}
+			return nil
+		},
+	})
+	run, err := prov.Start(context.Background(), StartRequest{
+		Prompt: "fork from seed", ParentSessionID: "parent", InheritParentContext: true,
+	})
+	if err != nil {
+		t.Fatalf("start fork: %v", err)
+	}
+	if _, err := run.Result(context.Background()); err != nil {
+		t.Fatalf("fork result: %v", err)
+	}
+	header, err := st.GetSessionHeader(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("get child header: %v", err)
+	}
+	if header.Parent != "parent" || header.Origin != "subagent" || header.SeedLength != len(parent.Events()) || header.DelegationDepth != 1 {
+		t.Fatalf("child header = %+v, want parent/seed lineage", header)
+	}
+	persisted, err := st.LoadSessionRaw(context.Background(), run.ID)
+	if err != nil {
+		t.Fatalf("load child raw: %v", err)
+	}
+	if len(persisted) <= len(parent.Events()) || persisted[len(parent.Events())-1].Type != session.EventTurnEnd {
+		t.Fatalf("persisted fork prefix = %d events, boundary=%q; want durable completed seed", len(persisted), persisted[len(parent.Events())-1].Type)
+	}
+	for i, event := range parent.Events() {
+		if persisted[i].Seq != event.Seq || persisted[i].Type != event.Type || string(persisted[i].Data) != string(event.Data) {
+			t.Fatalf("seed event %d = %+v, want parent event %+v", i, persisted[i], event)
+		}
+	}
+	if err := prov.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+}
+
+func TestForkSeedsColdDurableParentWhenRuntimeIsNotLive(t *testing.T) {
+	st, err := store.OpenSQLite(t.TempDir() + "/agent.db")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	parent := session.New()
+	for _, event := range []struct {
+		typ  string
+		data any
+	}{
+		{session.EventTurnStart, session.NewTurnStartAt(1)},
+		{session.EventStepStart, session.NewStepStartAt(1, 1)},
+		{session.EventUserMessage, session.NewUserMessageAt(1, 1, 0, llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("cold context")}})},
+		{session.EventAssistantMessage, session.NewAssistantMessageAtWithUsage(1, 1, "cold answer", nil, "stop", "", llm.TokenUsage{})},
+		{session.EventStepEnd, session.NewStepEndAt(1, 1, "completed", "")},
+		{session.EventTurnEnd, session.NewTurnEndAt(1, "completed", "")},
+	} {
+		if _, err := parent.Append(event.typ, event.data); err != nil {
+			t.Fatalf("append parent %s: %v", event.typ, err)
+		}
+	}
+	parentEvents := parent.Events()
+	if err := st.CreateSession(context.Background(), "cold-parent", time.Now().UTC()); err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	if err := st.AppendEvents(context.Background(), "cold-parent", parentEvents); err != nil {
+		t.Fatalf("persist parent: %v", err)
+	}
+
+	model := &scriptedLLM{steps: [][]llm.StreamEvent{{
+		{Kind: llm.StreamTextDelta, Text: "cold child"}, {Kind: llm.StreamFinish, FinishReason: "stop"},
+	}}}
+	prov := NewForkProvider(Deps{LLM: model, Tools: tools.New(), Prompt: prompt.New("child"), Model: "m", Store: st})
+	run, err := prov.Start(context.Background(), StartRequest{ParentSessionID: "cold-parent", Prompt: "use cold seed", InheritParentContext: true})
+	if err != nil {
+		t.Fatalf("start cold fork: %v", err)
+	}
+	if _, err := run.Result(context.Background()); err != nil {
+		t.Fatalf("fork result: %v", err)
+	}
+	child, ok := prov.ChildLog(run.ID)
+	if !ok {
+		t.Fatalf("missing child log %q", run.ID)
+	}
+	history := child.DeriveHistory()
+	if len(history) != 4 || history[0].Text() != "cold context" || history[1].Text() != "cold answer" || history[2].Text() != "use cold seed" || history[3].Text() != "cold child" {
+		t.Fatalf("cold fork history = %+v, want durable parent prefix followed by child turn", history)
+	}
+	if err := prov.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+}
+
+func TestSpawnDoesNotPublishChildBeforeInitializationCommits(t *testing.T) {
+	base, err := store.OpenSQLite(t.TempDir() + "/agent.db")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer base.Close()
+
+	var bound string
+	prov := NewSpawnProvider(Deps{
+		LLM:   &scriptedLLM{steps: [][]llm.StreamEvent{{{Kind: llm.StreamFinish, FinishReason: "stop"}}}},
+		Tools: tools.New(), Prompt: prompt.New("child"), Model: "m",
+		Store:          failingSessionCreateStore{Store: base, err: errors.New("injected create failure")},
+		BindSessionLog: func(id string, _ *session.Log) { bound = id },
+	})
+	_, err = prov.Start(context.Background(), StartRequest{Prompt: "must not publish", ParentSessionID: "parent"})
+	if err == nil || !strings.Contains(err.Error(), "injected create failure") {
+		t.Fatalf("start error = %v, want injected persistence failure", err)
+	}
+	if bound != "" {
+		t.Fatalf("child log published as %q before initialization committed", bound)
+	}
+	if children, listErr := prov.ListChildren(context.Background(), "parent"); listErr != nil || len(children) != 0 {
+		t.Fatalf("children after failed initialization = %+v, err=%v; want none", children, listErr)
+	}
+	if err := prov.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+}
+
+// TestSpawnAtomicPublicationFailureLeavesNoDurableChild exercises the
+// production SQLite path: header, fork seed, and the subagent/start receipt are
+// one transaction. An injected transaction failure must therefore leave neither
+// a live provider child nor a cold durable child that looks publishable.
+func TestSpawnAtomicPublicationFailureLeavesNoDurableChild(t *testing.T) {
+	base, err := store.OpenSQLite(t.TempDir() + "/agent.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer base.Close()
+
+	var bound string
+	prov := NewSpawnProvider(Deps{
+		LLM:   &scriptedLLM{steps: [][]llm.StreamEvent{{{Kind: llm.StreamFinish, FinishReason: "stop"}}}},
+		Tools: tools.New(), Prompt: prompt.New("child"), Model: "m",
+		Store:          failingSessionCreateOptionsStore{Store: base, SessionCreateStore: base, err: errors.New("injected atomic publication failure")},
+		BindSessionLog: func(id string, _ *session.Log) { bound = id },
+	})
+	_, err = prov.Start(context.Background(), StartRequest{Prompt: "must not publish", ParentSessionID: "parent"})
+	if err == nil || !strings.Contains(err.Error(), "injected atomic publication failure") {
+		t.Fatalf("start error = %v, want injected atomic publication failure", err)
+	}
+	if bound != "" {
+		t.Fatalf("child log published as %q before atomic publication committed", bound)
+	}
+	if children, listErr := prov.ListChildren(context.Background(), "parent"); listErr != nil || len(children) != 0 {
+		t.Fatalf("children after failed atomic publication = %+v, err=%v; want none", children, listErr)
+	}
+	if _, loadErr := base.LoadSession(context.Background(), "spawn-1"); !errors.Is(loadErr, store.ErrNotFound) {
+		t.Fatalf("durable child after failed atomic publication = %v, want ErrNotFound", loadErr)
+	}
+	if metas, listErr := base.ListSessions(context.Background()); listErr != nil {
+		t.Fatalf("list sessions after failed atomic publication: %v", listErr)
+	} else {
+		for _, meta := range metas {
+			if meta.ID == "spawn-1" {
+				t.Fatalf("durable child metadata survived failed atomic publication: %+v", meta)
+			}
+		}
+	}
+	if err := prov.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+}
+
+func TestSpawnStartCancellationStopsDurableInitialization(t *testing.T) {
+	base, err := store.OpenSQLite(t.TempDir() + "/agent.db")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer base.Close()
+	creating := &blockingSessionCreateStore{Store: base, started: make(chan struct{})}
+	var bound string
+	prov := NewSpawnProvider(Deps{
+		LLM:   &scriptedLLM{steps: [][]llm.StreamEvent{{{Kind: llm.StreamFinish, FinishReason: "stop"}}}},
+		Tools: tools.New(), Prompt: prompt.New("child"), Model: "m", Store: creating,
+		BindSessionLog: func(id string, _ *session.Log) { bound = id },
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	started := make(chan error, 1)
+	go func() {
+		_, startErr := prov.Start(ctx, StartRequest{Prompt: "cancel during create", ParentSessionID: "parent"})
+		started <- startErr
+	}()
+	select {
+	case <-creating.started:
+	case <-time.After(time.Second):
+		t.Fatal("durable child creation did not start")
+	}
+	cancel()
+	select {
+	case startErr := <-started:
+		if !errors.Is(startErr, context.Canceled) {
+			t.Fatalf("start error = %v, want context.Canceled", startErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Start did not honor cancellation during durable creation")
+	}
+	if bound != "" {
+		t.Fatalf("child log published as %q after cancelled initialization", bound)
+	}
+	if err := prov.Close(); err != nil {
+		t.Fatalf("close: %v", err)
 	}
 }
 

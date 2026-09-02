@@ -13,6 +13,7 @@ import (
 	agenttools "github.com/jabing/shutu-agent/internal/tools"
 	"strings"
 
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 	"github.com/jabing/shutu-agent/internal/session"
 )
 
@@ -47,6 +48,14 @@ func (t *EvalTools) emit(typ string, data any) {
 	if t.onEvent != nil {
 		t.onEvent(typ, data)
 	}
+}
+
+func (t *EvalTools) emitContext(ctx context.Context, typ string, data any) error {
+	if runtime, ok := runtimectx.Get(ctx); ok && runtime.Emit != nil {
+		return runtime.Emit(typ, data)
+	}
+	t.emit(typ, data)
+	return nil
 }
 
 // EvalRunTool judges a deliverable output against acceptance criteria and
@@ -105,7 +114,9 @@ func (t EvalRunTool) Execute(ctx context.Context, args any) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("eval_run: %w", err)
 	}
-	t.t.emit(session.EventEvalRun, session.NewEvalRun(rec.ID, rec.TaskID, string(rec.Verdict), rec.Reason, rec.EvaluatorKind, len(rec.Criteria)))
+	if err := t.t.emitContext(ctx, session.EventEvalRun, session.NewEvalRun(rec.ID, rec.TaskID, string(rec.Verdict), rec.Reason, rec.EvaluatorKind, len(rec.Criteria))); err != nil {
+		return "", fmt.Errorf("eval_run: persist event: %w", err)
+	}
 	return formatRecord(rec), nil
 }
 

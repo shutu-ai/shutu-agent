@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"runtime"
 	"strings"
 	"sync"
@@ -92,6 +94,67 @@ func TestJobStartExecutesRealCommand(t *testing.T) {
 	}
 }
 
+// TestJobCancellationClassification pins the cancellation boundary: bounded
+// waits return on registry cancellation, while a started background job is
+// intentionally owned beyond the starting tool call.
+func TestJobCancellationClassification(t *testing.T) {
+	l := NewLocal(LocalOpts{})
+	defer l.Close()
+	jt := NewJobTools(l, func() string { return "sess-classification" }, nil)
+	for _, tool := range []any{jt.Wait(), jt.DshOutput()} {
+		classified, ok := tool.(interface{ CancellationAware() bool })
+		if !ok || !classified.CancellationAware() {
+			t.Fatalf("%T must classify its bounded wait as cancellable", tool)
+		}
+	}
+	if _, ok := any(jt.Start()).(interface{ CancellationAware() bool }); ok {
+		t.Fatal("job_start must not claim registry-call cancellation for a background job")
+	}
+}
+
+func TestJobStartBoundsNoisyOutput(t *testing.T) {
+	command := fmt.Sprintf("yes x | head -c %d", defaultJobOutputLimit*4)
+	if runtime.GOOS == "windows" {
+		command = fmt.Sprintf("powershell -NoProfile -NonInteractive -Command ('x'*%d)", defaultJobOutputLimit*4)
+	}
+	outcome, err := runCommandLineBounded(command, t.TempDir())(context.Background())
+	if err != nil {
+		t.Fatalf("run command: %v", err)
+	}
+	if outcome.Status != StatusCompleted || !strings.Contains(outcome.Output, "[output truncated]") {
+		t.Fatalf("outcome = %+v, want completed bounded output", outcome)
+	}
+	if len(outcome.Output) > defaultJobOutputLimit+64 {
+		t.Fatalf("output length = %d, want bounded near %d", len(outcome.Output), defaultJobOutputLimit)
+	}
+}
+
+func TestJobStartUsesBoundSessionCWD(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("portable cwd assertion uses pwd")
+	}
+	dir := t.TempDir()
+	l := NewLocal(LocalOpts{})
+	defer l.Close()
+	jt := NewJobToolsWithCWD(l, func() string { return "sess-cwd" }, func(context.Context) string { return dir }, nil)
+	if _, err := jt.Start().Execute(context.Background(), json.RawMessage(`{"command":"pwd"}`)); err != nil {
+		t.Fatalf("job_start: %v", err)
+	}
+	if _, err := jt.Wait().Execute(context.Background(), json.RawMessage(`{"id":"bash-1","timeout_seconds":5}`)); err != nil {
+		t.Fatalf("job_wait: %v", err)
+	}
+	out, err := jt.Read().Execute(context.Background(), json.RawMessage(`{"id":"bash-1"}`))
+	if err != nil {
+		t.Fatalf("job_read: %v", err)
+	}
+	if !strings.Contains(out, dir) {
+		t.Fatalf("job output = %q, want workspace %q", out, dir)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("workspace disappeared: %v", err)
+	}
+}
+
 // TestDshJobProjectionUsesCanonicalArguments verifies the dsh-facing job
 // surface reads the same registry state with job_id and returns the status
 // marker shape consumed by the shell tools.
@@ -176,8 +239,8 @@ func TestDshJobOutputReturnsLiveDeltas(t *testing.T) {
 }
 
 // TestJobStartDefaults verifies job_start's argument defaults: kind "bash",
-// label = command, and owner_session = the current session via the injected
-// owner callback.
+// a bounded non-sensitive label, and owner_session = the current session via
+// the injected owner callback.
 func TestJobStartDefaults(t *testing.T) {
 	l := NewLocal(LocalOpts{})
 	defer l.Close()
@@ -190,8 +253,24 @@ func TestJobStartDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if snap.Kind != "bash" || snap.Label != "echo x" || snap.OwnerSession != "sess-9" {
-		t.Fatalf("defaulted snapshot = %+v, want kind=bash label=echo x owner=sess-9", snap)
+	if snap.Kind != "bash" || snap.Label != "background command" || snap.OwnerSession != "sess-9" {
+		t.Fatalf("defaulted snapshot = %+v, want kind=bash label=background command owner=sess-9", snap)
+	}
+}
+
+func TestJobStartRedactsDurableLabel(t *testing.T) {
+	l := NewLocal(LocalOpts{})
+	defer l.Close()
+	jt := NewJobTools(l, func() string { return "sess-redact" }, nil)
+	if _, err := jt.Start().Execute(context.Background(), json.RawMessage(`{"command":"echo safe","label":"deploy token=super-secret"}`)); err != nil {
+		t.Fatalf("job_start: %v", err)
+	}
+	snap, err := l.Get(context.Background(), "bash-1", "sess-redact")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if strings.Contains(snap.Label, "super-secret") || !strings.Contains(snap.Label, "[REDACTED]") {
+		t.Fatalf("durable job label = %q, want redacted secret", snap.Label)
 	}
 }
 

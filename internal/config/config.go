@@ -6,6 +6,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"runtime"
 	"strings"
@@ -34,6 +35,8 @@ const (
 	// 10 when jobs.max_concurrent_jobs_per_owner is absent or non-positive
 	// (mirrors dsh jobs-local and internal/jobs' own default).
 	DefaultMaxConcurrentJobsPerOwner = 10
+	DefaultJobCompletionDelivery     = "wakeup"
+	DefaultJobMaxConsecutiveWakes    = 3
 
 	// M5b subagent defaults (dispatch-m5b-2 §3): the delegation depth cap is 8
 	// when subagent.max_depth is absent or non-positive, and the default
@@ -71,14 +74,15 @@ const (
 	// parsed and defaulted here regardless).
 	DefaultScheduleTickInterval = time.Minute
 
-	// M6e-2 code-sandbox defaults (dispatch-m6e-2 §2): the sandbox execution
-	// deadline is 30s when code.timeout is absent or non-positive (mirrors the
-	// local provider's own default), the per-stream output cap is 65536 bytes
-	// when code.max_output is absent or non-positive (64KiB, the same bound as
-	// the provider default and tools.output_limit), and sandbox_dir stays empty
-	// meaning the provider default (<project>/.sandbox).
-	DefaultCodeTimeout   = 30 * time.Second
-	DefaultCodeMaxOutput = 64 * 1024
+	// M6e-2 Code Runtime defaults follow the reference worker: compute budget
+	// 60s, wall ceiling 600s, 64 MiB combined outer-output ledger, and a 512 MiB
+	// old-generation heap cap. The legacy shell sandbox keeps its independent
+	// 30s/64KiB defaults.
+	DefaultCodeComputeMS        = 60_000
+	DefaultCodeMaxWallMS        = 600_000
+	DefaultCodeTimeout          = 30 * time.Second // legacy shell compatibility
+	DefaultCodeMaxOutput        = 64 * 1024 * 1024
+	DefaultCodeMaxOldGeneration = 512
 
 	// M7-2 web defaults (dispatch-m7-2 §5 / ADR 2026-08-20-m7-web-search.md):
 	// the search result/query caps, the search and fetch timeouts, the fetch
@@ -107,26 +111,31 @@ const (
 	// https://api.anthropic.com/v1 and model claude-sonnet-4-5 (both
 	// configurable, consumed by M8-2b — these must stay in sync with the
 	// internal/llm/anthropic package defaults).
-	DefaultLLMProvider        = "deepseek-official"
-	DefaultOpenAIBaseURL      = "https://api.openai.com/v1"
-	DefaultOpenAIModel        = "gpt-4o-mini"
-	DefaultAnthropicBaseURL   = "https://api.anthropic.com/v1"
-	DefaultAnthropicModel     = "claude-sonnet-4-5"
-	DefaultLLMMaxRetries      = 2
-	DefaultLLMRetryBackoff    = 500 * time.Millisecond
-	DefaultLLMRetryMaxBackoff = 8 * time.Second
+	DefaultLLMProvider         = "deepseek-official"
+	DefaultOpenAIBaseURL       = "https://api.openai.com/v1"
+	DefaultOpenAIModel         = "gpt-4o-mini"
+	DefaultAnthropicBaseURL    = "https://api.anthropic.com/v1"
+	DefaultAnthropicModel      = "claude-sonnet-4-5"
+	DefaultLLMMaxRetries       = 5
+	DefaultLLMRetryBackoff     = 500 * time.Millisecond
+	DefaultLLMRetryMaxBackoff  = 10 * time.Second
+	DefaultLLMRetryJitterRatio = 0.1
 
 	// M8-3 multimodal defaults (dispatch-m8-3 §3 / ADR
 	// 2026-08-20-m8-message-model.md 决策 M8-3): multimodal is ON by default
 	// (用户 2026-08-20 拍板「图片附件默认打开」,覆盖原 D10 默认关——显式 "enabled: false"
 	// 仍可关); model_input_modalities defaults to "text" (the exact-model
 	// capability declaration); a single image's raw-byte cap defaults to
-	// 10 MiB (over-limit fails closed in internal/attachment); the per-request
+	// 3.5 MiB (over-limit fails closed in internal/attachment); the per-request
 	// image byte budget defaults to 20 MiB (M8-3b, over-budget images are
 	// offloaded — oldest replaced by the placeholder — in the providers).
 	DefaultModelInputModalities           = "text"
-	DefaultMultimodalMaxImageBytes        = 10 * 1024 * 1024 // 10 MiB
-	DefaultMultimodalMaxRequestImageBytes = 20 * 1024 * 1024 // 20 MiB
+	DefaultMultimodalMaxImageBytes        = 7 * 1024 * 1024 / 2 // 3.5 MiB
+	DefaultMultimodalMaxRequestImageBytes = 20 * 1024 * 1024    // 20 MiB
+	DefaultMultimodalMaxImagesPerMessage  = 20
+	DefaultMultimodalMaxMessageImageBytes = 100 * 1024 * 1024
+	DefaultMultimodalMaxImagePixels       = 40_000_000
+	DefaultMultimodalMaxImageDimension    = 2000
 
 	// M9 terminal defaults (dispatch-m9-2 §2 / ADR 2026-08-20-m9-terminal.md):
 	// the persistent-shell terminal is off by default (D10); the scrollback
@@ -205,7 +214,10 @@ func Enabled(b *bool) bool { return b == nil || *b }
 // config.yaml; Load fills defaults for empty values, so callers never branch
 // on field presence.
 type Config struct {
-	Model      string `yaml:"model"`       // chat model; default deepseek-v4-flash
+	Model string `yaml:"model"` // chat model; default deepseek-v4-flash
+	// MaxTokens is the optional per-request output budget. Zero delegates to
+	// the selected provider's default, matching the harness AgentOptions.
+	MaxTokens  int    `yaml:"max_tokens"`
 	BaseURL    string `yaml:"base_url"`    // optional OpenAI-compatible base URL; empty means the provider default
 	DataDir    string `yaml:"data_dir"`    // directory for pa.db (and runtime data); default "data"
 	PromptsDir string `yaml:"prompts_dir"` // directory of prompt section files; default "config/prompts"
@@ -237,12 +249,29 @@ type Config struct {
 	Hooks           HooksConfig        `yaml:"hooks"`         // metadata-only event hooks (P2)
 	WebServer       WebServerConfig    `yaml:"web_server"`    // unified web portal (M10a)
 	Workspace       WorkspaceConfig    `yaml:"workspace"`     // workspace/session cwd policy
+	Security        SecurityConfig     `yaml:"security"`      // process security boundaries (A6.4)
 
 	// Mode selects the agent capability preset (D-MODE-1): minimal | standard
 	// | code; default standard. minimal is preset-first (D-MODE-6): 能力开关
 	// 与白名单被覆盖, 用户显式开启的其余能力在 minimal 下被忽略.
 	Mode string `yaml:"mode"`
 }
+
+// SecurityConfig owns process-boundary policies that cannot be safely applied
+// to individual tools. CrashDumpPolicy defaults to disabled. The explicit
+// external profile records that the operating system owns crash dumps; it is
+// not eligible for a hostile-secret equivalence claim.
+type SecurityConfig struct {
+	// CrashDumpPolicy is "disabled" (default) or "external". Disabled asks the
+	// composition root to prevent OS core images for this process. External is
+	// an explicit, non-equivalent deployment profile: the OS owns dump policy.
+	CrashDumpPolicy string `yaml:"crash_dump_policy"`
+}
+
+const (
+	CrashDumpPolicyDisabled = "disabled"
+	CrashDumpPolicyExternal = "external"
+)
 
 // WorkspaceConfig controls the process-side directory used by sessions that
 // are not attached to a directory-backed workspace. An empty value resolves
@@ -273,6 +302,9 @@ type LLMConfig struct {
 	// (dispatch-m8-3 §3): "text" | "text,image". Empty defaults to "text".
 	// /llm-status displays it as the modalities line.
 	ModelInputModalities string `yaml:"model_input_modalities"`
+	// ThinkingBudgets maps reasoning effort ids to provider thinking budgets.
+	// Missing entries use the adapter/reference default.
+	ThinkingBudgets map[string]int `yaml:"thinking_budgets"`
 	// Multimodal is the image-attachment policy (M8-3). Multimodal is off by
 	// default (D10): when disabled the composition root creates no attachment
 	// store, /attach is unavailable, and image blocks are never serialized.
@@ -282,9 +314,27 @@ type LLMConfig struct {
 // RetryConfig is the shared request-level retry policy. Retries are attempted
 // only before a stream has yielded data; partial streams are never replayed.
 type RetryConfig struct {
+	Mode           string   `yaml:"mode"` // normal (bounded) or always (until cancellation)
 	MaxRetries     int      `yaml:"max_retries"`
 	InitialBackoff Duration `yaml:"initial_backoff"`
 	MaxBackoff     Duration `yaml:"max_backoff"`
+	JitterRatio    float64  `yaml:"jitter_ratio"`
+	RetryableCodes []string `yaml:"retryable_codes"`
+	// Providers is the route-owned policy overlay. A provider captures its
+	// effective policy when the registry is assembled; the global fields above
+	// remain the compatibility fallback for routes without an overlay.
+	Providers map[string]RetryProviderConfig `yaml:"providers"`
+}
+
+// RetryProviderConfig uses pointers so an explicit zero (for example
+// max_retries: 0) remains distinguishable from an omitted override.
+type RetryProviderConfig struct {
+	Mode           *string   `yaml:"mode"`
+	MaxRetries     *int      `yaml:"max_retries"`
+	InitialBackoff *Duration `yaml:"initial_backoff"`
+	MaxBackoff     *Duration `yaml:"max_backoff"`
+	JitterRatio    *float64  `yaml:"jitter_ratio"`
+	RetryableCodes *[]string `yaml:"retryable_codes"`
 }
 
 // TerminalConfig is the pwsh-tool + M9 /term REPL policy (ADR
@@ -383,7 +433,7 @@ type MultimodalConfig struct {
 	// "enabled: false". The minimal preset forces false (D-MODE-2).
 	Enabled *bool `yaml:"enabled"`
 	// MaxImageBytes is the single-image raw-byte cap applied by SaveImage;
-	// <= 0 means the default 10 MiB (over-limit fails closed).
+	// <= 0 means the default 3.5 MiB (over-limit fails closed).
 	MaxImageBytes int `yaml:"max_image_bytes"`
 	// MaxRequestImageBytes is the per-request image byte budget
 	// (dispatch-m8-3b §6): images whose cumulative bytes (in message-history
@@ -391,6 +441,13 @@ type MultimodalConfig struct {
 	// replaced by the placeholder text. <= 0 means the default 20 MiB (the
 	// provider New applies the same fallback, 校验非负).
 	MaxRequestImageBytes int `yaml:"max_request_image_bytes"`
+	// MaxImagesPerMessage bounds one ordered prompt batch.
+	MaxImagesPerMessage int `yaml:"max_images_per_message"`
+	// MaxMessageImageBytes bounds the aggregate encoded bytes in one prompt.
+	MaxMessageImageBytes int `yaml:"max_message_image_bytes"`
+	// MaxImagePixels and MaxImageDimension reject decompression-bomb images.
+	MaxImagePixels    int `yaml:"max_image_pixels"`
+	MaxImageDimension int `yaml:"max_image_dimension"`
 }
 
 // OpenAIProviderConfig is the OpenAI-compatible provider parameters
@@ -423,6 +480,11 @@ type JobsConfig struct {
 	// MaxConcurrentJobsPerOwner caps the running+stopping jobs in one owner
 	// bucket (and the shared unowned bucket); <= 0 means the default 10.
 	MaxConcurrentJobsPerOwner int `yaml:"max_concurrent_jobs_per_owner"`
+	// CompletionDelivery controls how an unreported completion reaches an idle
+	// owner: wakeup opens a turn, quiet leaves it in the inbox for a later turn.
+	CompletionDelivery string `yaml:"completion_delivery"`
+	// MaxConsecutiveWakes bounds self-exciting completion chains per owner.
+	MaxConsecutiveWakes int `yaml:"max_consecutive_wakes"`
 }
 
 // SubagentConfig is the subagent policy (dispatch-m5b-2 §3 / ADR
@@ -603,6 +665,8 @@ type InteractConfig struct {
 	// an enabled interact still registers the interact_* tools but intercepts
 	// nothing.
 	SensitiveTools []string `yaml:"sensitive_tools"`
+	// Policy is the service-enforced default approval policy: ask or never.
+	Policy string `yaml:"policy"`
 }
 
 // CodeConfig is the code-sandbox policy (dispatch-m6e-2 §2 / ADR
@@ -620,12 +684,23 @@ type CodeConfig struct {
 	// omits the per-call timeout (and the outer per-tool deadline bound for
 	// run_code, mirroring tools.run_command.timeout); <= 0 means the default 30s.
 	Timeout Duration `yaml:"timeout"`
-	// MaxOutput is the per-stream output cap of a sandbox run (the model cannot
-	// override it); <= 0 means the default 65536 bytes.
+	// ComputeMS and MaxWallMS are the TypeScript worker's independent busy-time
+	// and wall-clock budgets. Zero selects the reference defaults.
+	ComputeMS int `yaml:"compute_ms"`
+	MaxWallMS int `yaml:"max_wall_ms"`
+	// MaxOutput is the combined serialized outer-output cap of Code Runtime (the
+	// model cannot override it); <= 0 means the default 64 MiB. Legacy shell
+	// callers retain their own per-stream default.
 	MaxOutput int `yaml:"max_output"`
+	// MaxOldGenerationSizeMB bounds the Node subprocess old-generation heap;
+	// <= 0 means the reference default 512 MiB.
+	MaxOldGenerationSizeMB int `yaml:"max_old_generation_size_mb"`
 	// SandboxDir is the sandbox working directory used when the model omits
 	// cwd. Empty means the provider default (<project>/.sandbox).
 	SandboxDir string `yaml:"sandbox_dir"`
+	// MaxParallelSubCalls bounds consecutive concurrency-safe host calls made
+	// by one TypeScript Code Mode program. Values below one use the default 10.
+	MaxParallelSubCalls int `yaml:"max_parallel_sub_calls"`
 	// AllowNetwork is a declarative network toggle: false (the default) means
 	// the sandbox injects no network credentials — the v1 local provider always
 	// scrubs credential-shaped environment entries regardless of this flag. It
@@ -651,19 +726,44 @@ type McpConfig struct {
 	// for ACP sessions unless this is true, even when the REPL MCP capability
 	// is enabled.
 	ACPEnabled *bool `yaml:"acp_enabled"`
-	// Servers are the configured MCP servers (stdio, newline-delimited
-	// JSON-RPC). Each server's tools are bridged at startup with the
-	// mcp.<server>.<tool> prefix.
+	// Servers are the configured MCP servers. Transport defaults to stdio for
+	// legacy configurations; streamable-http uses URL/Headers. Each server's
+	// tools are bridged at startup with the mcp.<server>.<tool> prefix.
 	Servers []McpServer `yaml:"servers"`
+	// ReconnectEnabled controls the connection supervisor for long-lived
+	// bridged servers. It is enabled by default; setting it false surfaces
+	// transport failures without replaying a possibly committed tools/call.
+	ReconnectEnabled *bool `yaml:"reconnect_enabled"`
+	// ReconnectInitialDelayMS and ReconnectMaxDelayMS bound exponential
+	// reconnect backoff. ReconnectMaxAttempts bounds attempts after a loss;
+	// non-positive values use safe defaults during config normalization.
+	ReconnectInitialDelayMS int `yaml:"reconnect_initial_delay_ms"`
+	ReconnectMaxDelayMS     int `yaml:"reconnect_max_delay_ms"`
+	ReconnectMaxAttempts    int `yaml:"reconnect_max_attempts"`
 }
 
 // McpServer is one configured MCP server: a unique Name (used as the
 // mcp_list/mcp_call selector and the mcp.<server>.<tool> bridge prefix) and a
-// stdio command line (Cmd plus Args) the Factory spawns.
+// stdio command line (Cmd plus Args) the Factory spawns, or a Streamable HTTP
+// endpoint (URL plus Headers).
 type McpServer struct {
-	Name string   `yaml:"name"`
-	Cmd  string   `yaml:"cmd"`
-	Args []string `yaml:"args"`
+	Name      string            `yaml:"name"`
+	Transport string            `yaml:"transport"`
+	Cmd       string            `yaml:"cmd"`
+	Args      []string          `yaml:"args"`
+	URL       string            `yaml:"url"`
+	Headers   map[string]string `yaml:"headers"`
+	// Env and Cwd are passed only to stdio children. The ambient environment is
+	// credential-scrubbed before these explicit entries are added.
+	Env map[string]string `yaml:"env"`
+	Cwd string            `yaml:"cwd"`
+	// ToolCallTimeoutMS bounds each MCP tools/call invocation. Zero selects the
+	// reference default of 60000ms.
+	ToolCallTimeoutMS int `yaml:"tool_call_timeout_ms"`
+	// FailOnStartupError controls whether an initial connect/list failure for
+	// this optional server aborts host startup. The reference defaults to
+	// recovery in the background; explicit true keeps strict deployments loud.
+	FailOnStartupError bool `yaml:"fail_on_startup_error"`
 }
 
 // FsConfig is the safe-file-operation policy (dispatch-m6f-3 §3 / ADR
@@ -854,6 +954,16 @@ func Load(path string) (Config, error) {
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("config: parse %s: %w", path, err)
 	}
+	// Reconnect policy values are deliberately validated against the raw YAML
+	// before defaults are applied.  A zero/negative value that was explicitly
+	// configured is not the same thing as an omitted value: silently clamping it
+	// would change the outage budget and reconnect timing on replay.
+	if err := validateExplicitMcpReconnect(data); err != nil {
+		return Config{}, fmt.Errorf("config: invalid mcp reconnect policy: %w", err)
+	}
+	if err := validateExplicitMcpProcessPolicy(data); err != nil {
+		return Config{}, fmt.Errorf("config: invalid mcp server process policy: %w", err)
+	}
 	applyDefaults(&cfg)
 	// Mode fails closed on unknown values, like the LLM provider route
 	// (D-MODE-1): never silently fall back.
@@ -862,8 +972,240 @@ func Load(path string) (Config, error) {
 	default:
 		return Config{}, fmt.Errorf("config: invalid mode %q (want minimal|standard|code)", cfg.Mode)
 	}
+	if cfg.Interact.Policy != "ask" && cfg.Interact.Policy != "never" {
+		return Config{}, fmt.Errorf("config: invalid interact.policy %q (want ask|never)", cfg.Interact.Policy)
+	}
+	if err := validateRetryConfig(cfg.LLM.Retry); err != nil {
+		return Config{}, fmt.Errorf("config: invalid llm.retry: %w", err)
+	}
+	if err := validateThinkingBudgets(cfg.LLM.ThinkingBudgets); err != nil {
+		return Config{}, fmt.Errorf("config: invalid llm.thinking_budgets: %w", err)
+	}
+	if cfg.MaxTokens < 0 {
+		return Config{}, errors.New("config: max_tokens must be non-negative")
+	}
+	switch cfg.Security.CrashDumpPolicy {
+	case CrashDumpPolicyDisabled, CrashDumpPolicyExternal:
+	default:
+		return Config{}, fmt.Errorf("config: invalid security.crash_dump_policy %q (want disabled|external)",
+			cfg.Security.CrashDumpPolicy)
+	}
 	// BaseURL intentionally keeps an empty value to mean "provider default".
 	return cfg, nil
+}
+
+func validateThinkingBudgets(budgets map[string]int) error {
+	for effort, budget := range budgets {
+		switch effort {
+		case "low", "high", "max":
+		default:
+			return fmt.Errorf("unknown effort %q (want low|high|max)", effort)
+		}
+		if budget <= 0 {
+			return fmt.Errorf("%s must be positive", effort)
+		}
+	}
+	return nil
+}
+
+// validateExplicitMcpReconnect rejects invalid values that applyDefaults must
+// otherwise treat as absent.  The typed Config remains intentionally backward
+// compatible (zero means omitted for callers that construct Config directly),
+// while file loading follows the reference's fail-loud configuration contract.
+func validateExplicitMcpReconnect(data []byte) error {
+	var raw map[string]any
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		// The typed unmarshal above is the authoritative syntax error; this is
+		// only a second view used to distinguish omitted from explicit values.
+		return nil
+	}
+	mcpValue, ok := raw["mcp"]
+	if !ok {
+		return nil
+	}
+	mcp, ok := mcpValue.(map[string]any)
+	if !ok {
+		return errors.New("mcp must be a mapping")
+	}
+	initial, initialSet, err := explicitMcpInt(mcp, "reconnect_initial_delay_ms")
+	if err != nil {
+		return err
+	}
+	maximum, maxSet, err := explicitMcpInt(mcp, "reconnect_max_delay_ms")
+	if err != nil {
+		return err
+	}
+	attempts, attemptsSet, err := explicitMcpInt(mcp, "reconnect_max_attempts")
+	if err != nil {
+		return err
+	}
+	if initialSet && initial <= 0 {
+		return errors.New("reconnect_initial_delay_ms must be positive")
+	}
+	if maxSet && maximum <= 0 {
+		return errors.New("reconnect_max_delay_ms must be positive")
+	}
+	if attemptsSet && attempts <= 0 {
+		return errors.New("reconnect_max_attempts must be a positive integer")
+	}
+	effectiveInitial := int64(100)
+	if initialSet {
+		effectiveInitial = initial
+	}
+	effectiveMaximum := int64(5000)
+	if maxSet {
+		effectiveMaximum = maximum
+	}
+	if effectiveInitial > effectiveMaximum {
+		return errors.New("reconnect_initial_delay_ms must be no greater than reconnect_max_delay_ms")
+	}
+	return nil
+}
+
+func explicitMcpInt(mcp map[string]any, key string) (int64, bool, error) {
+	value, ok := mcp[key]
+	if !ok {
+		return 0, false, nil
+	}
+	switch number := value.(type) {
+	case int:
+		return int64(number), true, nil
+	case int64:
+		return number, true, nil
+	case uint64:
+		if number > uint64(^uint64(0)>>1) {
+			return 0, true, fmt.Errorf("%s must be an integer", key)
+		}
+		return int64(number), true, nil
+	default:
+		return 0, true, fmt.Errorf("%s must be an integer", key)
+	}
+}
+
+// validateExplicitMcpProcessPolicy keeps an explicitly configured per-server
+// timeout distinct from an omitted value. applyDefaults intentionally maps
+// zero to the reference default for programmatic Config callers, but a config
+// file containing zero/negative/overflow values must fail closed instead of
+// silently changing the call deadline.
+func validateExplicitMcpProcessPolicy(data []byte) error {
+	var raw map[string]any
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return nil
+	}
+	mcpValue, ok := raw["mcp"]
+	if !ok {
+		return nil
+	}
+	mcp, ok := mcpValue.(map[string]any)
+	if !ok {
+		return errors.New("mcp must be a mapping")
+	}
+	serversValue, ok := mcp["servers"]
+	if !ok {
+		return nil
+	}
+	servers, ok := serversValue.([]any)
+	if !ok {
+		return errors.New("servers must be a sequence")
+	}
+	for i, value := range servers {
+		server, ok := value.(map[string]any)
+		if !ok {
+			return fmt.Errorf("servers[%d] must be a mapping", i)
+		}
+		timeout, set, err := explicitMcpInt(server, "tool_call_timeout_ms")
+		if err != nil {
+			return fmt.Errorf("servers[%d]: %w", i, err)
+		}
+		if set && timeout <= 0 {
+			return fmt.Errorf("servers[%d].tool_call_timeout_ms must be positive", i)
+		}
+	}
+	return nil
+}
+
+// validateRetryConfig mirrors the reference provider-owned retry schema. The
+// loader must reject explicit invalid values rather than silently rewriting a
+// policy, because changing mode/budget/delay changes durable retry behavior
+// and replay identity.
+func validateRetryConfig(cfg RetryConfig) error {
+	if cfg.Mode != "normal" && cfg.Mode != "always" {
+		return fmt.Errorf("mode %q (want normal|always)", cfg.Mode)
+	}
+	if cfg.MaxRetries < 0 {
+		return errors.New("max_retries must be non-negative")
+	}
+	if cfg.InitialBackoff.Duration <= 0 || cfg.MaxBackoff.Duration <= 0 {
+		return errors.New("backoff durations must be positive")
+	}
+	if cfg.InitialBackoff.Duration > cfg.MaxBackoff.Duration {
+		return errors.New("initial_backoff must be no greater than max_backoff")
+	}
+	if math.IsNaN(cfg.JitterRatio) || math.IsInf(cfg.JitterRatio, 0) || cfg.JitterRatio < 0 || cfg.JitterRatio > 1 {
+		return errors.New("jitter_ratio must be finite and between 0 and 1")
+	}
+	if cfg.RetryableCodes != nil {
+		if len(cfg.RetryableCodes) == 0 {
+			return errors.New("retryable_codes must not be empty")
+		}
+		seen := make(map[string]struct{}, len(cfg.RetryableCodes))
+		for _, code := range cfg.RetryableCodes {
+			if strings.TrimSpace(code) == "" {
+				return errors.New("retryable_codes must contain only non-empty strings")
+			}
+			if _, exists := seen[code]; exists {
+				return fmt.Errorf("retryable_codes contains duplicate %q", code)
+			}
+			seen[code] = struct{}{}
+		}
+	}
+	for provider, route := range cfg.Providers {
+		if strings.TrimSpace(provider) == "" {
+			return errors.New("providers must not contain an empty key")
+		}
+		if route.Mode != nil && *route.Mode != "normal" && *route.Mode != "always" {
+			return fmt.Errorf("providers.%s.mode %q (want normal|always)", provider, *route.Mode)
+		}
+		if route.MaxRetries != nil && *route.MaxRetries < 0 {
+			return fmt.Errorf("providers.%s.max_retries must be non-negative", provider)
+		}
+		if route.InitialBackoff != nil && route.InitialBackoff.Duration <= 0 {
+			return fmt.Errorf("providers.%s.initial_backoff must be positive", provider)
+		}
+		if route.MaxBackoff != nil && route.MaxBackoff.Duration <= 0 {
+			return fmt.Errorf("providers.%s.max_backoff must be positive", provider)
+		}
+		effectiveInitial := cfg.InitialBackoff.Duration
+		if route.InitialBackoff != nil {
+			effectiveInitial = route.InitialBackoff.Duration
+		}
+		effectiveMax := cfg.MaxBackoff.Duration
+		if route.MaxBackoff != nil {
+			effectiveMax = route.MaxBackoff.Duration
+		}
+		if effectiveInitial > effectiveMax {
+			return fmt.Errorf("providers.%s.initial_backoff must be no greater than max_backoff", provider)
+		}
+		if route.JitterRatio != nil && (math.IsNaN(*route.JitterRatio) || math.IsInf(*route.JitterRatio, 0) || *route.JitterRatio < 0 || *route.JitterRatio > 1) {
+			return fmt.Errorf("providers.%s.jitter_ratio must be finite and between 0 and 1", provider)
+		}
+		if route.RetryableCodes != nil {
+			if len(*route.RetryableCodes) == 0 {
+				return fmt.Errorf("providers.%s.retryable_codes must not be empty", provider)
+			}
+			seen := make(map[string]struct{}, len(*route.RetryableCodes))
+			for _, code := range *route.RetryableCodes {
+				if strings.TrimSpace(code) == "" {
+					return fmt.Errorf("providers.%s.retryable_codes must contain only non-empty strings", provider)
+				}
+				if _, exists := seen[code]; exists {
+					return fmt.Errorf("providers.%s.retryable_codes contains duplicate %q", provider, code)
+				}
+				seen[code] = struct{}{}
+			}
+		}
+	}
+	return nil
 }
 
 // applyDefaults fills every field that is empty or absent so callers never
@@ -911,6 +1253,12 @@ func applyDefaults(cfg *Config) {
 	// M5a jobs defaults: off by default; the per-owner active-job cap is 10.
 	if cfg.Jobs.MaxConcurrentJobsPerOwner <= 0 {
 		cfg.Jobs.MaxConcurrentJobsPerOwner = DefaultMaxConcurrentJobsPerOwner
+	}
+	if cfg.Jobs.CompletionDelivery == "" {
+		cfg.Jobs.CompletionDelivery = DefaultJobCompletionDelivery
+	}
+	if cfg.Jobs.MaxConsecutiveWakes <= 0 {
+		cfg.Jobs.MaxConsecutiveWakes = DefaultJobMaxConsecutiveWakes
 	}
 	// Enabling subagent whitelists its four consumer tools as well, so the
 	// single subagent.enabled switch turns the whole capability (runtime +
@@ -1033,8 +1381,12 @@ func applyDefaults(cfg *Config) {
 			}
 		}
 	}
-	// M6e-2 code defaults: off by default (D10); the sandbox timeout is 30s,
-	// the per-stream output cap 65536 bytes, and sandbox_dir empty (the
+	if cfg.Interact.Policy == "" {
+		cfg.Interact.Policy = "ask"
+	}
+	// M6e-2 code defaults: off by default (D10); TypeScript uses the reference
+	// compute/wall/output/heap budgets, while the legacy shell timeout remains
+	// 30s. sandbox_dir stays empty (the
 	// provider default <project>/.sandbox). Enabling code whitelists its single
 	// consumer tool run_code, so the one code.enabled switch turns the whole
 	// capability (Provider + Engine + tool + event logging) on (mirrors
@@ -1051,8 +1403,20 @@ func applyDefaults(cfg *Config) {
 	if cfg.Code.Timeout.Duration <= 0 {
 		cfg.Code.Timeout.Duration = DefaultCodeTimeout
 	}
+	if cfg.Code.ComputeMS <= 0 {
+		cfg.Code.ComputeMS = DefaultCodeComputeMS
+	}
+	if cfg.Code.MaxWallMS <= 0 {
+		cfg.Code.MaxWallMS = DefaultCodeMaxWallMS
+	}
 	if cfg.Code.MaxOutput <= 0 {
 		cfg.Code.MaxOutput = DefaultCodeMaxOutput
+	}
+	if cfg.Code.MaxParallelSubCalls <= 0 {
+		cfg.Code.MaxParallelSubCalls = 10
+	}
+	if cfg.Code.MaxOldGenerationSizeMB <= 0 {
+		cfg.Code.MaxOldGenerationSizeMB = DefaultCodeMaxOldGeneration
 	}
 	// M6f-2 mcp defaults: off by default (D10). Enabling mcp whitelists its two
 	// consumer tools mcp_list and mcp_call, so the one mcp.enabled switch turns
@@ -1069,6 +1433,23 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Mcp.ACPEnabled == nil {
 		cfg.Mcp.ACPEnabled = Bool(false)
+	}
+	if cfg.Mcp.ReconnectEnabled == nil {
+		cfg.Mcp.ReconnectEnabled = Bool(true)
+	}
+	if cfg.Mcp.ReconnectInitialDelayMS <= 0 {
+		cfg.Mcp.ReconnectInitialDelayMS = 500
+	}
+	if cfg.Mcp.ReconnectMaxDelayMS <= 0 {
+		cfg.Mcp.ReconnectMaxDelayMS = 30000
+	}
+	if cfg.Mcp.ReconnectMaxAttempts <= 0 {
+		cfg.Mcp.ReconnectMaxAttempts = 10
+	}
+	for i := range cfg.Mcp.Servers {
+		if cfg.Mcp.Servers[i].ToolCallTimeoutMS <= 0 {
+			cfg.Mcp.Servers[i].ToolCallTimeoutMS = 60000
+		}
 	}
 	// M6f-3 fs defaults: enabled by default to match dsh base; root empty means the default
 	// <project> (the process working directory), resolved by the FileService
@@ -1164,17 +1545,20 @@ func applyDefaults(cfg *Config) {
 	if cfg.LLM.Anthropic.Model == "" {
 		cfg.LLM.Anthropic.Model = DefaultAnthropicModel
 	}
-	if cfg.LLM.Retry.MaxRetries <= 0 {
+	if cfg.LLM.Retry.MaxRetries == 0 {
 		cfg.LLM.Retry.MaxRetries = DefaultLLMMaxRetries
 	}
-	if cfg.LLM.Retry.InitialBackoff.Duration <= 0 {
+	if cfg.LLM.Retry.InitialBackoff.Duration == 0 {
 		cfg.LLM.Retry.InitialBackoff.Duration = DefaultLLMRetryBackoff
 	}
-	if cfg.LLM.Retry.MaxBackoff.Duration <= 0 {
+	if cfg.LLM.Retry.MaxBackoff.Duration == 0 {
 		cfg.LLM.Retry.MaxBackoff.Duration = DefaultLLMRetryMaxBackoff
 	}
+	if cfg.LLM.Retry.Mode == "" {
+		cfg.LLM.Retry.Mode = "normal"
+	}
 	// M8-3 multimodal defaults (dispatch-m8-3 §3): model_input_modalities 缺省
-	// "text"；multimodal.max_image_bytes 缺省 10MiB（非正值钳到默认，校验非负: 负值
+	// "text"；multimodal.max_image_bytes 缺省 3.5MiB（非正值钳到默认，校验非负: 负值
 	// 永远不会到达接线层）。multimodal.enabled 缺省 true（用户 2026-08-20 拍板「图片附件
 	// 默认打开」：*bool 区分「未设置 → 默认开」与显式 "enabled: false" → 关；minimal
 	// 预设强制关 D-MODE-2）。
@@ -1190,6 +1574,18 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.LLM.Multimodal.MaxRequestImageBytes <= 0 {
 		cfg.LLM.Multimodal.MaxRequestImageBytes = DefaultMultimodalMaxRequestImageBytes
+	}
+	if cfg.LLM.Multimodal.MaxImagesPerMessage <= 0 {
+		cfg.LLM.Multimodal.MaxImagesPerMessage = DefaultMultimodalMaxImagesPerMessage
+	}
+	if cfg.LLM.Multimodal.MaxMessageImageBytes <= 0 {
+		cfg.LLM.Multimodal.MaxMessageImageBytes = DefaultMultimodalMaxMessageImageBytes
+	}
+	if cfg.LLM.Multimodal.MaxImagePixels <= 0 {
+		cfg.LLM.Multimodal.MaxImagePixels = DefaultMultimodalMaxImagePixels
+	}
+	if cfg.LLM.Multimodal.MaxImageDimension <= 0 {
+		cfg.LLM.Multimodal.MaxImageDimension = DefaultMultimodalMaxImageDimension
 	}
 	if cfg.Terminal.ScrollbackMaxBytes <= 0 {
 		cfg.Terminal.ScrollbackMaxBytes = DefaultTerminalScrollbackMaxBytes
@@ -1211,6 +1607,9 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Terminal.ACPEnabled == nil {
 		cfg.Terminal.ACPEnabled = Bool(false)
+	}
+	if cfg.Security.CrashDumpPolicy == "" {
+		cfg.Security.CrashDumpPolicy = CrashDumpPolicyDisabled
 	}
 	// Enabling terminal whitelists its single consumer tool (pwsh), so the
 	// one terminal.enabled switch turns the whole capability on (the
@@ -1403,7 +1802,7 @@ var jobsToolNames = []string{"job_output", "job_kill", "job_list"}
 // are registered and whitelisted only when subagent is enabled; keeping the
 // names here makes the "subagent.enabled ⇒ 工具自动白名单" rule a single, tested
 // fact shared by applyDefaults and the composition root.
-var subagentToolNames = []string{"subagent", "spawn_teammate", "send_message", "followup_task", "wait_agent", "interrupt_agent", "list_agents"}
+var subagentToolNames = []string{"subagent", "subagent_fork", "spawn_teammate", "send_message", "followup_task", "wait_agent", "interrupt_agent", "list_agents", "task_create", "task_update", "task_list", "task_get", "team_message"}
 
 // skillToolNames are the skill consumer tools (dispatch-m5d-2 §2). skill
 // is registered and whitelisted only when skill is enabled; keeping the name
@@ -1437,9 +1836,9 @@ var codeToolNames = []string{"run_code"}
 // mcp_call are registered and whitelisted only when mcp is enabled; keeping the
 // names here makes the "mcp.enabled ⇒ 工具自动白名单" rule a single, tested fact
 // shared by applyDefaults and the composition root. Bridged server tools
-// (mcp.<server>.<tool>) are dynamic and are whitelisted by the composition root
-// as they are registered.
-var mcpToolNames = []string{}
+// (mcp__<server>__<tool>) are dynamic and are whitelisted by the composition
+// root as they are registered.
+var mcpToolNames = []string{"mcp_list", "mcp_call"}
 
 // fsToolNames are the safe-file-operation consumer tools (dispatch-m6f-3 §3).
 // They are registered and whitelisted only when fs is enabled; keeping the

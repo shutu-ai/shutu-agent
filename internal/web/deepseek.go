@@ -48,19 +48,21 @@ type Config struct {
 	HTTPClient *http.Client
 	// OnRequest 在派发前收到 secret-free 请求快照（组合根用它落 web/search-request）。
 	// 返回错误则阻止派发（模型可见的辅助输入不能逃过日志，D3）。
-	OnRequest func(SearchRequestEvent) error
+	OnRequest        func(SearchRequestEvent) error
+	OnRequestContext func(context.Context, SearchRequestEvent) error
 }
 
 // NewDeepSeekProvider 返回 DeepSeekSearchProvider（可用性检查见 Available）。
 func NewDeepSeekProvider(cfg Config) *DeepSeekSearchProvider {
 	p := &DeepSeekSearchProvider{
-		apiKey:     cfg.APIKey,
-		baseURL:    cfg.BaseURL,
-		model:      cfg.Model,
-		apiVersion: cfg.APIVersion,
-		maxTokens:  cfg.MaxTokens,
-		maxUses:    cfg.MaxUses,
-		onRequest:  cfg.OnRequest,
+		apiKey:           cfg.APIKey,
+		baseURL:          cfg.BaseURL,
+		model:            cfg.Model,
+		apiVersion:       cfg.APIVersion,
+		maxTokens:        cfg.MaxTokens,
+		maxUses:          cfg.MaxUses,
+		onRequest:        cfg.OnRequest,
+		onRequestContext: cfg.OnRequestContext,
 	}
 	if p.baseURL == "" {
 		p.baseURL = defaultBaseURL
@@ -88,14 +90,15 @@ func NewDeepSeekProvider(cfg Config) *DeepSeekSearchProvider {
 
 // DeepSeekSearchProvider 是 SearchProvider 的 DeepSeek 官方实现。
 type DeepSeekSearchProvider struct {
-	apiKey     string
-	baseURL    string
-	model      string
-	apiVersion string
-	maxTokens  int
-	maxUses    int
-	httpClient *http.Client
-	onRequest  func(SearchRequestEvent) error
+	apiKey           string
+	baseURL          string
+	model            string
+	apiVersion       string
+	maxTokens        int
+	maxUses          int
+	httpClient       *http.Client
+	onRequest        func(SearchRequestEvent) error
+	onRequestContext func(context.Context, SearchRequestEvent) error
 }
 
 // ID 返回稳定 id "deepseek-official"。
@@ -139,8 +142,13 @@ func (p *DeepSeekSearchProvider) Search(ctx context.Context, req WebSearchReques
 	httpReq.Header.Set("accept", "application/json")
 
 	// 派发前落日志（D3）：OnRequest 返回错误则中止派发，不发 HTTP 请求。
-	if p.onRequest != nil {
-		if err := p.onRequest(NewSearchRequestEvent(endpoint, p.apiVersion, p.model, req.Query, body)); err != nil {
+	requestEvent := NewSearchRequestEvent(endpoint, p.apiVersion, p.model, req.Query, body)
+	if p.onRequestContext != nil {
+		if err := p.onRequestContext(ctx, requestEvent); err != nil {
+			return WebSearchResult{}, err
+		}
+	} else if p.onRequest != nil {
+		if err := p.onRequest(requestEvent); err != nil {
 			return WebSearchResult{}, err
 		}
 	}

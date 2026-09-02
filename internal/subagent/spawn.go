@@ -11,6 +11,7 @@ package subagent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"github.com/jabing/shutu-agent/internal/llm"
 	"github.com/jabing/shutu-agent/internal/loop"
 	"github.com/jabing/shutu-agent/internal/prompt"
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 	"github.com/jabing/shutu-agent/internal/session"
 	"github.com/jabing/shutu-agent/internal/store"
 	"github.com/jabing/shutu-agent/internal/tools"
@@ -32,17 +34,48 @@ import (
 // M5b-2's subagent/* event recording will surface the parent lineage through
 // it. Each spawned child gets its own fresh session.New() log.
 type Deps struct {
-	Log    *session.Log
-	LLM    llm.LLM
+	Log *session.Log
+	// ParentLogFor resolves a durable parent runtime by session id. Fork uses
+	// this only when the parent is not another live child owned by this
+	// provider. A nil result means that the parent is unavailable; callers must
+	// not silently substitute the process-global Log for an addressed runtime.
+	ParentLogFor func(context.Context, string) *session.Log
+	// BindSessionLog publishes a newly-created child log to the host runtime
+	// index so session-aware nested tools can resolve the child runtime.
+	BindSessionLog func(string, *session.Log)
+	LLM            llm.LLM
+	// LLMFor resolves the provider for a child using its parent's runtime
+	// session. It takes precedence over LLM when supplied; the fixed field is
+	// retained for library callers and legacy tests.
+	LLMFor func(context.Context, string) llm.LLM
 	Tools  *tools.Registry
-	Prompt *prompt.Builder
-	Model  string
+	// ToolsFor resolves the parent session's scoped registry. It is used before
+	// ToolFilter/structured-output overlays are applied to the child.
+	ToolsFor func(context.Context, string) *tools.Registry
+	Prompt   *prompt.Builder
+	// PromptFor resolves the parent session's prompt snapshot.
+	PromptFor func(context.Context, string) *prompt.Builder
+	Model     string
+	// ModelFor mirrors LLMFor for per-session model selection.
+	ModelFor func(context.Context, string) string
+	// MaxTokens is the default output-token cap for a root child. A child
+	// inherits its parent's resolved cap unless StartRequest.MaxTokens overrides
+	// it; zero leaves the provider default in control.
+	MaxTokens int
+	// MaxTokensFor resolves a cap inherited from a host-owned parent that is
+	// not represented in this provider's in-memory child map. It is consulted
+	// only for root children and never overrides an explicit request cap.
+	MaxTokensFor func(context.Context, string) int
 	// Store durably records the independent child session when provided. It is
 	// optional so library users and existing tests can remain in-memory.
 	Store store.Store
 	// Report accepts a child-scoped report and returns its parent message id.
 	// It is optional so the provider remains usable without host delivery.
 	Report func(childID, parentID, output string) (string, error)
+	// ReportContext is the context-aware variant used by child tool execution.
+	// It lets the host preserve correlation/cancellation while still enforcing
+	// the registered parent identity.
+	ReportContext func(context.Context, string, string, string) (string, error)
 }
 
 // SpawnProvider spawns a brand-new child session + child loop for every Start.
@@ -53,10 +86,11 @@ type SpawnProvider struct {
 	idPrefix             string
 	inheritParentContext bool
 
-	mu       sync.Mutex
-	children map[string]*childRun
-	nextID   int
-	closed   bool
+	mu        sync.Mutex
+	children  map[string]*childRun
+	nextID    int
+	closed    bool
+	closeDone chan struct{}
 }
 
 // childRun is the provider's per-child record: the independent child log, the
@@ -73,6 +107,7 @@ type childRun struct {
 	done        chan struct{}      // closed once the child settles
 	inbox       chan string        // waking follow-up messages
 	continuable bool
+	maxTokens   int    // resolved output-token cap inherited by nested children
 	seedSeq     uint64 // parent-history watermark for fork result derivation
 
 	mu            sync.Mutex
@@ -86,14 +121,14 @@ type childRun struct {
 
 // NewSpawnProvider returns a SpawnProvider bound to the given core components.
 func NewSpawnProvider(deps Deps) *SpawnProvider {
-	return &SpawnProvider{deps: deps, name: "spawn", idPrefix: "spawn", children: map[string]*childRun{}}
+	return &SpawnProvider{deps: deps, name: "spawn", idPrefix: "spawn", children: map[string]*childRun{}, closeDone: make(chan struct{})}
 }
 
 // NewForkProvider returns the independent fork backend. It uses the same local
 // runner as spawn, but has its own provider identity and seeds the child from
 // the parent's completed event history when available.
 func NewForkProvider(deps Deps) *SpawnProvider {
-	return &SpawnProvider{deps: deps, name: "fork", idPrefix: "fork", inheritParentContext: true, children: map[string]*childRun{}}
+	return &SpawnProvider{deps: deps, name: "fork", idPrefix: "fork", inheritParentContext: true, children: map[string]*childRun{}, closeDone: make(chan struct{})}
 }
 
 // Name returns the provider name ("spawn"), the default subagent provider.
@@ -108,7 +143,7 @@ func (p *SpawnProvider) Name() string {
 // depth (MaxDepth ⇒ ErrDepthExceeded). ToolFilter/Persona application and
 // structured output is captured through a child-scoped structured_output tool.
 func (p *SpawnProvider) Capabilities() Capabilities {
-	return Capabilities{DepthLimit: true, OutputSchema: true, ContextInheritance: p.inheritParentContext}
+	return Capabilities{OutputSchema: true, DepthLimit: true, ToolFilter: true, Persona: true, ContextInheritance: p.inheritParentContext}
 }
 
 // Start registers a brand-new child session (depth = parent depth + 1, tracked
@@ -123,6 +158,9 @@ func (p *SpawnProvider) Start(ctx context.Context, req StartRequest) (*Run, erro
 	if req.Prompt == "" {
 		return nil, fmt.Errorf("%w: prompt is required", ErrInvalidRequest)
 	}
+	if req.MaxTokens < 0 {
+		return nil, fmt.Errorf("%w: max_tokens must be non-negative", ErrInvalidRequest)
+	}
 	if req.OutputSchema != nil {
 		if root, ok := req.OutputSchema["type"].(string); !ok || root != "object" {
 			return nil, fmt.Errorf("%w: output schema must have an object root", ErrInvalidRequest)
@@ -135,6 +173,9 @@ func (p *SpawnProvider) Start(ctx context.Context, req StartRequest) (*Run, erro
 			return nil, fmt.Errorf("%w: invalid output schema: %v", ErrInvalidRequest, err)
 		}
 	}
+	if err := p.syncNextID(ctx); err != nil {
+		return nil, err
+	}
 	req.Prompt = withAcceptance(req.Prompt, req.AcceptanceCriteria)
 	if req.OutputSchema != nil {
 		req.Prompt = structuredPrompt(req.Prompt, req.OutputSchema)
@@ -145,8 +186,12 @@ func (p *SpawnProvider) Start(ctx context.Context, req StartRequest) (*Run, erro
 		return nil, ErrProviderClosed
 	}
 	parentDepth := 0
+	parentMaxTokens := 0
 	if parent, ok := p.children[req.ParentSessionID]; ok {
 		parentDepth = parent.depth
+		parentMaxTokens = parent.maxTokens
+	} else if p.deps.MaxTokensFor != nil && strings.TrimSpace(req.ParentSessionID) != "" {
+		parentMaxTokens = p.deps.MaxTokensFor(ctx, req.ParentSessionID)
 	}
 	depth := parentDepth + 1
 	if req.MaxDepth > 0 && depth > req.MaxDepth {
@@ -154,12 +199,18 @@ func (p *SpawnProvider) Start(ctx context.Context, req StartRequest) (*Run, erro
 		return nil, fmt.Errorf("%w: depth %d exceeds max depth %d (parent %q)",
 			ErrDepthExceeded, depth, req.MaxDepth, req.ParentSessionID)
 	}
-	p.nextID++
 	prefix := p.idPrefix
 	if prefix == "" {
 		prefix = "spawn"
 	}
-	id := fmt.Sprintf("%s-%d", prefix, p.nextID)
+	id, err := store.GenerateReservedID(ctx, p.deps.Store, "session", func() (string, error) {
+		p.nextID++
+		return fmt.Sprintf("%s-%d", prefix, p.nextID), nil
+	})
+	if err != nil {
+		p.mu.Unlock()
+		return nil, fmt.Errorf("subagent: reserve child session id: %w", err)
+	}
 	runCtx, cancel := context.WithCancel(context.Background())
 	child := &childRun{
 		id:          id,
@@ -172,18 +223,67 @@ func (p *SpawnProvider) Start(ctx context.Context, req StartRequest) (*Run, erro
 		inbox:       make(chan string, 16),
 		continuable: req.Continuable,
 	}
+	if req.MaxTokens > 0 {
+		child.maxTokens = req.MaxTokens
+	} else if parentMaxTokens > 0 {
+		child.maxTokens = parentMaxTokens
+	} else {
+		child.maxTokens = p.deps.MaxTokens
+	}
 	var parentEvents []session.Event
 	if req.InheritParentContext {
-		if req.ParentSessionID == "" {
-			if p.deps.Log != nil {
-				parentEvents = p.deps.Log.Events()
-			}
-		} else if parent, ok := p.children[req.ParentSessionID]; ok {
+		if parent, ok := p.children[req.ParentSessionID]; ok {
 			parentEvents = parent.log.Events()
 		}
 	}
 	p.children[id] = child
 	p.mu.Unlock()
+	// A fork from a live application Agent is not represented in this
+	// provider's child map. Resolve that addressed parent explicitly instead
+	// of falling back to the mutable legacy current session. The empty-parent
+	// case remains a compatibility path for library callers that intentionally
+	// bind the provider to one host log.
+	if req.InheritParentContext && len(parentEvents) == 0 {
+		parentID := strings.TrimSpace(req.ParentSessionID)
+		if req.ParentSessionID != "" {
+			if p.deps.ParentLogFor != nil {
+				if parentLog := p.deps.ParentLogFor(ctx, req.ParentSessionID); parentLog != nil {
+					parentEvents = parentLog.Events()
+				}
+			}
+		} else if p.deps.ParentLogFor != nil {
+			parentID = runtimectx.SessionID(ctx)
+			if parentID != "" {
+				if parentLog := p.deps.ParentLogFor(ctx, parentID); parentLog != nil {
+					parentEvents = parentLog.Events()
+				}
+			}
+		} else if p.deps.Log != nil {
+			parentEvents = p.deps.Log.Events()
+		}
+		// A parent Agent may be cold after restart and therefore absent from the
+		// live runtime index. The durable session is still authoritative for a
+		// fork seed; use the raw tail when available so an in-flight parent turn
+		// can be excluded by completedTurnPrefix below.
+		var parentLoadErr error
+		if len(parentEvents) == 0 && parentID != "" && p.deps.Store != nil {
+			if raw, ok := p.deps.Store.(store.SessionRawStore); ok {
+				parentEvents, parentLoadErr = raw.LoadSessionRaw(ctx, parentID)
+			} else {
+				parentEvents, parentLoadErr = p.deps.Store.LoadSession(ctx, parentID)
+			}
+			if parentLoadErr != nil && !errors.Is(parentLoadErr, store.ErrNotFound) {
+				cancel()
+				p.mu.Lock()
+				delete(p.children, id)
+				p.mu.Unlock()
+				return nil, fmt.Errorf("subagent: load fork parent %q: %w", parentID, parentLoadErr)
+			}
+		}
+	}
+	if req.InheritParentContext {
+		parentEvents = completedTurnPrefix(parentEvents)
+	}
 	if len(parentEvents) > 0 {
 		if err := child.log.Restore(parentEvents); err != nil {
 			cancel()
@@ -195,24 +295,105 @@ func (p *SpawnProvider) Start(ctx context.Context, req StartRequest) (*Run, erro
 		child.seedSeq = parentEvents[len(parentEvents)-1].Seq
 	}
 	if p.deps.Store != nil {
-		if err := p.deps.Store.CreateSession(context.Background(), id, time.Now().UTC()); err != nil {
-			cancel()
-			p.mu.Lock()
-			delete(p.children, id)
-			p.mu.Unlock()
-			return nil, fmt.Errorf("subagent: persist child session %q: %w", id, err)
+		created := time.Now().UTC()
+		header := store.SessionHeader{
+			ID: id, CreatedAt: created, Parent: child.parent,
+			SeedLength: len(parentEvents), Origin: "subagent", DelegationDepth: child.depth,
+		}
+		var committedStart *session.Event
+		// Prefer the transaction that publishes the header and fork seed as one
+		// durable unit. The fallback keeps older Store implementations usable,
+		// but still writes the seed before exposing the live child sink.
+		if atomic, ok := p.deps.Store.(store.SessionCreateStore); ok {
+			// The first lifecycle fact is part of publication. This closes the
+			// remaining window in which a crash could leave a durable child row
+			// and seed but no subagent/start identity.
+			startData, marshalErr := json.Marshal(session.NewSubagentStartWithDepth(id, p.Name(), child.parent, child.label, child.depth))
+			if marshalErr != nil {
+				cancel()
+				p.mu.Lock()
+				delete(p.children, id)
+				p.mu.Unlock()
+				return nil, fmt.Errorf("subagent: encode child metadata %q: %w", id, marshalErr)
+			}
+			start := session.Event{
+				Seq: child.log.NextSeq(), Type: session.EventSubagentStart,
+				At: time.Now().UTC(), Version: session.EventVersion,
+				Data: startData,
+			}
+			durableEvents := append(append([]session.Event(nil), parentEvents...), start)
+			// The lifecycle marker is published in the same transaction, but it
+			// is not inherited parent context. Keep SeedLength as the exact
+			// parent-prefix boundary so replay and lineage consumers agree on
+			// where the forked context ends.
+			header.SeedLength = len(parentEvents)
+			if err := atomic.CreateSessionWithOptions(ctx, id, created, store.SessionCreateOptions{Header: header}, durableEvents); err != nil {
+				cancel()
+				p.mu.Lock()
+				delete(p.children, id)
+				p.mu.Unlock()
+				return nil, fmt.Errorf("subagent: persist child session %q: %w", id, err)
+			}
+			committedStart = &start
+		} else if atomic, ok := p.deps.Store.(store.SessionCreateEventStore); ok {
+			if err := atomic.CreateSessionWithEvents(ctx, id, created, header, parentEvents); err != nil {
+				cancel()
+				p.mu.Lock()
+				delete(p.children, id)
+				p.mu.Unlock()
+				return nil, fmt.Errorf("subagent: persist child session %q: %w", id, err)
+			}
+		} else {
+			if err := p.deps.Store.CreateSession(ctx, id, created); err != nil {
+				cancel()
+				p.mu.Lock()
+				delete(p.children, id)
+				p.mu.Unlock()
+				return nil, fmt.Errorf("subagent: persist child session %q: %w", id, err)
+			}
+			if lineage, ok := p.deps.Store.(store.SessionLineageStore); ok {
+				if err := lineage.SetSessionHeader(ctx, id, header); err != nil {
+					cancel()
+					p.mu.Lock()
+					delete(p.children, id)
+					p.mu.Unlock()
+					return nil, fmt.Errorf("subagent: persist child header %q: %w", id, err)
+				}
+			}
+			if len(parentEvents) > 0 {
+				if err := p.deps.Store.AppendEvents(ctx, id, parentEvents); err != nil {
+					cancel()
+					p.mu.Lock()
+					delete(p.children, id)
+					p.mu.Unlock()
+					return nil, fmt.Errorf("subagent: persist child seed %q: %w", id, err)
+				}
+			}
 		}
 		child.log.SetSink(func(ev session.Event) error {
 			return p.deps.Store.AppendEvents(context.Background(), id, []session.Event{ev})
 		})
-		if _, err := child.log.Append(session.EventSubagentStart,
-			session.NewSubagentStartWithDepth(id, p.Name(), child.parent, child.label, child.depth)); err != nil {
+		var startErr error
+		if committedStart != nil {
+			startErr = child.log.AppendPersisted(*committedStart)
+		} else {
+			_, startErr = child.log.Append(session.EventSubagentStart,
+				session.NewSubagentStartWithDepth(id, p.Name(), child.parent, child.label, child.depth))
+		}
+		if startErr != nil {
 			cancel()
 			p.mu.Lock()
 			delete(p.children, id)
 			p.mu.Unlock()
-			return nil, fmt.Errorf("subagent: persist child metadata %q: %w", id, err)
+			return nil, fmt.Errorf("subagent: persist child metadata %q: %w", id, startErr)
 		}
+	}
+	// Publish the child only after seed restoration, durable header/seed
+	// publication, and the first lifecycle event have all succeeded. Publishing
+	// earlier leaves a runtime-index entry behind when any initialization step
+	// fails, allowing a later nested tool to resolve a ghost child.
+	if p.deps.BindSessionLog != nil {
+		p.deps.BindSessionLog(id, child.log)
 	}
 
 	go p.runChild(child, req, runCtx)
@@ -223,6 +404,59 @@ func (p *SpawnProvider) Start(ctx context.Context, req StartRequest) (*Run, erro
 		SendQuiet: p.sendQuietFunc(child),
 		Cancel:    p.cancelFunc(child),
 	}, nil
+}
+
+// syncNextID prevents a freshly-created provider from reusing an in-memory
+// child id that already exists after a process restart. The durable create
+// transaction remains authoritative for true cross-process races; this scan
+// closes the common cold-start collision without changing the lightweight
+// in-memory provider contract.
+func (p *SpawnProvider) syncNextID(ctx context.Context) error {
+	if p.deps.Store == nil {
+		return nil
+	}
+	metas, err := p.deps.Store.ListSessions(ctx)
+	if err != nil {
+		return fmt.Errorf("subagent: inspect existing child sessions: %w", err)
+	}
+	prefix := p.idPrefix
+	if prefix == "" {
+		prefix = "spawn"
+	}
+	maxID := 0
+	for _, meta := range metas {
+		if !strings.HasPrefix(meta.ID, prefix+"-") {
+			continue
+		}
+		if n := parseSpawnID(meta.ID); n > maxID {
+			maxID = n
+		}
+	}
+	p.mu.Lock()
+	if maxID > p.nextID {
+		p.nextID = maxID
+	}
+	p.mu.Unlock()
+	return nil
+}
+
+// completedTurnPrefix returns the contiguous parent history through the last
+// completed turn. The live parent may currently be inside a tool-call turn;
+// copying that open tail would make the child seed fail session replay and
+// would expose an in-flight operation to a new authority boundary.
+func completedTurnPrefix(events []session.Event) []session.Event {
+	lastEnd := -1
+	for i, event := range events {
+		if event.Type == session.EventTurnEnd {
+			lastEnd = i
+		}
+	}
+	if lastEnd < 0 {
+		return nil
+	}
+	prefix := make([]session.Event, lastEnd+1)
+	copy(prefix, events[:lastEnd+1])
+	return prefix
 }
 
 // Resume rehydrates a persisted spawn session and runs one new turn against
@@ -249,9 +483,18 @@ func (p *SpawnProvider) Resume(ctx context.Context, sessionID, message string, c
 		Label         string `json:"label"`
 		Depth         int    `json:"depth"`
 	}
+	maxTokens := 0
 	for _, ev := range events {
 		if ev.Type == session.EventSubagentStart && json.Unmarshal(ev.Data, &meta) == nil {
-			break
+			continue
+		}
+		if ev.Type == session.EventRequestHeader {
+			var header struct {
+				MaxTokens int `json:"maxTokens"`
+			}
+			if json.Unmarshal(ev.Data, &header) == nil && header.MaxTokens > 0 {
+				maxTokens = header.MaxTokens
+			}
 		}
 	}
 	if meta.ID != sessionID || meta.Provider != p.Name() {
@@ -268,6 +511,13 @@ func (p *SpawnProvider) Resume(ctx context.Context, sessionID, message string, c
 	child := &childRun{
 		id: sessionID, label: meta.Label, parent: meta.ParentSession, depth: meta.Depth,
 		log: log, cancel: cancel, done: make(chan struct{}), inbox: make(chan string, 16), continuable: continuable,
+		maxTokens: maxTokens,
+	}
+	// A resumed run must derive its result from the new turn only. Otherwise a
+	// no-content completion can accidentally return the previous persisted
+	// assistant answer (the same seed-boundary rule used by fork).
+	if len(events) > 0 {
+		child.seedSeq = events[len(events)-1].Seq
 	}
 	log.SetSink(func(ev session.Event) error {
 		return p.deps.Store.AppendEvents(context.Background(), sessionID, []session.Event{ev})
@@ -288,6 +538,9 @@ func (p *SpawnProvider) Resume(ctx context.Context, sessionID, message string, c
 		p.nextID = n
 	}
 	p.mu.Unlock()
+	if p.deps.BindSessionLog != nil {
+		p.deps.BindSessionLog(sessionID, log)
+	}
 	go p.runChild(child, StartRequest{Prompt: message, Continuable: continuable}, runCtx)
 	return &Run{ID: sessionID, Result: p.resultFunc(child), Send: p.sendFunc(child), SendQuiet: p.sendQuietFunc(child), Cancel: p.cancelFunc(child)}, nil
 }
@@ -314,13 +567,46 @@ func (p *SpawnProvider) runChild(child *childRun, req StartRequest, runCtx conte
 		}
 	}()
 	model := p.deps.Model
+	if p.deps.ModelFor != nil {
+		if resolved := p.deps.ModelFor(runCtx, child.parent); resolved != "" {
+			model = resolved
+		}
+	}
 	if req.Model != "" {
 		model = req.Model
 	}
+	childLLM := p.deps.LLM
+	if p.deps.LLMFor != nil {
+		if resolved := p.deps.LLMFor(runCtx, child.parent); resolved != nil {
+			childLLM = resolved
+		}
+	}
 	childTools := p.deps.Tools
-	if req.Continuable && p.deps.Report != nil && childTools != nil {
-		childTools = p.deps.Tools.Clone()
-		if err := childTools.Register(newChildReportTool(child.id, child.parent, p.deps.Report)); err != nil {
+	if p.deps.ToolsFor != nil {
+		if resolved := p.deps.ToolsFor(runCtx, child.parent); resolved != nil {
+			childTools = resolved
+		}
+	}
+	if len(req.ToolFilter) > 0 {
+		if childTools == nil {
+			p.settle(child, Result{StopReason: StopError})
+			return
+		}
+		filtered := childTools.Clone()
+		policy := filtered.Policy()
+		policy.Enabled = append([]string(nil), req.ToolFilter...)
+		filtered.SetPolicy(policy)
+		childTools = filtered
+	}
+	if req.Continuable && (p.deps.Report != nil || p.deps.ReportContext != nil) && childTools != nil {
+		childTools = childTools.Clone()
+		var reportTool childReportTool
+		if p.deps.ReportContext != nil {
+			reportTool = newChildReportToolWithContext(child.id, child.parent, p.deps.ReportContext)
+		} else {
+			reportTool = newChildReportTool(child.id, child.parent, p.deps.Report)
+		}
+		if err := childTools.Register(reportTool); err != nil {
 			p.settle(child, Result{StopReason: StopError})
 			return
 		}
@@ -348,12 +634,35 @@ func (p *SpawnProvider) runChild(child *childRun, req StartRequest, runCtx conte
 		}
 		childTools.Allow(structuredOutputToolName)
 	}
+	if childTools != nil {
+		childTools.SetOwner(tools.Owner{SessionID: child.id, NextSeq: child.log.NextSeq})
+	}
+	childPrompt := p.deps.Prompt
+	if p.deps.PromptFor != nil {
+		if resolved := p.deps.PromptFor(runCtx, child.parent); resolved != nil {
+			childPrompt = resolved
+		}
+	}
+	if childPrompt != nil && (req.Persona != "" || childTools != p.deps.Tools || req.Continuable || req.OutputSchema != nil) {
+		childPrompt = childPrompt.Clone()
+		if req.Persona != "" {
+			childPrompt.Add(prompt.Section{Name: "persona", Order: -100, Text: req.Persona})
+		}
+		childPrompt.SetTools(func() []llm.ToolSchema { return childTools.VisibleSpecs() })
+	}
 	lp := loop.New(loop.Config{
-		LLM:    p.deps.LLM,
-		Log:    child.log,
-		Tools:  childTools,
-		Prompt: p.deps.Prompt,
-		Model:  model,
+		LLM:              childLLM,
+		Log:              child.log,
+		Tools:            childTools,
+		ToolSpecs:        func() []llm.ToolSchema { return childTools.VisibleSpecs() },
+		Prompt:           childPrompt,
+		Model:            model,
+		MaxTokens:        child.maxTokens,
+		RuntimeSessionID: child.id,
+		RuntimeEmit: func(typ string, data any) error {
+			_, err := child.log.Append(typ, data)
+			return err
+		},
 	})
 	message := req.Prompt
 	for {
@@ -410,9 +719,19 @@ func (p *SpawnProvider) deriveResult(child *childRun, runErr error) Result {
 	case cancelled:
 		result.StopReason = StopAborted
 	case runErr != nil:
-		result.StopReason = StopError
+		if failure, ok := llm.FailureFacts(runErr); ok && (failure.Code == "REFUSAL" || failure.Code == "CONTENT_FILTER") {
+			// The parent loop keeps the structured failure for durable replay;
+			// the subagent surface retains its historical refusal bucket.
+			result.StopReason = StopRefusal
+		} else {
+			result.StopReason = StopError
+		}
 	default:
-		result.StopReason = mapStopReason(last.finishReason)
+		finishReason := last.finishReason
+		if finishReason == "" {
+			finishReason = last.turnReason
+		}
+		result.StopReason = mapStopReason(finishReason)
 	}
 	if result.StopReason == StopCompleted && structuredSet {
 		result.Structured = structured
@@ -560,7 +879,11 @@ func (p *SpawnProvider) ChildLog(id string) (*session.Log, bool) {
 func (p *SpawnProvider) Close() error {
 	p.mu.Lock()
 	if p.closed {
+		done := p.closeDone
 		p.mu.Unlock()
+		if done != nil {
+			<-done
+		}
 		return nil
 	}
 	p.closed = true
@@ -584,6 +907,7 @@ func (p *SpawnProvider) Close() error {
 	for _, c := range children {
 		<-c.done
 	}
+	close(p.closeDone)
 	return nil
 }
 
@@ -592,6 +916,7 @@ func (p *SpawnProvider) Close() error {
 type assistantEvent struct {
 	text         string
 	finishReason string
+	turnReason   string
 }
 
 // lastAssistantEvent scans a child session log for the most recent
@@ -614,14 +939,41 @@ func lastAssistantEventAfter(log *session.Log, afterSeq uint64) assistantEvent {
 		var d struct {
 			Text         string `json:"text"`
 			FinishReason string `json:"finishReason"`
+			Message      struct {
+				Content []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"message"`
 		}
 		if json.Unmarshal(e.Data, &d) != nil {
 			continue
 		}
-		if d.Text != "" {
-			ev.text = d.Text
+		text := d.Text
+		if text == "" {
+			for _, block := range d.Message.Content {
+				if block.Type == "text" {
+					text += block.Text
+				}
+			}
+		}
+		if text != "" {
+			ev.text = text
 		}
 		ev.finishReason = d.FinishReason
+	}
+	for _, e := range log.Events() {
+		if e.Seq <= afterSeq || e.Type != session.EventTurnEnd {
+			continue
+		}
+		var d struct {
+			Reason struct {
+				Kind string `json:"kind"`
+			} `json:"reason"`
+		}
+		if json.Unmarshal(e.Data, &d) == nil {
+			ev.turnReason = d.Reason.Kind
+		}
 	}
 	return ev
 }
@@ -632,7 +984,7 @@ func lastAssistantEventAfter(log *session.Log, afterSeq uint64) assistantEvent {
 // is completed.
 func mapStopReason(finishReason string) string {
 	switch finishReason {
-	case "length", "max_tokens":
+	case "length", "max_tokens", "max-tokens":
 		return StopMaxTokens
 	case "content_filter", "refusal":
 		return StopRefusal

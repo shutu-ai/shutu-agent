@@ -11,6 +11,7 @@ const startPromise = new Promise((resolve, reject) => {
 })
 const pending = new Map()
 let nextCallID = 0
+const fatalMarker = Symbol('workflow-fatal')
 
 function send(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`)
@@ -46,9 +47,17 @@ rl.on('close', () => {
 
 function fatalError(message, code) {
   const error = new Error(String(message))
+  // Do not use a forgeable `fatal: true` property as the combinator marker.
+  // Model-authored scripts can throw arbitrary objects; only errors created
+  // by this host-side closure are allowed to escape parallel/pipeline.
+  Object.defineProperty(error, fatalMarker, { value: true })
   error.fatal = true
   error.code = code
   return error
+}
+
+function isFatal(error) {
+  return Boolean(error && error[fatalMarker] === true)
 }
 
 function asString(value, name) {
@@ -125,6 +134,54 @@ function assertSchemaNode(value, path) {
 
 function jsonValue(value) {
   if (value === undefined) return null
+  const seen = new Set()
+  function validate(current, path) {
+    if (current === null || typeof current === 'boolean' || typeof current === 'string') return
+    if (typeof current === 'number') {
+      if (!Number.isFinite(current) || Object.is(current, -0)) {
+        throw fatalError(`${path} must be lossless JSON data`, 'RESULT_UNSERIALIZABLE')
+      }
+      return
+    }
+    if (typeof current !== 'object') {
+      throw fatalError(`${path} must be lossless JSON data`, 'RESULT_UNSERIALIZABLE')
+    }
+    if (seen.has(current)) throw fatalError(`${path} contains a cycle`, 'RESULT_UNSERIALIZABLE')
+    seen.add(current)
+    try {
+      if (Array.isArray(current)) {
+        const names = Object.getOwnPropertyNames(current)
+        if (Object.getOwnPropertySymbols(current).length > 0 || names.length !== current.length + 1 || !names.includes('length')) {
+          throw fatalError(`${path} must be a dense JSON array`, 'RESULT_UNSERIALIZABLE')
+        }
+        for (let index = 0; index < current.length; index++) {
+          if (!Object.prototype.hasOwnProperty.call(current, String(index))) {
+            throw fatalError(`${path} must be a dense JSON array`, 'RESULT_UNSERIALIZABLE')
+          }
+          const descriptor = Object.getOwnPropertyDescriptor(current, String(index))
+          if (!descriptor || !('value' in descriptor)) throw fatalError(`${path} contains an accessor`, 'RESULT_UNSERIALIZABLE')
+          validate(descriptor.value, `${path}[${index}]`)
+        }
+        return
+      }
+      if (Object.prototype.toString.call(current) !== '[object Object]') {
+        throw fatalError(`${path} must be a plain JSON object`, 'RESULT_UNSERIALIZABLE')
+      }
+      const prototype = Object.getPrototypeOf(current)
+      if (prototype !== null && (Object.prototype.toString.call(prototype) !== '[object Object]' || Object.getPrototypeOf(prototype) !== null)) {
+        throw fatalError(`${path} must be a plain JSON object`, 'RESULT_UNSERIALIZABLE')
+      }
+      if (Object.getOwnPropertySymbols(current).length > 0) throw fatalError(`${path} contains symbols`, 'RESULT_UNSERIALIZABLE')
+      for (const key of Object.getOwnPropertyNames(current)) {
+        const descriptor = Object.getOwnPropertyDescriptor(current, key)
+        if (!descriptor || !('value' in descriptor)) throw fatalError(`${path}.${key} contains an accessor`, 'RESULT_UNSERIALIZABLE')
+        validate(descriptor.value, `${path}.${key}`)
+      }
+    } finally {
+      seen.delete(current)
+    }
+  }
+  validate(value, 'workflow result')
   return JSON.parse(JSON.stringify(value))
 }
 
@@ -165,6 +222,11 @@ async function execute(request) {
     if (options === null || typeof options !== 'object' || Array.isArray(options)) {
       throw fatalError('agent() options must be an object', 'INVALID_ARGUMENT')
     }
+    try {
+      options = jsonValue(options)
+    } catch (error) {
+      throw fatalError(`agent() options must be plain JSON data: ${error instanceof Error ? error.message : String(error)}`, 'INVALID_ARGUMENT')
+    }
     for (const key of Object.keys(options)) {
       if (!agentOptionKeys.has(key)) {
         if (agentDeferredKeys.has(key)) throw fatalError(`agent() option "${key}" is deferred and not supported`, 'UNSUPPORTED_OPTION')
@@ -180,13 +242,16 @@ async function execute(request) {
     if (agentsStarted >= maxTotal) {
       throw fatalError(`workflow reached maxTotalAgents (${maxTotal})`, 'AGENT_CAP')
     }
-    await acquireSlot()
+    // Count before the first await. JavaScript runs this section atomically
+    // with respect to other agent() calls; counting after acquireSlot() would
+    // let concurrent callers all observe a stale total while queued.
     const seq = ++agentsStarted
+    await acquireSlot()
     const id = ++nextCallID
+    const firstLine = prompt.split('\n', 1)[0]
     const label = typeof options.label === 'string' && options.label.length > 0
-      ? options.label : prompt.slice(0, 80)
+      ? options.label : (firstLine.length <= 48 ? firstLine : `${firstLine.slice(0, 47)}…`)
     const phase = typeof options.phase === 'string' && options.phase.length > 0 ? options.phase : currentPhase
-    base('workflow/agent-start', { seq, label, ...(phase === undefined ? {} : { phase }) })
     try {
       const result = await new Promise((resolve, reject) => {
         pending.set(id, { resolve, reject })
@@ -203,15 +268,23 @@ async function execute(request) {
           },
         })
       })
+      // A member is durable only after its child Session is published. If the
+      // provider never returns a child id, the reference contract emits neither
+      // the member start nor its end.
+      const childID = result.child_id ?? ''
+      if (childID) {
+        base('workflow/agent-start', { seq, label, ...(phase === undefined ? {} : { phase }), child_id: childID })
+      }
       const outcome = result.stop_reason === 'completed' ? 'completed' : 'failed'
-      base('workflow/agent-end', { seq, label, ...(phase === undefined ? {} : { phase }), child_id: result.child_id ?? '', outcome })
+      if (childID) {
+        base('workflow/agent-end', { seq, label, ...(phase === undefined ? {} : { phase }), child_id: childID, outcome })
+      }
       if (result.stop_reason !== 'completed') return null
       if (options.schema !== undefined) {
         return result.structured !== undefined ? jsonValue(result.structured) : null
       }
       return result.structured !== undefined ? jsonValue(result.structured) : String(result.output ?? '')
     } catch (error) {
-      base('workflow/agent-end', { seq, label, ...(phase === undefined ? {} : { phase }), outcome: 'failed' })
       throw error
     } finally {
       releaseSlot()
@@ -224,7 +297,7 @@ async function execute(request) {
     return Promise.all(thunks.map(async (thunk, index) => {
       if (typeof thunk !== 'function') throw fatalError(`parallel() item ${index} is not a function`, 'INVALID_ARGUMENT')
       try { return await thunk() } catch (error) {
-        if (error?.fatal) throw error
+        if (isFatal(error)) throw error
         return null
       }
     }))
@@ -242,7 +315,7 @@ async function execute(request) {
         for (const stage of stages) value = await stage(value, item, index)
         return value
       } catch (error) {
-        if (error?.fatal) throw error
+        if (isFatal(error)) throw error
         return null
       }
     }))
@@ -257,8 +330,17 @@ async function execute(request) {
     base('workflow/log', { message: asString(message, 'log') })
   }
 
-  base('workflow/start')
-  const sandbox = { args: request.args, agent, parallel, pipeline, phase, log }
+  // The host publishes its own OS PID so lifecycle tests can terminate the
+  // worker deterministically; model scripts deliberately do not get `process`.
+  const sandbox = {
+    args: request.args,
+    workerPid: request.workerPid,
+    agent,
+    parallel,
+    pipeline,
+    phase,
+    log,
+  }
   const context = vm.createContext(sandbox)
   const source = `(async () => {\n${request.script}\n})()`
   try {
@@ -267,12 +349,10 @@ async function execute(request) {
       timeout: syncTimeout,
     })
     const result = { value: jsonValue(value), stop_reason: 'completed', agents_started: agentsStarted }
-    base('workflow/end', { stop_reason: result.stop_reason, agents_started: agentsStarted })
     return result
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     const result = { value: null, stop_reason: 'error', error: message, agents_started: agentsStarted }
-    base('workflow/end', { stop_reason: result.stop_reason, error: message, agents_started: agentsStarted })
     return result
   }
 }

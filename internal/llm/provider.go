@@ -13,6 +13,33 @@ import (
 	"sync"
 )
 
+// ErrProviderUnavailable is the stable route-admission class used when a
+// registered provider fails its local availability check. Callers may add
+// route details with %w, but must not require parsing the message text.
+var ErrProviderUnavailable = errors.New("llm provider is unavailable")
+
+// ErrCapabilityUnavailable is the stable negative class for an explicit model
+// feature request that the selected model's catalog declaration does not own.
+var ErrCapabilityUnavailable = errors.New("model capability is unavailable")
+
+// CredentialProvider resolves a provider credential for one operation. The
+// composition root may rotate credentials without rebuilding every consumer;
+// adapters must snapshot the returned value before constructing the request
+// and must never persist it in durable events or diagnostics.
+type CredentialProvider func(context.Context) (string, error)
+
+// CredentialLease keeps a resolved credential alive for the lifetime of one
+// provider operation. Revocation blocks new leases, while an in-flight stream
+// may finish before Release wipes the old value.
+type CredentialLease interface {
+	Value() string
+	Release()
+}
+
+// CredentialLeaseProvider is the release-aware credential seam. The older
+// CredentialProvider remains supported for standalone adapters and embedders.
+type CredentialLeaseProvider func(context.Context) (CredentialLease, error)
+
 // Provider is an LLM backend (D2). Consumers (loop/composition root) depend
 // only on this interface, never on a concrete provider.
 type Provider interface {
@@ -25,6 +52,39 @@ type Provider interface {
 	// Stream starts a chat request and returns an incremental reader honoring
 	// ctx cancellation (D6).
 	Stream(ctx context.Context, req ChatRequest) (StreamReader, error)
+}
+
+// RetryPolicyProvider is an optional provider-owned recovery declaration.
+// The loop/retry layer captures this at route selection time; transport
+// adapters must not silently replace it with a different policy.
+type RetryPolicyProvider interface {
+	RetryPolicy() RetryPolicy
+}
+
+// RetryPolicy is the provider-neutral shape of the reference route policy.
+// Durations are represented in milliseconds at the boundary so the value is
+// stable in durable retry events and JSON configuration.
+type RetryPolicy struct {
+	Mode           string
+	MaxRetries     int
+	RetryableCodes []string
+	InitialDelayMS int64
+	MaxDelayMS     int64
+	JitterRatio    float64
+}
+
+// ImageCapability is an optional provider capability. A transport must not
+// advertise or admit image input merely because a global config flag is set;
+// it must also verify the exact selected provider route exposes this marker.
+type ImageCapability interface {
+	SupportsImages() bool
+}
+
+// Closeable is an optional provider lifecycle seam. Providers that retain
+// credential material implement it to wipe that material when their
+// generation is retired or the application shuts down.
+type Closeable interface {
+	Close() error
 }
 
 // Registry is the multi-provider registry (D2). Providers are registered by
@@ -82,4 +142,23 @@ func (r *Registry) List() []Provider {
 	out := make([]Provider, len(r.order))
 	copy(out, r.order)
 	return out
+}
+
+// Close disposes every provider that exposes a lifecycle. Providers are
+// closed after taking a stable snapshot so a provider's disposer never runs
+// while the registry lock is held.
+func (r *Registry) Close() error {
+	if r == nil {
+		return nil
+	}
+	providers := r.List()
+	var first error
+	for _, provider := range providers {
+		if closeable, ok := provider.(Closeable); ok {
+			if err := closeable.Close(); err != nil && first == nil {
+				first = err
+			}
+		}
+	}
+	return first
 }

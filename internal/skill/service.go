@@ -156,7 +156,7 @@ var (
 
 // NewRegistry returns an empty skill Registry.
 func NewRegistry() Registry {
-	return &registry{}
+	return &registry{closeDone: make(chan struct{})}
 }
 
 // indexedProvider tracks one registered provider and its registration order.
@@ -189,6 +189,7 @@ type registry struct {
 	providers []*indexedProvider
 	nextOrder int
 	closed    bool
+	closeDone chan struct{}
 }
 
 // closer is the optional extension a Provider implements to release its
@@ -280,7 +281,11 @@ func (r *registry) Get(ctx context.Context, name string) (*Definition, error) {
 func (r *registry) Close() error {
 	r.mu.Lock()
 	if r.closed {
+		done := r.closeDone
 		r.mu.Unlock()
+		if done != nil {
+			<-done
+		}
 		return nil
 	}
 	r.closed = true
@@ -288,14 +293,16 @@ func (r *registry) Close() error {
 	copy(ps, r.providers)
 	r.mu.Unlock()
 
+	var first error
 	for _, ip := range ps {
 		if c, ok := ip.p.(closer); ok {
-			if err := c.Close(); err != nil {
-				return err
+			if err := c.Close(); err != nil && first == nil {
+				first = err
 			}
 		}
 	}
-	return nil
+	close(r.closeDone)
+	return first
 }
 
 // snapshotProviders returns a copy of the provider list under lock, or nil

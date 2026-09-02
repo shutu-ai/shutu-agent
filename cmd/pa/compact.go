@@ -14,8 +14,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"os"
 	"sort"
 	"strconv"
 
@@ -178,20 +178,115 @@ func estimateSurfaceEvent(event session.Event) int {
 // injector, manual through the /compact command. The engine holds no closable
 // resources (it shares the caller-owned LLM), so there is no deferred Close.
 func (a *app) registerCompaction() error {
-	if !config.Enabled(a.cfg.Compaction.Enabled) {
+	cfg := a.providerConfigSnapshot()
+	if !config.Enabled(cfg.Compaction.Enabled) {
 		return nil
 	}
+	a.compactionMu.Lock()
+	a.compactionEngines = nil
+	a.compactionMu.Unlock()
 	a.compaction = compaction.NewBasic(compaction.BasicOpts{
 		LLM:                   a.currentLLM(),
-		Model:                 llmProviderModel(a.cfg, a.cfg.LLM.Provider),
-		TokenThreshold:        a.cfg.Compaction.TokenThreshold,
-		RetainTurns:           a.cfg.Compaction.RetainTurns,
-		RetainTokens:          a.cfg.Compaction.RetainTokens,
-		SummaryInputTokens:    a.cfg.Compaction.SummaryInputTokens,
+		Meter:                 a.compactionSurfaceMeter(a.currentID),
+		Model:                 llmProviderModel(cfg, cfg.LLM.Provider),
+		TokenThreshold:        cfg.Compaction.TokenThreshold,
+		RetainTurns:           cfg.Compaction.RetainTurns,
+		RetainTokens:          cfg.Compaction.RetainTokens,
+		SummaryInputTokens:    cfg.Compaction.SummaryInputTokens,
 		FrameSummary:          true,
 		RequireSmallerSummary: true,
 	})
+	a.compactionMu.Lock()
+	if a.compactionEngines == nil {
+		a.compactionEngines = make(map[string]compaction.Engine)
+	}
+	a.compactionMu.Unlock()
 	return nil
+}
+
+// compactionEngineFor returns the compaction projection owned by a runtime
+// session. The legacy engine remains the fallback for direct CLI and tests
+// without a runtime session. BasicEngine is deliberately cheap and has no
+// external resources, so each session gets its own provider/model selection
+// and compaction counter rather than sharing application-global state.
+func (a *app) compactionEngineFor(ctx context.Context, sessionID string) compaction.Engine {
+	if a.compaction == nil {
+		return nil
+	}
+	if sessionID == "" || (a.agentRegistry == nil && sessionID == a.currentID) {
+		return a.compaction
+	}
+	a.compactionMu.Lock()
+	if existing := a.compactionEngines[sessionID]; existing != nil {
+		a.compactionMu.Unlock()
+		return existing
+	}
+	a.compactionMu.Unlock()
+	provider, model, err := a.sessionProviderModelStrict(sessionID)
+	if err != nil {
+		// Keep compaction fail-closed on durable session-config failures. An
+		// unavailable adapter causes the compaction request to report its error;
+		// it must not summarize with another session's global provider.
+		provider, model = "__session_config_unavailable__", ""
+	}
+	cfg := a.providerConfigSnapshot()
+	engine := compaction.NewBasic(compaction.BasicOpts{
+		LLM: a.llmFor(provider), Model: model,
+		Meter:              a.compactionSurfaceMeter(sessionID),
+		TokenThreshold:     cfg.Compaction.TokenThreshold,
+		RetainTurns:        cfg.Compaction.RetainTurns,
+		RetainTokens:       cfg.Compaction.RetainTokens,
+		SummaryInputTokens: cfg.Compaction.SummaryInputTokens,
+		FrameSummary:       true, RequireSmallerSummary: true,
+	})
+	a.compactionMu.Lock()
+	if existing := a.compactionEngines[sessionID]; existing != nil {
+		a.compactionMu.Unlock()
+		return existing
+	}
+	if a.compactionEngines == nil {
+		a.compactionEngines = make(map[string]compaction.Engine)
+	}
+	a.compactionEngines[sessionID] = engine
+	a.compactionMu.Unlock()
+	return engine
+}
+
+// compactionSurfaceMeter adapts the application-wide usage meter to the
+// compaction package's provider-neutral seam. Both pressure admission and
+// retainTokens selection now consume the same replacement-folded node prices
+// that telemetry exposes; a nil meter deliberately leaves standalone/test
+// engines on their injected estimator path.
+func (a *app) compactionSurfaceMeter(sessionID string) compaction.SurfaceMeter {
+	if a.usageMeter == nil {
+		return nil
+	}
+	return func(value compaction.SessionLike) compaction.SurfaceMeasurement {
+		log, ok := value.(*session.Log)
+		if !ok || log == nil {
+			return compaction.SurfaceMeasurement{TotalTokens: -1}
+		}
+		measurement := a.usageMeter.Measure(sessionID, log, nil)
+		nodes := make([]compaction.SurfaceNode, 0, len(measurement.Nodes))
+		for _, node := range measurement.Nodes {
+			nodes = append(nodes, compaction.SurfaceNode{Seq: node.Seq, Tokens: node.Tokens})
+		}
+		return compaction.SurfaceMeasurement{
+			LogRevision:             measurement.LogRevision,
+			BaselineEstimatedTokens: measurement.BaselineEstimatedTokens,
+			BaselineUsageTokens:     measurement.BaselineUsageTokens,
+			SurfaceDeltaTokens:      measurement.SurfaceDeltaTokens,
+			TotalTokens:             measurement.TotalTokens,
+			SurfaceTokens:           measurement.SurfaceTokens,
+			Nodes:                   nodes,
+		}
+	}
+}
+
+func (a *app) closeCompactionEngines() {
+	a.compactionMu.Lock()
+	a.compactionEngines = nil
+	a.compactionMu.Unlock()
 }
 
 // preStepInjectors returns the loop's registered pre-step injectors for the
@@ -202,31 +297,53 @@ func (a *app) registerCompaction() error {
 // after compaction as required (dispatch-m5c-2 §4 / dispatch-m5d-2 §4). The
 // turn/step structure is unchanged (D4).
 func (a *app) preStepInjectors() []loop.PreStepInjector {
+	return a.preStepInjectorsFor(a.log)
+}
+
+func (a *app) preStepInjectorsFor(log *session.Log) []loop.PreStepInjector {
+	return a.preStepInjectorsForSession(a.currentID, log)
+}
+
+func (a *app) preStepInjectorsForSession(sessionID string, log *session.Log) []loop.PreStepInjector {
 	var injectors []loop.PreStepInjector
 	if a.compaction != nil {
-		injectors = append(injectors, a.compactionInjector(defaultCompactionEstimator))
+		est := defaultCompactionEstimator
+		if a.usageMeter != nil && sessionID != "" {
+			// The pressure gate runs before the next request is assembled. The
+			// replay-aware meter still knows the durable header and the latest
+			// provider usage anchor, so use its full total rather than only the
+			// surface. This keeps the admission gate and compaction engine on the
+			// same replacement-aware accounting source.
+			est = func(current *session.Log) int {
+				return a.usageMeter.Measure(sessionID, current, nil).TotalTokens
+			}
+		}
+		injectors = append(injectors, a.compactionInjectorFor(sessionID, est, log))
 	}
 	// M5d-2: the "skill" catalog injector is appended after compaction so the
 	// bounded skill catalog (re-read each turn, no file watching) reaches the
 	// model's first request whenever skill is enabled (D10-gated here and by
 	// registerSkills).
 	if a.skills != nil {
-		injectors = append(injectors, a.skillCatalogInjector())
+		injectors = append(injectors, a.skillCatalogInjectorFor(log))
 	}
 	// Human skill references are resolved after the catalog so the first request
 	// carries both discovery and the selected <skill_content> body. This keeps
 	// the original /skill-name text in history while matching dsh's host
 	// pre-step behavior.
 	if a.skills != nil {
-		injectors = append(injectors, a.skillInvocationInjector())
+		injectors = append(injectors, a.skillInvocationInjectorFor(log))
 	}
 	// M6a-2: the "schedule" injector is appended after skill (ADR 决策 M6a /
 	// dispatch-m6a-2 §4) so the serial schedule-clock advance — turning due
 	// triggers into schedule/fire events and fired jobs — runs after the skill
 	// catalog on every turn. It contributes no context message (schedule/fire
 	// is log-only); the ordering is recall → compaction → skill → skill-invocation → schedule.
-	if a.schedules != nil {
-		injectors = append(injectors, a.scheduleInjector())
+	// Durable scheduling has no legacy a.schedules engine: each addressed
+	// session lazily owns a scheduler in goalSchedulers. Keep the injector on
+	// Agent-owned child sessions as well as the old in-memory path.
+	if a.schedules != nil || a.goalScheduler != nil || a.scheduleWake != nil {
+		injectors = append(injectors, a.scheduleInjectorFor(log))
 	}
 	return injectors
 }
@@ -239,53 +356,60 @@ func (a *app) preStepInjectors() []loop.PreStepInjector {
 // compaction/end observation events (D3). The injected context is a short
 // notice, not the summary body — the folded history already carries the summary
 // marker (M5c-1a). Every append happens here on the serial pre-step path (D5);
-// a failing compaction is surfaced as a stderr warning and contributes no
-// context (fail-open).
+// durable lifecycle failure stops the model request instead of allowing the
+// in-memory compaction result to diverge from the session transcript.
 func (a *app) compactionInjector(est compactionEstimator) loop.PreStepInjector {
+	return a.compactionInjectorFor(a.currentID, est, a.log)
+}
+
+func (a *app) compactionInjectorFor(sessionID string, est compactionEstimator, log *session.Log) loop.PreStepInjector {
 	return loop.PreStepInjector{
-		Name:        "compaction",
-		Inject:      a.compactionPreStep(est),
-		OncePerTurn: true,
+		Name:            "compaction",
+		Inject:          a.compactionPreStepFor(sessionID, est, log),
+		InjectWithError: a.compactionPreStepForWithError(sessionID, est, log),
+		OncePerTurn:     true,
 	}
 }
 
 func (a *app) compactionPreStep(est compactionEstimator) func(context.Context, string) []llm.Message {
+	return a.compactionPreStepFor(a.currentID, est, a.log)
+}
+
+func (a *app) compactionPreStepFor(sessionID string, est compactionEstimator, log *session.Log) func(context.Context, string) []llm.Message {
 	return func(ctx context.Context, userText string) []llm.Message {
-		if a.compaction == nil {
-			return nil
+		messages, _ := a.compactionPreStepForWithError(sessionID, est, log)(ctx, userText)
+		return messages
+	}
+}
+
+func (a *app) compactionPreStepForWithError(sessionID string, est compactionEstimator, log *session.Log) func(context.Context, string) ([]llm.Message, error) {
+	return func(ctx context.Context, userText string) ([]llm.Message, error) {
+		engine := a.compactionEngineFor(ctx, sessionID)
+		if engine == nil {
+			return nil, nil
 		}
-		over, ok := a.overPressureContext(ctx, est)
+		over, ok := a.overPressureContextFor(ctx, est, log)
 		if !ok || !over {
-			return nil
+			return nil, nil
 		}
-		// dsh gives pressure compaction one follow-up attempt when the first
-		// summary did not bring the surface below the pressure threshold.
-		var res *compaction.Result
-		for attempt := 0; attempt < 2; attempt++ {
-			over, ok = a.overPressureContext(ctx, est)
-			if !ok || !over {
-				break
-			}
-			result, err := a.compactAndLog(ctx, "surface token estimate exceeded threshold", "pressure",
-				func() (*compaction.Result, error) {
-					// The pressure gate has already derived the surface above. Use the
-					// unconditional path so BasicEngine does not derive the same
-					// 100k-event history a second time before it can observe cancel.
-					return a.compaction.CompactNow(ctx, a.log)
-				})
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "[compaction failed open]", err)
-				return nil
-			}
-			if result == nil {
-				break
-			}
-			res = result
+		// A pressure pre-step owns one compaction attempt. Retrying here without
+		// observing a new replacement generation can repeatedly summarize the
+		// retained tail (and, with a pending user claim, create an extra model
+		// request). Canonical request-error recovery is the separate retry seam.
+		res, err := a.compactAndLogOn(ctx, log, "surface token estimate exceeded threshold", "pressure",
+			func() (*compaction.Result, error) {
+				// The pressure gate has already derived the surface above. Use the
+				// unconditional path so BasicEngine does not derive the same
+				// 100k-event history a second time before it can observe cancel.
+				return engine.CompactNow(ctx, log)
+			})
+		if err != nil {
+			return nil, err
 		}
 		if res == nil {
-			return nil
+			return nil, nil
 		}
-		return []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text(compactedNotice)}}}
+		return []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text(compactedNotice)}}}, nil
 	}
 }
 
@@ -293,12 +417,20 @@ func (a *app) compactionPreStep(est compactionEstimator) func(context.Context, s
 // provider context-window rejection. It runs on the loop's serial step path,
 // so the retry observes the newly appended checkpoint marker immediately.
 func (a *app) recoverContextOverflow(ctx context.Context) bool {
-	if a.compaction == nil || a.log == nil {
+	return a.recoverContextOverflowFor(ctx, a.log)
+}
+
+func (a *app) recoverContextOverflowFor(ctx context.Context, log *session.Log) bool {
+	if log == nil {
 		return false
 	}
-	res, err := a.compactAndLog(ctx, "provider rejected the request because the context window is full", "context-overflow",
+	engine := a.compactionEngineFor(ctx, a.runtimeSessionID(ctx))
+	if engine == nil {
+		return false
+	}
+	res, err := a.compactAndLogOn(ctx, log, "provider rejected the request because the context window is full", "context-overflow",
 		func() (*compaction.Result, error) {
-			return a.compaction.CompactIfNeeded(ctx, a.log, compaction.TriggerContextOverflow)
+			return engine.CompactIfNeeded(ctx, log, compaction.TriggerContextOverflow)
 		})
 	return err == nil && res != nil
 }
@@ -323,11 +455,15 @@ func (a *app) overPressure(est compactionEstimator) bool {
 // only reads a snapshot, so letting it finish in the background is safe and the
 // buffered result prevents a goroutine leak once it returns.
 func (a *app) overPressureContext(ctx context.Context, est compactionEstimator) (bool, bool) {
+	return a.overPressureContextFor(ctx, est, a.log)
+}
+
+func (a *app) overPressureContextFor(ctx context.Context, est compactionEstimator, log *session.Log) (bool, bool) {
 	if err := ctx.Err(); err != nil {
 		return false, false
 	}
 	done := make(chan int, 1)
-	go func() { done <- est(a.log) }()
+	go func() { done <- est(log) }()
 	select {
 	case <-ctx.Done():
 		return false, false
@@ -347,28 +483,35 @@ func (a *app) overPressureContext(ctx context.Context, est compactionEstimator) 
 // (bounded summary, shadowed range, tokens saved). A nil result (nothing
 // foldable) or an engine error leaves only the start — the ADR's "orphan start
 // reveals an interrupted/no-op attempt" signal. Event append failures are
-// surfaced as stderr warnings and never block the attempt (fail-open, same as
-// the job/subagent onEvent sinks).
+// returned to the caller so no model request is issued against an uncommitted
+// lifecycle fact.
 func (a *app) compactAndLog(ctx context.Context, reason, trigger string, run func() (*compaction.Result, error)) (*compaction.Result, error) {
-	if _, err := a.log.Append(session.EventCompactionStart, session.NewCompactionStart(reason, trigger)); err != nil {
-		fmt.Fprintln(os.Stderr, "pa: compaction/start event:", err)
+	return a.compactAndLogOn(ctx, a.log, reason, trigger, run)
+}
+
+func (a *app) compactAndLogOn(ctx context.Context, log *session.Log, reason, trigger string, run func() (*compaction.Result, error)) (*compaction.Result, error) {
+	if log == nil {
+		return nil, errors.New("compaction: session log is unavailable")
+	}
+	if _, err := log.Append(session.EventCompactionStart, session.NewCompactionStart(reason, trigger)); err != nil {
+		return nil, fmt.Errorf("compaction/start: persist event: %w", err)
 	}
 	res, err := run()
 	if err != nil {
-		if _, appendErr := a.log.Append(session.EventCompactionEnd, session.NewCompactionEndError("", err.Error())); appendErr != nil {
-			fmt.Fprintln(os.Stderr, "pa: compaction/end error event:", appendErr)
+		if _, appendErr := log.Append(session.EventCompactionEnd, session.NewCompactionEndError("", err.Error())); appendErr != nil {
+			return res, errors.Join(err, fmt.Errorf("compaction/end error: persist event: %w", appendErr))
 		}
 		return res, err
 	}
 	if res == nil {
 		return res, err
 	}
-	if _, err := a.log.Append(session.EventCompactionSummary,
+	if _, err := log.Append(session.EventCompactionSummary,
 		session.NewCompactionSummaryWithStats(res.CompactionID, res.Summary, res.ShadowedSeqs, res.ShadowedTokens, trigger)); err != nil {
-		fmt.Fprintln(os.Stderr, "pa: compaction/summary event:", err)
+		return res, fmt.Errorf("compaction/summary: persist event: %w", err)
 	}
-	if _, err := a.log.Append(session.EventCompactionEnd, session.NewCompactionEnd(res.CompactionID, res.ShadowedRange, res.ShadowedTokens)); err != nil {
-		fmt.Fprintln(os.Stderr, "pa: compaction/end event:", err)
+	if _, err := log.Append(session.EventCompactionEnd, session.NewCompactionEnd(res.CompactionID, res.ShadowedRange, res.ShadowedTokens)); err != nil {
+		return res, fmt.Errorf("compaction/end: persist event: %w", err)
 	}
 	return res, nil
 }
@@ -384,6 +527,33 @@ func (a *app) compactCommand(ctx context.Context, args []string) error {
 		fmt.Println("compaction: disabled (compaction.enabled=false)")
 		return nil
 	}
+	if a.agentRegistry != nil {
+		sessionID := a.currentID
+		handle, err := a.sessionAgent(sessionID)
+		if err != nil {
+			return err
+		}
+		var res *compaction.Result
+		err = handle.RunMaintenance(func(taskCtx context.Context) error {
+			log, logErr := a.sessionLogForAgent(taskCtx, sessionID)
+			if logErr != nil {
+				return logErr
+			}
+			engine := a.compactionEngineFor(taskCtx, sessionID)
+			if engine == nil {
+				return nil
+			}
+			return a.compactSession(taskCtx, engine, log, args, &res)
+		})
+		if err != nil {
+			return err
+		}
+		return printCompactionResult(res)
+	}
+	return a.compactLegacy(ctx, args)
+}
+
+func (a *app) compactLegacy(ctx context.Context, args []string) error {
 	var res *compaction.Result
 	var err error
 	switch {
@@ -404,6 +574,38 @@ func (a *app) compactCommand(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if res == nil {
+		fmt.Println("compaction: nothing to compact")
+		return nil
+	}
+	return printCompactionResult(res)
+}
+
+func (a *app) compactSession(ctx context.Context, engine compaction.Engine, log *session.Log, args []string, out **compaction.Result) error {
+	var res *compaction.Result
+	var err error
+	switch {
+	case len(args) == 3 && args[0] == "region":
+		start, e1 := strconv.ParseInt(args[1], 10, 64)
+		end, e2 := strconv.ParseInt(args[2], 10, 64)
+		if e1 != nil || e2 != nil {
+			return fmt.Errorf("usage: /compact region <start> <end> (integer event seqs)")
+		}
+		res, err = a.compactAndLogOn(ctx, log, "manual /compact region command", "manual",
+			func() (*compaction.Result, error) { return engine.CompactRegion(ctx, log, start, end) })
+	case len(args) != 0:
+		return fmt.Errorf("usage: /compact or /compact region <start> <end>")
+	default:
+		res, err = a.compactAndLogOn(ctx, log, "manual /compact command", "manual",
+			func() (*compaction.Result, error) { return engine.CompactNow(ctx, log) })
+	}
+	if out != nil {
+		*out = res
+	}
+	return err
+}
+
+func printCompactionResult(res *compaction.Result) error {
 	if res == nil {
 		fmt.Println("compaction: nothing to compact")
 		return nil

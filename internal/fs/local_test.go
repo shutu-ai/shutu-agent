@@ -233,3 +233,39 @@ func TestLocalFSRootDefaultsToWorkingDirectory(t *testing.T) {
 		t.Fatalf("Root = %q, want the working directory %q", fsys.Root(), filepath.Clean(wd))
 	}
 }
+
+func TestLocalFSRejectsSymlinkEscapes(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	outsideFile := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(outsideFile, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "secret.txt")
+	if err := os.Symlink(outsideFile, link); err != nil {
+		t.Skipf("symlink unavailable in this environment: %v", err)
+	}
+	fsys := NewLocalFS(root)
+	ctx := context.Background()
+	if _, err := fsys.Read(ctx, "secret.txt", 0); !errors.Is(err, ErrPathOutsideRoot) {
+		t.Fatalf("Read through outside symlink error = %v, want ErrPathOutsideRoot", err)
+	}
+	if err := fsys.Write(ctx, "secret.txt", "overwrite"); !errors.Is(err, ErrPathOutsideRoot) {
+		t.Fatalf("Write through outside symlink error = %v, want ErrPathOutsideRoot", err)
+	}
+
+	outsideDir := filepath.Join(outside, "new-dir")
+	if err := os.MkdirAll(outsideDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkDir := filepath.Join(root, "linked-dir")
+	if err := os.Symlink(outsideDir, linkDir); err != nil {
+		t.Skipf("directory symlink unavailable in this environment: %v", err)
+	}
+	if err := fsys.Write(ctx, filepath.Join("linked-dir", "created.txt"), "escape"); !errors.Is(err, ErrPathOutsideRoot) {
+		t.Fatalf("Write below outside symlink error = %v, want ErrPathOutsideRoot", err)
+	}
+	if _, err := os.Stat(filepath.Join(outsideDir, "created.txt")); !os.IsNotExist(err) {
+		t.Fatalf("outside file was created through symlink: %v", err)
+	}
+}

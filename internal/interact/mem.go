@@ -54,6 +54,27 @@ func (m *memProvider) List(ctx context.Context) ([]Request, error) {
 	return out, nil
 }
 
+// ListForSession is the provider-side ownership filter. Keep it under the
+// provider mutex so a scoped answerer observes one consistent snapshot.
+func (m *memProvider) ListForSession(ctx context.Context, sessionID string) ([]Request, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return nil, ErrProviderClosed
+	}
+	out := make([]Request, 0)
+	for _, r := range m.requests {
+		if r.SessionID == sessionID {
+			out = append(out, cloneRequest(r))
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
+}
+
 // Create stores r under a fresh provider-issued id and returns the stored copy.
 func (m *memProvider) Create(ctx context.Context, r Request) (Request, error) {
 	if err := ctx.Err(); err != nil {
@@ -143,6 +164,10 @@ func cloneRequest(r Request) Request {
 	if r.ResolvedAt != nil {
 		t := *r.ResolvedAt
 		r.ResolvedAt = &t
+	}
+	if r.ExpiresAt != nil {
+		t := *r.ExpiresAt
+		r.ExpiresAt = &t
 	}
 	return r
 }

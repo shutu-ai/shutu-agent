@@ -1,0 +1,712 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "InitializeParams": {
+      "type": "object",
+      "properties": {
+        "cwd": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "maxTokens": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "cwd",
+        "provider",
+        "model"
+      ]
+    },
+    "InitializeResult": {
+      "type": "object",
+      "properties": {
+        "serverInfo": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "version": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "version"
+          ]
+        }
+      },
+      "required": [
+        "serverInfo"
+      ]
+    },
+    "ContentBlock": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/TextBlock"
+        },
+        {
+          "$ref": "#/$defs/ReasoningBlock"
+        },
+        {
+          "$ref": "#/$defs/ImageBlock"
+        },
+        {
+          "$ref": "#/$defs/ToolCallBlock"
+        },
+        {
+          "$ref": "#/$defs/ToolResultBlock"
+        },
+        {
+          "type": "object",
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "type": "string"
+            }
+          },
+          "not": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "enum": [
+                  "text",
+                  "reasoning",
+                  "image",
+                  "tool-call",
+                  "tool-result"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "TextBlock": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "text"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "text"
+      ]
+    },
+    "ReasoningBlock": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "reasoning"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "text"
+      ]
+    },
+    "ImageBlock": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "image"
+        },
+        "attachment": {
+          "$ref": "#/$defs/ImageAttachmentRef"
+        }
+      },
+      "required": [
+        "type",
+        "attachment"
+      ]
+    },
+    "ImageAttachmentRef": {
+      "type": "object",
+      "properties": {
+        "attachmentId": {
+          "$ref": "#/$defs/AttachmentId"
+        },
+        "mediaType": {
+          "$ref": "#/$defs/ImageMediaType"
+        },
+        "bytes": {
+          "type": "number"
+        },
+        "width": {
+          "type": "number"
+        },
+        "height": {
+          "type": "number"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "attachmentId",
+        "mediaType",
+        "bytes",
+        "width",
+        "height"
+      ]
+    },
+    "AttachmentId": {
+      "type": "string"
+    },
+    "ImageMediaType": {
+      "oneOf": [
+        {
+          "const": "image/png"
+        },
+        {
+          "const": "image/jpeg"
+        },
+        {
+          "const": "image/webp"
+        },
+        {
+          "const": "image/gif"
+        }
+      ]
+    },
+    "ToolCallBlock": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "tool-call"
+        },
+        "id": {
+          "$ref": "#/$defs/CallId"
+        },
+        "name": {
+          "type": "string"
+        },
+        "arguments": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "name",
+        "arguments"
+      ]
+    },
+    "CallId": {
+      "type": "string"
+    },
+    "ToolResultBlock": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "const": "tool-result"
+        },
+        "toolCallId": {
+          "$ref": "#/$defs/CallId"
+        },
+        "content": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentBlock"
+          }
+        },
+        "isError": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "type",
+        "toolCallId",
+        "content"
+      ]
+    },
+    "SessionPromptParams": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        },
+        "contentBlocks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentBlock"
+          }
+        }
+      },
+      "required": [
+        "sessionId",
+        "contentBlocks"
+      ]
+    },
+    "SessionPromptResult": {
+      "type": "object",
+      "properties": {
+        "messageId": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "messageId"
+      ]
+    },
+    "SdkRunStatus": {
+      "oneOf": [
+        {
+          "const": "ok"
+        },
+        {
+          "const": "error"
+        }
+      ]
+    },
+    "SessionEvent": {
+      "type": "object",
+      "required": [
+        "type",
+        "seq",
+        "time"
+      ],
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "time": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "data": true,
+        "ignorable": {
+          "const": true
+        },
+        "sourceEventSeqs": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "surfaceOp": {
+          "oneOf": [
+            {
+              "const": "append"
+            },
+            {
+              "type": "object",
+              "required": [
+                "op",
+                "start",
+                "end"
+              ],
+              "properties": {
+                "op": {
+                  "const": "replace"
+                },
+                "start": {
+                  "type": "number"
+                },
+                "end": {
+                  "type": "number"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "SessionEventNotification": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        },
+        "event": {
+          "$ref": "#/$defs/SessionEvent"
+        }
+      },
+      "required": [
+        "sessionId",
+        "event"
+      ]
+    },
+    "SessionStatusNotification": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string"
+        },
+        "status": {
+          "oneOf": [
+            {
+              "const": "idle"
+            },
+            {
+              "const": "running"
+            }
+          ]
+        }
+      },
+      "required": [
+        "sessionId",
+        "status"
+      ]
+    },
+    "SubagentStartedNotification": {
+      "type": "object",
+      "properties": {
+        "parentSessionId": {
+          "type": "string"
+        },
+        "childSessionId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "parentSessionId",
+        "childSessionId"
+      ]
+    },
+    "SubagentStopReason": {
+      "oneOf": [
+        {
+          "const": "error"
+        },
+        {
+          "const": "completed"
+        },
+        {
+          "const": "aborted"
+        },
+        {
+          "const": "max-tokens"
+        },
+        {
+          "const": "refusal"
+        }
+      ]
+    },
+    "SubagentFinishedNotification": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string"
+        },
+        "agentId": {
+          "type": "string"
+        },
+        "parentSessionId": {
+          "type": "string"
+        },
+        "childSessionId": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/SdkRunStatus"
+        },
+        "stopReason": {
+          "$ref": "#/$defs/SubagentStopReason"
+        },
+        "lastAssistantMessage": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ContentBlock"
+          }
+        }
+      },
+      "required": [
+        "provider",
+        "agentId",
+        "parentSessionId",
+        "childSessionId",
+        "status",
+        "stopReason"
+      ]
+    },
+    "notification.session.event": {
+      "type": "object",
+      "required": [
+        "jsonrpc",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "method": {
+          "const": "session.event"
+        },
+        "params": {
+          "$ref": "#/$defs/SessionEventNotification"
+        }
+      },
+      "additionalProperties": false
+    },
+    "notification.session.status": {
+      "type": "object",
+      "required": [
+        "jsonrpc",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "method": {
+          "const": "session.status"
+        },
+        "params": {
+          "$ref": "#/$defs/SessionStatusNotification"
+        }
+      },
+      "additionalProperties": false
+    },
+    "notification.subagent.started": {
+      "type": "object",
+      "required": [
+        "jsonrpc",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "method": {
+          "const": "subagent.started"
+        },
+        "params": {
+          "$ref": "#/$defs/SubagentStartedNotification"
+        }
+      },
+      "additionalProperties": false
+    },
+    "notification.subagent.finished": {
+      "type": "object",
+      "required": [
+        "jsonrpc",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "method": {
+          "const": "subagent.finished"
+        },
+        "params": {
+          "$ref": "#/$defs/SubagentFinishedNotification"
+        }
+      },
+      "additionalProperties": false
+    },
+    "request.initialize": {
+      "type": "object",
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "method": {
+          "const": "initialize"
+        },
+        "params": {
+          "$ref": "#/$defs/InitializeParams"
+        }
+      },
+      "additionalProperties": false
+    },
+    "request.session/prompt": {
+      "type": "object",
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "method": {
+          "const": "session/prompt"
+        },
+        "params": {
+          "$ref": "#/$defs/SessionPromptParams"
+        }
+      },
+      "additionalProperties": false
+    },
+    "request.shutdown": {
+      "type": "object",
+      "required": [
+        "jsonrpc",
+        "id",
+        "method"
+      ],
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "method": {
+          "const": "shutdown"
+        }
+      },
+      "additionalProperties": false
+    },
+    "SessionSnapshotParams": {
+      "type": "object",
+      "required": [
+        "sessionId"
+      ],
+      "properties": {
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "request.session/snapshot": {
+      "type": "object",
+      "required": [
+        "jsonrpc",
+        "id",
+        "method",
+        "params"
+      ],
+      "properties": {
+        "jsonrpc": {
+          "const": "2.0"
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "method": {
+          "const": "session/snapshot"
+        },
+        "params": {
+          "$ref": "#/$defs/SessionSnapshotParams"
+        }
+      },
+      "additionalProperties": false
+    },
+    "notification": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/notification.session.event"
+        },
+        {
+          "$ref": "#/$defs/notification.session.status"
+        },
+        {
+          "$ref": "#/$defs/notification.subagent.started"
+        },
+        {
+          "$ref": "#/$defs/notification.subagent.finished"
+        }
+      ]
+    },
+    "request": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/request.initialize"
+        },
+        {
+          "$ref": "#/$defs/request.session~1prompt"
+        },
+        {
+          "$ref": "#/$defs/request.shutdown"
+        },
+        {
+          "$ref": "#/$defs/request.session~1snapshot"
+        }
+      ]
+    },
+    "initializeResult": {
+      "$ref": "#/$defs/InitializeResult"
+    },
+    "promptResult": {
+      "$ref": "#/$defs/SessionPromptResult"
+    },
+    "shutdownResult": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  },
+  "x-generated-by": "tools/generate-sdk-protocol-schema.mjs",
+  "x-reference-root": "../deepseek-harness",
+  "x-generated-from": [
+    {
+      "file": "packages/attachment/attachment/src/brand.ts",
+      "sha256": "aaa1b3c64f12be9a1ede5d5ce03e1e37a84932ba41d98368ea65ef63b563eafc"
+    },
+    {
+      "file": "packages/attachment/attachment/src/types.ts",
+      "sha256": "97f35440ffe74f5eca6a224d22fbb20ad52ed4245262355b4f731e8bbb9c0782"
+    },
+    {
+      "file": "packages/core/session/src/types.ts",
+      "sha256": "f809a8774e05aa73da3a092bc5f3e31af6556c3ffdffc866be6c3335c0a97117"
+    },
+    {
+      "file": "packages/llm/llm/src/brand.ts",
+      "sha256": "65e5feee571370bd086708b8413aae77f55186f8199c7d78aa5fedd770792b99"
+    },
+    {
+      "file": "packages/llm/llm/src/types.ts",
+      "sha256": "a5b57262793677767353f321b2853ad86f3c1f048780d5f83deed4e08dbc058b"
+    },
+    {
+      "file": "packages/sdk/protocol/src/types.ts",
+      "sha256": "b9de1f85d14956fb79573d24a220e687e78efe6903e6bae820ad21a41d536878"
+    },
+    {
+      "file": "packages/subagent/subagent/src/types.ts",
+      "sha256": "c21829a95caf7fe95e817d6a13d92cf3b58038cee3f7c2a426d8cc67e8b91b59"
+    }
+  ]
+}

@@ -23,6 +23,10 @@ const (
 
 	// providerID is the stable provider id of this adapter.
 	providerID = "openai"
+	// defaultMaxTokens is the generic OpenAI-compatible route default. The
+	// DeepSeek adapter is shared for wire compatibility, but its 256K default
+	// must not leak into ordinary OpenAI-compatible routes.
+	defaultMaxTokens = 32768
 )
 
 // Config configures the OpenAI-compatible provider. APIKey must come from the
@@ -31,10 +35,16 @@ const (
 // non-empty ID lets the composition root register arbitrary OpenAI-compatible
 // custom providers (M11: 增加自定义提供方) under their own route.
 type Config struct {
-	ID      string
-	BaseURL string
-	APIKey  string
-	Model   string
+	ID                      string
+	BaseURL                 string
+	APIKey                  string
+	CredentialProvider      llm.CredentialProvider
+	CredentialLeaseProvider llm.CredentialLeaseProvider
+	Model                   string
+	ModelCatalog            []llm.ModelInfo
+	// DefaultMaxTokens is the route-level request default. Non-positive uses
+	// the generic OpenAI-compatible default, not DeepSeek's special default.
+	DefaultMaxTokens int
 	// SupportsImages is the model's input-modality capability declaration,
 	// passed from config llm.model_input_modalities by the composition root
 	// (dispatch-m8-3b §4.1). false (the default) means an image request fails
@@ -68,15 +78,23 @@ func New(cfg Config) *openaiProvider {
 	if cfg.Model == "" {
 		cfg.Model = DefaultModel
 	}
+	if cfg.DefaultMaxTokens <= 0 {
+		cfg.DefaultMaxTokens = defaultMaxTokens
+	}
 	return &openaiProvider{
 		id: cfg.ID,
 		c: deepseek.New(deepseek.Config{
-			BaseURL:              cfg.BaseURL,
-			APIKey:               cfg.APIKey,
-			Model:                cfg.Model,
-			SupportsImages:       cfg.SupportsImages,
-			MaxRequestImageBytes: cfg.MaxRequestImageBytes,
-			DisableRetry:         cfg.DisableRetry,
+			ProviderName:            cfg.ID,
+			BaseURL:                 cfg.BaseURL,
+			APIKey:                  cfg.APIKey,
+			CredentialProvider:      cfg.CredentialProvider,
+			CredentialLeaseProvider: cfg.CredentialLeaseProvider,
+			Model:                   cfg.Model,
+			ModelCatalog:            cfg.ModelCatalog,
+			DefaultMaxTokens:        cfg.DefaultMaxTokens,
+			SupportsImages:          cfg.SupportsImages,
+			MaxRequestImageBytes:    cfg.MaxRequestImageBytes,
+			DisableRetry:            cfg.DisableRetry,
 		}),
 	}
 }
@@ -84,6 +102,23 @@ func New(cfg Config) *openaiProvider {
 // ID returns the provider's registry id ("openai" for the built-in adapter, or
 // the custom route configured via Config.ID).
 func (p *openaiProvider) ID() string { return p.id }
+
+func (p *openaiProvider) SupportsImages() bool { return p.c.SupportsImages() }
+
+func (p *openaiProvider) ListModels(ctx context.Context) ([]llm.ModelInfo, error) {
+	return p.c.ListModels(ctx)
+}
+
+func (p *openaiProvider) ResolveModelInfo(ctx context.Context, model string) (llm.ModelInfo, error) {
+	return p.c.ResolveModelInfo(ctx, model)
+}
+
+func (p *openaiProvider) Close() error {
+	if p == nil || p.c == nil {
+		return nil
+	}
+	return p.c.Close()
+}
 
 // Available reports whether the provider can be used: a cheap local check (API
 // key present and base URL parseable) that never performs a network call —

@@ -29,7 +29,7 @@ func (a *app) registerLSP() error {
 		cwd, _ := os.Getwd()
 		return cwd
 	}
-	tool := lsp.NewTool(lsp.Config{
+	tool := lsp.NewToolWithContext(lsp.Config{
 		Command:          a.cfg.LSP.Command,
 		Args:             a.cfg.LSP.Args,
 		ExtensionToLang:  a.cfg.LSP.Extensions,
@@ -37,7 +37,9 @@ func (a *app) registerLSP() error {
 		MaxLocations:     a.cfg.LSP.MaxLocations,
 		MaxResultChars:   a.cfg.LSP.MaxResultChars,
 		MaxDocumentBytes: a.cfg.LSP.MaxDocumentBytes,
-	}, root)
+	}, root, func(ctx context.Context) string {
+		return a.sessionCWDFor(a.runtimeSessionID(ctx))
+	})
 	if err := a.reg.Register(tool); err != nil {
 		return fmt.Errorf("pa: register %s: %w", tool.Name(), err)
 	}

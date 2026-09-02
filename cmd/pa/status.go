@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jabing/shutu-agent/internal/interact"
@@ -60,9 +61,50 @@ func (a *app) sessionStatus(ctx context.Context, m store.SessionMeta) webserver.
 // read here atomically, so the status provider never touches a.currentID
 // (which other handlers mutate) and stays race-free.
 func (a *app) isSessionRunning(id string) bool {
+	a.runningMu.Lock()
+	if a.runningSessions != nil && a.runningSessions[id] > 0 {
+		a.runningMu.Unlock()
+		return true
+	}
+	a.runningMu.Unlock()
 	v := a.runningSession.Load()
 	s, _ := v.(string)
 	return s != "" && s == id
+}
+
+// beginSessionRun/endSessionRun maintain the full running-session set. A
+// single atomic string is retained only as a source-compatible legacy signal;
+// it cannot represent concurrent Agent turns.
+func (a *app) beginSessionRun(id string) {
+	if strings.TrimSpace(id) == "" {
+		return
+	}
+	a.runningMu.Lock()
+	if a.runningSessions == nil {
+		a.runningSessions = make(map[string]int)
+	}
+	a.runningSessions[id]++
+	a.runningMu.Unlock()
+	a.runningSession.Store(id)
+}
+
+func (a *app) endSessionRun(id string) {
+	if strings.TrimSpace(id) == "" {
+		return
+	}
+	a.runningMu.Lock()
+	if a.runningSessions != nil {
+		if count := a.runningSessions[id]; count <= 1 {
+			delete(a.runningSessions, id)
+		} else {
+			a.runningSessions[id] = count - 1
+		}
+	}
+	remaining := len(a.runningSessions) > 0
+	a.runningMu.Unlock()
+	if !remaining {
+		a.runningSession.Store("")
+	}
 }
 
 // subagentRunningCount returns how many of the session's spawned children are
@@ -97,11 +139,27 @@ func (a *app) pendingInteraction(ctx context.Context, sessionID string) string {
 		return ""
 	}
 	for _, req := range reqs {
-		if req.Status == interact.StatusPending {
+		if req.Status != interact.StatusPending {
+			continue
+		}
+		owned := req.SessionID == sessionID || a.interactionBelongsTo(req.ID, sessionID)
+		if req.SessionID == "" && !a.interactionHasOwner(req.ID) {
+			// Direct/legacy engines predate SessionID. Preserve their single
+			// active-session behavior until the app has indexed an owner.
+			owned = true
+		}
+		if owned {
 			return "approval"
 		}
 	}
 	return ""
+}
+
+func (a *app) interactionHasOwner(id string) bool {
+	a.interactionMu.RLock()
+	_, ok := a.interactionSessions[id]
+	a.interactionMu.RUnlock()
+	return ok
 }
 
 // pendingLabel maps a dsh pending-status key to the localized status label.

@@ -1,0 +1,255 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://shutu-agent.local/evidence/dsh-session-event-v1.schema.json",
+  "title": "DeepSeek Harness session event envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["type", "seq", "time", "data"],
+  "properties": {
+    "type": { "type": "string", "minLength": 1 },
+    "seq": { "type": "integer", "minimum": 0 },
+    "time": { "type": "integer", "minimum": 0 },
+    "data": {},
+    "ignorable": { "const": true },
+    "surfaceOp": { "enum": ["append", "replace"] },
+    "sourceEventSeqs": { "type": "array", "items": { "type": "integer", "minimum": 0 } }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "type": { "const": "turn/start" } } },
+      "then": { "properties": { "data": { "$ref": "#/$defs/turnStart" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "turn/end" } } },
+      "then": { "properties": { "data": { "$ref": "#/$defs/turnEnd" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "step/start" } } },
+      "then": { "properties": { "data": { "$ref": "#/$defs/step" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "step/end" } } },
+      "then": { "properties": { "data": { "$ref": "#/$defs/step" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "user/message" } } },
+      "then": {
+        "required": ["surfaceOp"],
+        "properties": { "data": { "$ref": "#/$defs/userMessage" }, "surfaceOp": { "enum": ["append", "replace"] } }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "assistant/chunk" } } },
+      "then": { "properties": { "data": { "$ref": "#/$defs/assistantChunk" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "assistant/message" } } },
+      "then": {
+        "required": ["surfaceOp"],
+        "properties": { "data": { "$ref": "#/$defs/assistantMessage" }, "surfaceOp": { "enum": ["append", "replace"] } }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "tool/call" } } },
+      "then": { "properties": { "data": { "$ref": "#/$defs/toolCall" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "tool/result" } } },
+      "then": {
+        "required": ["surfaceOp"],
+        "properties": { "data": { "$ref": "#/$defs/toolResult" }, "surfaceOp": { "enum": ["append", "replace"] } }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "request/header" } } },
+      "then": { "properties": { "data": { "$ref": "#/$defs/requestHeader" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "request/context" } } },
+      "then": { "properties": { "data": { "$ref": "#/$defs/requestContext" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "todo/write" } } },
+      "then": { "properties": { "data": { "$ref": "#/$defs/todoWrite" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "feedback/record" } } },
+      "then": { "properties": { "data": { "$ref": "#/$defs/feedbackRecord" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "plan/create" } } },
+      "then": { "properties": { "data": { "$ref": "#/$defs/planCreate" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "plan/update" } } },
+      "then": { "properties": { "data": { "$ref": "#/$defs/planUpdate" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "plan/delete" } } },
+      "then": { "properties": { "data": { "$ref": "#/$defs/planDelete" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "plan/status" } } },
+      "then": { "properties": { "data": { "$ref": "#/$defs/planStatus" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "plan/list" } } },
+      "then": { "properties": { "data": { "$ref": "#/$defs/planList" } } }
+    },
+    {
+      "if": { "properties": { "type": { "const": "plan/mode" } } },
+      "then": { "properties": { "data": { "$ref": "#/$defs/planMode" } } }
+    }
+  ],
+  "$defs": {
+    "turnStart": {
+      "type": "object",
+      "required": ["turn"],
+      "properties": { "turn": { "type": "integer", "minimum": 0 }, "trigger": {} },
+      "additionalProperties": false
+    },
+    "turnEnd": {
+      "type": "object",
+      "required": ["turn", "reason"],
+      "properties": {
+        "turn": { "type": "integer", "minimum": 0 },
+          "reason": { "type": "object", "required": ["kind"], "properties": { "kind": { "enum": ["completed", "aborted", "blocked", "error", "max-tokens", "interrupted", "refusal", "legacy"] } }, "additionalProperties": true }
+      },
+      "additionalProperties": false
+    },
+    "step": {
+      "type": "object",
+      "required": ["turn", "step"],
+      "properties": { "turn": { "type": "integer", "minimum": 0 }, "step": { "type": "integer", "minimum": 0 }, "status": { "type": "string" }, "error": { "type": "string" } },
+      "additionalProperties": false
+    },
+    "message": {
+      "type": "object",
+      "required": ["role", "content", "source"],
+      "properties": { "id": { "type": "string" }, "role": { "type": "string" }, "content": { "type": "array", "items": { "$ref": "#/$defs/contentBlock" } }, "source": { "type": "object" } },
+      "additionalProperties": true
+    },
+    "userMessage": { "$ref": "#/$defs/message" },
+    "contentBlock": {
+      "oneOf": [
+        { "type": "object", "required": ["type", "text"], "properties": { "type": { "const": "text" }, "text": { "type": "string" } }, "additionalProperties": false },
+        { "type": "object", "required": ["type", "text"], "properties": { "type": { "const": "reasoning" }, "text": { "type": "string" } }, "additionalProperties": false },
+        { "type": "object", "required": ["type", "attachment"], "properties": { "type": { "const": "image" }, "attachment": { "$ref": "#/$defs/attachment" } }, "additionalProperties": false },
+        { "type": "object", "required": ["type", "id", "name", "arguments"], "properties": { "type": { "const": "tool-call" }, "id": { "type": "string" }, "name": { "type": "string" }, "arguments": { "type": "string" } }, "additionalProperties": false },
+        { "type": "object", "required": ["type", "toolCallId", "content"], "properties": { "type": { "const": "tool-result" }, "toolCallId": { "type": "string" }, "content": { "type": "array", "items": { "$ref": "#/$defs/contentBlock" } }, "isError": { "type": "boolean" } }, "additionalProperties": false }
+      ]
+    },
+    "attachment": {
+      "type": "object",
+      "required": ["attachmentId", "mediaType", "bytes", "width", "height"],
+      "properties": { "attachmentId": { "type": "string" }, "mediaType": { "type": "string" }, "bytes": { "type": "integer", "minimum": 0 }, "width": { "type": "integer", "minimum": 0 }, "height": { "type": "integer", "minimum": 0 }, "name": { "type": "string" } },
+      "additionalProperties": false
+    },
+    "assistantChunk": {
+      "type": "object",
+      "required": ["turn", "step", "chunk"],
+      "properties": { "turn": { "type": "integer" }, "step": { "type": "integer" }, "chunk": { "type": "object", "required": ["type"], "properties": { "type": { "type": "string" } }, "additionalProperties": true } },
+      "additionalProperties": false
+    },
+    "assistantMessage": {
+      "type": "object",
+      "required": ["turn", "step", "message"],
+      "properties": { "turn": { "type": "integer" }, "step": { "type": "integer" }, "message": { "$ref": "#/$defs/message" }, "usage": { "type": "object" }, "interrupted": { "const": true } },
+      "additionalProperties": false
+    },
+    "requestContext": {
+      "type": "object",
+      "required": ["provider", "model"],
+      "properties": {
+        "provider": { "type": "string", "minLength": 1 },
+        "model": { "type": "string", "minLength": 1 },
+        "contextWindow": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "toolCall": {
+      "type": "object",
+      "required": ["turn", "step", "callId", "name", "arguments"],
+      "properties": { "turn": { "type": "integer" }, "step": { "type": "integer" }, "callId": { "type": "string" }, "name": { "type": "string" }, "arguments": { "type": "string" } },
+      "additionalProperties": false
+    },
+    "toolResult": {
+      "type": "object",
+      "required": ["turn", "step", "message"],
+      "properties": { "turn": { "type": "integer" }, "step": { "type": "integer" }, "message": { "$ref": "#/$defs/message" }, "error": { "type": "object", "required": ["name", "code"] }, "meta": {}, "sourceEventSeqs": { "type": "array", "items": { "type": "integer" } } },
+      "additionalProperties": true
+    },
+    "requestHeader": {
+      "type": "object",
+      "required": ["header", "reason"],
+        "properties": { "header": { "type": "object" }, "reason": { "enum": ["initial", "resume", "change", "update"] } },
+      "additionalProperties": false
+    },
+    "todoWrite": {
+      "type": "object",
+      "required": ["todos"],
+      "properties": { "todos": { "type": "array" } },
+      "additionalProperties": false
+    },
+    "feedbackRecord": {
+      "type": "object",
+      "required": ["text"],
+      "properties": { "text": { "type": "string", "minLength": 1 } },
+      "additionalProperties": false
+    },
+    "planCreate": {
+      "type": "object",
+      "required": ["scope", "id", "title"],
+      "properties": {
+        "scope": { "type": "string", "minLength": 1 },
+        "id": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": true
+    },
+    "planUpdate": {
+      "type": "object",
+      "required": ["scope", "id"],
+      "properties": {
+        "scope": { "type": "string", "minLength": 1 },
+        "id": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": true
+    },
+    "planDelete": {
+      "type": "object",
+      "required": ["scope", "id"],
+      "properties": {
+        "scope": { "type": "string", "minLength": 1 },
+        "id": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": true
+    },
+    "planStatus": {
+      "type": "object",
+      "required": ["scope", "id", "status"],
+      "properties": {
+        "scope": { "type": "string", "minLength": 1 },
+        "id": { "type": "string", "minLength": 1 },
+        "status": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": true
+    },
+    "planList": {
+      "type": "object",
+      "required": ["count"],
+      "properties": {
+        "count": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "planMode": {
+      "type": "object",
+      "required": ["active"],
+      "properties": {
+        "active": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

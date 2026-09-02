@@ -26,19 +26,25 @@ import (
 	"time"
 
 	"github.com/jabing/shutu-agent/internal/acp"
+	"github.com/jabing/shutu-agent/internal/agent"
 	"github.com/jabing/shutu-agent/internal/attachment"
 	"github.com/jabing/shutu-agent/internal/code"
 	"github.com/jabing/shutu-agent/internal/compaction"
 	"github.com/jabing/shutu-agent/internal/config"
+	"github.com/jabing/shutu-agent/internal/credential"
 	"github.com/jabing/shutu-agent/internal/eval"
 	"github.com/jabing/shutu-agent/internal/fs"
 	hookrunner "github.com/jabing/shutu-agent/internal/hooks"
 	"github.com/jabing/shutu-agent/internal/interact"
 	"github.com/jabing/shutu-agent/internal/jobs"
+	"github.com/jabing/shutu-agent/internal/lifecycle"
 	"github.com/jabing/shutu-agent/internal/llm"
 	"github.com/jabing/shutu-agent/internal/loop"
 	"github.com/jabing/shutu-agent/internal/mcp"
+	"github.com/jabing/shutu-agent/internal/meter"
+	"github.com/jabing/shutu-agent/internal/observability"
 	"github.com/jabing/shutu-agent/internal/plan"
+	"github.com/jabing/shutu-agent/internal/plugin"
 	"github.com/jabing/shutu-agent/internal/prompt"
 	"github.com/jabing/shutu-agent/internal/schedule"
 	"github.com/jabing/shutu-agent/internal/session"
@@ -46,6 +52,7 @@ import (
 	"github.com/jabing/shutu-agent/internal/spill"
 	"github.com/jabing/shutu-agent/internal/store"
 	"github.com/jabing/shutu-agent/internal/subagent"
+	"github.com/jabing/shutu-agent/internal/team"
 	"github.com/jabing/shutu-agent/internal/terminal"
 	"github.com/jabing/shutu-agent/internal/tools"
 	"github.com/jabing/shutu-agent/internal/web"
@@ -56,10 +63,25 @@ func main() {
 	configPath := flag.String("config", "config.yaml", "path to the configuration file")
 	webOnly := flag.Bool("web-only", false, "serve the web portal only, without the REPL (blocks until interrupted)")
 	acpMode := flag.Bool("acp", false, "serve ACP JSON-RPC over stdin/stdout")
+	sdkMode := flag.Bool("sdk", false, "serve the DeepSeek Harness SDK JSON-RPC runtime over stdin/stdout")
+	catalogManifestPath := flag.String("catalog-manifest", "", "write the canonical tool catalog manifest to this file ('-' for stdout) and exit")
+	verifyCatalogManifestPath := flag.String("verify-catalog-manifest", "", "verify a tool catalog manifest against this runtime and exit")
 	flag.Parse()
+	if *acpMode && *sdkMode {
+		fmt.Fprintln(os.Stderr, "pa: --acp and --sdk are mutually exclusive")
+		os.Exit(2)
+	}
+	if *catalogManifestPath != "" && *verifyCatalogManifestPath != "" {
+		fmt.Fprintln(os.Stderr, "pa: --catalog-manifest and --verify-catalog-manifest are mutually exclusive")
+		os.Exit(2)
+	}
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
+		fmt.Fprintln(os.Stderr, "pa:", err)
+		os.Exit(1)
+	}
+	if err := enforceCrashDumpPolicy(cfg.Security.CrashDumpPolicy); err != nil {
 		fmt.Fprintln(os.Stderr, "pa:", err)
 		os.Exit(1)
 	}
@@ -70,7 +92,16 @@ func main() {
 		fmt.Fprintln(os.Stderr, "pa:", err)
 		os.Exit(1)
 	}
-	defer st.Close()
+	shutdown := lifecycle.New()
+	if err := shutdown.Register("store", st.Close); err != nil {
+		fmt.Fprintln(os.Stderr, "pa: shutdown:", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if err := shutdown.Close(); err != nil {
+			fmt.Fprintln(os.Stderr, "pa: shutdown:", err)
+		}
+	}()
 
 	// Runtime General-settings rows (durable in the SQLite settings table,
 	// applied at startup; D-WEB2-D: config changes need a restart, no hot
@@ -90,6 +121,10 @@ func main() {
 		}
 	}
 	permissionPreset := settings["permission_preset"] // "" | "readonly" | "standard" | "full"
+	if permissionPreset != "" {
+		stored, _, _, _ := permissionBundle(permissionPreset)
+		permissionPreset = stored
+	}
 	if v, ok := settings["agent_preset"]; ok &&
 		(v == config.ModeMinimal || v == config.ModeStandard || v == config.ModeCode) {
 		cfg.Mode = v
@@ -184,10 +219,18 @@ func main() {
 		fmt.Fprintln(os.Stderr, "pa:", err)
 		os.Exit(1)
 	}
-	promptBuilder.SetTools(func() []llm.ToolSchema { return toolSpecsForMode(cfg.Mode, reg.Specs()) })
+	promptBuilder.SetTools(func() []llm.ToolSchema { return toolSpecsForMode(cfg.Mode, reg.VisibleSpecs()) })
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
+	if err := shutdown.Register("signal", func() error { stop(); return nil }); err != nil {
+		fmt.Fprintln(os.Stderr, "pa: shutdown:", err)
+		os.Exit(1)
+	}
+	telemetry, err := observability.NewSessionTelemetryExporterFromEnvAt(cfg.DataDir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "pa: telemetry:", err)
+		os.Exit(1)
+	}
 
 	app := &app{
 		cfg:          cfg,
@@ -203,19 +246,55 @@ func main() {
 		hub: NewEventHub(),
 		// baseCtx = the process-lifetime signal ctx (see the field comment): the
 		// persist sink and the web-only block live as long as the process.
-		baseCtx: ctx,
+		baseCtx:            ctx,
+		agentRegistry:      agent.NewRegistry(),
+		strictAgentRuntime: true,
+		pluginRegistry:     plugin.NewRegistryWithTools(nil, reg),
+		sessionAgents:      make(map[string]*agent.Handle),
+		jobTraceSpans:      make(map[string]*observability.Span),
+		usageMeter:         meter.New(),
+		metrics:            observability.New(),
+		tracer:             observability.NewTracer(4096),
+		telemetry:          telemetry,
+	}
+	if telemetry != nil {
+		if err := shutdown.Register("telemetry", func() error {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			return telemetry.Shutdown(shutdownCtx)
+		}); err != nil {
+			fmt.Fprintln(os.Stderr, "pa: shutdown:", err)
+			os.Exit(1)
+		}
+	}
+	credentialBackend := store.CredentialRecordStore(st)
+	credentialVault, err := credential.New(context.Background(), credentialBackend)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "pa: credentials:", err)
+		os.Exit(1)
+	}
+	app.credentials = credentialVault
+	if err := shutdown.Register("credentials", credentialVault.Close); err != nil {
+		fmt.Fprintln(os.Stderr, "pa: shutdown:", err)
+		os.Exit(1)
 	}
 	runtimeApp = app
+	registerShutdown := func(name string, closeFn func() error) {
+		if err := shutdown.Register(name, closeFn); err != nil {
+			fmt.Fprintln(os.Stderr, "pa: shutdown:", err)
+			os.Exit(1)
+		}
+	}
+	// Plugin scopes close before Agent and tool consumers in LIFO shutdown.
+	registerShutdown("plugins", func() error { return app.pluginRegistry.Close() })
 	// M11: load the provider API-key overrides (llm.key.<id>) and custom
 	// OpenAI-compatible provider declarations (llm.custom.<route>) from the
 	// durable settings table before registerLLM builds the registry. A
 	// configured key wins over the env var (閰嶇疆鍚庝互閰嶇疆鐨勪负鍑? user 2026-09).
+	legacyCredentialKeys := map[string]string{}
 	for k, v := range settings {
 		if strings.HasPrefix(k, "llm.key.") {
-			if app.llmKeys == nil {
-				app.llmKeys = map[string]string{}
-			}
-			app.llmKeys[strings.TrimPrefix(k, "llm.key.")] = v
+			legacyCredentialKeys[strings.TrimPrefix(k, "llm.key.")] = v
 		} else if strings.HasPrefix(k, "llm.custom.") {
 			var cp customProviderProfile
 			if json.Unmarshal([]byte(v), &cp) == nil && cp.ID != "" && cp.Name != "" {
@@ -229,6 +308,37 @@ func main() {
 				}
 				app.builtinProfiles[strings.TrimPrefix(k, "llm.profile.")] = bp
 			}
+		}
+	}
+	for provider, value := range legacyCredentialKeys {
+		if strings.TrimSpace(value) == "" {
+			if err := st.DeleteSetting(context.Background(), "llm.key."+provider); err != nil {
+				fmt.Fprintln(os.Stderr, "pa: migrate empty credential:", err)
+				os.Exit(1)
+			}
+			continue
+		}
+		reference := llmKeyEnv(provider)
+		if !credentialVault.Has(reference) {
+			if err := credentialVault.Set(context.Background(), reference, value); err != nil {
+				fmt.Fprintln(os.Stderr, "pa: migrate credential:", err)
+				os.Exit(1)
+			}
+		}
+		if err := st.DeleteSetting(context.Background(), "llm.key."+provider); err != nil {
+			fmt.Fprintln(os.Stderr, "pa: remove legacy credential setting:", err)
+			os.Exit(1)
+		}
+	}
+	app.llmKeys = map[string]string{}
+	for _, provider := range builtinProviders {
+		if key := providerKeyFromSnapshot(nil, provider.id); key != "" {
+			app.llmKeys[provider.id] = key
+		}
+	}
+	for _, provider := range app.customProviders {
+		if value, err := credentialVault.Resolve(context.Background(), llmKeyEnv(provider.ID)); err == nil {
+			app.llmKeys[provider.ID] = value
 		}
 	}
 	// M8-2: registerLLM builds the provider registry and injects the selected
@@ -252,9 +362,6 @@ func main() {
 		fmt.Fprintln(os.Stderr, "pa:", err)
 		os.Exit(1)
 	}
-	if app.jobs != nil {
-		defer app.jobs.Close()
-	}
 	// M5b-2: wire the subagent seam 鈥?spawn provider + Runtime + the four
 	// subagent_* tools + the D3 event sink 鈥?when subagent.enabled (榛樿鍏抽棴,
 	// D10). config.applyDefaults already whitelisted the subagent_* names when
@@ -266,7 +373,11 @@ func main() {
 		os.Exit(1)
 	}
 	if app.subagents != nil {
-		defer app.subagents.Close()
+		registerShutdown("subagents", app.subagents.Close)
+	}
+	if err := app.registerTeam(); err != nil {
+		fmt.Fprintln(os.Stderr, "pa:", err)
+		os.Exit(1)
 	}
 	// GAP-2: wire the ralph fresh-agent loop seam (ADR
 	// 2026-08-20-standard-gaps.md D-GAP-3, 瀵归綈 dsh tool-ralph) 鈥?the ralph
@@ -304,6 +415,9 @@ func main() {
 		fmt.Fprintln(os.Stderr, "pa:", err)
 		os.Exit(1)
 	}
+	if app.compaction != nil {
+		registerShutdown("compaction", func() error { app.closeCompactionEngines(); return nil })
+	}
 	// M5d-2: wire the skill seam 鈥?filesystem provider + Registry + the
 	// skill_load tool + the "skill" pre-step catalog injector 鈥?when
 	// skill.enabled (榛樿鍏抽棴, D10). config.applyDefaults already whitelisted
@@ -315,7 +429,7 @@ func main() {
 		os.Exit(1)
 	}
 	if app.skills != nil {
-		defer app.skills.Close()
+		registerShutdown("skills", app.skills.Close)
 	}
 	// M6a-2: wire the schedule seam 鈥?in-memory Provider + Engine + the three
 	// schedule_* tools + the D3 event sink + the "schedule" pre-step injector
@@ -330,7 +444,7 @@ func main() {
 		os.Exit(1)
 	}
 	if app.schedules != nil {
-		defer app.schedules.Close()
+		registerShutdown("schedules", app.schedules.Close)
 	}
 	// M6b-2: wire the plan seam 鈥?in-memory Provider + Engine + the six
 	// plan_* tools + the D3 event sink 鈥?when plan.enabled (榛樿鍏抽棴, D10).
@@ -344,7 +458,7 @@ func main() {
 		os.Exit(1)
 	}
 	if app.plans != nil {
-		defer app.plans.Close()
+		registerShutdown("plans", func() error { app.closePlanEngines(); return nil })
 	}
 	// M6c-2: wire the spill seam 鈥?in-memory Provider + Engine + the four
 	// spill_* tools + the D3 event sink + the turn-completion auto-sedimentation
@@ -359,7 +473,7 @@ func main() {
 		os.Exit(1)
 	}
 	if app.spills != nil {
-		defer app.spills.Close()
+		registerShutdown("spills", app.spills.Close)
 	}
 	// M6e-2: wire the code seam 鈥?local subprocess Provider + Engine + the
 	// run_code tool + the D3 event sink 鈥?when code.enabled (榛樿鍏抽棴, D10).
@@ -373,7 +487,7 @@ func main() {
 		os.Exit(1)
 	}
 	if app.code != nil {
-		defer app.code.Close()
+		registerShutdown("code", app.code.Close)
 	}
 	// M6f-2: wire the MCP tool-ecosystem seam 鈥?stdio Factory + the
 	// mcp_list/mcp_call tools + per-server tool bridging (mcp.<server>.<tool>)
@@ -389,12 +503,17 @@ func main() {
 		fmt.Fprintln(os.Stderr, "pa:", err)
 		os.Exit(1)
 	}
-	if len(app.mcp) > 0 {
-		defer func() {
-			for _, c := range app.mcp {
-				_ = c.Close()
+	if len(app.mcpClients()) > 0 {
+		registerShutdown("mcp", func() error {
+			var first error
+			clients := app.mcpClients()
+			for _, c := range clients {
+				if err := c.Close(); err != nil && first == nil {
+					first = err
+				}
 			}
-		}()
+			return first
+		})
 	}
 	// M6f-3: wire the safe-file-operation seam 鈥?local FileService (root =
 	// fs.root, defaulting to <project>) + the three fs_* tools + the D3 event
@@ -409,7 +528,7 @@ func main() {
 		os.Exit(1)
 	}
 	if app.fs != nil {
-		defer app.fs.Close()
+		registerShutdown("filesystem", app.fs.Close)
 	}
 	// D-GAP-1: wire the file-content-search seam 鈥?the grep/glob tools (dsh tool-fs-search contract) 鈥?when
 	// fs_search.enabled (榛樿鍏?D10). config.applyDefaults already whitelisted
@@ -434,7 +553,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "pa:", err)
 		os.Exit(1)
 	}
-	defer app.closeHooks()
+	registerShutdown("hooks", func() error { app.closeHooks(); return nil })
 	// M7-2: wire the web seam 鈥?Engine + DeepSeek search provider (env key
 	// only) + HTTP fetch provider + the two web_* tools 鈥?when web.enabled
 	// (榛樿鍏抽棴, D10). config.applyDefaults already whitelisted web_search/
@@ -457,12 +576,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, "pa:", err)
 		os.Exit(1)
 	}
-	defer func() {
+	registerShutdown("terminals", func() error {
 		app.closeModelTerminalSessions()
 		if app.termSess != nil {
-			app.termSess.Close()
+			return app.termSess.Close()
 		}
-	}()
+		return nil
+	})
 	// M6d-2: wire the interact seam 鈥?in-memory Provider + Engine + the two
 	// interact_* tools + the D3 event sink + the sensitive-tool gate 鈥?when
 	// interact.enabled (榛樿鍏抽棴, D10). config.applyDefaults already whitelisted
@@ -477,7 +597,7 @@ func main() {
 		os.Exit(1)
 	}
 	if app.interacts != nil {
-		defer app.interacts.Close()
+		registerShutdown("interactions", app.interacts.Close)
 	}
 	if config.Enabled(app.cfg.Plan.Enabled) {
 		if err := app.reg.Register(exitPlanModeTool{app: app}); err != nil {
@@ -505,14 +625,58 @@ func main() {
 		os.Exit(1)
 	}
 	if app.evalEng != nil {
-		defer app.evalEng.Close()
+		registerShutdown("evaluation", func() error { app.evalEng.Close(); return nil })
 	}
+	// Provider generations may retain credentials for an in-flight request.
+	// Register this disposer before title/Agent/jobs barriers so LIFO shutdown
+	// drains all consumers first and wipes the current generation last among
+	// model users.
+	registerShutdown("llm-credentials", func() error {
+		return app.closeProviderGenerations()
+	})
 	// M10a: wire the unified web portal (ADR 2026-08-20-m10-web-portal.md) 鈥?	// the bearer-authenticated net/http server over the read-only store
 	// (sessions/events browsing + static vanilla-JS frontend) 鈥?when
 	// web_server.enabled (榛樿鍏?D10, no listener at all). An empty token fails
 	// closed at startup (no bare server). The deferred Close shuts the listener
 	// at shutdown so no port lingers.
+	// Register this defer after every Agent-dependent service has registered its
+	// own cleanup. LIFO then quiesces Agents first, so no child turn can enter a
+	// jobs/code/approval/plugin service after that service has been closed.
+	registerShutdown("title-workers", func() error { app.waitTitleWorkers(); return nil })
+	registerShutdown("agents", func() error {
+		if err := app.agentRegistry.CloseAll(); err != nil {
+			return err
+		}
+		return nil
+	})
+	// Jobs must drain before Agents close: settlement callbacks may still need
+	// to publish a completion wake into the owning Agent inbox. The defer is
+	// registered after the Agent cleanup so LIFO shutdown is gate -> scheduler
+	// -> jobs -> agents -> remaining process services.
+	registerShutdown("jobs", func() error {
+		if app.jobs != nil {
+			return app.jobs.Close()
+		}
+		return nil
+	})
+	if *catalogManifestPath != "" {
+		if err := writeToolCatalogManifest(app.reg, *catalogManifestPath); err != nil {
+			fmt.Fprintln(os.Stderr, "pa:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if *verifyCatalogManifestPath != "" {
+		if err := verifyToolCatalogManifest(app.reg, *verifyCatalogManifestPath); err != nil {
+			fmt.Fprintln(os.Stderr, "pa:", err)
+			os.Exit(1)
+		}
+		fmt.Println("tool catalog manifest verified")
+		return
+	}
 	if *acpMode {
+		// Admission is registered last so the coordinator closes it first.
+		registerShutdown("admission", func() error { app.beginShutdown(); return nil })
 		server := &acp.Server{
 			Factory:      &acpFactory{app: app},
 			In:           os.Stdin,
@@ -526,23 +690,31 @@ func main() {
 		}
 		return
 	}
+	if *sdkMode {
+		registerShutdown("admission", func() error { app.beginShutdown(); return nil })
+		server := newSDKServer(app, os.Stdin, os.Stdout)
+		if err := server.run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			fmt.Fprintln(os.Stderr, "pa: sdk:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := app.registerWebServer(); err != nil {
 		fmt.Fprintln(os.Stderr, "pa:", err)
 		os.Exit(1)
 	}
 	if app.webserver != nil {
-		defer app.webserver.Close()
+		registerShutdown("webserver", app.webserver.Close)
 	}
 	if err := app.startup(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, "pa:", err)
 		os.Exit(1)
 	}
 	app.startGoalScheduler(ctx)
-	defer func() {
-		if app.goalScheduler != nil {
-			_ = app.goalScheduler.Close()
-		}
-	}()
+	registerShutdown("goal-schedulers", func() error { app.closeGoalSchedulers(); return nil })
+	// Admission is registered after every dependent resource. The coordinator
+	// therefore rejects new work before any resource close barrier runs.
+	registerShutdown("admission", func() error { app.beginShutdown(); return nil })
 	// M10 W3: --web-only serves the portal without the REPL (dsh-style
 	// standalone web). The signal ctx cancels on Ctrl+C/Ctrl+Break; the
 	// deferred webserver.Close shuts the listener so no port lingers.
@@ -577,17 +749,35 @@ type app struct {
 	prompt       *prompt.Builder
 	agentPresets *nativeAgentPresetStore
 	// basePolicy is the startup Execute policy (global mode + permission
-	// preset). Per-session permission tiers swap a derived policy around a turn
-	// (turnMu serializes turns) and restore basePolicy afterwards.
+	// preset). Per-session permission tiers swap a derived policy around the
+	// legacy turn only; Agent-owned turns use a cloned registry.
 	basePolicy tools.Policy
+	// codeUnavailableReason is populated when code mode was requested but its
+	// enforcing runtime could not be verified. The rest of the Agent remains
+	// usable; code mode is rejected at session admission and never advertised.
+	codeUnavailableReason string
 	// promptByMode caches a per-mode system-prompt builder (Phase 2: 鎸変細璇?	// mode 閿佸畾). Populated lazily on first use for a non-global session mode.
 	promptByMode map[string]*prompt.Builder
 	llm          llm.LLM
+	usageMeter   *meter.Meter
+	metrics      *observability.Metrics
+	tracer       *observability.Tracer
+	telemetry    *observability.SessionTelemetryExporter
 	// llmMu guards the llm/llmReg pointer swap during the live model switch
-	// (POST /api/config/model, P5.1): the switch holds turnMu (D5 serial, so no
-	// turn is in flight) and takes the write lock; consumers read the selected
+	// (POST /api/config/model, P5.1): the switch holds the legacy/control locks
+	// (D5 serial, so no legacy turn is in flight) and takes the write lock; consumers read the selected
 	// provider through currentLLM() (RLock). The zero value is ready.
 	llmMu sync.RWMutex
+	// providerMu guards the mutable provider configuration and credential
+	// indexes. A model switch is serialized with the legacy turn, but status,
+	// ACP capability discovery and background Agent creation can read the same
+	// state concurrently; those readers must observe an immutable snapshot.
+	providerMu sync.RWMutex
+	// providerStateMu is the publication barrier for the selected provider and
+	// its configuration. A live model switch builds a complete registry before
+	// publishing it; Agent runtime assembly takes the read side so it cannot
+	// observe new config with the previous registry during that rebuild.
+	providerStateMu sync.RWMutex
 	// baseCtx is the process-lifetime context (the main signal context). It is
 	// the ctx the persist sink uses (attachSink), decoupled from any HTTP
 	// request ctx: webSessionManager/webMessage pass r.Context() into
@@ -599,6 +789,14 @@ type app struct {
 	// builds it and injects the selected provider into llm; /llm-status reads
 	// it. Non-nil only after registerLLM succeeds.
 	llmReg *llm.Registry
+	// credentials owns real provider secrets separately from generic runtime
+	// settings. llmKeys is retained only as a process-local compatibility/cache
+	// overlay for provider construction and is populated from this vault.
+	credentials *credential.Vault
+	// providerGeneration owns the lifetime of the published registry. A model
+	// switch retires the previous generation, but credential-bearing adapters
+	// are not closed until every in-flight stream releases its lease.
+	providerGeneration *providerGeneration
 	// llmKeys is the M11 provider API-key override map (settings rows
 	// llm.key.<providerId>), loaded at startup and updated by the Model-settings
 	// page's save endpoint. A configured key wins over the env var (閰嶇疆鍚庝互閰嶇疆鐨?	// 涓哄噯, user 2026-09); providerKey consults it first. nil 鈬?env-only.
@@ -624,8 +822,10 @@ type app struct {
 	subagents     subagent.Runtime        // nil when subagent disabled (D10)
 	subagentTools *subagent.SubagentTools // live browser-addressed child seam
 
-	compaction compaction.Engine // nil when compaction disabled (D10)
-	skills     skill.Registry    // nil when skill disabled (D10)
+	compaction        compaction.Engine // nil when compaction disabled (D10)
+	compactionMu      sync.Mutex
+	compactionEngines map[string]compaction.Engine
+	skills            skill.Registry // nil when skill disabled (D10)
 	// skillManager is the web settings-page skill manager (dsh-skill-mcp-panel
 	// 瀵归綈). It is created whenever the web server runs 鈥?independent of
 	// skill.enabled 鈥?so the 鎶€鑳?settings page can list/enable/disable/delete/
@@ -635,13 +835,31 @@ type app struct {
 	// asynchronous model title has already been attempted (dsh-session-title
 	// alignment): the model title fires at most once per session per process,
 	// so a failed run never re-fires on every later turn.
-	titleMu       sync.Mutex
-	titleDone     map[string]bool
-	schedules     schedule.Engine // nil when schedule disabled (D10)
-	goalScheduler *schedule.DurableScheduler
-	scheduleRunMu sync.Mutex
-	scheduleWake  chan struct{}
-	plans         plan.Engine // nil when plan disabled (D10)
+	titleMu        sync.Mutex
+	titleDone      map[string]bool
+	titleWG        sync.WaitGroup
+	schedules      schedule.Engine // nil when schedule disabled (D10)
+	goalScheduler  *schedule.DurableScheduler
+	scheduleMu     sync.Mutex
+	goalSchedulers map[string]*schedule.DurableScheduler
+	// scheduleClosed is the shutdown gate for lazy per-session scheduler
+	// creation. Without it, a tool already admitted while shutdown begins could
+	// recreate a scheduler after closeGoalSchedulers has drained the ticker.
+	scheduleClosed       bool
+	scheduleSessionMu    sync.Mutex
+	scheduleSessionLocks map[string]*sync.Mutex
+	scheduleWake         chan struct{}
+	scheduleCancel       context.CancelFunc
+	scheduleWG           sync.WaitGroup
+	plans                plan.Engine // nil when plan disabled (D10)
+	planMu               sync.Mutex
+	planEngines          map[string]plan.Engine
+	planPending          map[string]bool // session-scoped selections awaiting the next Agent boundary
+	// nativeGoalMu serializes the plan-engine mutation followed by its durable
+	// session-event append. It is intentionally independent of the legacy turn lock: an
+	// addressed Web session must not wait for or mutate the REPL's current
+	// session while still preserving CAS/event ordering for goal mutations.
+	nativeGoalMu sync.Mutex
 	// goalActivation is intentionally process-local. Durable goal state lives
 	// in the session log; opening/resuming a session disarms automatic rounds
 	// until an explicit human resume or a newly created goal arms it.
@@ -649,43 +867,110 @@ type app struct {
 	goalActivation   map[string]bool
 	spills           spill.Engine    // nil when spill disabled (D10)
 	interacts        interact.Engine // nil when interact disabled (D10)
+	teamMu           sync.Mutex
+	teamBoards       map[string]*team.Board
+	// teamDispatchMu protects the process-local delivery fences used by the
+	// durable Team mailbox. The Lead journal is the ordering source; these
+	// fences only prevent concurrent live injections from reordering that log or
+	// dispatching the same queued message twice during recovery.
+	teamDispatchMu       sync.Mutex
+	teamDispatchTails    map[string]chan struct{}
+	teamDispatchInFlight map[string]*teamDispatchResult
+	jobWakeMu            sync.Mutex
+	// jobTraceMu protects live background-job spans. The span is created
+	// before the producer goroutine starts and ended by the single settlement
+	// observer, so async work remains correlated after its tool returns.
+	jobTraceMu    sync.Mutex
+	jobTraceSpans map[string]*observability.Span
+	// jobEventMu serializes the check-and-append boundary for job/* events. A
+	// fast job can be observed by job_start at the same time its completion
+	// observer runs; both paths must share one durable terminal projection.
+	jobEventMu    sync.Mutex
+	jobWakeCounts map[string]int
 	// interactionSessions keeps the owner session for live Web approval
 	// requests. DSH scopes interaction surfaces to the addressed conversation;
 	// the engine itself remains process-wide for CLI compatibility.
 	interactionMu       sync.RWMutex
 	interactionSessions map[string]string
-	code                code.ProgramRuntime // nil when code disabled (D10)
-	codeBindingPolicy   tools.Policy        // PTC nested tools during the active turn
-	mcp                 []mcp.Client        // nil when mcp disabled (D10); one live bridged client per configured server
-	fs                  fs.FileService      // nil when fs disabled (D10)
-	web                 *web.Engine         // nil when web disabled (D10)
-	hooks               *hookrunner.Runner
+	interactionCallIDs  map[string]string
+	// interactionResolveMu serializes answerers across CLI/Web. Resolving the
+	// in-memory engine and appending its durable decision must be one ordered
+	// state transition from the application's point of view; otherwise two
+	// answerers can race and a failed append can leave live state ahead of the
+	// transcript.
+	interactionResolveMu sync.Mutex
+	// agentRegistry owns the long-lived root Agent handles used by the native
+	// and ACP bridges. Production composition sets strictAgentRuntime, so a
+	// missing registry is fail-closed; lightweight compatibility/test apps may
+	// leave both unset and use the legacy direct path.
+	agentRegistry      *agent.Registry
+	strictAgentRuntime bool
+	// pluginRegistry owns plugin generations and generation-guarded tool
+	// publication into reg. It is created for every production composition so
+	// optional plugin hosts cannot bypass canonical ownership metadata.
+	pluginRegistry *plugin.Registry
+	agentMu        sync.Mutex
+	sessionAgents  map[string]*agent.Handle
+	// runtimeMu/runtimeLogs keep native session-owned log objects alive
+	// independently of the REPL's current selection. Web/Agent turns must not
+	// switch currentID merely to find their durable source of truth.
+	runtimeMu          sync.Mutex
+	runtimeLogs        map[string]*session.Log
+	runtimeMaxTokensMu sync.RWMutex
+	runtimeMaxTokens   map[string]int
+	code               code.ProgramRuntime   // nil when code disabled (D10)
+	codeBindingPolicy  tools.Policy          // PTC nested tools during the active turn
+	mcp                []mcp.Client          // nil when mcp disabled (D10); one live bridged client per configured server
+	mcpMu              sync.RWMutex          // protects the live bridged-client slice for Web status and shutdown
+	mcpByServer        map[string]mcp.Client // name-stable view; unlike mcp, it remains correct when an optional server is down
+	mcpSyncMu          sync.Mutex            // serializes reconnect re-sync and generation replacement
+	mcpToolNames       map[string][]string   // currently published bridged names by server
+	fs                 fs.FileService        // nil when fs disabled (D10)
+	web                *web.Engine           // nil when web disabled (D10)
+	hooks              *hookrunner.Runner
 
 	// webserver is the M10a unified web portal (ADR 2026-08-20-m10-web-portal.md);
 	// nil when web_server disabled (D10).
 	webserver *webserver.Server
 
-	// turnMu serializes every turn (D5): the REPL and the web message API share
-	// one loop, so at most one Run executes at any moment (M10 W1, D-WEB2-A).
-	turnMu sync.Mutex
+	// sessionStateMu serializes only the compatibility REPL/currentID selection.
+	// Addressed Agent sessions use their own handle and webSessionLocks, so
+	// Web/ACP turns never use process-global currentID as their owner.
+	sessionStateMu sync.Mutex
+	// controlMu serializes the remaining REPL publication path. Agent turns
+	// consume providerState snapshots and do not take it.
+	controlMu sync.Mutex
+	// lifecycleMu/lifecycleClosed form the application-wide admission gate.
+	// Shutdown closes admission before dependent services are drained, so a
+	// late Web/ACP request cannot recreate an Agent, scheduler or title worker
+	// while the process is releasing those resources.
+	lifecycleMu     sync.RWMutex
+	lifecycleClosed bool
 	// cancelMu + turnCancel let POST /api/sessions/{id}/stop abort the web turn
-	// (dsh 鍋滄鎸夐挳) without holding turnMu: the web message handler registers its
+	// (dsh 鍋滄鎸夐挳) without holding the legacy turn lock: the web message handler registers its
 	// cancellable context here, and the stop handler calls the stored cancel.
-	cancelMu   sync.Mutex
-	turnCancel context.CancelFunc
+	cancelMu    sync.Mutex
+	turnCancels map[string]context.CancelFunc
 	// webQueueMu protects the process-local dsh-style queue. Queue contents are
 	// intentionally ephemeral like the current Web turn; durable conversation
 	// history remains in the session store.
 	webQueueMu      sync.Mutex
 	webQueue        map[string][]webQueueMessage
 	webQueueRunning map[string]bool
+	// webSessionMu serializes command-side mutations for one Agent-backed
+	// session. It deliberately does not serialize different sessions and is
+	// separate from sessionStateMu, which protects only REPL selection state.
+	webSessionMu    sync.Mutex
+	webSessionLocks map[string]*sync.Mutex
 	webQueueSeq     uint64
 	// runningSession is the session id whose turn is currently in flight, or ""
-	// when idle. It is published by runTurn under turnMu and read atomically by
+	// when idle. It is published by runTurn under sessionStateMu and read atomically by
 	// the sidebar status provider, so the webserver always sees a consistent
 	// "running" dot without touching a.currentID (which other handlers mutate).
 	// dsh-session-status alignment.
-	runningSession atomic.Value
+	runningSession  atomic.Value
+	runningMu       sync.Mutex
+	runningSessions map[string]int
 	// hub is the M10 W1 real-time event broadcaster (ADR D-WEB2-B): attachSink
 	// publishes each persisted event of the current session, and the web's SSE
 	// streams subscribe per session id. Always created in main; attachSink also
@@ -708,6 +993,9 @@ type app struct {
 	// separate from termSess, which remains the user-facing /term session.
 	modelTermMu sync.Mutex
 	modelTerms  map[string]*modelTerminalRecord
+	// modelTermStopMu serializes owner disposal retries so a failed receipt can
+	// be retried without racing another disposer into a duplicate stop edge.
+	modelTermStopMu sync.Mutex
 
 	// approveInput feeds the sensitive-tool gate's y/n read (nil => os.Stdin).
 	// It exists so the wiring tests can inject canned approval answers; in the
@@ -726,6 +1014,11 @@ type app struct {
 	// pin deterministic roots.
 	skillProjectRoot string
 	skillUserHome    string
+	// feedbackMu/id hold the harness-home anonymous identity used by the
+	// feedback acknowledgement. The durable file is created lazily so merely
+	// starting the app never creates an identity on disk.
+	feedbackMu          sync.Mutex
+	feedbackAnonymousID string
 }
 
 // startup resumes the most recently updated session, or starts a fresh one.
@@ -757,7 +1050,7 @@ func (a *app) startup(ctx context.Context) error {
 // a blank session has no durable value to lose, so a delete failure is logged
 // rather than failing the switch.
 func (a *app) pruneBlankCurrent(ctx context.Context) {
-	if a.currentID == "" || a.log == nil || len(a.log.Events()) != 0 {
+	if a.currentID == "" || a.log == nil || sessionHasUserContent(a.log.Events()) {
 		return
 	}
 	if err := a.store.DeleteSession(ctx, a.currentID); err != nil {
@@ -765,27 +1058,64 @@ func (a *app) pruneBlankCurrent(ctx context.Context) {
 	}
 }
 
+// sessionHasUserContent excludes log-only command lifecycle rows from the
+// blank-session decision. Starting a command such as /new must not make an
+// otherwise empty session durable merely because command/run was recorded.
+func sessionHasUserContent(events []session.Event) bool {
+	for _, event := range events {
+		if event.Type == session.EventCommandRun || event.Type == session.EventCommandDone {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 // newSession starts a fresh session with a random id.
 func (a *app) newSession(ctx context.Context) error {
+	if err := a.requireRunning(); err != nil {
+		return err
+	}
 	// Session replacement swaps the process-wide log and its durable sink. It
 	// must not race an active Web/REPL turn, whose loop holds the current log
 	// pointer while worker callbacks may still be committing events.
-	a.turnMu.Lock()
-	defer a.turnMu.Unlock()
-	id, err := newSessionID()
+	a.sessionStateMu.Lock()
+	defer a.sessionStateMu.Unlock()
+	id, err := store.GenerateReservedID(ctx, a.store, "session", newSessionID)
 	if err != nil {
 		return fmt.Errorf("pa: generate session id: %w", err)
 	}
 	// dsh: starting a fresh session discards an abandoned blank one.
 	a.pruneBlankCurrent(ctx)
-	if err := a.store.CreateSession(ctx, id, time.Now().UTC()); err != nil {
-		return err
-	}
-	if err := a.setSessionCWD(ctx, id, a.defaultWorkdir()); err != nil {
-		return err
+	created := time.Now().UTC()
+	cwd := a.defaultWorkdir()
+	createdAtomically := false
+	if atomic, ok := a.store.(store.SessionCreateStore); ok {
+		cfg := a.providerConfigSnapshot()
+		if err := atomic.CreateSessionWithOptions(ctx, id, created, store.SessionCreateOptions{
+			Header: store.SessionHeader{ID: id, CreatedAt: created, CWD: cwd, AgentPreset: cfg.Mode},
+			Config: &store.SessionConfig{AgentPreset: cfg.Mode, Provider: cfg.LLM.Provider, Model: llmProviderModel(cfg, cfg.LLM.Provider), ReasoningEffort: cfg.ReasoningEffort},
+		}, nil); err != nil {
+			return err
+		}
+		createdAtomically = true
+	} else {
+		if err := a.store.CreateSession(ctx, id, created); err != nil {
+			return err
+		}
+		if err := a.setSessionCWD(ctx, id, cwd); err != nil {
+			return err
+		}
 	}
 	a.currentID = id
 	a.log = session.New()
+	a.configureImageResolver(a.log)
+	a.runtimeMu.Lock()
+	if a.runtimeLogs == nil {
+		a.runtimeLogs = make(map[string]*session.Log)
+	}
+	a.runtimeLogs[id] = a.log
+	a.runtimeMu.Unlock()
 	a.setGoalActivation(id, false)
 	if err := a.restorePlans(); err != nil {
 		return err
@@ -793,10 +1123,12 @@ func (a *app) newSession(ctx context.Context) error {
 	if err := a.restoreGoalScheduler(); err != nil {
 		return err
 	}
-	// Repair legacy sessions and keep the durable header aligned with a
-	// directory-backed workspace after a restart.
-	if err := a.setSessionCWD(ctx, id, a.sessionCWD()); err != nil {
-		return err
+	// Compatibility stores may not have the atomic creation seam. Keep their
+	// legacy header repair, while SQLite already committed the cwd above.
+	if !createdAtomically {
+		if err := a.setSessionCWD(ctx, id, a.sessionCWD()); err != nil {
+			return err
+		}
 	}
 	a.attachSink(ctx)
 	a.bindSpillOwner()
@@ -806,12 +1138,19 @@ func (a *app) newSession(ctx context.Context) error {
 
 // resumeSession loads a session's full history from the store into a new log.
 func (a *app) resumeSession(ctx context.Context, id string) error {
+	if err := a.requireRunning(); err != nil {
+		return err
+	}
+	a.sessionStateMu.Lock()
+	defer a.sessionStateMu.Unlock()
+	return a.resumeSessionLocked(ctx, id)
+}
+
+func (a *app) resumeSessionLocked(ctx context.Context, id string) error {
 	// Opening a session from another browser tab can arrive while a long turn is
 	// streaming. Wait for that turn to settle before replacing a.log; otherwise
 	// the old loop and the newly restored log can both append the same Seq to the
 	// session store through different sinks.
-	a.turnMu.Lock()
-	defer a.turnMu.Unlock()
 	events, err := a.store.LoadSession(ctx, id)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -827,6 +1166,13 @@ func (a *app) resumeSession(ctx context.Context, id string) error {
 	}
 	a.currentID = id
 	a.log = session.New()
+	a.configureImageResolver(a.log)
+	a.runtimeMu.Lock()
+	if a.runtimeLogs == nil {
+		a.runtimeLogs = make(map[string]*session.Log)
+	}
+	a.runtimeLogs[id] = a.log
+	a.runtimeMu.Unlock()
 	a.setGoalActivation(id, false)
 	if err := a.log.Restore(events); err != nil {
 		return err
@@ -859,6 +1205,13 @@ func (a *app) resumeSession(ctx context.Context, id string) error {
 // persistence (kept in the signature for the call sites).
 func (a *app) attachSink(ctx context.Context) {
 	id := a.currentID
+	a.attachSinkFor(ctx, id, a.log)
+}
+
+func (a *app) attachSinkFor(_ context.Context, id string, log *session.Log) {
+	if log == nil || a.store == nil {
+		return
+	}
 	// Persist under the process-lifetime ctx. baseCtx is always set by main;
 	// tests that build an app directly fall back to Background so a nil ctx can
 	// never reach database/sql (which panics on a nil context).
@@ -866,17 +1219,23 @@ func (a *app) attachSink(ctx context.Context) {
 	if pctx == nil {
 		pctx = context.Background()
 	}
-	a.log.SetSink(func(ev session.Event) error {
-		if err := a.store.AppendEvents(pctx, id, []session.Event{ev}); err != nil {
-			return err
-		}
+	log.SetSink(func(ev session.Event) error {
+		return a.store.AppendEvents(pctx, id, []session.Event{ev})
+	})
+	log.SetObserver(func(ev session.Event) {
 		if a.hub != nil {
 			a.hub.Publish(id, ev)
 		}
 		if a.hooks != nil {
 			a.hooks.Notify(id, ev)
 		}
-		return nil
+		if a.telemetry != nil {
+			if ev.Type == session.EventFeedbackRecord {
+				a.telemetry.ObserveSession(id, log.Events(), ev.Seq)
+			} else {
+				a.telemetry.Observe(id, ev)
+			}
+		}
 	})
 }
 
@@ -929,54 +1288,135 @@ func (a *app) newLoopFor(rt sessionRuntime, interactive bool) *loop.Loop {
 // are the streaming hooks: the REPL prints them, the web path is silent.
 // provider/model/effort override the globals when a per-session selection is
 // active (dsh ModelSelection: the session owns provider+model+effort); an
-// unknown provider id falls back to the global LLM (fail-open). mode is the
+// unknown provider id is fail-closed at turn dispatch. mode is the
 // session's agent preset (standard | code | minimal): it owns the model-facing
 // tool surface (loop.Config.ToolSpecs). pb overrides the system prompt when a
 // per-session mode is active. effort is the thinking-effort selection ("" keeps
 // the provider default).
 func (a *app) buildLoop(onText func(string), onError func(error), sessionID, provider, model, effort, mode string, pb *prompt.Builder) *loop.Loop {
+	return a.buildLoopBound(onText, onError, sessionID, provider, model, effort, mode, pb, a.log, a.reg)
+}
+
+func (a *app) buildLoopBound(onText func(string), onError func(error), sessionID, provider, model, effort, mode string, pb *prompt.Builder, log *session.Log, registry *tools.Registry) *loop.Loop {
+	return a.buildLoopBoundWithProvider(onText, onError, sessionID, provider, model, effort, mode, pb, log, registry, nil)
+}
+
+// buildLoopBoundWithProvider optionally pins the provider instance selected
+// while an Agent turn was assembled. The named route remains part of the
+// request identity, but an in-flight turn must not re-read a newly published
+// process-wide registry generation after a concurrent model switch.
+func (a *app) buildLoopBoundWithProvider(onText func(string), onError func(error), sessionID, provider, model, effort, mode string, pb *prompt.Builder, log *session.Log, registry *tools.Registry, pinned llm.LLM) *loop.Loop {
+	runtime := a.providerRuntimeSnapshot(provider)
+	if pinned != nil {
+		runtime.selected = pinned
+		runtime.selectedID = provider
+	}
+	cfg := runtime.cfg
+	provider = runtime.provider
 	if provider == "" {
-		provider = a.cfg.LLM.Provider
+		provider = cfg.LLM.Provider
 	}
 	if model == "" {
-		model = llmProviderModel(a.cfg, provider)
+		model = llmProviderModel(cfg, provider)
+	}
+	// Resolve the final route before deriving any capability-dependent loop
+	// field. The previous order used the session's current model to derive
+	// MaxTokens, then replaced capability with the explicitly requested route;
+	// a caller switching routes during assembly could therefore send the old
+	// model's output budget with the new model.
+	capability := a.modelCapabilityForRoute(provider, model)
+	maxTokens := effectiveModelOutputLimit(cfg.MaxTokens, capability.DefaultMaxTokens, capability.MaxTokens)
+	a.runtimeMaxTokensMu.RLock()
+	if configured := a.runtimeMaxTokens[sessionID]; configured > 0 {
+		maxTokens = configured
+	}
+	a.runtimeMaxTokensMu.RUnlock()
+	effort = effectiveModelReasoningEffort(capability, effort)
+	reasoningBudgetTokens := 0
+	if cfg.LLM.ThinkingBudgets != nil {
+		reasoningBudgetTokens = cfg.LLM.ThinkingBudgets[strings.TrimSpace(effort)]
 	}
 	if pb == nil {
 		pb = a.prompt
 	}
 	if mode == "" {
-		mode = a.cfg.Mode
+		mode = cfg.Mode
 	}
 	if mode == config.ModeCode {
+		if registry == nil {
+			registry = tools.New()
+		}
 		pb = pb.Clone().Add(prompt.Section{
 			Name:  "code-mode-sdk",
 			Order: 1001,
-			Text:  codeModeSDKSection(a.reg.Specs()),
+			Text:  codeModeSDKSection(registry.Specs()),
 		})
 	}
-	ll := a.llmFor(provider)
+	ll := runtime.selected
 	return loop.New(loop.Config{
-		LLM:             ll,
-		Log:             a.log,
-		Tools:           a.reg,
-		ToolSpecs:       func() []llm.ToolSchema { return toolSpecsForMode(mode, a.reg.Specs()) },
-		Prompt:          pb,
-		Model:           model,
-		Provider:        provider,
-		ReasoningEffort: effort,
+		LLM: ll,
+		// Request middleware is allowed to select an explicit provider. Resolve
+		// that final route at the transport boundary so provider metadata,
+		// credentials and provider-owned retry policy cannot diverge. An empty
+		// provider keeps this turn's already-resolved route.
+		ResolveRequestLLM: func(_ context.Context, request llm.ChatRequest) (llm.LLM, error) {
+			requested := strings.TrimSpace(request.Provider)
+			if requested == "" {
+				if provider == "" {
+					// Standalone embedders/tests may intentionally supply only an
+					// LLM without a named registry route.
+					return ll, nil
+				}
+				requested = provider
+			}
+			if pinned != nil && requested == provider {
+				return pinned, nil
+			}
+			resolved := a.providerRuntimeSnapshot(requested)
+			if resolved.selectedID == "" {
+				return nil, fmt.Errorf("pa: llm provider %q is not registered", requested)
+			}
+			return resolved.selected, nil
+		},
+		Log:                   log,
+		Tools:                 registry,
+		ToolSpecs:             func() []llm.ToolSchema { return modelToolSpecs(capability, mode, registry.VisibleSpecs()) },
+		Prompt:                pb,
+		Model:                 model,
+		MaxTokens:             maxTokens,
+		ContextWindow:         capability.ContextWindow,
+		Provider:              provider,
+		ReasoningEffort:       effort,
+		ReasoningBudgetTokens: reasoningBudgetTokens,
 		// Bind the runtime snapshot to the session selected for this turn. The
 		// loop's injector callback also receives userText, not a session id, so
 		// capturing the id here avoids falling back to the process-global currentID.
 		RuntimeContext: func(ctx context.Context, _ string) []llm.Message {
 			return a.runtimeContextFor(ctx, sessionID)
 		},
+		RuntimeSessionID: sessionID,
+		RuntimeAgentID:   sessionID,
+		RuntimeEmit: func(typ string, data any) error {
+			if log == nil {
+				return errors.New("runtime event sink is unavailable")
+			}
+			_, err := a.appendRuntimeEvent(log, typ, data)
+			return err
+		},
 		// M5c-2b: the "compaction" pre-step injector (auto token-pressure
 		// compaction) is appended when compaction is enabled; it runs after the
 		// (D4 — the turn/step structure is unchanged).
-		PreStep:                a.preStepInjectors(),
-		RecoverContextOverflow: a.recoverContextOverflow,
+		PreStep:                a.preStepInjectorsForSession(sessionID, log),
+		RecoverContextOverflow: func(ctx context.Context) bool { return a.recoverContextOverflowFor(ctx, log) },
 		OnText:                 onText,
 		OnError:                onError,
+		OnUsage: func(request llm.ChatRequest, usage llm.TokenUsage) {
+			if a.usageMeter != nil {
+				a.usageMeter.RecordSuccessfulUsageAt(sessionID, request, usage, log)
+			}
+		},
+		Metrics: a.metrics,
+		Tracer:  a.tracer,
 	})
 }
 
@@ -988,31 +1428,81 @@ func (a *app) buildLoop(onText func(string), onError func(error), sessionID, pro
 type sessionRuntime struct {
 	sessionID string
 	provider  string
+	// selected is the provider generation captured while resolving this turn.
+	// It prevents a concurrent registry publication from changing an in-flight
+	// Agent request route; retirement still requires a separate usage lease.
+	selected  llm.LLM
 	model     string
 	effort    string
 	mode      string
 	prompt    *prompt.Builder
+	log       *session.Log
+	registry  *tools.Registry
+	cwd       string
+	maxTokens int
 }
 
 // applySessionRuntime resolves one session's per-turn provider/model/effort /
 // mode-prompt / permission tier (session override ?? global) and swaps the
-// registry policy to the session's mode-projected whitelist. runTurn holds
-// turnMu while it runs, so the swap is serialized with the turn; the returned
-// restore func reinstates the base policy. Fail-open: any store or builder
+// registry policy to the session's mode-projected whitelist. The compatibility
+// helper remains only for focused composition tests; production turns use the
+// strict Agent-owned path. The returned restore func reinstates the base policy.
+// Fail-open: any store or builder
 // error falls back to the globals.
 func (a *app) applySessionRuntime(id string) (sessionRuntime, func()) {
-	provider := a.cfg.LLM.Provider
+	return a.applySessionRuntimeOn(id, a.log, a.reg)
+}
+
+// applySessionRuntimeE is the strict legacy-host assembly boundary. Even when
+// a small compatibility host has not composed the Agent registry, it must
+// return durable configuration and canonical catalog projection errors instead
+// of silently substituting global runtime state.
+func (a *app) applySessionRuntimeE(id string) (sessionRuntime, func(), error) {
+	return a.applySessionRuntimeOnStrict(id, a.log, a.reg)
+}
+
+func (a *app) applySessionRuntimeOn(id string, log *session.Log, registry *tools.Registry) (sessionRuntime, func()) {
+	rt, restore, err := a.applySessionRuntimeOnMode(id, log, registry, false)
+	if err != nil {
+		// The legacy REPL has no error return at this seam. Keep its historical
+		// compatibility behavior explicit and isolated; Agent-owned turns use
+		// applySessionRuntimeOnStrict below and never take this fallback.
+		return sessionRuntime{sessionID: id, log: log, registry: registry}, func() {}
+	}
+	return rt, restore
+}
+
+// applySessionRuntimeOnStrict is the Agent-owned runtime assembly boundary.
+// A durable configuration or approval-policy failure must not silently turn
+// into a global-provider/global-permission turn after restart.
+func (a *app) applySessionRuntimeOnStrict(id string, log *session.Log, registry *tools.Registry) (sessionRuntime, func(), error) {
+	return a.applySessionRuntimeOnMode(id, log, registry, true)
+}
+
+func (a *app) applySessionRuntimeOnMode(id string, log *session.Log, registry *tools.Registry, strict bool) (sessionRuntime, func(), error) {
+	cfgSnapshot := a.providerConfigSnapshot()
+	provider := cfgSnapshot.LLM.Provider
 	rt := sessionRuntime{
 		sessionID: id,
 		provider:  provider,
-		model:     llmProviderModel(a.cfg, provider),
-		effort:    a.cfg.ReasoningEffort,
+		model:     llmProviderModel(cfgSnapshot, provider),
+		effort:    cfgSnapshot.ReasoningEffort,
 		prompt:    a.prompt,
+		log:       log,
+		registry:  registry,
+		cwd:       a.sessionCWDFor(id),
 	}
 	perm := ""
-	mode := a.cfg.Mode
+	mode := cfgSnapshot.Mode
+	if mode == "" {
+		mode = config.ModeStandard
+	}
 	if scs, ok := a.store.(store.SessionConfigStore); ok && id != "" {
-		if cfg, err := scs.GetSessionConfig(context.Background(), id); err == nil {
+		cfg, err := scs.GetSessionConfig(context.Background(), id)
+		if err != nil && strict && !errors.Is(err, store.ErrNotFound) {
+			return sessionRuntime{}, func() {}, fmt.Errorf("pa: load session runtime %q: %w", id, err)
+		}
+		if err == nil {
 			if cfg.Provider != "" {
 				rt.provider = cfg.Provider
 			}
@@ -1029,54 +1519,112 @@ func (a *app) applySessionRuntime(id string) (sessionRuntime, func()) {
 			perm = cfg.Permission
 		}
 	}
+	// Approval policy is part of the session runtime, not merely a tool
+	// whitelist. Reapply the persisted permission tier before any sensitive
+	// call so a restored full-permission session cannot accidentally inherit the
+	// process-wide ask policy (and vice versa).
+	if a.interacts != nil && id != "" && perm != "" {
+		if controller, ok := a.interacts.(interact.PolicyController); ok {
+			_, _, _, approvalPolicy := permissionBundle(perm)
+			if err := controller.SetSessionPolicy(id, interact.ApprovalPolicy(approvalPolicy)); err != nil && strict {
+				return sessionRuntime{}, func() {}, fmt.Errorf("pa: set session approval policy %q: %w", id, err)
+			}
+		}
+	}
 	rt.mode = mode
 	toolMode := mode
 	if a.agentPresets != nil && !nativeAgentPresetKnown(mode) {
 		toolMode = a.agentPresets.Mode(mode)
+	}
+	if toolMode == config.ModeCode && a.codeUnavailableReason != "" {
+		return sessionRuntime{}, func() {}, fmt.Errorf("pa: code mode unavailable: %s", a.codeUnavailableReason)
 	}
 	// DSH persona sections resolve model and working-directory placeholders at
 	// prompt render time. Clone per turn so one shared base builder remains safe
 	// while sessions use different model/workspace selections.
 	rt.prompt = rt.prompt.Clone().SetVariables(map[string]string{
 		"model": rt.model,
-		"cwd":   a.sessionCWDFor(id),
+		"cwd":   rt.cwd,
 	})
-	if a.log != nil && session.FoldPlanMode(a.log.Events()) {
-		rt.prompt = rt.prompt.Clone().Add(prompt.Section{Name: "plan-mode", Order: 900, Text: planModeSection})
+	if log != nil {
+		planActive, err := currentPlanModeActive(log)
+		if err != nil {
+			return sessionRuntime{}, func() {}, fmt.Errorf("pa: read plan mode for session %q: %w", id, err)
+		}
+		if planActive {
+			rt.prompt = rt.prompt.Clone().Add(prompt.Section{Name: "plan-mode", Order: 900, Text: planModeSection})
+		}
 	}
 	// Every turn projects the session's mode onto the full base whitelist and
 	// swaps it in for the turn's duration (dsh: the executor honors the same
 	// presentation mode; standard never executes run_code, PTC only run_code,
 	// minimal only its fixed seam).
+	if registry == nil {
+		registry = tools.New()
+	}
 	base := a.basePolicy
 	base.Enabled = modeToolWhitelist(toolMode, base.Enabled)
-	pol, _ := a.sessionPolicyFrom(base, perm, toolMode)
-	a.reg.SetPolicy(pol)
+	base.Profile = toolMode
+	pol, _ := a.sessionPolicyFromRegistry(base, perm, toolMode, registry)
+	registry.SetPolicy(pol)
+	if strict {
+		if err := registry.ValidateProjection(toolMode, toolSpecsForMode(toolMode, registry.VisibleSpecs())); err != nil {
+			return sessionRuntime{}, func() {}, fmt.Errorf("pa: validate canonical tool projection for session %q: %w", id, err)
+		}
+	}
 	// PTC exposes only run_code to the model, but its TypeScript program may
 	// dispatch the same tools available to the session. Keep that nested view
 	// separate from the direct-call policy so the outer loop remains fail-closed.
 	nested := a.basePolicy
+	nested.Profile = config.ModeStandard
 	nested.Enabled = modeToolWhitelist(config.ModeStandard, nested.Enabled)
 	if perm == "readonly" {
 		nested.Enabled = config.ReadOnlyTools()
 	} else if perm == "full" {
-		nested.Enabled = modeToolWhitelist(config.ModeStandard, a.allRegisteredToolNames())
+		nested.Enabled = modeToolWhitelist(config.ModeStandard, registeredToolNames(registry))
 	}
-	a.codeBindingPolicy = nested
-	return rt, func() { a.reg.SetPolicy(a.basePolicy) }
+	if registry == a.reg {
+		a.codeBindingPolicy = nested
+	}
+	selected := a.providerRuntimeSnapshotPinned(rt.provider)
+	rt.selected = selected.selected
+	return rt, func() {
+		if registry == a.reg {
+			registry.SetPolicy(a.basePolicy)
+		}
+		if selected.release != nil {
+			selected.release()
+		}
+	}, nil
 }
 
 func (a *app) sessionPolicyFrom(base tools.Policy, perm, mode string) (tools.Policy, bool) {
+	return a.sessionPolicyFromRegistry(base, perm, mode, a.reg)
+}
+
+func (a *app) sessionPolicyFromRegistry(base tools.Policy, perm, mode string, registry *tools.Registry) (tools.Policy, bool) {
 	switch perm {
 	case "readonly":
 		base.Enabled = config.ReadOnlyTools()
 		return base, true
 	case "full":
-		base.Enabled = modeToolWhitelist(mode, a.allRegisteredToolNames())
+		base.Enabled = modeToolWhitelist(mode, registeredToolNames(registry))
 		return base, true
 	default:
 		return base, false
 	}
+}
+
+func registeredToolNames(registry *tools.Registry) []string {
+	if registry == nil {
+		return nil
+	}
+	specs := registry.Specs()
+	names := make([]string, 0, len(specs))
+	for _, spec := range specs {
+		names = append(names, spec.Name)
+	}
+	return names
 }
 
 // modeToolWhitelist projects the model-facing tool surface for a mode. Native
@@ -1150,11 +1698,12 @@ func (a *app) allRegisteredToolNames() []string {
 }
 
 // promptFor returns the system-prompt builder for a non-global mode, building
-// and caching it on first use. Called under turnMu. The minimal persona is
+// and caching it on first use. Called under the legacy turn lock. The minimal persona is
 // self-contained (fixed text, no appended catalog); the wire tool surface is
 // still mode-filtered through loop.Config.ToolSpecs.
 func (a *app) promptFor(mode string) *prompt.Builder {
-	if mode == "" || mode == a.cfg.Mode {
+	cfg := a.providerConfigSnapshot()
+	if mode == "" || mode == cfg.Mode {
 		return a.prompt
 	}
 	if a.promptByMode == nil {
@@ -1168,11 +1717,11 @@ func (a *app) promptFor(mode string) *prompt.Builder {
 	if a.agentPresets != nil && !nativeAgentPresetKnown(mode) {
 		b, err = a.agentPresets.Prompt(mode)
 	} else {
-		b, err = buildPrompt(mode, a.cfg.PromptsDir)
+		b, err = buildPrompt(mode, cfg.PromptsDir)
 	}
 	if err == nil {
 		if mode != config.ModeMinimal {
-			b.SetTools(func() []llm.ToolSchema { return toolSpecsForMode(mode, a.reg.Specs()) })
+			b.SetTools(func() []llm.ToolSchema { return toolSpecsForMode(mode, a.reg.VisibleSpecs()) })
 		}
 		a.promptByMode[mode] = b
 		return b
@@ -1187,32 +1736,92 @@ func (a *app) runTurn(ctx context.Context, text string, interactive bool) error 
 	return a.runTurnFor(ctx, a.currentID, text, interactive)
 }
 
-// runTurnFor executes a turn for an explicit session. The session is activated
-// while turnMu is held, so the log, runtime prompt, tool owner and workspace
-// snapshot all refer to the same session even when Web requests arrive for
-// different sessions concurrently.
+// runTurnFor executes a turn through the session-owned Agent handle. There is
+// deliberately no global-session fallback: a missing Agent registry is a
+// composition error, not permission to route a request through legacy state.
 func (a *app) runTurnFor(ctx context.Context, sessionID, text string, interactive bool) error {
-	a.turnMu.Lock()
-	defer a.turnMu.Unlock()
+	if err := a.requireRunning(); err != nil {
+		return err
+	}
+	if a.agentRegistry == nil {
+		if a.strictAgentRuntime || a.reg == nil || a.log == nil {
+			return errors.New("agent runtime is unavailable")
+		}
+		return a.runTurnForLegacy(ctx, sessionID, text, interactive)
+	}
+	handle, err := a.sessionAgent(sessionID)
+	if err != nil {
+		return err
+	}
+	metadata := map[string]string{}
+	if interactive {
+		metadata["interactive"] = "true"
+	}
+	return handle.Run(ctx, text, metadata)
+}
+
+func (a *app) runTurnContentFor(ctx context.Context, sessionID string, content []llm.ContentBlock, interactive bool) error {
+	if err := a.requireRunning(); err != nil {
+		return err
+	}
+	if a.agentRegistry == nil {
+		if a.strictAgentRuntime || a.reg == nil || a.log == nil {
+			return errors.New("agent runtime is unavailable")
+		}
+		return a.runTurnContentForLegacy(ctx, sessionID, content, interactive)
+	}
+	handle, err := a.sessionAgent(sessionID)
+	if err != nil {
+		return err
+	}
+	metadata := map[string]string{}
+	if interactive {
+		metadata["interactive"] = "true"
+	}
+	return handle.RunContent(ctx, content, metadata)
+}
+
+// runTurnForLegacy is retained only for small compatibility hosts and tests
+// that intentionally do not compose the Agent registry. The production app
+// sets strictAgentRuntime and never reaches this process-global path.
+func (a *app) runTurnForLegacy(ctx context.Context, sessionID, text string, interactive bool) error {
+	a.sessionStateMu.Lock()
+	defer a.sessionStateMu.Unlock()
 	if sessionID != "" && sessionID != a.currentID {
 		if err := a.resumeSession(ctx, sessionID); err != nil {
 			return err
 		}
 	}
 	activeID := a.currentID
-	// Publish the running session so the sidebar status dot reflects the live
-	// turn; cleared when the turn settles (the deferred store runs before the
-	// unlock, so a concurrent list read sees the fully-settled session).
 	defer a.runningSession.Store("")
 	a.runningSession.Store(activeID)
-	// Phase 2: resolve the session's per-turn model / mode prompt / permission
-	// tier and swap the registry policy for the duration of the turn.
-	rt, restore := a.applySessionRuntime(activeID)
-	defer restore()
-	if interactive {
-		return a.newLoopFor(rt, true).Run(ctx, text)
+	rt, restore, err := a.applySessionRuntimeE(activeID)
+	if err != nil {
+		return err
 	}
-	return a.newLoopFor(rt, false).Run(ctx, text)
+	defer restore()
+	return a.newLoopFor(rt, interactive).Run(ctx, text)
+}
+
+func (a *app) runTurnContentForLegacy(ctx context.Context, sessionID string, content []llm.ContentBlock, interactive bool) error {
+	a.sessionStateMu.Lock()
+	defer a.sessionStateMu.Unlock()
+	if sessionID != "" && sessionID != a.currentID {
+		if err := a.resumeSession(ctx, sessionID); err != nil {
+			return err
+		}
+	}
+	activeID := a.currentID
+	defer a.runningSession.Store("")
+	a.runningSession.Store(activeID)
+	rt, restore, err := a.applySessionRuntimeE(activeID)
+	if err != nil {
+		return err
+	}
+	defer restore()
+	return a.newLoopFor(rt, interactive).RunMessages(ctx, []llm.Message{{
+		Role: llm.RoleUser, Content: append([]llm.ContentBlock(nil), content...),
+	}})
 }
 
 // repl drives turns from stdin, handling the session commands.
@@ -1266,8 +1875,30 @@ func (a *app) repl(ctx context.Context) {
 }
 
 // command dispatches the /-commands.
-func (a *app) command(ctx context.Context, line string) error {
+func (a *app) command(ctx context.Context, line string) (err error) {
 	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return errors.New("empty command")
+	}
+	var commandID string
+	commandLog := a.log
+	if nativeCommandLifecycle(fields[0]) {
+		commandID, err = appendCommandRun(commandLog, strings.TrimPrefix(fields[0], "/"), commandArgs(line, fields[0]))
+		if err != nil {
+			return err
+		}
+		defer func() {
+			kind := "success"
+			text := ""
+			if err != nil {
+				kind = "error"
+				text = err.Error()
+			}
+			if appendErr := appendCommandDone(commandLog, commandID, kind, text); err == nil && appendErr != nil {
+				err = appendErr
+			}
+		}()
+	}
 	switch fields[0] {
 	case "/help":
 		a.printHelp()
@@ -1296,10 +1927,104 @@ func (a *app) command(ctx context.Context, line string) error {
 		return a.evalStatus()
 	case "/compact":
 		return a.compactCommand(ctx, fields[1:])
+	case "/feedback":
+		text := strings.TrimSpace(line[len(fields[0]):])
+		result, err := a.webFeedback(ctx, text)
+		if err != nil {
+			return err
+		}
+		fmt.Println(result)
+	case "/plan":
+		return a.planCommand(ctx, strings.TrimSpace(line[len(fields[0]):]))
 	default:
 		return fmt.Errorf("unknown command %q (try /help)", fields[0])
 	}
 	return nil
+}
+
+// planCommand implements the host-side /plan entry for the native REPL. Plan
+// mode is a durable session fact; an optional suffix is a separate ordinary
+// user turn, matching the Web command and dsh's command contract.
+func (a *app) planCommand(ctx context.Context, suffix string) error {
+	if a.log == nil {
+		return errors.New("no active session")
+	}
+	if a.agentRegistry != nil {
+		loggedActive, err := currentPlanModeActive(a.log)
+		if err != nil {
+			return err
+		}
+		action, err := a.setPlanModeFor(ctx, a.currentID, a.log, suffix != "off")
+		if err != nil {
+			return err
+		}
+		if suffix == "off" {
+			switch {
+			case action == planModeQueued:
+				fmt.Println("Leaving plan mode (applies from the next step).")
+			case action == planModeCancelled:
+				fmt.Println("Plan mode entry cancelled.")
+			case action == planModeNoop && !loggedActive:
+				fmt.Println("Plan mode is already inactive.")
+			default:
+				fmt.Println("Plan mode off.")
+			}
+			return nil
+		}
+		if suffix == "" {
+			switch {
+			case action == planModeQueued:
+				fmt.Println("Entering plan mode (applies from the next step). Use /plan off to leave.")
+			case action == planModeCommitted || action == planModeNoop && !loggedActive:
+				fmt.Println("Plan mode on. Use /plan off to leave.")
+			default:
+				fmt.Println("Plan mode is already active. Use /plan off to leave.")
+			}
+			return nil
+		}
+		if action == planModeQueued {
+			if steered, steerErr := a.steerPlanMessage(a.currentID, suffix); steerErr != nil {
+				return steerErr
+			} else if steered {
+				return nil
+			}
+		}
+		return a.runTurn(ctx, suffix, true)
+	}
+	active, err := currentPlanModeActive(a.log)
+	if err != nil {
+		return err
+	}
+	if suffix == "off" {
+		if active {
+			if _, err := a.log.Append(session.EventPlanMode, session.NewPlanMode(false)); err != nil {
+				return err
+			}
+			fmt.Println("Plan mode off.")
+			return nil
+		}
+		fmt.Println("Plan mode is already inactive.")
+		return nil
+	}
+	if !active {
+		if _, err := a.log.Append(session.EventPlanMode, session.NewPlanMode(true)); err != nil {
+			return err
+		}
+		fmt.Println("Plan mode on. Use /plan off to leave.")
+	} else if suffix == "" {
+		fmt.Println("Plan mode is already active. Use /plan off to leave.")
+	}
+	if suffix == "" {
+		return nil
+	}
+	// The exact argument "off" was handled above. Every other non-empty
+	// suffix is the message sent in plan mode, without the /plan command text.
+	if err := a.runTurn(ctx, suffix, true); err != nil {
+		return err
+	}
+	a.spillAutoSpill(ctx)
+	a.ensureSessionTitle(ctx, a.currentID)
+	return a.runIdleGoal(ctx, true)
 }
 
 func (a *app) printHelp() {
@@ -1313,6 +2038,9 @@ func (a *app) printHelp() {
   /eval-status       task-evaluation status (eval)
   /compact          compact the session now (fold old context into a summary)
   /compact region <start> <end>  compact only the given surface event range
+	/feedback <text>  record feedback without sending an LLM turn
+	/plan [message]    enter plan mode, optionally submit a message
+	/plan off         leave plan mode
   /help             show this command table
   /exit             quit (alias: /quit)
   anything else     send to the agent as a message
@@ -1439,9 +2167,10 @@ func (a *app) listSessions(ctx context.Context) error {
 	return nil
 }
 
-// newSessionID returns a short random session id (e.g. "s-1a2b3c4d").
+// newSessionID returns an opaque collision-resistant session id. The durable
+// SQLite primary key remains the authoritative uniqueness check.
 func newSessionID() (string, error) {
-	var b [4]byte
+	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", err
 	}

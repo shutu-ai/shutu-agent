@@ -20,6 +20,13 @@ func sleepCommand(seconds int) string {
 	return fmt.Sprintf("sleep %d", seconds)
 }
 
+func noisyCommand(bytes int) string {
+	if runtime.GOOS == "windows" {
+		return fmt.Sprintf("powershell -NoProfile -NonInteractive -Command ('x'*%d)", bytes)
+	}
+	return fmt.Sprintf("yes x | head -c %d", bytes)
+}
+
 func TestScrubEnvRemovesCredentialShapedEntries(t *testing.T) {
 	env := []string{
 		"DEEPSEEK_API_KEY=sk-secret",
@@ -239,6 +246,29 @@ func TestRunCommandTimeout(t *testing.T) {
 	}
 }
 
+// TestRunCommandOutputQuota verifies that a noisy foreground command is
+// continuously drained but never retained beyond the per-stream quota.
+func TestRunCommandOutputQuota(t *testing.T) {
+	r := New()
+	r.Register(NewRunCommand(""))
+	r.SetPolicy(Policy{
+		Enabled:     []string{"bash"},
+		Timeout:     time.Minute,
+		OutputLimit: 0,
+		RunCommand:  RunCommandPolicy{Enabled: true, Timeout: time.Minute},
+	})
+	res, err := r.Execute(context.Background(), "bash", json.RawMessage(`{"command":"`+noisyCommand(DefaultOutputLimit*4)+`","description":"emit bounded output"}`))
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if !strings.Contains(res.Output, "[output truncated]") {
+		t.Fatalf("output = %q, want truncation marker", res.Output)
+	}
+	if len(res.Output) > DefaultOutputLimit+64 {
+		t.Fatalf("output length = %d, want bounded near %d", len(res.Output), DefaultOutputLimit)
+	}
+}
+
 // TestRunCommandCancelled interrupts an executing command via context
 // cancellation (Ctrl+C path) — the process is killed through
 // exec.CommandContext and Execute returns promptly (dispatch-m3: 取消中断执行中命令).
@@ -272,5 +302,18 @@ func TestRunCommandCancelled(t *testing.T) {
 	}
 	if err != nil || !result.IsError || result.Error == nil || result.Error.Code != "ABORTED" {
 		t.Fatalf("result = %+v, err = %v, want structured interruption", result, err)
+	}
+}
+
+// TestRunCommandCatalogCancellationClassification ties the execution metadata
+// to the registry contract rather than leaving it as a detached method.
+func TestRunCommandCatalogCancellationClassification(t *testing.T) {
+	r := New()
+	if err := r.Register(NewRunCommand("")); err != nil {
+		t.Fatal(err)
+	}
+	entry := r.Catalog()[0]
+	if !entry.Cancellable || entry.Registration.Provenance != "builtin" || entry.TimeoutMS != int64(DefaultRunCommandTimeout/time.Millisecond) {
+		t.Fatalf("run_command catalog contract = %+v", entry)
 	}
 }

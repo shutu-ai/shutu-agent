@@ -1,8 +1,10 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +14,8 @@ import (
 	"time"
 
 	"github.com/jabing/shutu-agent/internal/jobs"
+	"github.com/jabing/shutu-agent/internal/llm"
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 )
 
 // runCommandName is the single execution-class tool (design.md §5 / D10 落地).
@@ -29,12 +33,17 @@ var sensitiveEnvTokens = []string{"KEY", "SECRET", "TOKEN", "PASSWORD", "API"}
 // directory. It is deliberately not an interactive shell: on Windows the
 // command runs through "cmd /C <line>", elsewhere "/bin/sh -c <line>".
 type RunCommand struct {
-	Workdir     string // fixed working directory; empty means the agent's own cwd
-	WorkdirFunc func() string
-	JobsFunc    func() jobs.Registry
-	OwnerFunc   func() string
-	DshEnvFunc  ManagedEnvFunc
-	Background  bool
+	Workdir                string // fixed working directory; empty means the agent's own cwd
+	WorkdirFunc            func() string
+	WorkdirContextFunc     func(context.Context) string
+	WorkdirRootContextFunc func(context.Context) string
+	JobsFunc               func() jobs.Registry
+	JobsContextFunc        func(context.Context) jobs.Registry
+	OwnerFunc              func() string
+	OwnerContextFunc       func(context.Context) string
+	DshEnvFunc             ManagedEnvFunc
+	DshEnvContextFunc      func(context.Context) map[string]string
+	Background             bool
 }
 
 // NewRunCommand returns a RunCommand bound to a fixed working directory.
@@ -54,6 +63,10 @@ func NewRunCommandForWorkdirAndJobs(workdir func() string, jobsFunc func() jobs.
 }
 
 func (RunCommand) Name() string { return runCommandName }
+
+// CancellationAware is explicit: the foreground runner monitors the registry
+// context and interrupts the owned process group before waiting for quiescence.
+func (RunCommand) CancellationAware() bool { return true }
 
 func (RunCommand) Description() string {
 	return "Execute a bash command and return stdout/stderr. Each call runs in a fresh non-interactive shell; " +
@@ -127,7 +140,9 @@ func (t RunCommand) Execute(ctx context.Context, args any) (string, error) {
 		return "", fmt.Errorf("run_command: cancelled: %w", err)
 	}
 	workdir := t.Workdir
-	if t.WorkdirFunc != nil {
+	if t.WorkdirContextFunc != nil {
+		workdir = t.WorkdirContextFunc(ctx)
+	} else if t.WorkdirFunc != nil {
 		workdir = t.WorkdirFunc()
 	}
 	if a.Workdir != "" {
@@ -137,11 +152,18 @@ func (t RunCommand) Execute(ctx context.Context, args any) (string, error) {
 			workdir = a.Workdir
 		}
 	}
+	if t.WorkdirRootContextFunc != nil {
+		var err error
+		workdir, err = constrainWorkdir(workdir, t.WorkdirRootContextFunc(ctx))
+		if err != nil {
+			return "", fmt.Errorf("run_command: %w", err)
+		}
+	}
 	if a.RunInBackground {
-		if !t.Background || t.JobsFunc == nil || t.JobsFunc() == nil {
+		if !t.Background || t.jobsFor(ctx) == nil {
 			return "", fmt.Errorf("run_command: run_in_background is unavailable (jobs disabled)")
 		}
-		return t.startBackground(ctx, a.Command, workdir)
+		return t.startBackground(ctx, a.Command, a.Description, workdir)
 	}
 	return t.runForeground(ctx, a.Command, workdir, a.TimeoutMS)
 }
@@ -161,49 +183,62 @@ func (t RunCommand) runForeground(ctx context.Context, command, workdir string, 
 		execCtx, cancel = context.WithTimeout(ctx, time.Duration(requested)*time.Millisecond)
 		defer cancel()
 	}
-	cmd := newCommand(command, workdir, bashEnv(t.DshEnvFunc))
-	outFile, err := os.CreateTemp("", "pa-run-stdout-*.txt")
+	cmd := newCommand(command, workdir, bashEnvContext(ctx, t.DshEnvFunc, t.DshEnvContextFunc))
+	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
-		return "", fmt.Errorf("run_command: create output file: %w", err)
+		return "", fmt.Errorf("run_command: create stdout pipe: %w", err)
 	}
-	outPath := outFile.Name()
-	errFile, err := os.CreateTemp("", "pa-run-stderr-*.txt")
+	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
-		outFile.Close()
-		os.Remove(outPath)
-		return "", fmt.Errorf("run_command: create error file: %w", err)
+		return "", fmt.Errorf("run_command: create stderr pipe: %w", err)
 	}
-	errPath := errFile.Name()
-	defer outFile.Close()
-	defer errFile.Close()
-	defer os.Remove(outPath)
-	defer os.Remove(errPath)
-	cmd.Stdout = outFile
-	cmd.Stderr = errFile
+	stdout := &boundedOutput{limit: DefaultOutputLimit}
+	stderr := &boundedOutput{limit: DefaultOutputLimit}
+	stdoutDone := make(chan error, 1)
+	stderrDone := make(chan error, 1)
+	startCapture := func() {
+		go func() { _, copyErr := io.Copy(stdout, stdoutPipe); stdoutDone <- copyErr }()
+		go func() { _, copyErr := io.Copy(stderr, stderrPipe); stderrDone <- copyErr }()
+	}
 
 	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("run_command: start: %w", err)
 	}
+	attachProcessGroup(cmd)
+	defer releaseProcessGroup(cmd)
+	startCapture()
 	// Interrupt the process when the context is done (Ctrl+C or the Execute
-	// deadline): the direct child is killed, and its output file (not a pipe)
-	// lets Wait return immediately.
+	// deadline). The capture goroutines continue draining until the owned
+	// process group has exited.
 	stop := monitorCtx(execCtx, cmd)
 	waitErr := cmd.Wait()
 	stop()
-
-	out, readErr := os.ReadFile(outPath)
-	if readErr != nil {
-		return "", fmt.Errorf("run_command: read output: %w", readErr)
+	stdoutCopyErr := <-stdoutDone
+	stderrCopyErr := <-stderrDone
+	if stdoutCopyErr != nil && ctx.Err() == nil && execCtx.Err() == nil {
+		return "", fmt.Errorf("run_command: read output: %w", stdoutCopyErr)
 	}
-	errOut, readErr := os.ReadFile(errPath)
-	if readErr != nil {
-		return "", fmt.Errorf("run_command: read stderr: %w", readErr)
+	if stderrCopyErr != nil && ctx.Err() == nil && execCtx.Err() == nil {
+		return "", fmt.Errorf("run_command: read stderr: %w", stderrCopyErr)
 	}
+	out := []byte(stdout.String())
+	errOut := []byte(stderr.String())
 	out = []byte(strings.ToValidUTF8(string(out), "\uFFFD"))
 	errOut = []byte(strings.ToValidUTF8(string(errOut), "\uFFFD"))
+	truncated := stdout.truncated || stderr.truncated
+	if truncated {
+		if len(errOut) > 0 && !strings.HasSuffix(string(errOut), "\n") {
+			errOut = append(errOut, '\n')
+		}
+		errOut = append(errOut, []byte("[output truncated]\n")...)
+	}
 	if waitErr != nil {
 		if ctx.Err() == context.Canceled {
-			return "", fmt.Errorf("run_command: interrupted: %w", waitErr)
+			return "", &ExecutionError{
+				Info:    ErrorInfo{Name: "AbortError", Code: CodeAborted},
+				Message: fmt.Sprintf("run_command: interrupted: %v", waitErr),
+				Cause:   waitErr,
+			}
 		}
 		if execCtx.Err() == context.DeadlineExceeded {
 			timedOut = true
@@ -231,19 +266,23 @@ func (t RunCommand) runForeground(ctx context.Context, command, workdir string, 
 	return formatBashOutput(out, errOut, 0, timedOut, requested), nil
 }
 
-func (t RunCommand) startBackground(ctx context.Context, command, workdir string) (string, error) {
-	provider := t.JobsFunc()
+func (t RunCommand) startBackground(ctx context.Context, command, description, workdir string) (string, error) {
+	provider := t.jobsFor(ctx)
 	var mu sync.Mutex
 	var live *exec.Cmd
 	var capture capturePaths
 	id, err := provider.Start(ctx, jobs.JobStart{
-		Kind: jobs.Kind(runCommandName), Label: command,
-		OwnerSession: t.ownerSession(), OutputLimitBytes: 64 * 1024,
-		ReadOutput: capture.Read,
+		// Commands may contain credentials or other user secrets. The
+		// description is the model-supplied UI label and is the only text that
+		// crosses into the durable job/start projection.
+		Kind: jobs.Kind(runCommandName), Label: llm.RedactDiagnostic(description),
+		OwnerSession: t.ownerSession(ctx), OutputLimitBytes: 64 * 1024,
+		Correlation: jobs.CorrelationFromContext(ctx),
+		ReadOutput:  capture.Read,
 		Run: func(jctx context.Context) (outcome jobs.JobOutcome, runErr error) {
 			streamOutput := ""
 			defer func() { capture.Finish(streamOutput) }()
-			cmd := newCommand(command, workdir, bashEnv(t.DshEnvFunc))
+			cmd := newCommand(command, workdir, bashEnvContext(jctx, t.DshEnvFunc, t.DshEnvContextFunc))
 			mu.Lock()
 			live = cmd
 			mu.Unlock()
@@ -265,13 +304,42 @@ func (t RunCommand) startBackground(ctx context.Context, command, workdir string
 			defer errFile.Close()
 			defer os.Remove(path)
 			defer os.Remove(errPath)
-			cmd.Stdout, cmd.Stderr = outFile, errFile
+			stdoutPipe, err := cmd.StdoutPipe()
+			if err != nil {
+				return jobs.JobOutcome{}, err
+			}
+			stderrPipe, err := cmd.StderrPipe()
+			if err != nil {
+				return jobs.JobOutcome{}, err
+			}
+			stdoutWriter := &boundedFileOutput{file: outFile, limit: DefaultOutputLimit}
+			stderrWriter := &boundedFileOutput{file: errFile, limit: DefaultOutputLimit}
 			if err := cmd.Start(); err != nil {
 				return jobs.JobOutcome{}, err
 			}
+			attachProcessGroup(cmd)
+			defer releaseProcessGroup(cmd)
+			stdoutDone := make(chan error, 1)
+			stderrDone := make(chan error, 1)
+			go func() { _, copyErr := io.Copy(stdoutWriter, stdoutPipe); stdoutDone <- copyErr }()
+			go func() { _, copyErr := io.Copy(stderrWriter, stderrPipe); stderrDone <- copyErr }()
 			stop := monitorCtx(jctx, cmd)
 			waitErr := cmd.Wait()
 			stop()
+			stdoutCopyErr := <-stdoutDone
+			stderrCopyErr := <-stderrDone
+			if stdoutCopyErr != nil && jctx.Err() == nil {
+				return jobs.JobOutcome{}, stdoutCopyErr
+			}
+			if stderrCopyErr != nil && jctx.Err() == nil {
+				return jobs.JobOutcome{}, stderrCopyErr
+			}
+			if stdoutWriter.err != nil {
+				return jobs.JobOutcome{}, stdoutWriter.err
+			}
+			if stderrWriter.err != nil {
+				return jobs.JobOutcome{}, stderrWriter.err
+			}
 			out, err := os.ReadFile(path)
 			if err != nil {
 				return jobs.JobOutcome{}, err
@@ -279,6 +347,12 @@ func (t RunCommand) startBackground(ctx context.Context, command, workdir string
 			errOut, err := os.ReadFile(errPath)
 			if err != nil {
 				return jobs.JobOutcome{}, err
+			}
+			if stdoutWriter.truncated || stderrWriter.truncated {
+				if len(errOut) > 0 && errOut[len(errOut)-1] != '\n' {
+					errOut = append(errOut, '\n')
+				}
+				errOut = append(errOut, []byte("[output truncated]\n")...)
 			}
 			streamOutput = formatShellStreams(string(out), string(errOut))
 			if jctx.Err() != nil {
@@ -305,7 +379,20 @@ func (t RunCommand) startBackground(ctx context.Context, command, workdir string
 	return fmt.Sprintf("started background job %s; observe with job_output or job_kill", id), nil
 }
 
-func (t RunCommand) ownerSession() string {
+func (t RunCommand) jobsFor(ctx context.Context) jobs.Registry {
+	if t.JobsContextFunc != nil {
+		return t.JobsContextFunc(ctx)
+	}
+	if t.JobsFunc != nil {
+		return t.JobsFunc()
+	}
+	return nil
+}
+
+func (t RunCommand) ownerSession(ctx context.Context) string {
+	if id := runtimectx.SessionID(ctx); id != "" {
+		return id
+	}
 	if t.OwnerFunc != nil {
 		return t.OwnerFunc()
 	}
@@ -332,14 +419,19 @@ func newCommand(command, workdir string, env []string) *exec.Cmd {
 // does not leak.
 func monitorCtx(ctx context.Context, cmd *exec.Cmd) func() {
 	done := make(chan struct{})
+	finished := make(chan struct{})
 	go func() {
+		defer close(finished)
 		select {
 		case <-ctx.Done():
 			killTree(cmd)
 		case <-done:
 		}
 	}()
-	return func() { close(done) }
+	return func() {
+		close(done)
+		<-finished
+	}
 }
 
 // scrubbedEnv returns the parent environment minus credential-shaped entries.
@@ -376,6 +468,86 @@ func isSensitiveEnvName(name string) bool {
 		}
 	}
 	return false
+}
+
+// boundedOutput drains a subprocess stream while retaining only its prefix.
+// It keeps reading after the quota is reached so a noisy child cannot block on
+// a full pipe. ReadFrom is explicit because bytes.Buffer also exposes a
+// promoted ReadFrom that would bypass the quota-aware Write method.
+type boundedOutput struct {
+	bytes.Buffer
+	limit     int
+	truncated bool
+}
+
+func (o *boundedOutput) Write(p []byte) (int, error) {
+	if o.limit <= o.Len() {
+		o.truncated = true
+		return len(p), nil
+	}
+	remaining := o.limit - o.Len()
+	if len(p) > remaining {
+		if _, err := o.Buffer.Write(p[:remaining]); err != nil {
+			return 0, err
+		}
+		o.truncated = true
+		return len(p), nil
+	}
+	return o.Buffer.Write(p)
+}
+
+func (o *boundedOutput) ReadFrom(r io.Reader) (int64, error) {
+	buf := make([]byte, 32*1024)
+	var total int64
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			written, writeErr := o.Write(buf[:n])
+			total += int64(written)
+			if writeErr != nil {
+				return total, writeErr
+			}
+		}
+		if err != nil {
+			if err == io.EOF {
+				return total, nil
+			}
+			return total, err
+		}
+	}
+}
+
+// boundedFileOutput keeps the pollable background-job files bounded while
+// continuing to drain the process pipe after the quota is reached.
+type boundedFileOutput struct {
+	file      *os.File
+	limit     int64
+	n         int64
+	truncated bool
+	err       error
+}
+
+func (o *boundedFileOutput) Write(p []byte) (int, error) {
+	if o.err != nil {
+		return len(p), nil
+	}
+	remaining := o.limit - o.n
+	if remaining <= 0 {
+		o.truncated = true
+		return len(p), nil
+	}
+	toWrite := p
+	if int64(len(toWrite)) > remaining {
+		toWrite = toWrite[:remaining]
+		o.truncated = true
+	}
+	n, err := o.file.Write(toWrite)
+	o.n += int64(n)
+	if err != nil {
+		o.err = err
+		return len(p), nil
+	}
+	return len(p), nil
 }
 
 // capturePaths exposes consuming output from a pair of append-only process

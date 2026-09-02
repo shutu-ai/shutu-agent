@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 )
 
 // defaultMaxConcurrentJobsPerOwner is the active-job cap applied when
@@ -21,6 +23,16 @@ type LocalOpts struct {
 	// exact-owner bucket (and the shared unowned bucket). <= 0 means the
 	// default (10).
 	MaxConcurrentJobsPerOwner int
+	// OnSettled is invoked once for each first terminal transition. The
+	// callback runs outside the registry mutex and must tolerate shutdown.
+	OnSettled CompletionObserver
+	// OnStarted is invoked once after a job is registered and before its Run
+	// body is launched. It is an observation hook; panics are contained so
+	// telemetry cannot prevent a job from starting.
+	OnStarted func(JobSnapshot)
+	// ReserveID optionally provides cross-process uniqueness for generated job
+	// ids. The callback runs before the job is published to this registry.
+	ReserveID IDReservation
 }
 
 // Local is the default in-memory Registry provider (ADR 决策 ①). Every record
@@ -29,11 +41,16 @@ type LocalOpts struct {
 // concurrent use by many owners.
 type Local struct {
 	maxConcurrentJobsPerOwner int
+	onSettled                 CompletionObserver
+	onStarted                 func(JobSnapshot)
+	reserveID                 IDReservation
 
-	mu       sync.Mutex
-	jobs     map[string]*jobRecord
-	counters map[Kind]int
-	closed   bool
+	mu            sync.Mutex
+	jobs          map[string]*jobRecord
+	counters      map[Kind]int
+	closed        bool
+	closingOwners map[string]chan struct{}
+	closeDone     chan struct{}
 }
 
 // jobRecord is the registry's mutable per-job record. It is never handed out:
@@ -47,19 +64,22 @@ type jobRecord struct {
 	detail      string
 	output      string
 	outputLimit int
+	correlation runtimectx.Correlation
 	startedAt   time.Time
 	finishedAt  *time.Time
 
-	run       func(ctx context.Context) (JobOutcome, error)
-	cancel    func(reason string) error
-	ctx       context.Context
-	cancelJob context.CancelFunc
-	done      chan struct{} // closed once the job settles
+	run          func(ctx context.Context) (JobOutcome, error)
+	cancel       func(reason string) error
+	ctx          context.Context
+	cancelJob    context.CancelFunc
+	done         chan struct{} // closed once the job settles
+	observerDone chan struct{} // closed after completion observers return
 
 	reported   bool // terminal state has been reported to some consumer (read/kill/wait)
 	waiters    int  // live waits, for settlement-time reported marking
 	readMu     sync.Mutex
 	readOutput func() (string, error)
+	onSettled  func(JobSnapshot)
 }
 
 // NewLocal returns a Local provider. MaxConcurrentJobsPerOwner <= 0 selects the
@@ -71,8 +91,13 @@ func NewLocal(opts LocalOpts) *Local {
 	}
 	return &Local{
 		maxConcurrentJobsPerOwner: max,
+		onSettled:                 opts.OnSettled,
+		onStarted:                 opts.OnStarted,
+		reserveID:                 opts.ReserveID,
 		jobs:                      map[string]*jobRecord{},
 		counters:                  map[Kind]int{},
+		closingOwners:             map[string]chan struct{}{},
+		closeDone:                 make(chan struct{}),
 	}
 }
 
@@ -101,40 +126,109 @@ func (l *Local) Start(ctx context.Context, spec JobStart) (string, error) {
 	if spec.OutputLimitBytes < 0 {
 		return "", errors.New("jobs: invalid output limit: must be non-negative")
 	}
+	if inherited, ok := runtimectx.CorrelationOf(ctx); ok {
+		if spec.Correlation.AgentID == "" {
+			spec.Correlation.AgentID = inherited.AgentID
+		}
+		if spec.Correlation.SessionID == "" {
+			spec.Correlation.SessionID = inherited.SessionID
+		}
+		if spec.Correlation.TurnID == "" {
+			spec.Correlation.TurnID = inherited.TurnID
+		}
+		if spec.Correlation.StepID == "" {
+			spec.Correlation.StepID = inherited.StepID
+		}
+		if spec.Correlation.RequestID == "" {
+			spec.Correlation.RequestID = inherited.RequestID
+		}
+		if spec.Correlation.CallID == "" {
+			spec.Correlation.CallID = inherited.CallID
+		}
+		if spec.Correlation.GenerationID == "" {
+			spec.Correlation.GenerationID = inherited.GenerationID
+		}
+	}
+	if spec.Correlation.SessionID == "" {
+		spec.Correlation.SessionID = spec.OwnerSession
+	}
+	if spec.Correlation.AgentID == "" {
+		spec.Correlation.AgentID = spec.Correlation.SessionID
+	}
 
 	l.mu.Lock()
 	if l.closed {
 		l.mu.Unlock()
 		return "", ErrRegistryClosed
 	}
+	if spec.OwnerSession != "" {
+		if _, closing := l.closingOwners[spec.OwnerSession]; closing {
+			l.mu.Unlock()
+			return "", ErrOwnerClosed
+		}
+	}
 	if l.activeCountLocked(spec.OwnerSession) >= l.maxConcurrentJobsPerOwner {
 		l.mu.Unlock()
 		return "", fmt.Errorf("%w (limit: %d)", ErrLimitReached, l.maxConcurrentJobsPerOwner)
 	}
 
-	count := l.counters[spec.Kind] + 1
-	l.counters[spec.Kind] = count
-	id := fmt.Sprintf("%s-%d", spec.Kind, count)
+	var id string
+	for attempt := 0; attempt < 32; attempt++ {
+		count := l.counters[spec.Kind] + 1
+		l.counters[spec.Kind] = count
+		candidate := fmt.Sprintf("%s-%d", spec.Kind, count)
+		if l.reserveID == nil {
+			id = candidate
+			break
+		}
+		claimed, err := l.reserveID(ctx, "job:"+string(spec.Kind), candidate)
+		if err != nil {
+			l.mu.Unlock()
+			return "", fmt.Errorf("jobs: reserve id: %w", err)
+		}
+		if claimed {
+			id = candidate
+			break
+		}
+	}
+	if id == "" {
+		l.mu.Unlock()
+		return "", errors.New("jobs: unable to reserve a unique id")
+	}
 
 	jobCtx, cancelJob := context.WithCancel(context.Background())
+	// The caller's context cannot be retained: a tool request may be cancelled
+	// as soon as registration returns. Carry only the immutable runtime
+	// correlation into the independent job context.
+	jobCtx = runtimectx.WithCorrelation(jobCtx, spec.Correlation)
 	rec := &jobRecord{
-		id:          id,
-		kind:        spec.Kind,
-		label:       spec.Label,
-		owner:       spec.OwnerSession,
-		status:      StatusRunning,
-		outputLimit: spec.OutputLimitBytes,
-		startedAt:   time.Now(),
-		run:         spec.Run,
-		cancel:      spec.Cancel,
-		ctx:         jobCtx,
-		cancelJob:   cancelJob,
-		done:        make(chan struct{}),
-		readOutput:  spec.ReadOutput,
+		id:           id,
+		kind:         spec.Kind,
+		label:        spec.Label,
+		owner:        spec.OwnerSession,
+		status:       StatusRunning,
+		outputLimit:  spec.OutputLimitBytes,
+		correlation:  spec.Correlation,
+		startedAt:    time.Now(),
+		run:          spec.Run,
+		cancel:       spec.Cancel,
+		ctx:          jobCtx,
+		cancelJob:    cancelJob,
+		done:         make(chan struct{}),
+		observerDone: make(chan struct{}),
+		readOutput:   spec.ReadOutput,
+		onSettled:    spec.OnSettled,
 	}
 	l.jobs[id] = rec
+	startedSnapshot := snapshotOf(rec)
 	l.mu.Unlock()
 
+	if l.onStarted != nil {
+		func() {
+			defer func() { _ = recover() }()
+			l.onStarted(startedSnapshot)
+		}()
+	}
 	go l.runJob(rec)
 	return id, nil
 }
@@ -152,21 +246,25 @@ func (l *Local) runJob(rec *jobRecord) {
 		return rec.run(rec.ctx)
 	}()
 	if err != nil {
-		l.settle(rec, JobOutcome{Status: StatusFailed, Detail: err.Error()})
+		if l.settle(rec, JobOutcome{Status: StatusFailed, Detail: err.Error()}) {
+			l.notifySettled(rec)
+		}
 		return
 	}
-	l.settle(rec, outcome)
+	if l.settle(rec, outcome) {
+		l.notifySettled(rec)
+	}
 }
 
 // settle records the first terminal outcome for a job: status, detail, a
 // bounded output, finishedAt, then releases waiters and marks the job
 // reported. First-wins: a later settlement (e.g. a Close force-failure racing
 // the producer's own terminal outcome) is ignored.
-func (l *Local) settle(rec *jobRecord, outcome JobOutcome) {
+func (l *Local) settle(rec *jobRecord, outcome JobOutcome) bool {
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	if isTerminal(rec.status) {
-		return
+		l.mu.Unlock()
+		return false
 	}
 	status := outcome.Status
 	if status != StatusCompleted && status != StatusKilled && status != StatusFailed {
@@ -181,6 +279,36 @@ func (l *Local) settle(rec *jobRecord, outcome JobOutcome) {
 		rec.reported = true
 	}
 	close(rec.done)
+	l.mu.Unlock()
+	return true
+}
+
+func (l *Local) notifySettled(rec *jobRecord) {
+	if rec == nil {
+		return
+	}
+	// Close waits for this signal in addition to rec.done. settle closes done
+	// before this callback runs, so waiting on done alone allows the owner
+	// shutdown sequence to race the durable completion observer.
+	defer close(rec.observerDone)
+	l.mu.Lock()
+	snapshot := snapshotOf(rec)
+	output := rec.output
+	perJob := rec.onSettled
+	observer := l.onSettled
+	l.mu.Unlock()
+	if perJob != nil {
+		func() {
+			defer func() { _ = recover() }()
+			perJob(snapshot)
+		}()
+	}
+	if observer != nil {
+		func() {
+			defer func() { _ = recover() }()
+			observer(snapshot, output)
+		}()
+	}
 }
 
 // List returns every snapshot visible to callerSession, sorted by id.
@@ -392,7 +520,9 @@ func (l *Local) Wait(ctx context.Context, id, callerSession string, timeout time
 func (l *Local) Close() error {
 	l.mu.Lock()
 	if l.closed {
+		closeDone := l.closeDone
 		l.mu.Unlock()
+		<-closeDone
 		return nil
 	}
 	l.closed = true
@@ -422,14 +552,99 @@ func (l *Local) Close() error {
 		}
 		rec.cancelJob()
 		if cancelErr != nil {
-			l.settle(rec, JobOutcome{Status: StatusFailed, Detail: "cancel failed during close: " + cancelErr.Error()})
+			if l.settle(rec, JobOutcome{Status: StatusFailed, Detail: "cancel failed during close: " + cancelErr.Error()}) {
+				l.notifySettled(rec)
+			}
 		}
 	}
 	for _, rec := range recs {
 		<-rec.done
+		<-rec.observerDone
 	}
+	close(l.closeDone)
 	return nil
 }
+
+// CloseOwner disposes the exact owner bucket. This is the Agent-scope
+// lifecycle boundary used by the Harness jobs-local provider: closing an
+// Agent must cancel and await its jobs, then remove their snapshots. It is
+// intentionally separate from Close so an Agent cannot tear down jobs owned
+// by another Agent or the shared unowned bucket.
+//
+// The owner is captured by value before cancellation. A producer may settle
+// and run completion observers while this method is waiting; the observer is
+// always drained before the record is removed, so no callback can observe a
+// half-disposed job record.
+func (l *Local) CloseOwner(owner string) error {
+	if l == nil || owner == "" {
+		return nil
+	}
+	l.mu.Lock()
+	if closeDone, alreadyClosing := l.closingOwners[owner]; alreadyClosing {
+		l.mu.Unlock()
+		<-closeDone
+		return nil
+	}
+	ownerDone := make(chan struct{})
+	l.closingOwners[owner] = ownerDone
+	recs := make([]*jobRecord, 0)
+	for _, rec := range l.jobs {
+		if rec.owner != owner {
+			continue
+		}
+		recs = append(recs, rec)
+		if !isTerminal(rec.status) {
+			rec.status = StatusStopping
+			rec.reported = true
+		}
+	}
+	l.mu.Unlock()
+
+	var first error
+	for _, rec := range recs {
+		if isTerminalSnapshot(l.snapshot(rec)) {
+			continue
+		}
+		var cancelErr error
+		if rec.cancel != nil {
+			cancelErr = rec.cancel("owner disposed")
+		}
+		rec.cancelJob()
+		if cancelErr != nil {
+			if l.settle(rec, JobOutcome{Status: StatusFailed, Detail: "cancel failed during owner close: " + cancelErr.Error()}) {
+				l.notifySettled(rec)
+			}
+			if first == nil {
+				first = cancelErr
+			}
+		}
+	}
+	for _, rec := range recs {
+		<-rec.done
+		<-rec.observerDone
+	}
+	l.mu.Lock()
+	for _, rec := range recs {
+		if current := l.jobs[rec.id]; current == rec && current.owner == owner {
+			delete(l.jobs, rec.id)
+		}
+	}
+	delete(l.closingOwners, owner)
+	close(ownerDone)
+	l.mu.Unlock()
+	return first
+}
+
+// snapshot is a small locked projection used only by CloseOwner's cancellation
+// pass. Keeping the check behind the registry mutex avoids reading status while
+// the producer settles concurrently.
+func (l *Local) snapshot(rec *jobRecord) JobSnapshot {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return snapshotOf(rec)
+}
+
+func isTerminalSnapshot(s JobSnapshot) bool { return isTerminal(s.Status) }
 
 // lookupLocked returns the record for id and checks owner access. The caller
 // must hold l.mu.
@@ -485,6 +700,7 @@ func snapshotOf(rec *jobRecord) JobSnapshot {
 		Detail:           rec.detail,
 		StartedAt:        rec.startedAt,
 		OutputLimitBytes: rec.outputLimit,
+		Correlation:      rec.correlation,
 	}
 	if rec.finishedAt != nil {
 		t := *rec.finishedAt

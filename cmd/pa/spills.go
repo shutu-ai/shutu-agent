@@ -72,7 +72,14 @@ func (a *app) registerSpills() error {
 // Every failure is surfaced as a stderr warning and contributes nothing
 // (fail-open, the same contract as the schedule tick hook).
 func (a *app) spillAutoSpill(ctx context.Context) {
+	a.spillAutoSpillFor(ctx, a.currentID, a.log)
+}
+
+func (a *app) spillAutoSpillFor(ctx context.Context, sessionID string, log *session.Log) {
 	if a.spills == nil || !a.cfg.Spill.AutoSpillValue() {
+		return
+	}
+	if log == nil || sessionID == "" {
 		return
 	}
 	before, err := a.spills.List(ctx)
@@ -84,7 +91,7 @@ func (a *app) spillAutoSpill(ctx context.Context) {
 	for _, m := range before {
 		beforeIDs[m.ID] = true
 	}
-	added, err := a.spills.AutoSpill(ctx, a.log.Events())
+	added, err := a.spills.AutoSpill(ctx, log.Events())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "[spill auto-spill failed open]", err)
 		return
@@ -101,7 +108,7 @@ func (a *app) spillAutoSpill(ctx context.Context) {
 		if beforeIDs[m.ID] {
 			continue
 		}
-		if _, err := a.log.Append(session.EventSpillWrite, session.NewSpillWrite(m.ID, m.Content)); err != nil {
+		if _, err := log.Append(session.EventSpillWrite, session.NewSpillWrite(m.ID, m.Content)); err != nil {
 			fmt.Fprintln(os.Stderr, "pa: spill/write event:", err)
 		}
 	}

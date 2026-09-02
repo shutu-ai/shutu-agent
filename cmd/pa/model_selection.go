@@ -30,7 +30,7 @@ func parsePersistedModelSelection(raw string) (persistedModelSelection, bool) {
 		return persistedModelSelection{}, false
 	}
 	switch selection.ReasoningEffort {
-	case "", "off", "low", "high", "max":
+	case "", "off", "minimal", "low", "medium", "high", "xhigh", "max":
 		return selection, true
 	default:
 		return persistedModelSelection{}, false

@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"unicode/utf8"
 
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 	"github.com/jabing/shutu-agent/internal/session"
 )
 
@@ -27,11 +28,17 @@ const WorkflowRunToolName = "workflow"
 // WorkflowRunTool bundles both workflow execution paths: the legacy Go DAG and
 // the optional dsh-shaped JavaScript runner. The D3 event sink is shared.
 type WorkflowRunTool struct {
-	eng     *Engine
-	script  ScriptRunner
-	agent   AgentStart
-	parent  func() string
-	onEvent func(typ string, data any)
+	eng           *Engine
+	script        ScriptRunner
+	agent         AgentStart
+	parent        func() string
+	parentContext func(context.Context) string
+	onEvent       func(typ string, data any)
+	// eventSink lets the composition root install a durable sink even for
+	// legacy calls without a runtime context. Unlike onEvent, failures are
+	// returned to the model instead of leaving a successful tool result with a
+	// missing lifecycle receipt.
+	eventSink func(context.Context, string, any) error
 }
 
 // NewWorkflowRunTool returns the workflow tool bound to an Engine. onEvent,
@@ -48,13 +55,44 @@ func NewWorkflowRunToolWithScript(eng *Engine, script ScriptRunner, agent AgentS
 	return &WorkflowRunTool{eng: eng, script: script, agent: agent, parent: parent, onEvent: onEvent}
 }
 
+// NewWorkflowRunToolWithScriptContext is the Agent-owned constructor. The
+// parent resolver is evaluated with the addressed runtime context whenever a
+// workflow starts a child.
+func NewWorkflowRunToolWithScriptContext(eng *Engine, script ScriptRunner, agent AgentStart, parent func(context.Context) string, onEvent func(typ string, data any)) *WorkflowRunTool {
+	return &WorkflowRunTool{eng: eng, script: script, agent: agent, parentContext: parent, onEvent: onEvent}
+}
+
+// SetEmitContext installs the addressed, failure-reporting event sink. It
+// takes precedence over runtimectx.Emit and the legacy best-effort callback.
+func (t *WorkflowRunTool) SetEmitContext(emit func(context.Context, string, any) error) {
+	if t != nil {
+		t.eventSink = emit
+	}
+}
+
 func (t *WorkflowRunTool) emit(typ string, data any) {
 	if t.onEvent != nil {
 		t.onEvent(typ, data)
 	}
 }
 
+func (t *WorkflowRunTool) emitContext(ctx context.Context, typ string, data any) error {
+	if t.eventSink != nil {
+		return t.eventSink(ctx, typ, data)
+	}
+	if runtime, ok := runtimectx.Get(ctx); ok && runtime.Emit != nil {
+		return runtime.Emit(typ, data)
+	}
+	t.emit(typ, data)
+	return nil
+}
+
 func (WorkflowRunTool) Name() string { return WorkflowRunToolName }
+
+// CancellationAware is explicit: the Node process and agent admission contexts
+// derive from the registry context, and engine cancellation tests cover
+// partial-run settlement.
+func (*WorkflowRunTool) CancellationAware() bool { return true }
 
 func (WorkflowRunTool) Description() string {
 	return "Run a JavaScript workflow script that orchestrates subagents at scale. Provide meta (required name and description, optional whenToUse and phases), a plain JavaScript script body with top-level await, and optional args. The script exposes agent, pipeline, parallel, phase, and log; agent supports label, phase, provider, model, and object-rooted JSON schema options. Ordinary child or stage failures return null; invalid hooks, unsupported options/schemas, and cap violations fail the whole workflow. The call runs in the foreground and returns only after the script completes."
@@ -125,12 +163,34 @@ func (t *WorkflowRunTool) ExecuteResult(ctx context.Context, args any) (agenttoo
 			return agenttools.ToolResult{}, fmt.Errorf("workflow: %w", err)
 		}
 		parent := ""
-		if t.parent != nil {
+		if runtimeID := runtimectx.SessionID(ctx); runtimeID != "" {
+			parent = runtimeID
+		} else if t.parentContext != nil {
+			parent = t.parentContext(ctx)
+		} else if t.parent != nil {
 			parent = t.parent()
 		}
-		res, err := t.script.RunScript(ctx, ScriptRequest{Meta: a.Meta, Script: a.Script, Args: a.Args, ParentSessionID: parent}, t.agent, func(ev ScriptEvent) {
-			t.emit(ev.Type, ev.Data)
+		// A workflow owns its external child actions only while its lifecycle
+		// receipts remain writable. The run context is narrower than the tool
+		// context: the first durable sink failure closes admission immediately,
+		// so a lost event cannot be followed by another agent() side effect.
+		runCtx, cancelRun := context.WithCancel(ctx)
+		defer cancelRun()
+		var emitErr error
+		recorder := &toolWorkflowRecorder{emit: t.emitContext}
+		res, err := t.script.RunScript(runCtx, ScriptRequest{Meta: a.Meta, Script: a.Script, Args: a.Args, ParentSessionID: parent}, t.agent, func(ev ScriptEvent) {
+			recorder.observe(runCtx, ev)
+			if emitErr == nil {
+				emitErr = t.emitContext(runCtx, ev.Type, ev.Data)
+				if emitErr != nil {
+					cancelRun()
+				}
+			}
 		})
+		recorder.finish(ctx)
+		if emitErr != nil {
+			return agenttools.ToolResult{}, fmt.Errorf("workflow: persist event: %w", emitErr)
+		}
 		if err != nil {
 			return agenttools.ToolResult{}, fmt.Errorf("workflow: JavaScript: %w", err)
 		}
@@ -143,7 +203,9 @@ func (t *WorkflowRunTool) ExecuteResult(ctx context.Context, args any) (agenttoo
 		if res.RunID == "" {
 			res.RunID = fmt.Sprintf("workflow-%d", atomic.AddUint64(&runSequence, 1))
 		}
-		t.emit(session.EventWorkflowRun, map[string]any{"mode": "script", "stopReason": res.StopReason, "agentsStarted": res.AgentsStarted})
+		if err := t.emitContext(ctx, session.EventWorkflowRun, map[string]any{"mode": "script", "stopReason": res.StopReason, "agentsStarted": res.AgentsStarted}); err != nil {
+			return agenttools.ToolResult{}, fmt.Errorf("workflow: persist event: %w", err)
+		}
 		value := map[string]any{"runId": res.RunID, "agentsStarted": res.AgentsStarted, "result": res.Value}
 		return agenttools.ToolResult{Value: value, Output: formatScriptResult(a.Meta["name"].(string), res)}, nil
 	}
@@ -165,7 +227,9 @@ func (t *WorkflowRunTool) ExecuteResult(ctx context.Context, args any) (agenttoo
 			failed++
 		}
 	}
-	t.emit(session.EventWorkflowRun, session.NewWorkflowRun(len(rep.Tasks), completed, failed))
+	if err := t.emitContext(ctx, session.EventWorkflowRun, session.NewWorkflowRun(len(rep.Tasks), completed, failed)); err != nil {
+		return agenttools.ToolResult{}, fmt.Errorf("workflow: persist event: %w", err)
+	}
 	text := formatReport(rep)
 	return agenttools.ToolResult{Value: text, Output: text}, nil
 }
@@ -187,10 +251,21 @@ func validateScriptMeta(meta map[string]any) error {
 	if meta == nil {
 		return fmt.Errorf("JavaScript workflow meta is required")
 	}
+	known := map[string]bool{"name": true, "description": true, "whenToUse": true, "phases": true}
+	for key := range meta {
+		if !known[key] {
+			return fmt.Errorf("JavaScript workflow meta.%s is not a recognized field (name/description/whenToUse/phases)", key)
+		}
+	}
 	for _, key := range []string{"name", "description"} {
 		value, ok := meta[key].(string)
 		if !ok || strings.TrimSpace(value) == "" {
 			return fmt.Errorf("JavaScript workflow meta.%s must be a non-empty string", key)
+		}
+	}
+	if value, ok := meta["whenToUse"]; ok {
+		if _, ok := value.(string); !ok {
+			return fmt.Errorf("JavaScript workflow meta.whenToUse must be a string")
 		}
 	}
 	if phases, ok := meta["phases"]; ok {
@@ -203,9 +278,21 @@ func validateScriptMeta(meta map[string]any) error {
 			if !ok {
 				return fmt.Errorf("JavaScript workflow meta.phases[%d] must be an object", i)
 			}
+			for key := range phase {
+				if key != "title" && key != "detail" && key != "provider" && key != "model" {
+					return fmt.Errorf("JavaScript workflow meta.phases[%d].%s is not a recognized field", i, key)
+				}
+			}
 			title, ok := phase["title"].(string)
 			if !ok || strings.TrimSpace(title) == "" {
 				return fmt.Errorf("JavaScript workflow meta.phases[%d].title must be a non-empty string", i)
+			}
+			for _, key := range []string{"detail", "provider", "model"} {
+				if value, exists := phase[key]; exists {
+					if _, ok := value.(string); !ok {
+						return fmt.Errorf("JavaScript workflow meta.phases[%d].%s must be a string", i, key)
+					}
+				}
 			}
 		}
 	}

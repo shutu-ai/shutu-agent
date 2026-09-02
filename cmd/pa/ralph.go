@@ -34,13 +34,14 @@ func (a *app) registerRalph() error {
 	}
 	spawn := func(ctx context.Context, prompt string) (string, error) {
 		run, err := a.subagents.Start(ctx, "spawn", subagent.StartRequest{
-			Prompt: prompt, ParentSessionID: a.currentID, OutputSchema: ralph.RoundReportSchema(),
+			Prompt: prompt, ParentSessionID: a.runtimeSessionID(ctx), OutputSchema: ralph.RoundReportSchema(),
 		})
 		if err != nil {
 			return "", err
 		}
 		res, err := run.Result(ctx)
 		if err != nil {
+			_ = run.Cancel("Ralph parent cancelled")
 			return "", err
 		}
 		if res.Structured != nil {

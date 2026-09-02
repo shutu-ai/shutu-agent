@@ -17,6 +17,8 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/jabing/shutu-agent/internal/projection"
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 	"github.com/jabing/shutu-agent/internal/session"
 	"github.com/jabing/shutu-agent/internal/store"
 )
@@ -42,10 +44,11 @@ type Backend interface {
 
 // Tools bundles the five read-only consumers over one backend.
 type Tools struct {
-	backend       Backend
-	current       func() string
-	maxResults    int
-	searchTimeout time.Duration
+	backend        Backend
+	current        func() string
+	currentContext func(context.Context) string
+	maxResults     int
+	searchTimeout  time.Duration
 }
 
 type sessionSearchArgs struct {
@@ -82,7 +85,7 @@ func (t *Tools) authorizedMetas(ctx context.Context) (map[string]store.SessionMe
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	current := t.currentID()
+	current := t.currentID(ctx)
 	if current == "" {
 		return nil, errors.New("current session is unavailable")
 	}
@@ -137,13 +140,27 @@ func NewTools(backend Backend, current func() string, maxResults ...int) *Tools 
 // NewToolsWithConfig binds DSH's deployment-owned search cap and cooperative
 // search deadline. The model cannot override either value.
 func NewToolsWithConfig(backend Backend, current func() string, maxResults int, searchTimeout time.Duration) *Tools {
+	return newTools(backend, current, nil, maxResults, searchTimeout)
+}
+
+// NewToolsWithConfigContext binds the current-session resolver to the
+// addressed runtime context. A non-nil context resolver is authoritative: if
+// the context has no session it returns no current session instead of falling
+// back to a process-global selection. This is the constructor used by the
+// Agent-owned composition root; NewToolsWithConfig remains source-compatible
+// for legacy embedders.
+func NewToolsWithConfigContext(backend Backend, current func(context.Context) string, maxResults int, searchTimeout time.Duration) *Tools {
+	return newTools(backend, nil, current, maxResults, searchTimeout)
+}
+
+func newTools(backend Backend, current func() string, currentContext func(context.Context) string, maxResults int, searchTimeout time.Duration) *Tools {
 	if maxResults < 1 || maxResults > MaxResults {
 		maxResults = DefaultMaxResults
 	}
 	if searchTimeout <= 0 {
 		searchTimeout = 30 * time.Second
 	}
-	return &Tools{backend: backend, current: current, maxResults: maxResults, searchTimeout: searchTimeout}
+	return &Tools{backend: backend, current: current, currentContext: currentContext, maxResults: maxResults, searchTimeout: searchTimeout}
 }
 
 func (SearchTool) ConcurrencySafe(any) bool      { return false }
@@ -203,7 +220,7 @@ func (t SearchTool) Execute(ctx context.Context, args any) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", SessionSearchToolName, err)
 	}
-	current := t.tools.currentID()
+	current := t.tools.currentID(ctx)
 	hits, err := t.tools.searchHits(ctx, query, 0, scope, current)
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", SessionSearchToolName, err)
@@ -230,7 +247,11 @@ func (t SearchTool) Execute(ctx context.Context, args any) (string, error) {
 				continue
 			}
 		}
-		match := bestEventMatch(events, query, a.EventSeqFrom, a.EventSeqTo, a.EventTimeFrom, a.EventTimeTo, a.EventTypes, a.EventSurfaces)
+		surfaces, err := projection.ClassifyEventSurfaces(events)
+		if err != nil {
+			return "", fmt.Errorf("%s: project event surfaces: %w", SessionSearchToolName, err)
+		}
+		match := bestEventMatch(events, surfaces, query, a.EventSeqFrom, a.EventSeqTo, a.EventTimeFrom, a.EventTimeTo, a.EventTypes, a.EventSurfaces)
 		if hasEventFilters(a) && match == nil {
 			continue
 		}
@@ -286,7 +307,7 @@ func (t EventSearchTool) Execute(ctx context.Context, args any) (string, error) 
 	if err := validateEventSearchArgs(in); err != nil {
 		return "", fmt.Errorf("%s: %w", EventSearchToolName, err)
 	}
-	id := t.tools.targetID(in.SessionID)
+	id := t.tools.targetID(ctx, in.SessionID)
 	if id == "" {
 		return "", fmt.Errorf("%s: session_id is required when there is no current session", EventSearchToolName)
 	}
@@ -297,8 +318,12 @@ func (t EventSearchTool) Execute(ctx context.Context, args any) (string, error) 
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", EventSearchToolName, err)
 	}
-	if id == t.tools.currentID() && latestStepStart(events) == 0 {
+	if id == t.tools.currentID(ctx) && latestStepStart(events) == 0 {
 		return "", fmt.Errorf("%s: current-session search requires an active step boundary", EventSearchToolName)
+	}
+	surfaces, err := projection.ClassifyEventSurfaces(events)
+	if err != nil {
+		return "", fmt.Errorf("%s: project event surfaces: %w", EventSearchToolName, err)
 	}
 	needle := foldText(query)
 	lines := []string{}
@@ -307,14 +332,14 @@ func (t EventSearchTool) Execute(ctx context.Context, args any) (string, error) 
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		if id == t.tools.currentID() && isAfterCurrentStep(events, ev.Seq) {
+		if id == t.tools.currentID(ctx) && isAfterCurrentStep(events, ev.Seq) {
 			continue
 		}
 		text := eventText(ev)
-		if !strings.Contains(foldText(text), needle) || !eventMatches(events, ev, in.SeqFrom, in.SeqTo, in.TimeFrom, in.TimeTo, in.EventTypes, in.Surfaces) {
+		if !strings.Contains(foldText(text), needle) || !eventMatches(surfaces, ev, in.SeqFrom, in.SeqTo, in.TimeFrom, in.TimeTo, in.EventTypes, in.Surfaces) {
 			continue
 		}
-		lines = append(lines, fmt.Sprintf("%d. seq %d | %s | %s | %s\n   Snippet: %s", len(lines)+1, ev.Seq, ev.Type, eventSurfaceFor(events, ev), ev.At.UTC().Format(time.RFC3339), bound(text, 500)))
+		lines = append(lines, fmt.Sprintf("%d. seq %d | %s | %s | %s\n   Snippet: %s", len(lines)+1, ev.Seq, ev.Type, surfaces[ev.Seq], ev.At.UTC().Format(time.RFC3339), bound(text, 500)))
 		if len(lines) == t.tools.maxResults {
 			capped = true
 			break
@@ -352,7 +377,7 @@ func (t TraceTool) Execute(ctx context.Context, args any) (string, error) {
 	if err := agenttools.DecodeArgs(args, &in); err != nil {
 		return "", fmt.Errorf("%s: %w", SessionTraceToolName, err)
 	}
-	id := t.tools.targetID(in.SessionID)
+	id := t.tools.targetID(ctx, in.SessionID)
 	if id == "" {
 		return "", fmt.Errorf("%s: session_id is required when there is no current session", SessionTraceToolName)
 	}
@@ -387,7 +412,7 @@ func (t EventTraceTool) Execute(ctx context.Context, args any) (string, error) {
 	if err := agenttools.DecodeArgs(args, &in); err != nil {
 		return "", fmt.Errorf("%s: %w", EventTraceToolName, err)
 	}
-	id := t.tools.targetID(in.SessionID)
+	id := t.tools.targetID(ctx, in.SessionID)
 	if id == "" {
 		return "", fmt.Errorf("%s: session_id is required when there is no current session", EventTraceToolName)
 	}
@@ -411,24 +436,15 @@ func (t EventTraceTool) Execute(ctx context.Context, args any) (string, error) {
 	if target < 0 {
 		return "", fmt.Errorf("%s: event seq %d not found", EventTraceToolName, in.Seq)
 	}
-	var replacedBy uint64
-	for _, ev := range events {
-		var op struct {
-			SurfaceOp *struct {
-				Op    string `json:"op"`
-				Start int64  `json:"start"`
-				End   int64  `json:"end"`
-			} `json:"surfaceOp"`
-		}
-		if json.Unmarshal(ev.Data, &op) == nil && op.SurfaceOp != nil && op.SurfaceOp.Op == "replace" {
-			if in.Seq >= uint64(maxInt64(op.SurfaceOp.Start)) && in.Seq <= uint64(maxInt64(op.SurfaceOp.End)) {
-				replacedBy = ev.Seq
-			}
-		}
+	relations, err := projection.EventRelations(events, in.Seq)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", EventTraceToolName, err)
 	}
-	_ = replacedBy // retained for compatibility with the original replacement scan
-	relations := eventRelations(events, target)
-	return fmt.Sprintf("Session %s\nTarget: seq %d | %s | %s\nReplaced by: %s\nReplacement chain: %s\nEvents replaced by target: %s\nEvents cited directly as sources: %s\nDirect derived events: %s", id, events[target].Seq, events[target].Type, events[target].At.UTC().Format(time.RFC3339), seqOrNone(relations.replacedBy), replacementChain(events, target), replacementRange(events[target]), seqListOrNone(relations.sources), seqListOrNone(relations.derived)), nil
+	return fmt.Sprintf("Session %s\nTarget: seq %d | %s | %s\nReplaced by: %s\nReplacement chain: %s\nEvents replaced by target: %s\nEvents cited directly as sources: %s\nDirect derived events: %s",
+		id, events[target].Seq, events[target].Type, events[target].At.UTC().Format(time.RFC3339),
+		seqOrNone(relations.ReplacedBy), seqListOrNone(relations.ReplacementChain), formatReplacedRange(relations.Replaces),
+		seqListOrNone(relations.Sources), seqListOrNone(relations.Derived),
+	), nil
 }
 
 type EventReadTool struct{ tools *Tools }
@@ -455,7 +471,7 @@ func (t EventReadTool) Execute(ctx context.Context, args any) (string, error) {
 	if err := agenttools.DecodeArgs(args, &in); err != nil {
 		return "", fmt.Errorf("%s: %w", EventReadToolName, err)
 	}
-	id := t.tools.targetID(in.SessionID)
+	id := t.tools.targetID(ctx, in.SessionID)
 	if id == "" {
 		return "", fmt.Errorf("%s: session_id is required when there is no current session", EventReadToolName)
 	}
@@ -516,7 +532,15 @@ func (t EventReadTool) Execute(ctx context.Context, args any) (string, error) {
 	return strings.Join(lines, "\n"), nil
 }
 
-func (t *Tools) currentID() string {
+func (t *Tools) currentID(ctx ...context.Context) string {
+	if len(ctx) > 0 {
+		if id := runtimectx.SessionID(ctx[0]); id != "" {
+			return id
+		}
+		if t.currentContext != nil {
+			return strings.TrimSpace(t.currentContext(ctx[0]))
+		}
+	}
 	if t.current == nil {
 		return ""
 	}
@@ -703,19 +727,19 @@ type eventMatch struct {
 	Snippet string
 }
 
-func bestEventMatch(events []session.Event, query string, seqFrom, seqTo *uint64, timeFrom, timeTo string, types, surfaces []string) *eventMatch {
+func bestEventMatch(events []session.Event, classified map[uint64]projection.EventSurface, query string, seqFrom, seqTo *uint64, timeFrom, timeTo string, types, surfaces []string) *eventMatch {
 	needle := foldText(query)
 	for _, ev := range events {
 		text := eventText(ev)
-		if !strings.Contains(foldText(text), needle) || !eventMatches(events, ev, seqFrom, seqTo, timeFrom, timeTo, types, surfaces) {
+		if !strings.Contains(foldText(text), needle) || !eventMatches(classified, ev, seqFrom, seqTo, timeFrom, timeTo, types, surfaces) {
 			continue
 		}
-		return &eventMatch{Event: ev, Surface: eventSurfaceFor(events, ev), Snippet: bound(text, 500)}
+		return &eventMatch{Event: ev, Surface: string(classified[ev.Seq]), Snippet: bound(text, 500)}
 	}
 	return nil
 }
 
-func eventMatches(events []session.Event, ev session.Event, seqFrom, seqTo *uint64, timeFrom, timeTo string, types, surfaces []string) bool {
+func eventMatches(classified map[uint64]projection.EventSurface, ev session.Event, seqFrom, seqTo *uint64, timeFrom, timeTo string, types, surfaces []string) bool {
 	if seqFrom != nil && ev.Seq < *seqFrom || seqTo != nil && ev.Seq > *seqTo {
 		return false
 	}
@@ -728,41 +752,10 @@ func eventMatches(events []session.Event, ev session.Event, seqFrom, seqTo *uint
 	if len(types) > 0 && !contains(types, ev.Type) {
 		return false
 	}
-	if len(surfaces) > 0 && !contains(surfaces, eventSurfaceFor(events, ev)) {
+	if len(surfaces) > 0 && !contains(surfaces, string(classified[ev.Seq])) {
 		return false
 	}
 	return true
-}
-
-func eventSurfaceFor(events []session.Event, target session.Event) string {
-	for _, ev := range events {
-		if ev.Seq <= target.Seq {
-			continue
-		}
-		var marker struct {
-			SurfaceOp *struct {
-				Op    string `json:"op"`
-				Start int64  `json:"start"`
-				End   int64  `json:"end"`
-			} `json:"surfaceOp"`
-		}
-		if json.Unmarshal(ev.Data, &marker) == nil && marker.SurfaceOp != nil && marker.SurfaceOp.Op == "replace" && target.Seq >= uint64(maxInt64(marker.SurfaceOp.Start)) && target.Seq <= uint64(maxInt64(marker.SurfaceOp.End)) {
-			return "shadowed"
-		}
-	}
-	if isLogOnlyEvent(target.Type) {
-		return "log-only"
-	}
-	return "current"
-}
-
-func isLogOnlyEvent(typ string) bool {
-	for _, prefix := range []string{"turn/", "step/", "llm/", "subagent/", "workflow/", "goal/", "compaction/", "job/", "terminal/", "eval/", "schedule/", "feedback/"} {
-		if strings.HasPrefix(typ, prefix) {
-			return true
-		}
-	}
-	return false
 }
 
 func isAfterCurrentStep(events []session.Event, seq uint64) bool {
@@ -843,11 +836,11 @@ func (t *Tools) searchHits(ctx context.Context, query string, limit int, scope m
 	return out, nil
 }
 
-func (t *Tools) targetID(id string) string {
+func (t *Tools) targetID(ctx context.Context, id string) string {
 	if strings.TrimSpace(id) != "" {
 		return strings.TrimSpace(id)
 	}
-	return t.currentID()
+	return t.currentID(ctx)
 }
 
 func (t *Tools) lineage(ctx context.Context, scope map[string]store.SessionMeta) (map[string]string, map[string][]string, error) {
@@ -1005,135 +998,6 @@ func collectStrings(v any, out *[]string) {
 		}
 	}
 }
-func replacementRange(ev session.Event) string {
-	var op struct {
-		SurfaceOp *struct {
-			Op    string `json:"op"`
-			Start int64  `json:"start"`
-			End   int64  `json:"end"`
-		} `json:"surfaceOp"`
-	}
-	if json.Unmarshal(ev.Data, &op) != nil || op.SurfaceOp == nil || op.SurfaceOp.Op != "replace" {
-		return "none"
-	}
-	return fmt.Sprintf("%d-%d", op.SurfaceOp.Start, op.SurfaceOp.End)
-}
-
-func replacementChain(events []session.Event, target int) string {
-	current := events[target].Seq
-	var chain []uint64
-	seen := map[uint64]bool{current: true}
-	for {
-		var next uint64
-		for _, ev := range events {
-			start, end, ok := replacementMarker(ev)
-			if !ok || ev.Seq <= current || current < uint64(start) || current > uint64(end) || (next != 0 && ev.Seq >= next) {
-				continue
-			}
-			next = ev.Seq
-		}
-		if next == 0 || seen[next] {
-			break
-		}
-		chain = append(chain, next)
-		seen[next] = true
-		current = next
-	}
-	return seqListOrNone(chain)
-}
-
-type eventRelationSet struct {
-	replacedBy uint64
-	sources    []uint64
-	derived    []uint64
-}
-
-func replacementMarker(ev session.Event) (int64, int64, bool) {
-	var op struct {
-		SurfaceOp *struct {
-			Op    string `json:"op"`
-			Start int64  `json:"start"`
-			End   int64  `json:"end"`
-		} `json:"surfaceOp"`
-	}
-	if json.Unmarshal(ev.Data, &op) != nil || op.SurfaceOp == nil || op.SurfaceOp.Op != "replace" || op.SurfaceOp.Start < 1 || op.SurfaceOp.End < op.SurfaceOp.Start {
-		return 0, 0, false
-	}
-	return op.SurfaceOp.Start, op.SurfaceOp.End, true
-}
-
-// eventRelations derives local source/derived edges from the append-only
-// event vocabulary. Surface replacement ranges and tool call ids already
-// carry enough correlation data, so this does not add a new event type.
-func eventRelations(events []session.Event, target int) eventRelationSet {
-	result := eventRelationSet{}
-	targetSeq := events[target].Seq
-	for _, ev := range events {
-		if ev.Seq == targetSeq {
-			continue
-		}
-		start, end, ok := replacementMarker(ev)
-		if ok && ev.Seq > targetSeq && targetSeq >= uint64(start) && targetSeq <= uint64(end) && (result.replacedBy == 0 || ev.Seq < result.replacedBy) {
-			result.replacedBy = ev.Seq
-		}
-	}
-	if start, end, ok := replacementMarker(events[target]); ok {
-		for _, ev := range events {
-			if ev.Seq >= uint64(start) && ev.Seq <= uint64(end) && ev.Seq != targetSeq {
-				result.sources = append(result.sources, ev.Seq)
-			}
-		}
-	}
-	targetCall, targetAssistantCalls := eventCallRefs(events[target])
-	for i, ev := range events {
-		if i == target {
-			continue
-		}
-		call, assistantCalls := eventCallRefs(ev)
-		if targetCall != "" && (events[target].Type == session.EventToolResult || events[target].Type == session.EventToolError) && ev.Type == session.EventToolStart && call == targetCall {
-			result.sources = append(result.sources, ev.Seq)
-		}
-		if targetCall != "" && events[target].Type == session.EventToolStart && ev.Type == session.EventAssistantMessage && containsString(assistantCalls, targetCall) {
-			result.sources = append(result.sources, ev.Seq)
-		}
-		if targetCall != "" && events[target].Type == session.EventToolStart && (ev.Type == session.EventToolResult || ev.Type == session.EventToolError) && call == targetCall {
-			result.derived = append(result.derived, ev.Seq)
-		}
-		if len(targetAssistantCalls) > 0 && ev.Type == session.EventToolStart && containsString(targetAssistantCalls, call) {
-			result.derived = append(result.derived, ev.Seq)
-		}
-	}
-	result.sources = uniqueSeqs(result.sources)
-	result.derived = uniqueSeqs(result.derived)
-	return result
-}
-
-func eventCallRefs(ev session.Event) (string, []string) {
-	if ev.Type == session.EventToolStart || ev.Type == session.EventToolResult || ev.Type == session.EventToolError {
-		var v struct {
-			CallID string `json:"callId"`
-		}
-		_ = json.Unmarshal(ev.Data, &v)
-		return v.CallID, nil
-	}
-	if ev.Type == session.EventAssistantMessage {
-		var v struct {
-			ToolCalls []struct {
-				ID string `json:"ID"`
-			} `json:"toolCalls"`
-		}
-		_ = json.Unmarshal(ev.Data, &v)
-		ids := make([]string, 0, len(v.ToolCalls))
-		for _, call := range v.ToolCalls {
-			if call.ID != "" {
-				ids = append(ids, call.ID)
-			}
-		}
-		return "", ids
-	}
-	return "", nil
-}
-
 func containsString(values []string, needle string) bool {
 	for _, value := range values {
 		if value == needle {
@@ -1142,19 +1006,20 @@ func containsString(values []string, needle string) bool {
 	}
 	return false
 }
-
-func uniqueSeqs(values []uint64) []uint64 {
-	if len(values) < 2 {
-		return values
+func formatReplacedRange(values []uint64) string {
+	if len(values) == 0 {
+		return "none"
 	}
-	sort.Slice(values, func(i, j int) bool { return values[i] < values[j] })
-	out := values[:0]
-	for _, value := range values {
-		if len(out) == 0 || out[len(out)-1] != value {
-			out = append(out, value)
+	first, last := values[0], values[0]
+	for _, value := range values[1:] {
+		if value < first {
+			first = value
+		}
+		if value > last {
+			last = value
 		}
 	}
-	return out
+	return fmt.Sprintf("%d-%d", first, last)
 }
 func seqOrNone(n uint64) string {
 	if n == 0 {
@@ -1172,12 +1037,6 @@ func seqListOrNone(values []uint64) string {
 		parts[i] = fmt.Sprint(value)
 	}
 	return strings.Join(parts, ", ")
-}
-func maxInt64(n int64) int64 {
-	if n < 0 {
-		return 0
-	}
-	return n
 }
 
 // Keep deterministic ordering available to callers that use the package

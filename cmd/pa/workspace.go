@@ -18,7 +18,15 @@ func (a *app) defaultWorkdir() string {
 		if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
 			dir = filepath.Join(home, "shudu")
 			if err := os.MkdirAll(dir, 0o755); err == nil {
-				return filepath.Clean(dir)
+				// Creation success is not sufficient on restricted hosts: the
+				// directory may be virtualized or inaccessible to a later child
+				// process. Validate the same read/resolve boundary used by tools
+				// before selecting it as the session workspace.
+				if info, statErr := os.Stat(dir); statErr == nil && info.IsDir() {
+					if resolved, resolveErr := filepath.EvalSymlinks(filepath.Clean(dir)); resolveErr == nil {
+						return filepath.Clean(resolved)
+					}
+				}
 			}
 		}
 		dir, _ = os.Getwd()

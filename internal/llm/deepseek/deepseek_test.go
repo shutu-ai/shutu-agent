@@ -7,7 +7,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -48,7 +51,8 @@ func TestStreamText(t *testing.T) {
 	})
 
 	reader, err := c.Stream(context.Background(), llm.ChatRequest{
-		Model: "deepseek-v4-flash",
+		Model: "request-selected-model", MaxTokens: 123, Stop: []string{"END"},
+		Temperature: func() *float64 { v := 0.2; return &v }(),
 		Messages: []llm.Message{
 			{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("hi")}},
 		},
@@ -86,8 +90,149 @@ func TestStreamText(t *testing.T) {
 	if gotBody["stream"] != true {
 		t.Fatalf("stream flag = %v, want true", gotBody["stream"])
 	}
-	if gotBody["model"] != "deepseek-v4-flash" {
+	streamOptions, ok := gotBody["stream_options"].(map[string]any)
+	if !ok || streamOptions["include_usage"] != true {
+		t.Fatalf("stream_options = %#v, want include_usage=true", gotBody["stream_options"])
+	}
+	if gotBody["model"] != "request-selected-model" {
 		t.Fatalf("model = %v", gotBody["model"])
+	}
+	if gotBody["max_tokens"] != float64(123) || gotBody["temperature"] != 0.2 {
+		t.Fatalf("generation controls = %#v, want max_tokens=123 temperature=0.2", gotBody)
+	}
+	if stops, ok := gotBody["stop"].([]any); !ok || len(stops) != 1 || stops[0] != "END" {
+		t.Fatalf("stop = %#v, want [END]", gotBody["stop"])
+	}
+}
+
+func TestOfficialRequestCarriesAttributionIdentity(t *testing.T) {
+	var got http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(sse(`{"choices":[{"delta":{},"finish_reason":"stop"}]}`, "[DONE]")))
+	}))
+	t.Cleanup(srv.Close)
+	c := New(Config{BaseURL: srv.URL, APIKey: "test-key", UserID: "anonymous-test"})
+	reader, err := c.Stream(context.Background(), llm.ChatRequest{SessionID: "session-1", Purpose: "compaction"})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	for {
+		_, nextErr := reader.Next()
+		if errors.Is(nextErr, io.EOF) {
+			break
+		}
+		if nextErr != nil {
+			t.Fatalf("next: %v", nextErr)
+		}
+	}
+	if got.Get("User-Agent") != llm.AttributionUserAgent {
+		t.Fatalf("user-agent = %q, want %q", got.Get("User-Agent"), llm.AttributionUserAgent)
+	}
+	if got.Get("X-Deepseek-Harness-User-Id") != "anonymous-test" {
+		t.Fatalf("user id = %q", got.Get("X-Deepseek-Harness-User-Id"))
+	}
+	if got.Get("X-Deepseek-Harness-Session-Id") != "session-1" {
+		t.Fatalf("session id = %q", got.Get("X-Deepseek-Harness-Session-Id"))
+	}
+	if got.Get("X-Deepseek-Harness-Compact") != "1" {
+		t.Fatalf("compact = %q", got.Get("X-Deepseek-Harness-Compact"))
+	}
+}
+
+func TestCompatibleRouteOmitsDeepSeekIdentityHeaders(t *testing.T) {
+	var got http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(sse(`{"choices":[{"delta":{},"finish_reason":"stop"}]}`, "[DONE]")))
+	}))
+	t.Cleanup(srv.Close)
+	c := New(Config{ProviderName: "openai", BaseURL: srv.URL, APIKey: "test-key", UserID: "anonymous-test"})
+	reader, err := c.Stream(context.Background(), llm.ChatRequest{SessionID: "session-1", Purpose: "compaction"})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	for {
+		_, nextErr := reader.Next()
+		if errors.Is(nextErr, io.EOF) {
+			break
+		}
+		if nextErr != nil {
+			t.Fatalf("next: %v", nextErr)
+		}
+	}
+	if got.Get("User-Agent") != llm.AttributionUserAgent {
+		t.Fatalf("user-agent = %q, want %q", got.Get("User-Agent"), llm.AttributionUserAgent)
+	}
+	for _, name := range []string{"X-Deepseek-Harness-User-Id", "X-Deepseek-Harness-Session-Id", "X-Deepseek-Harness-Compact"} {
+		if value := got.Get(name); value != "" {
+			t.Fatalf("%s = %q, want omitted for compatible route", name, value)
+		}
+	}
+}
+
+func TestStreamPreservesEveryDeltaInOneChunk(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(sse(
+			`{"choices":[{"delta":{"reasoning_content":"think","content":"answer"},"finish_reason":null},{"delta":{"content":" tail"},"finish_reason":null}]}`,
+			`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+			"[DONE]",
+		)))
+	})
+	reader, err := c.Stream(context.Background(), llm.ChatRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []llm.StreamEvent
+	for {
+		event, nextErr := reader.Next()
+		if errors.Is(nextErr, io.EOF) {
+			break
+		}
+		if nextErr != nil {
+			t.Fatal(nextErr)
+		}
+		got = append(got, event)
+	}
+	if len(got) != 4 || got[0].Kind != llm.StreamReasoningDelta || got[0].Text != "think" ||
+		got[1].Kind != llm.StreamTextDelta || got[1].Text != "answer" ||
+		got[2].Kind != llm.StreamTextDelta || got[2].Text != " tail" ||
+		got[3].Kind != llm.StreamFinish {
+		t.Fatalf("events = %+v, want reasoning + both text deltas + finish", got)
+	}
+}
+
+func TestStreamUsageAcceptsCacheHitCompatibilityField(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(sse(
+			`{"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}`,
+			`{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12,"prompt_cache_hit_tokens":3}}`,
+			"[DONE]",
+		)))
+	})
+	reader, err := c.Stream(context.Background(), llm.ChatRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var finish llm.StreamEvent
+	for {
+		event, nextErr := reader.Next()
+		if errors.Is(nextErr, io.EOF) {
+			break
+		}
+		if nextErr != nil {
+			t.Fatal(nextErr)
+		}
+		if event.Kind == llm.StreamFinish {
+			finish = event
+		}
+	}
+	if finish.Usage.InputTokens != 7 || finish.Usage.CacheReadTokens != 3 || finish.Usage.TotalTokens != 12 {
+		t.Fatalf("usage = %+v, want disjoint input=7 cacheRead=3 total=12", finish.Usage)
 	}
 }
 
@@ -123,6 +268,48 @@ func TestStreamReasoningEffort(t *testing.T) {
 		if _, present := body["reasoning_effort"]; present {
 			t.Fatalf("%q effort must omit reasoning_effort, got %v", eff, body["reasoning_effort"])
 		}
+	}
+}
+
+func TestStreamReasoningEffortValidatesAndPublishesThinkingMode(t *testing.T) {
+	var gotBody map[string]any
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(sse(`{"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}`, `{"choices":[{"delta":{},"finish_reason":"stop"}]}`, "[DONE]")))
+	})
+	reader, err := c.Stream(context.Background(), llm.ChatRequest{ReasoningEffort: "low"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := reader.Next(); errors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if gotBody["thinking"] == nil || gotBody["reasoning_effort"] != "low" {
+		t.Fatalf("thinking wire = %#v, want enabled + low", gotBody)
+	}
+	thinking := gotBody["thinking"].(map[string]any)
+	if thinking["type"] != "enabled" {
+		t.Fatalf("thinking = %#v, want enabled", thinking)
+	}
+
+	if _, err := c.Stream(context.Background(), llm.ChatRequest{ReasoningEffort: "bogus"}); err == nil {
+		t.Fatal("unsupported reasoning effort was accepted")
+	} else if failure, ok := llm.FailureFacts(err); !ok || failure.Code != "UNSUPPORTED_REASONING_EFFORT" {
+		t.Fatalf("failure = %+v (typed=%v), want UNSUPPORTED_REASONING_EFFORT", failure, ok)
+	}
+}
+
+func TestStreamDeploymentDisabledThinkingRejectsEnablement(t *testing.T) {
+	c := New(Config{BaseURL: "http://127.0.0.1:1", APIKey: "test-key", Thinking: "disabled"})
+	if _, err := c.Stream(context.Background(), llm.ChatRequest{ReasoningEffort: "high"}); err == nil {
+		t.Fatal("deployment-disabled thinking accepted high effort")
+	} else if failure, ok := llm.FailureFacts(err); !ok || failure.Code != "UNSUPPORTED_REASONING_EFFORT" {
+		t.Fatalf("failure = %+v (typed=%v), want UNSUPPORTED_REASONING_EFFORT", failure, ok)
 	}
 }
 
@@ -199,6 +386,53 @@ func TestStreamSendsToolsAndToolMessage(t *testing.T) {
 	}
 }
 
+func TestStreamToolResultImagesUseTextToolMessageAndUserImageMessage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tool.png")
+	if err := os.WriteFile(path, []byte("image-bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(sse(`{"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}`, `{"choices":[{"delta":{},"finish_reason":"stop"}]}`, "[DONE]")))
+	}))
+	defer srv.Close()
+	c := New(Config{BaseURL: srv.URL, APIKey: "test-key", SupportsImages: true})
+	reader, err := c.Stream(context.Background(), llm.ChatRequest{Messages: []llm.Message{{
+		Role: llm.RoleTool, ToolCallID: "call-1",
+		Content: []llm.ContentBlock{{Kind: llm.BlockImage, Image: llm.ImageRef{Path: path, MediaType: "image/png", Bytes: 11}}},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := reader.Next(); errors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
+			t.Fatal(err)
+		}
+	}
+	messages, ok := gotBody["messages"].([]any)
+	if !ok || len(messages) != 2 {
+		t.Fatalf("messages = %#v, want tool + following user image message", gotBody["messages"])
+	}
+	tool := messages[0].(map[string]any)
+	if tool["role"] != "tool" || tool["tool_call_id"] != "call-1" || tool["content"] != "(see attached image)" {
+		t.Fatalf("tool message = %#v", tool)
+	}
+	user := messages[1].(map[string]any)
+	if user["role"] != "user" {
+		t.Fatalf("image message = %#v", user)
+	}
+	parts := user["content"].([]any)
+	if len(parts) != 2 || parts[0].(map[string]any)["text"] != toolResultImageMarker {
+		t.Fatalf("image parts = %#v", parts)
+	}
+}
+
 func TestStreamHTTPError(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
@@ -206,6 +440,26 @@ func TestStreamHTTPError(t *testing.T) {
 	})
 	if _, err := c.Stream(context.Background(), llm.ChatRequest{}); err == nil {
 		t.Fatal("expected error on 401")
+	} else if failure, ok := llm.FailureFacts(err); !ok || failure.Code != "AUTH" {
+		t.Fatalf("401 failure = %+v (typed=%v), want AUTH", failure, ok)
+	}
+}
+
+func TestStreamEmptyResponseIsTypedFailure(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte(sse(`{"choices":[{"delta":{},"finish_reason":"stop"}]}`, "[DONE]")))
+	})
+	reader, err := c.Stream(context.Background(), llm.ChatRequest{})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	event, err := reader.Next()
+	if err != nil {
+		t.Fatalf("empty response next: %v", err)
+	}
+	if event.Kind != llm.StreamFinish || event.Failure == nil || event.Failure.Code != "EMPTY_RESPONSE" {
+		t.Fatalf("empty response event = %+v, want EMPTY_RESPONSE finish", event)
 	}
 }
 
@@ -225,6 +479,89 @@ func TestStreamTruncatedMissingDone(t *testing.T) {
 	_, err = reader.Next() // EOF without [DONE]
 	if err == nil {
 		t.Fatal("expected truncated-stream error")
+	} else if failure, ok := llm.FailureFacts(err); !ok || failure.Code != "STREAM_CLOSED" {
+		t.Fatalf("truncated stream failure = %+v (typed=%v), want STREAM_CLOSED", failure, ok)
+	}
+}
+
+func TestStreamRejectsUnterminatedSSETail(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}"))
+	})
+	reader, err := c.Stream(context.Background(), llm.ChatRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.Next(); err == nil {
+		t.Fatal("unterminated SSE tail was accepted")
+	} else if failure, ok := llm.FailureFacts(err); !ok || failure.Code != "STREAM_CLOSED" {
+		t.Fatalf("failure = %+v (typed=%v), want STREAM_CLOSED", failure, ok)
+	}
+}
+
+func TestStreamAcceptsUTF8BOMBeforeFirstSSEField(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("\xef\xbb\xbf" + sse(
+			`{"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}`,
+			`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+			"[DONE]",
+		)))
+	})
+	reader, err := c.Stream(context.Background(), llm.ChatRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	event, err := reader.Next()
+	if err != nil || event.Kind != llm.StreamTextDelta || event.Text != "ok" {
+		t.Fatalf("first event = %+v, err=%v", event, err)
+	}
+}
+
+func TestStreamIdleWatchdogReturnsTimeout(t *testing.T) {
+	c := New(Config{APIKey: "test-key", StreamIdleTimeout: 20 * time.Millisecond})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	c.baseURL = srv.URL
+	reader, err := c.Stream(context.Background(), llm.ChatRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.Next(); err == nil {
+		t.Fatal("idle stream unexpectedly returned")
+	} else if failure, ok := llm.FailureFacts(err); !ok || failure.Code != "TIMEOUT" {
+		t.Fatalf("failure = %+v (typed=%v), want TIMEOUT", failure, ok)
+	}
+}
+
+func TestStreamCancellationReturnsAborted(t *testing.T) {
+	c := New(Config{APIKey: "test-key", StreamIdleTimeout: time.Hour})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	c.baseURL = srv.URL
+	ctx, cancel := context.WithCancel(context.Background())
+	reader, err := c.Stream(ctx, llm.ChatRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	if _, err := reader.Next(); err == nil {
+		t.Fatal("cancelled stream unexpectedly returned")
+	} else if failure, ok := llm.FailureFacts(err); !ok || failure.Code != "ABORTED" {
+		t.Fatalf("failure = %+v (typed=%v), want ABORTED", failure, ok)
 	}
 }
 
@@ -239,6 +576,8 @@ func TestStreamMalformedPayload(t *testing.T) {
 	}
 	if _, err := reader.Next(); err == nil {
 		t.Fatal("expected malformed payload error")
+	} else if failure, ok := llm.FailureFacts(err); !ok || failure.Code != "MALFORMED_RESPONSE" {
+		t.Fatalf("malformed payload failure = %+v (typed=%v), want MALFORMED_RESPONSE", failure, ok)
 	}
 }
 
@@ -379,6 +718,103 @@ func TestAvailable(t *testing.T) {
 		if New(Config{APIKey: "k", BaseURL: bad}).Available() {
 			t.Errorf("base URL %q must be unavailable", bad)
 		}
+	}
+}
+
+func TestCloseWipesCredentialAndMakesClientUnavailable(t *testing.T) {
+	c := New(Config{APIKey: "secret"})
+	if !c.Available() {
+		t.Fatal("client should be available before Close")
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if c.Available() {
+		t.Fatal("client remained available after credential wipe")
+	}
+	if got := c.keySnapshot(); got != "" {
+		t.Fatalf("credential after Close = %q", got)
+	}
+}
+
+func TestCredentialProviderIsResolvedPerStream(t *testing.T) {
+	var current string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer "+current {
+			t.Errorf("authorization = %q, want Bearer %s", got, current)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(sse(`{"choices":[{"delta":{},"finish_reason":"stop"}]}`, "[DONE]")))
+	}))
+	defer server.Close()
+	current = "first"
+	client := New(Config{
+		BaseURL: server.URL,
+		APIKey:  "bootstrap",
+		CredentialProvider: func(context.Context) (string, error) {
+			return current, nil
+		},
+	})
+	for _, want := range []string{"first", "rotated"} {
+		current = want
+		reader, err := client.Stream(context.Background(), llm.ChatRequest{})
+		if err != nil {
+			t.Fatalf("stream with %s: %v", want, err)
+		}
+		for {
+			_, err = reader.Next()
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			if err != nil {
+				t.Fatalf("read with %s: %v", want, err)
+			}
+		}
+	}
+}
+
+type trackingCredentialLease struct {
+	value    string
+	released chan struct{}
+	once     sync.Once
+}
+
+func (l *trackingCredentialLease) Value() string { return l.value }
+func (l *trackingCredentialLease) Release() {
+	l.once.Do(func() { close(l.released) })
+}
+
+func TestCredentialLeaseIsReleasedWhenStreamTerminates(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(sse(`{"choices":[{"delta":{"content":"ok"}}]}`, `{"choices":[{"delta":{},"finish_reason":"stop"}]}`, "[DONE]")))
+	}))
+	defer server.Close()
+	lease := &trackingCredentialLease{value: "lease-key", released: make(chan struct{})}
+	client := New(Config{
+		BaseURL: server.URL,
+		APIKey:  "bootstrap",
+		CredentialLeaseProvider: func(context.Context) (llm.CredentialLease, error) {
+			return lease, nil
+		},
+	})
+	reader, err := client.Stream(context.Background(), llm.ChatRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		_, err = reader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	select {
+	case <-lease.released:
+	case <-time.After(time.Second):
+		t.Fatal("credential lease was not released after stream termination")
 	}
 }
 

@@ -6,6 +6,8 @@ package session
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -17,17 +19,29 @@ const EventScheduleChange = "schedule/change"
 
 // Event type discriminators (v1 vocabulary, see design.md §3).
 const (
-	EventTurnStart          = "turn/start"
-	EventTurnEnd            = "turn/end"
-	EventStepStart          = "step/start"
-	EventStepEnd            = "step/end"
-	EventLLMRequestStart    = "llm/request_start"
+	EventTurnStart       = "turn/start"
+	EventTurnEnd         = "turn/end"
+	EventStepStart       = "step/start"
+	EventStepEnd         = "step/end"
+	EventRequestHeader   = "request/header"
+	EventRequestContext  = "request/context"
+	EventSteeringMessage = "steering/message"
+	EventTodoWrite       = "todo/write"
+	// EventLLMRequestStart is a source-compatibility alias for the canonical
+	// DSH request/header event. The old literal remains readable through the
+	// projection layer but is no longer emitted by the loop.
+	EventLLMRequestStart    = EventRequestHeader
 	EventLLMRequestEnd      = "llm/request_end"
 	EventLLMRetry           = "llm/retry"
+	EventLLMRetryStarted    = "llm/retry-started"
 	EventUserMessage        = "user/message"
 	EventAssistantChunk     = "assistant/chunk"
 	EventAssistantReasoning = "assistant/reasoning" // M8: one streamed reasoning delta
 	EventAssistantMessage   = "assistant/message"
+	// EventSessionTitle is the log-backed title projection. It is an opaque
+	// session fact (not model history) but must still be durable so every
+	// surface can fold the same latest-wins title after restart.
+	EventSessionTitle = "session/title"
 	// EventToolCall is the dsh-compatible durable call event. EventToolStart is
 	// kept as a source-compatibility alias for callers written against the old
 	// shutu vocabulary; new events are still emitted as tool/call.
@@ -40,6 +54,10 @@ const (
 	EventToolError        = EventToolResult
 	EventFeedbackRecord   = "feedback/record"    // dsh /feedback; log-only
 	EventWebCommandResult = "web/command-result" // Web-only command acknowledgement
+	// Canonical dsh command lifecycle facts. They are log-only and pair a
+	// resolved slash-command invocation with its settled result.
+	EventCommandRun  = "command/run"
+	EventCommandDone = "command/done"
 
 	// M5a background-job events (design.md §3 / ADR 2026-08-18-m5-agent-core.md
 	// 决策 ① / dispatch-m5a-2): job/start lands when a job registers
@@ -94,6 +112,14 @@ const (
 	EventWorkflowAgentStart = "workflow/agent-start"
 	EventWorkflowAgentEnd   = "workflow/agent-end"
 	EventWorkflowEnd        = "workflow/end"
+
+	// Parent-side durable workflow records mirror the reference
+	// tool-workflow vocabulary. Member starts carry a published child Session
+	// ID, and every run start/end and member start/end pair settles once.
+	EventToolWorkflowRunStart   = "tool-workflow/run-start"
+	EventToolWorkflowAgentStart = "tool-workflow/agent-start"
+	EventToolWorkflowAgentEnd   = "tool-workflow/agent-end"
+	EventToolWorkflowRunEnd     = "tool-workflow/run-end"
 
 	// M5b subagent events (design.md §3 / ADR 2026-08-18-m5-agent-core.md
 	// 决策 ② / dispatch-m5b-2 §1): subagent/start lands when a delegation
@@ -212,6 +238,24 @@ const (
 	EventInteractDeny    = "interact/deny"
 	EventInteractStatus  = "interact/status"
 
+	// Canonical DSH approval audit events. The legacy interact/* constants are
+	// retained for old logs and the compatibility REPL; Agent-backed runtime
+	// emission projects to this vocabulary.
+	EventApprovalAsked     = "approval/asked"
+	EventApprovalDecided   = "approval/decided"
+	EventApprovalPolicy    = "approval/policy"
+	EventPermissionPreset  = "permission/preset"
+	EventSandboxMode       = "sandbox/mode"
+	EventAgentInboxSpliced = "agent/inbox/spliced"
+	EventTeamSnapshot      = "team/snapshot"
+	// Team domain events are append-only reconstruction facts. The legacy
+	// team/snapshot event remains readable for migration, but new task/mailbox
+	// mutations use these narrowly folded records.
+	EventTeamMember           = "team/member"
+	EventTeamTask             = "team/task"
+	EventTeamMessageQueued    = "team/message/queued"
+	EventTeamMessageDelivered = "team/message/delivered"
+
 	// M6e-2 code-sandbox events (design.md §3 / ADR 2026-08-19-m6-agent-full.md
 	// 决策 M6e / dispatch-m6e-2 §1): code/run lands when run_code completes a
 	// sandbox execution (a run that happened — zero or non-zero exit, with or
@@ -284,8 +328,126 @@ type Log struct {
 	seq                 uint64
 	turnStarts          int
 	sink                func(Event) error // optional durable sink (D8), called after each append
+	observer            func(Event)       // optional live projection, after durable commit
+	imageResolver       func(llm.ImageRef) llm.ImageRef
 	derivedHistory      []llm.Message
 	derivedHistoryValid bool
+}
+
+// AtomicAppend describes one event to be committed through AppendAtomic. The
+// durable callback receives fully assigned events and must commit all of them
+// or none. It is used for cross-session facts such as a Team receipt plus its
+// Lead delivery edge; ordinary callers should continue to use Append.
+type AtomicAppend struct {
+	Log  *Log
+	Type string
+	Data any
+}
+
+// AppendAtomic assigns contiguous event positions while holding every target
+// log's mutex, commits the exact event bytes through commit, then incorporates
+// the already-committed events without invoking per-log sinks a second time.
+// Logs are locked in pointer order so two callers cannot deadlock by presenting
+// the same logs in opposite order.
+func AppendAtomic(appends []AtomicAppend, commit func([]Event) error) error {
+	if len(appends) == 0 {
+		return nil
+	}
+	if commit == nil {
+		return fmt.Errorf("session: atomic commit callback is required")
+	}
+	raw := make([]json.RawMessage, len(appends))
+	logs := make([]*Log, 0, len(appends))
+	seen := make(map[*Log]bool, len(appends))
+	for i, item := range appends {
+		if item.Log == nil || item.Type == "" {
+			return fmt.Errorf("session: invalid atomic append")
+		}
+		encoded, err := json.Marshal(item.Data)
+		if err != nil {
+			return err
+		}
+		if err := validateLogEventVocabulary(item.Type, encoded); err != nil {
+			return err
+		}
+		raw[i] = encoded
+		if !seen[item.Log] {
+			seen[item.Log] = true
+			logs = append(logs, item.Log)
+		}
+	}
+	sort.Slice(logs, func(i, j int) bool {
+		return reflect.ValueOf(logs[i]).Pointer() < reflect.ValueOf(logs[j]).Pointer()
+	})
+	for _, log := range logs {
+		log.mu.Lock()
+	}
+	unlock := func() {
+		for i := len(logs) - 1; i >= 0; i-- {
+			logs[i].mu.Unlock()
+		}
+	}
+	events := make([]Event, len(appends))
+	next := make(map[*Log]uint64, len(logs))
+	for _, log := range logs {
+		next[log] = log.seq + 1
+	}
+	for i, item := range appends {
+		seq := next[item.Log]
+		next[item.Log] = seq + 1
+		events[i] = Event{Seq: seq, Type: item.Type, At: time.Now().UTC(), Version: EventVersion, Data: raw[i]}
+	}
+	candidates := make(map[*Log][]Event, len(logs))
+	for _, log := range logs {
+		candidates[log] = append([]Event(nil), log.events...)
+	}
+	for i, item := range appends {
+		candidates[item.Log] = append(candidates[item.Log], events[i])
+	}
+	for _, log := range logs {
+		if err := validateEventProvenance(candidates[log]); err != nil {
+			unlock()
+			return err
+		}
+		if err := validateCommandLifecycle(candidates[log]); err != nil {
+			unlock()
+			return err
+		}
+		if err := validateWorkflowRecordLifecycle(candidates[log]); err != nil {
+			unlock()
+			return err
+		}
+	}
+	if err := commit(events); err != nil {
+		unlock()
+		return err
+	}
+	observers := make([]func(Event), len(events))
+	for i, item := range appends {
+		item.Log.events = append(item.Log.events, events[i])
+		item.Log.seq = events[i].Seq
+		if item.Log.derivedHistoryValid {
+			if isSurfaceReplacementEvent(events[i]) {
+				item.Log.derivedHistory = nil
+				item.Log.derivedHistoryValid = false
+			} else {
+				incremental := derive([]Event{events[i]})
+				resolveImages(incremental, item.Log.imageResolver)
+				item.Log.derivedHistory = append(item.Log.derivedHistory, incremental...)
+			}
+		}
+		if events[i].Type == EventTurnStart {
+			item.Log.turnStarts++
+		}
+		observers[i] = item.Log.observer
+	}
+	unlock()
+	for i, observer := range observers {
+		if observer != nil {
+			notifyObserver(observer, events[i])
+		}
+	}
+	return nil
 }
 
 // New returns an empty in-memory log.
@@ -303,6 +465,44 @@ func (l *Log) SetSink(sink func(Event) error) {
 	l.sink = sink
 }
 
+// SetObserver installs a live projection callback. Unlike the durable sink,
+// an observer is not part of the append transaction: it runs only after the
+// event is committed in memory (and, when configured, accepted by the sink),
+// and its failure cannot roll back or reorder the durable log. This is the
+// bridge used by SSE/WebSocket and hook projections, including events that
+// were committed by an external atomic transaction and then incorporated via
+// AppendPersisted.
+func (l *Log) SetObserver(observer func(Event)) {
+	l.mu.Lock()
+	l.observer = observer
+	l.mu.Unlock()
+}
+
+// SetImageResolver reconnects canonical attachment references to local
+// runtime storage. File paths are deliberately omitted from durable events;
+// providers receive a resolved path only at model-request time.
+func (l *Log) SetImageResolver(resolve func(llm.ImageRef) llm.ImageRef) {
+	l.mu.Lock()
+	l.imageResolver = resolve
+	l.derivedHistory = nil
+	l.derivedHistoryValid = false
+	l.mu.Unlock()
+}
+
+// ImageResolver returns the runtime-only attachment resolver currently bound
+// to the log. Durable events remain path-free; consumers that build a
+// model-visible projection may pass this resolver explicitly to restore local
+// attachment paths without making them part of the durable projection.
+func (l *Log) ImageResolver() func(llm.ImageRef) llm.ImageRef {
+	if l == nil {
+		return nil
+	}
+	l.mu.RLock()
+	resolve := l.imageResolver
+	l.mu.RUnlock()
+	return resolve
+}
+
 // Restore rebuilds the log from scratch with previously persisted events
 // (startup replay, D8). Events must arrive in strictly increasing Seq order;
 // after a successful Restore the next Append continues after the last Seq.
@@ -310,23 +510,63 @@ func (l *Log) SetSink(sink func(Event) error) {
 func (l *Log) Restore(events []Event) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.events = nil
-	l.seq = 0
-	l.turnStarts = 0
-	l.derivedHistory = nil
-	l.derivedHistoryValid = false
+	// Validate into detached locals first. A malformed replay must not leave a
+	// partially restored live log that can later append after an invalid tail.
+	restored := make([]Event, 0, len(events))
+	restoredTurnStarts := 0
+	canonicalLifecycle := false
 	var last uint64
+	seen := false
 	for _, ev := range events {
-		if ev.Seq <= last {
-			return fmt.Errorf("session: non-monotonic seq %d after %d in replay", ev.Seq, last)
+		if err := validateLogEventVocabulary(ev.Type, ev.Data); err != nil {
+			return err
 		}
-		l.events = append(l.events, ev)
+		if !seen {
+			// Current logs are one-based; SQLite also accepts historical
+			// zero-based rows. Once the namespace is established, gaps are
+			// never admissible because surface provenance and reconnect cursors
+			// depend on contiguous durable positions.
+			if ev.Seq != 0 && ev.Seq != 1 {
+				return fmt.Errorf("session: invalid first seq %d in replay", ev.Seq)
+			}
+		} else if ev.Seq != last+1 {
+			return fmt.Errorf("session: non-contiguous seq %d after %d in replay", ev.Seq, last)
+		}
+		restored = append(restored, ev)
+		if ev.Type == EventTurnStart || ev.Type == EventTurnEnd || ev.Type == EventStepStart ||
+			ev.Type == EventStepEnd || ev.Type == EventLLMRetry || ev.Type == EventLLMRetryStarted {
+			var payload map[string]any
+			if json.Unmarshal(ev.Data, &payload) == nil {
+				if _, ok := payload["turn"]; ok {
+					canonicalLifecycle = true
+				}
+			}
+		}
 		if ev.Type == EventTurnStart {
-			l.turnStarts++
+			restoredTurnStarts++
 		}
 		last = ev.Seq
+		seen = true
 	}
+	if err := validateEventProvenance(restored); err != nil {
+		return err
+	}
+	if err := validateCommandLifecycle(restored); err != nil {
+		return fmt.Errorf("session: invalid command lifecycle in replay: %w", err)
+	}
+	if err := validateWorkflowRecordLifecycle(restored); err != nil {
+		return fmt.Errorf("session: invalid workflow record lifecycle in replay: %w", err)
+	}
+	if canonicalLifecycle {
+		if err := ValidateLifecycle(restored); err != nil {
+			return fmt.Errorf("session: invalid lifecycle in replay: %w", err)
+		}
+	}
+	l.events = restored
 	l.seq = last
+	l.turnStarts = restoredTurnStarts
+	l.derivedHistory = nil
+	l.derivedHistoryValid = false
 	return nil
 }
 
@@ -338,15 +578,44 @@ func (l *Log) Append(typ string, data any) (Event, error) {
 	if err != nil {
 		return Event{}, err
 	}
+	if err := validateLogEventVocabulary(typ, raw); err != nil {
+		return Event{}, err
+	}
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	l.seq++
 	ev := Event{Seq: l.seq, Type: typ, At: time.Now().UTC(), Version: EventVersion, Data: raw}
 	l.events = append(l.events, ev)
+	if typ == EventLLMRetry || typ == EventLLMRetryStarted {
+		if err := validateCanonicalRetryLifecycle(l.events); err != nil {
+			l.events = l.events[:len(l.events)-1]
+			l.seq--
+			l.mu.Unlock()
+			return Event{}, err
+		}
+	}
+	if err := validateEventProvenance(l.events); err != nil {
+		l.events = l.events[:len(l.events)-1]
+		l.seq--
+		l.mu.Unlock()
+		return Event{}, err
+	}
+	if err := validateCommandLifecycle(l.events); err != nil {
+		l.events = l.events[:len(l.events)-1]
+		l.seq--
+		l.mu.Unlock()
+		return Event{}, err
+	}
+	if err := validateWorkflowRecordLifecycle(l.events); err != nil {
+		l.events = l.events[:len(l.events)-1]
+		l.seq--
+		l.mu.Unlock()
+		return Event{}, err
+	}
 	if l.sink != nil {
 		if err := l.sink(ev); err != nil {
 			l.events = l.events[:len(l.events)-1]
 			l.seq--
+			l.mu.Unlock()
 			return Event{}, fmt.Errorf("session: persist %s event: %w", typ, err)
 		}
 	}
@@ -358,13 +627,110 @@ func (l *Log) Append(typ string, data any) (Event, error) {
 			l.derivedHistory = nil
 			l.derivedHistoryValid = false
 		} else {
-			l.derivedHistory = append(l.derivedHistory, derive([]Event{ev})...)
+			incremental := derive([]Event{ev})
+			resolveImages(incremental, l.imageResolver)
+			l.derivedHistory = append(l.derivedHistory, incremental...)
 		}
 	}
 	if ev.Type == EventTurnStart {
 		l.turnStarts++
 	}
+	observer := l.observer
+	l.mu.Unlock()
+	if observer != nil {
+		notifyObserver(observer, ev)
+	}
 	return ev, nil
+}
+
+// AppendPersisted incorporates an event that has already been committed by a
+// durable transaction. It deliberately bypasses the sink: using Append here
+// would write the same event a second time. The sequence check prevents the
+// in-memory projection from silently diverging if another writer advanced the
+// log between event planning and the external transaction commit.
+func (l *Log) AppendPersisted(ev Event) error {
+	l.mu.Lock()
+	previousSeq := l.seq
+	// Restore accepts historical zero-based streams. The projection fallback
+	// uses this append path for a valid live tail when strict lifecycle replay
+	// cannot be used, so preserve the same first-row namespace here.
+	wantSeq := l.seq + 1
+	if len(l.events) == 0 && ev.Seq == 0 {
+		wantSeq = 0
+	}
+	if ev.Seq != wantSeq {
+		l.mu.Unlock()
+		return fmt.Errorf("session: persisted event sequence %d, want %d", ev.Seq, wantSeq)
+	}
+	if ev.Type == "" || ev.Version <= 0 {
+		l.mu.Unlock()
+		return fmt.Errorf("session: invalid persisted event")
+	}
+	if err := validateLogEventVocabulary(ev.Type, ev.Data); err != nil {
+		l.mu.Unlock()
+		return err
+	}
+	l.events = append(l.events, ev)
+	l.seq = ev.Seq
+	if err := validateEventProvenance(l.events); err != nil {
+		l.events = l.events[:len(l.events)-1]
+		l.seq = previousSeq
+		l.mu.Unlock()
+		return err
+	}
+	if err := validateCommandLifecycle(l.events); err != nil {
+		l.events = l.events[:len(l.events)-1]
+		l.seq = previousSeq
+		l.mu.Unlock()
+		return err
+	}
+	if err := validateWorkflowRecordLifecycle(l.events); err != nil {
+		l.events = l.events[:len(l.events)-1]
+		l.seq = previousSeq
+		l.mu.Unlock()
+		return err
+	}
+	if ev.Type == EventLLMRetry || ev.Type == EventLLMRetryStarted {
+		if err := validateCanonicalRetryLifecycle(l.events); err != nil {
+			l.events = l.events[:len(l.events)-1]
+			l.seq = previousSeq
+			l.mu.Unlock()
+			return err
+		}
+	}
+	if l.derivedHistoryValid {
+		if isSurfaceReplacementEvent(ev) {
+			l.derivedHistory = nil
+			l.derivedHistoryValid = false
+		} else {
+			incremental := derive([]Event{ev})
+			resolveImages(incremental, l.imageResolver)
+			l.derivedHistory = append(l.derivedHistory, incremental...)
+		}
+	}
+	if ev.Type == EventTurnStart {
+		l.turnStarts++
+	}
+	observer := l.observer
+	l.mu.Unlock()
+	if observer != nil {
+		notifyObserver(observer, ev)
+	}
+	return nil
+}
+
+// notifyObserver isolates live projections from the durable session path.
+// Observers feed SSE, telemetry and other best-effort consumers; a panic in
+// one of them must never turn an already committed event into a failed model
+// step or make a caller retry a durable append.
+func notifyObserver(observer func(Event), ev Event) {
+	if observer == nil {
+		return
+	}
+	defer func() {
+		_ = recover()
+	}()
+	observer(ev)
 }
 
 // Events returns a snapshot copy of the current event log.
@@ -394,6 +760,81 @@ func (l *Log) NextTurn() int {
 	return l.turnStarts + 1
 }
 
+// HasOpenTurn reports whether the durable event prefix currently sits inside a
+// turn. Approval and other user-interaction asks are turn-owned in the DSH
+// contract: an audit pair created between turns would look like an
+// uncommitted crash tail during replay. The helper is pure so transports can
+// validate their runtime boundary without owning a Log.
+func HasOpenTurn(events []Event) bool {
+	open := false
+	for _, event := range events {
+		switch event.Type {
+		case EventTurnStart:
+			open = true
+		case EventTurnEnd:
+			open = false
+		}
+	}
+	return open
+}
+
+// ValidateLifecycle checks the durable turn/step grammar used by DSH. Logs
+// containing only legacy surface events remain valid; once a lifecycle anchor
+// appears, nesting and terminal ordering are enforced strictly.
+func ValidateLifecycle(events []Event) error {
+	var turn, step int
+	var last uint64
+	seen := false
+	for _, event := range events {
+		if err := validateLogEventVocabulary(event.Type, event.Data); err != nil {
+			return err
+		}
+		if seen && event.Seq <= last {
+			return fmt.Errorf("session: non-monotonic event sequence %d after %d", event.Seq, last)
+		}
+		last = event.Seq
+		seen = true
+		switch event.Type {
+		case EventTurnStart:
+			if turn != 0 {
+				return fmt.Errorf("session: turn/start while turn %d is open", turn)
+			}
+			turn++
+		case EventTurnEnd:
+			if turn == 0 || step != 0 {
+				return fmt.Errorf("session: turn/end without a closed step")
+			}
+			turn = 0
+		case EventStepStart:
+			if turn == 0 || step != 0 {
+				return fmt.Errorf("session: step/start outside a turn or with step open")
+			}
+			step++
+		case EventStepEnd:
+			if turn == 0 || step == 0 {
+				return fmt.Errorf("session: step/end without step/start")
+			}
+			step = 0
+		}
+	}
+	if step != 0 {
+		return fmt.Errorf("session: step %d remains open", step)
+	}
+	if turn != 0 {
+		return fmt.Errorf("session: turn %d remains open", turn)
+	}
+	if err := validateCanonicalLifecycle(events); err != nil {
+		return err
+	}
+	if err := validateCanonicalRetryLifecycle(events); err != nil {
+		return err
+	}
+	if err := validateWorkflowRecordLifecycle(events); err != nil {
+		return err
+	}
+	return validateCommandLifecycle(events)
+}
+
 // DeriveHistory folds the log into model-visible messages (design.md §3:
 // history is a pure derivation of the log). assistant/chunk rows are streaming
 // fidelity records and are folded away in favor of the authoritative
@@ -407,8 +848,9 @@ func (l *Log) DeriveHistory() []llm.Message {
 	}
 	events := make([]Event, len(l.events))
 	copy(events, l.events)
+	resolver := l.imageResolver
 	l.mu.RUnlock()
-	msgs := derive(events)
+	msgs := DeriveHistoryEvents(events, resolver)
 
 	// Publishing the cache is conditional: concurrent appenders may have
 	// advanced the log while the snapshot was being folded. Returning the
@@ -420,6 +862,194 @@ func (l *Log) DeriveHistory() []llm.Message {
 	}
 	l.mu.Unlock()
 	return msgs
+}
+
+// DeriveHistoryEvents is the canonical cold/live history fold for an ordered
+// durable event prefix.  Projection cursors and persistence-backed consumers
+// use this seam instead of constructing a private Log merely to obtain model
+// history.  The optional resolver is runtime-only attachment hydration; it
+// never changes the durable event bytes.
+func DeriveHistoryEvents(events []Event, resolve func(llm.ImageRef) llm.ImageRef) []llm.Message {
+	msgs := derive(events)
+	resolveImages(msgs, resolve)
+	return msgs
+}
+
+// DeriveEventMessage projects one surface-producing event without requiring a
+// complete log. Token metering uses this to preserve the same message pricing
+// for positional nodes that history replay uses.
+func DeriveEventMessage(event Event) (llm.Message, bool) {
+	messages := derive([]Event{event})
+	if len(messages) == 0 {
+		return llm.Message{}, false
+	}
+	return messages[0], true
+}
+
+// WireEvent projects one durable event into the session/event envelope used
+// by external clients.  The on-disk Go log keeps structural metadata inside
+// Data for compatibility with its append API, while the DSH wire places
+// sourceEventSeqs and surfaceOp at the envelope level.  Keep this lift in the
+// session package so SDK and other protocol adapters do not each invent a
+// subtly different event shape.
+func WireEvent(event Event) map[string]any {
+	data := any(json.RawMessage(append([]byte(nil), event.Data...)))
+	var object map[string]any
+	if err := json.Unmarshal(event.Data, &object); err == nil {
+		data = object
+	}
+	wire := map[string]any{
+		"seq":  event.Seq,
+		"type": event.Type,
+		"time": event.At.UnixMilli(),
+		"data": data,
+	}
+	if isSurfaceEventType(event.Type) {
+		// Remove internal storage copies before lifting the metadata to the
+		// reference envelope.  Preserve all unrelated opaque fields verbatim.
+		if object != nil {
+			delete(object, "surfaceOp")
+			delete(object, "sourceEventSeqs")
+			wire["data"] = object
+		}
+		op := any("append")
+		if replacement, ok := SurfaceReplacement(event); ok {
+			op = map[string]any{"op": "replace", "start": replacement.Start, "end": replacement.End}
+		}
+		wire["surfaceOp"] = op
+		if sourceSeqs, ok := EventSourceEventSeqs(event); ok {
+			wire["sourceEventSeqs"] = sourceSeqs
+		}
+	}
+	return wire
+}
+
+// EventSourceEventSeqs returns the optional source-event metadata shared by
+// surface event wire adapters.  A present empty slice is meaningful for a
+// known empty assistant stream, so the boolean must be retained.
+func EventSourceEventSeqs(event Event) ([]uint64, bool) {
+	if !isSurfaceEventType(event.Type) {
+		return nil, false
+	}
+	var data struct {
+		SourceEventSeqs *[]uint64 `json:"sourceEventSeqs"`
+	}
+	if json.Unmarshal(event.Data, &data) != nil || data.SourceEventSeqs == nil {
+		return nil, false
+	}
+	return append([]uint64(nil), (*data.SourceEventSeqs)...), true
+}
+
+// SurfaceReplacement returns the replacement range carried by a user/message
+// compaction marker. The marker itself is still a normal surface message; the
+// caller is responsible for replacing the shadowed positional nodes.
+func SurfaceReplacement(event Event) (SurfaceReplace, bool) {
+	if event.Type != EventUserMessage {
+		return SurfaceReplace{}, false
+	}
+	var data userMessageData
+	if json.Unmarshal(event.Data, &data) != nil || data.SurfaceOp == nil || data.SurfaceOp.Op != surfaceReplaceOp {
+		return SurfaceReplace{}, false
+	}
+	return *data.SurfaceOp, true
+}
+
+// validateEventProvenance enforces the replay-critical subset of DSH surface
+// provenance. It deliberately permits absent provenance for old logs, but a
+// present field is never silently ignored: references must be unique, earlier
+// than the owning event, and point at the event kind that produced them.
+func validateEventProvenance(events []Event) error {
+	bySeq := make(map[uint64]Event, len(events))
+	for _, event := range events {
+		bySeq[event.Seq] = event
+	}
+	for _, event := range events {
+		var raw struct {
+			SourceEventSeqs *[]uint64       `json:"sourceEventSeqs"`
+			SurfaceOp       *SurfaceReplace `json:"surfaceOp"`
+		}
+		if err := json.Unmarshal(event.Data, &raw); err != nil {
+			continue
+		}
+		if raw.SourceEventSeqs == nil {
+			continue
+		}
+		seen := make(map[uint64]struct{}, len(*raw.SourceEventSeqs))
+		for _, sourceSeq := range *raw.SourceEventSeqs {
+			if sourceSeq >= event.Seq {
+				return fmt.Errorf("session: event %s at seq %d source seq %d is not earlier", event.Type, event.Seq, sourceSeq)
+			}
+			if _, exists := seen[sourceSeq]; exists {
+				return fmt.Errorf("session: event %s at seq %d repeats source seq %d", event.Type, event.Seq, sourceSeq)
+			}
+			seen[sourceSeq] = struct{}{}
+			source, exists := bySeq[sourceSeq]
+			if !exists {
+				return fmt.Errorf("session: event %s at seq %d source seq %d is missing", event.Type, event.Seq, sourceSeq)
+			}
+			switch event.Type {
+			case EventAssistantMessage:
+				if source.Type != EventAssistantChunk && source.Type != EventAssistantReasoning {
+					return fmt.Errorf("session: assistant/message at seq %d cites %s at seq %d", event.Seq, source.Type, sourceSeq)
+				}
+			case EventToolResult:
+				if source.Type != EventToolCall {
+					return fmt.Errorf("session: tool/result at seq %d cites %s at seq %d", event.Seq, source.Type, sourceSeq)
+				}
+			}
+		}
+		if event.Type == EventUserMessage && raw.SurfaceOp != nil && raw.SurfaceOp.Op == surfaceReplaceOp {
+			if raw.SurfaceOp.Start < 0 || raw.SurfaceOp.End < raw.SurfaceOp.Start {
+				return fmt.Errorf("session: replacement at seq %d has invalid range [%d,%d]", event.Seq, raw.SurfaceOp.Start, raw.SurfaceOp.End)
+			}
+			for _, source := range events {
+				if source.Seq < uint64(raw.SurfaceOp.Start) || source.Seq > uint64(raw.SurfaceOp.End) {
+					continue
+				}
+				if !isSurfaceEventType(source.Type) {
+					continue
+				}
+				if _, cited := seen[source.Seq]; !cited {
+					return fmt.Errorf("session: replacement at seq %d does not cite shadowed surface seq %d", event.Seq, source.Seq)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// ValidateEventProvenance exposes the replay-critical source-reference rules
+// to persistence write boundaries. It rejects malformed provenance before an
+// event can become a durable cold seed or append-only log tail.
+func ValidateEventProvenance(events []Event) error {
+	return validateEventProvenance(events)
+}
+
+func isSurfaceEventType(typ string) bool {
+	switch typ {
+	case EventUserMessage, EventAssistantMessage, EventToolResult:
+		return true
+	default:
+		return false
+	}
+}
+
+func resolveImages(messages []llm.Message, resolve func(llm.ImageRef) llm.ImageRef) {
+	if resolve == nil {
+		return
+	}
+	var visit func([]llm.ContentBlock)
+	visit = func(blocks []llm.ContentBlock) {
+		for i := range blocks {
+			if blocks[i].Kind == llm.BlockImage {
+				blocks[i].Image = resolve(blocks[i].Image)
+			}
+			visit(blocks[i].Blocks)
+		}
+	}
+	for i := range messages {
+		visit(messages[i].Content)
+	}
 }
 
 func isSurfaceReplacementEvent(ev Event) bool {
@@ -466,6 +1096,14 @@ func derive(events []Event) []llm.Message {
 			continue
 		}
 		switch ev.Type {
+		case EventSteeringMessage:
+			// Pre-Agent logs stored steering as a private event. Reference
+			// persistence upgrades it to a user/message; keep the same model
+			// surface during replay even when the physical row is legacy.
+			var d steeringMessageData
+			if json.Unmarshal(ev.Data, &d) == nil && d.Text != "" {
+				out = append(out, tagged{msg: llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text(d.Text)}}, seq: ev.Seq})
+			}
 		case EventUserMessage:
 			var d userMessageData
 			if json.Unmarshal(ev.Data, &d) != nil {
@@ -511,7 +1149,7 @@ func derive(events []Event) []llm.Message {
 			// M8: prefer the logged content blocks (M8-3 reservation); old
 			// logs carry only text, which folds back into a single text block
 			// (D8, old-format replay).
-			content := d.Content
+			content := fromWireContentBlocks(d.Content)
 			if len(content) == 0 {
 				content = []llm.ContentBlock{llm.Text(d.Text)}
 			}
@@ -521,18 +1159,24 @@ func derive(events []Event) []llm.Message {
 			if json.Unmarshal(ev.Data, &d) != nil {
 				continue
 			}
+			text, toolCalls, reasoning, richContent := assistantFields(d)
 			// M8: reasoning is folded as a reasoning block before the text
 			// block (dsh order: reasoning first, text after). Old logs carry
 			// no reasoning, so they fold to a single text block (D8).
-			content := make([]llm.ContentBlock, 0, 2)
-			if d.Reasoning != "" {
-				content = append(content, llm.ContentBlock{Kind: llm.BlockReasoning, Text: d.Reasoning})
+			content := richContent
+			if len(content) == 0 {
+				content = make([]llm.ContentBlock, 0, 2)
+				if reasoning != "" {
+					content = append(content, llm.ContentBlock{Kind: llm.BlockReasoning, Text: reasoning})
+				}
+				if text != "" {
+					content = append(content, llm.Text(text))
+				}
 			}
-			content = append(content, llm.Text(d.Text))
 			out = append(out, tagged{msg: llm.Message{
 				Role:      llm.RoleAssistant,
 				Content:   content,
-				ToolCalls: d.ToolCalls,
+				ToolCalls: toolCalls,
 			}, seq: ev.Seq})
 		case EventToolResult:
 			var d toolResultData
@@ -550,13 +1194,9 @@ func derive(events []Event) []llm.Message {
 				}
 				continue
 			}
-			content := d.Content
+			content := fromWireContentBlocks(d.Content)
 			if len(content) == 0 && d.Message != nil {
-				for _, block := range d.Message.Content {
-					if block.Type == "text" {
-						content = append(content, llm.Text(block.Text))
-					}
-				}
+				content = toolResultMessageContent(d.Message.Content)
 			}
 			if len(content) == 0 {
 				content = []llm.ContentBlock{llm.Text(d.Output)}
@@ -591,27 +1231,181 @@ func derive(events []Event) []llm.Message {
 	return msgs
 }
 
+// toolResultMessageContent converts the canonical DSH ToolResultMessage
+// (user-role message containing one tool-result block) to the provider-neutral
+// history representation (tool role containing the nested content blocks).
+// Legacy payloads whose message content is already plain blocks remain valid.
+func toolResultMessageContent(blocks []wireContentBlock) []llm.ContentBlock {
+	content := fromWireContentBlocks(blocks)
+	if len(content) == 1 && content[0].Kind == llm.BlockToolResult && len(content[0].Blocks) > 0 {
+		return content[0].Blocks
+	}
+	return content
+}
+
+func assistantFields(d assistantMessageData) (string, []llm.ToolCall, string, []llm.ContentBlock) {
+	if d.Message == nil {
+		return d.Text, d.ToolCalls, d.Reasoning, nil
+	}
+	raw, err := json.Marshal(d.Message)
+	if err != nil {
+		return d.Text, d.ToolCalls, d.Reasoning, nil
+	}
+	var message struct {
+		Content []wireContentBlock `json:"content"`
+	}
+	if json.Unmarshal(raw, &message) != nil {
+		return d.Text, d.ToolCalls, d.Reasoning, nil
+	}
+	var text, reasoning string
+	calls := make([]llm.ToolCall, 0)
+	for _, block := range message.Content {
+		switch block.Type {
+		case "text":
+			text += block.Text
+		case "reasoning":
+			reasoning += block.Text
+		case "tool-call":
+			calls = append(calls, llm.ToolCall{ID: block.ID, Name: block.Name, Arguments: block.Arguments})
+		}
+	}
+	return text, calls, reasoning, fromWireContentBlocks(message.Content)
+}
+
 // Payload structs for each v1 event type. Kept private: only the session
 // package knows the on-disk shapes, and the loop builds them through the
 // New* helpers below so model-visible inputs cannot be logged ad hoc.
 
 type userMessageData struct {
-	Text      string             `json:"text"`
-	Content   []llm.ContentBlock `json:"content,omitempty"`   // M8-3 reservation: content blocks (images); not written this milestone
+	ID        string             `json:"id,omitempty"`
+	Role      string             `json:"role,omitempty"`
+	Text      string             `json:"text,omitempty"`
+	Content   []wireContentBlock `json:"content,omitempty"`
 	Source    *messageSource     `json:"source,omitempty"`    // dsh-style origin for model-only context messages
 	SurfaceOp *SurfaceReplace    `json:"surfaceOp,omitempty"` // set by compaction summaries (M5c)
+	// SourceEventSeqs cites the surface nodes shadowed by a replacement. Keep a
+	// pointer so legacy replacements can remain distinguishable from a
+	// provenance-aware replacement with an empty source list.
+	SourceEventSeqs *[]uint64 `json:"sourceEventSeqs,omitempty"`
 }
 
 // messageSource identifies a model-only context message without changing its
 // user-role wire representation. It is intentionally small: the Web layer
 // only needs the stable source label, while DeriveHistory ignores it.
 type messageSource struct {
-	Kind   string `json:"kind"`
-	Plugin string `json:"plugin,omitempty"`
+	Kind       string `json:"kind"`
+	Plugin     string `json:"plugin,omitempty"`
+	TeamID     string `json:"teamId,omitempty"`
+	MessageID  string `json:"messageId,omitempty"`
+	SenderID   string `json:"senderId,omitempty"`
+	SenderName string `json:"senderName,omitempty"`
+}
+
+type wireContentBlock struct {
+	Type       string             `json:"type"`
+	Text       string             `json:"text,omitempty"`
+	ID         string             `json:"id,omitempty"`
+	ToolCallID string             `json:"toolCallId,omitempty"`
+	Name       string             `json:"name,omitempty"`
+	Arguments  string             `json:"arguments,omitempty"`
+	IsError    bool               `json:"isError,omitempty"`
+	Attachment any                `json:"attachment,omitempty"`
+	Content    []wireContentBlock `json:"content,omitempty"`
+
+	// Kind and Image are decode-only compatibility projections for callers that
+	// used to unmarshal session payloads directly into llm.ContentBlock-shaped
+	// values. The canonical wire representation remains Type/Attachment.
+	Kind  llm.ContentBlockKind `json:"-"`
+	Image llm.ImageRef         `json:"-"`
+	Raw   json.RawMessage      `json:"-"`
+}
+
+func (w wireContentBlock) MarshalJSON() ([]byte, error) {
+	if len(w.Raw) != 0 {
+		return w.Raw, nil
+	}
+	type plain wireContentBlock
+	return json.Marshal(plain(w))
+}
+
+// wireImageRef is the durable/reference shape for an image attachment. The
+// runtime ImageRef keeps a filesystem Path; that path is intentionally not
+// part of the canonical session payload.
+type wireImageRef struct {
+	AttachmentID string `json:"attachmentId"`
+	MediaType    string `json:"mediaType"`
+	Bytes        int64  `json:"bytes"`
+	Width        int    `json:"width"`
+	Height       int    `json:"height"`
+	Name         string `json:"name,omitempty"`
+}
+
+func (w *wireContentBlock) UnmarshalJSON(raw []byte) error {
+	type plain wireContentBlock
+	var decoded plain
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return err
+	}
+	*w = wireContentBlock(decoded)
+	var legacy struct {
+		Kind  llm.ContentBlockKind `json:"Kind"`
+		Image llm.ImageRef         `json:"Image"`
+	}
+	if err := json.Unmarshal(raw, &legacy); err != nil {
+		return err
+	}
+	if w.Type == "" && legacy.Kind != "" {
+		w.Type = string(legacy.Kind)
+	}
+	w.Kind = llm.ContentBlockKind(w.Type)
+	if w.Kind == llm.BlockImage {
+		var image wireImageRef
+		if value, ok := w.Attachment.(map[string]any); ok {
+			encoded, err := json.Marshal(value)
+			if err != nil {
+				return err
+			}
+			if err := json.Unmarshal(encoded, &image); err != nil {
+				return err
+			}
+			if image.AttachmentID == "" {
+				var legacyAttachment llm.ImageRef
+				if err := json.Unmarshal(encoded, &legacyAttachment); err != nil {
+					return err
+				}
+				image = wireImageRef{AttachmentID: legacyAttachment.ID, MediaType: legacyAttachment.MediaType, Bytes: legacyAttachment.Bytes, Width: legacyAttachment.Width, Height: legacyAttachment.Height}
+			}
+		}
+		if image.AttachmentID == "" && legacy.Image.ID != "" {
+			image = wireImageRef{AttachmentID: legacy.Image.ID, MediaType: legacy.Image.MediaType, Bytes: legacy.Image.Bytes, Width: legacy.Image.Width, Height: legacy.Image.Height}
+		}
+		w.Image = llm.ImageRef{ID: image.AttachmentID, MediaType: image.MediaType, Bytes: image.Bytes, Width: image.Width, Height: image.Height}
+		w.Image.Name = image.Name
+	}
+	switch w.Kind {
+	case llm.BlockText, llm.BlockReasoning, llm.BlockImage, llm.BlockToolCall, llm.BlockToolResult:
+	default:
+		w.Raw = append(json.RawMessage(nil), raw...)
+	}
+	return nil
 }
 
 type feedbackRecordData struct {
 	Text string `json:"text"`
+}
+
+type commandRunData struct {
+	CommandID string            `json:"commandId"`
+	Name      string            `json:"name"`
+	Args      string            `json:"args,omitempty"`
+	Source    map[string]string `json:"source"`
+}
+
+type commandDoneData struct {
+	CommandID      string  `json:"commandId"`
+	Kind           string  `json:"kind"`
+	Text           string  `json:"text,omitempty"`
+	SourceEventSeq *uint64 `json:"sourceEventSeq,omitempty"`
 }
 
 type webCommandResultData struct {
@@ -619,14 +1413,20 @@ type webCommandResultData struct {
 	Command string `json:"command,omitempty"`
 }
 
-type turnStartData struct{}
+type turnStartData struct {
+	Turn    int `json:"turn,omitempty"`
+	Trigger any `json:"trigger,omitempty"`
+}
 
 type turnEndData struct {
+	Turn   int    `json:"turn,omitempty"`
 	Status string `json:"status"`
 	Error  string `json:"error,omitempty"`
+	Reason any    `json:"reason,omitempty"`
 }
 
 type stepData struct {
+	Turn   int    `json:"turn,omitempty"`
 	Step   int    `json:"step"`
 	Status string `json:"status,omitempty"`
 	Error  string `json:"error,omitempty"`
@@ -643,6 +1443,29 @@ type llmRequestData struct {
 	Attempts  int                 `json:"attempts,omitempty"`
 	Messages  []llmRequestMessage `json:"messages,omitempty"`
 	Tools     []llmRequestTool    `json:"tools,omitempty"`
+}
+
+type requestHeaderData struct {
+	RequestID   string         `json:"requestId,omitempty"`
+	Turn        int            `json:"turn,omitempty"`
+	Step        int            `json:"step,omitempty"`
+	Provider    string         `json:"provider,omitempty"`
+	Model       string         `json:"model,omitempty"`
+	Effort      string         `json:"reasoningEffort,omitempty"`
+	MaxTokens   int            `json:"maxTokens,omitempty"`
+	Temperature *float64       `json:"temperature,omitempty"`
+	Stop        []string       `json:"stop,omitempty"`
+	Reason      string         `json:"reason,omitempty"`
+	Header      map[string]any `json:"header"`
+}
+
+type steeringMessageData struct {
+	Text   string `json:"text"`
+	Source string `json:"source,omitempty"`
+}
+
+type todoWriteData struct {
+	Todos any `json:"todos"`
 }
 
 type llmRequestMessage struct {
@@ -669,17 +1492,159 @@ type llmRequestTool struct {
 // NewTurnStart and NewTurnEnd provide durable lifecycle anchors for a turn.
 func NewTurnStart() any { return turnStartData{} }
 
+// NewTurnStartAt is the canonical DSH-shaped turn boundary. NewTurnStart is
+// retained for legacy fixtures that predate turn metadata.
+func NewTurnStartAt(turn int) any {
+	return turnStartData{Turn: turn, Trigger: map[string]any{
+		"kind": "message", "source": map[string]any{"kind": "user"},
+	}}
+}
+
 func NewTurnEnd(status, errText string) any {
 	return turnEndData{Status: status, Error: errText}
+}
+
+func NewTurnEndAt(turn int, status, errText string) any {
+	return turnEndData{Turn: turn, Status: status, Error: errText, Reason: turnEndReason(status, errText)}
+}
+
+// NewTurnEndAtFailure preserves the structured provider failure used by the
+// reference runtime instead of collapsing every failed turn to UNKNOWN.
+func NewTurnEndAtFailure(turn int, status string, failure llm.Failure) any {
+	return turnEndData{
+		Turn: turn, Status: status, Error: failure.Message,
+		Reason: map[string]any{
+			"kind":  "error",
+			"error": map[string]any{"message": failure.Message, "code": failure.Code},
+		},
+	}
 }
 
 // NewStepStart and NewStepEnd provide durable lifecycle anchors for a model
 // request/tool step. They are opaque to history derivation.
 func NewStepStart(step int) any { return stepData{Step: step} }
 
+func NewStepStartAt(turn, step int) any { return stepData{Turn: turn, Step: step} }
+
 func NewStepEnd(step int, status, errText string) any {
 	return stepData{Step: step, Status: status, Error: errText}
 }
+
+func NewStepEndAt(turn, step int, status, errText string) any {
+	return stepData{Turn: turn, Step: step, Status: status, Error: errText}
+}
+
+func turnEndReason(status, errText string) any {
+	switch status {
+	case "cancelled", "aborted":
+		return map[string]any{"kind": "aborted", "reason": map[string]any{"kind": "user"}}
+	case "failed", "error":
+		return map[string]any{"kind": "error", "error": map[string]any{"message": errText, "code": "UNKNOWN"}}
+	case "max-tokens":
+		return map[string]any{"kind": "max-tokens"}
+	case "refusal":
+		return map[string]any{"kind": "refusal"}
+	case "interrupted":
+		return map[string]any{"kind": "interrupted"}
+	case "rejected", "blocked":
+		return map[string]any{"kind": "blocked"}
+	default:
+		return map[string]any{"kind": "completed"}
+	}
+}
+
+// NewRequestHeader records the model request header in the canonical DSH
+// event shape. Conversation messages remain derived from the session log;
+// this event records the effective system prompt and tool catalog.
+func NewRequestHeader(requestID string, req llm.ChatRequest, reason string) any {
+	turn, step := requestCoordinates(requestID)
+	system := ""
+	for _, message := range req.Messages {
+		if message.Role != llm.RoleSystem {
+			continue
+		}
+		if text := message.Text(); text != "" {
+			if system != "" {
+				system += "\n"
+			}
+			system += text
+		}
+	}
+	toolDefs := make([]any, 0, len(req.Tools))
+	for _, tool := range req.Tools {
+		toolDefs = append(toolDefs, map[string]any{
+			"name":        tool.Name,
+			"description": tool.Description,
+			"parameters":  tool.Parameters,
+		})
+	}
+	return requestHeaderData{
+		RequestID: requestID, Turn: turn, Step: step,
+		Provider:    req.Provider,
+		Model:       req.Model,
+		Effort:      req.ReasoningEffort,
+		MaxTokens:   req.MaxTokens,
+		Temperature: req.Temperature,
+		Stop:        append([]string(nil), req.Stop...),
+		Reason:      reason,
+		Header: map[string]any{
+			"config": map[string]any{
+				"provider":        req.Provider,
+				"model":           req.Model,
+				"reasoningEffort": req.ReasoningEffort,
+				"maxTokens":       req.MaxTokens,
+				"temperature":     req.Temperature,
+				"stop":            append([]string(nil), req.Stop...),
+			},
+			"system": system,
+			"tools":  toolDefs,
+		},
+	}
+}
+
+type requestContextData struct {
+	Provider      string `json:"provider"`
+	Model         string `json:"model"`
+	ContextWindow int    `json:"contextWindow,omitempty"`
+}
+
+// NewRequestContext records the resolved provider/model route and optional
+// context capacity independently from request/header. The latest value is
+// folded by the meter and is emitted only when the route or capacity changes.
+func NewRequestContext(provider, model string, contextWindow int) any {
+	return requestContextData{Provider: provider, Model: model, ContextWindow: contextWindow}
+}
+
+// requestCoordinates extracts the canonical coordinates embedded in the
+// stable loop request identity (turn:N:step:M). Keeping them on request/header
+// makes provider-routed retry invariants checkable after cold replay, without
+// changing the legacy request identity or requiring a second event type.
+func requestCoordinates(requestID string) (turn, step int) {
+	if _, err := fmt.Sscanf(requestID, "turn:%d:step:%d", &turn, &step); err != nil || turn <= 0 || step <= 0 {
+		return 0, 0
+	}
+	return turn, step
+}
+
+// NewSteeringMessage records a user/model-visible steer delivery.
+func NewSteeringMessage(text, source string) any {
+	return steeringMessageData{Text: text, Source: source}
+}
+
+// NewSteeringUserMessage is the current durable representation of a steer.
+// The old steering/message constructor remains for replaying pre-Agent logs.
+func NewSteeringUserMessage(text, source string) any {
+	return userMessageData{Role: "user", Text: text, Source: &messageSource{Kind: "steering", Plugin: source}}
+}
+
+// NewSteeringUserMessageWithBlocks preserves rich steering content, including
+// image references, in the durable user/message projection.
+func NewSteeringUserMessageWithBlocks(text, source string, blocks []llm.ContentBlock) any {
+	return userMessageData{Role: "user", Text: text, Content: toWireContentBlocks(blocks), Source: &messageSource{Kind: "steering", Plugin: source}}
+}
+
+// NewTodoWrite records the canonical todo projection payload.
+func NewTodoWrite(todos any) any { return todoWriteData{Todos: todos} }
 
 func NewLLMRequestStart(provider, model, effort string) any {
 	return llmRequestData{Provider: provider, Model: model, Effort: effort}
@@ -745,18 +1710,51 @@ func NewLLMRequestEndWithUsageDetail(requestID, provider, model, effort, status,
 		copy := usage
 		u = &copy
 	}
-	return llmRequestData{RequestID: requestID, Provider: provider, Model: model, Effort: effort, Status: status, Error: errText, Usage: u, Attempts: attempts}
+	return llmRequestData{RequestID: requestID, Provider: provider, Model: model, Effort: effort, Status: status, Error: llm.RedactDiagnostic(errText), Usage: u, Attempts: attempts}
 }
 
 func NewLLMRetry(provider, model string, retry llm.RetryEvent) any {
+	return NewLLMRetryAt(0, 0, provider, model, retry)
+}
+
+func NewLLMRetryAt(turn, step int, provider, model string, retry llm.RetryEvent) any {
+	failure := retry.Failure
+	if failure != nil {
+		copy := *failure
+		copy.Message = llm.RedactDiagnostic(copy.Message)
+		failure = &copy
+	}
+	data := struct {
+		RetryID    string       `json:"retryId,omitempty"`
+		Turn       int          `json:"turn,omitempty"`
+		Step       int          `json:"step,omitempty"`
+		Provider   string       `json:"provider,omitempty"`
+		Model      string       `json:"model,omitempty"`
+		Mode       string       `json:"mode,omitempty"`
+		PolicyKey  string       `json:"policyKey,omitempty"`
+		Retry      int          `json:"retry,omitempty"`
+		Attempt    int          `json:"attempt"`
+		MaxRetries int          `json:"maxRetries,omitempty"`
+		DelayMS    int64        `json:"delayMs"`
+		Error      string       `json:"error,omitempty"`
+		Failure    *llm.Failure `json:"failure,omitempty"`
+	}{
+		RetryID: retry.RetryID, Turn: turn, Step: step,
+		Provider: provider, Model: model, Mode: retry.Mode,
+		PolicyKey: retry.PolicyKey, Retry: retry.Attempt,
+		Attempt: retry.Attempt, MaxRetries: retry.MaxRetries,
+		DelayMS: retry.DelayMS, Error: llm.RedactDiagnostic(retry.Error), Failure: failure,
+	}
+	return data
+}
+
+func NewLLMRetryStarted(retry llm.RetryEvent, turn, step int) any {
 	return struct {
-		Provider   string `json:"provider,omitempty"`
-		Model      string `json:"model,omitempty"`
-		Attempt    int    `json:"attempt"`
-		MaxRetries int    `json:"maxRetries"`
-		DelayMS    int64  `json:"delayMs"`
-		Error      string `json:"error,omitempty"`
-	}{Provider: provider, Model: model, Attempt: retry.Attempt, MaxRetries: retry.MaxRetries, DelayMS: retry.DelayMS, Error: retry.Error}
+		RetryID string `json:"retryId"`
+		Turn    int    `json:"turn"`
+		Step    int    `json:"step"`
+		Retry   int    `json:"retry"`
+	}{RetryID: retry.RetryID, Turn: turn, Step: step, Retry: retry.Attempt}
 }
 
 // surfaceReplaceOp is the only SurfaceReplace operation currently defined: the
@@ -775,7 +1773,10 @@ type SurfaceReplace struct {
 }
 
 type assistantChunkData struct {
-	Text string `json:"text"`
+	Turn  int    `json:"turn,omitempty"`
+	Step  int    `json:"step,omitempty"`
+	Chunk any    `json:"chunk,omitempty"`
+	Text  string `json:"text,omitempty"`
 }
 
 // assistantReasoningData is the assistant/reasoning payload: one streamed
@@ -788,12 +1789,19 @@ type assistantReasoningData struct {
 }
 
 type assistantMessageData struct {
-	Text         string          `json:"text"`
+	Turn         int             `json:"turn,omitempty"`
+	Step         int             `json:"step,omitempty"`
+	Message      any             `json:"message,omitempty"`
+	Text         string          `json:"text,omitempty"`
 	Reasoning    string          `json:"reasoning,omitempty"` // assistant reasoning (M8, D3): folded to a reasoning block on derive
 	ToolCalls    []llm.ToolCall  `json:"toolCalls,omitempty"`
 	FinishReason string          `json:"finishReason,omitempty"`
 	Interrupted  bool            `json:"interrupted,omitempty"`
 	Usage        *llm.TokenUsage `json:"usage,omitempty"`
+	// SourceEventSeqs is a pointer so a known empty provider stream can be
+	// encoded as [] while legacy/producers that do not know provenance omit the
+	// field. DSH uses that distinction when replaying usage anchors.
+	SourceEventSeqs *[]uint64 `json:"sourceEventSeqs,omitempty"`
 }
 
 type toolResultData struct {
@@ -812,7 +1820,7 @@ type toolResultData struct {
 	Output  string             `json:"output,omitempty"`
 	Spill   *SpillRef          `json:"spill,omitempty"`
 	Code    string             `json:"code,omitempty"`
-	Content []llm.ContentBlock `json:"content,omitempty"`
+	Content []wireContentBlock `json:"content,omitempty"`
 }
 
 type toolCallData struct {
@@ -824,18 +1832,12 @@ type toolCallData struct {
 }
 
 type toolResultMessageData struct {
-	Source  toolResultSourceData  `json:"source"`
-	Content []toolResultBlockData `json:"content"`
+	Source  toolResultSourceData `json:"source"`
+	Content []wireContentBlock   `json:"content"`
 }
 
 type toolResultSourceData struct {
 	CallID string `json:"callId"`
-}
-
-type toolResultBlockData struct {
-	Type    string `json:"type"`
-	Text    string `json:"text,omitempty"`
-	IsError bool   `json:"isError,omitempty"`
 }
 
 type toolResultErrorData struct {
@@ -860,8 +1862,16 @@ type toolStartData struct {
 // logged (D3). Output already carries the truncation notice with the locator;
 // this structured copy is for tooling/replay.
 type SpillRef struct {
-	Locator string `json:"locator"`
-	Bytes   int    `json:"bytes"`
+	Locator       string       `json:"locator"`
+	Bytes         int          `json:"bytes"`
+	RetrievalHint string       `json:"retrievalHint,omitempty"`
+	Source        *SpillSource `json:"source,omitempty"`
+}
+
+type SpillSource struct {
+	ToolName string `json:"toolName,omitempty"`
+	CallID   string `json:"callId,omitempty"`
+	Label    string `json:"label,omitempty"`
 }
 
 type toolErrorData struct {
@@ -873,9 +1883,52 @@ type toolErrorData struct {
 // NewUserMessage builds the user/message payload.
 func NewUserMessage(text string) any { return userMessageData{Text: text} }
 
+func NewUserMessageAt(turn, step, index int, message llm.Message) any {
+	content := message.Content
+	if len(content) == 0 && message.Text() != "" {
+		content = []llm.ContentBlock{llm.Text(message.Text())}
+	}
+	sourceKind, sourcePlugin := message.SourceKind, message.SourcePlugin
+	if sourceKind == "" {
+		sourceKind = "user"
+	}
+	return userMessageData{
+		ID: fmt.Sprintf("turn:%d:step:%d:user:%d", turn, step, index), Role: "user",
+		Content: toWireContentBlocks(content), Source: &messageSource{
+			Kind: sourceKind, Plugin: sourcePlugin, TeamID: message.SourceTeamID,
+			MessageID: message.SourceMessageID, SenderID: message.SourceSenderID,
+			SenderName: message.SourceSenderName,
+		},
+	}
+}
+
+// NewTeamMessage builds the durable target-session receipt for one Team
+// mailbox item. The source fields make retries and cold recovery idempotent;
+// the content is already framed for the receiving model.
+func NewTeamMessage(text string, blocks []llm.ContentBlock, teamID, messageID, senderID, senderName string) any {
+	return userMessageData{
+		Role: "user", Text: text, Content: toWireContentBlocks(blocks),
+		Source: &messageSource{Kind: "team-message", TeamID: teamID, MessageID: messageID, SenderID: senderID, SenderName: senderName},
+	}
+}
+
 // NewFeedbackRecord builds the dsh-compatible log-only feedback payload. It is
 // deliberately not a user/message, so feedback never enters model history.
 func NewFeedbackRecord(text string) any { return feedbackRecordData{Text: text} }
+
+// NewCommandRun records the admitted human command before its handler runs.
+func NewCommandRun(commandID, name, args string) any {
+	return commandRunData{CommandID: commandID, Name: name, Args: args, Source: map[string]string{"kind": "user"}}
+}
+
+// NewCommandDone records the settled result of an admitted command.
+func NewCommandDone(commandID, kind, text string, sourceEventSeq ...uint64) any {
+	data := commandDoneData{CommandID: commandID, Kind: kind, Text: text}
+	if len(sourceEventSeq) > 0 {
+		data.SourceEventSeq = &sourceEventSeq[0]
+	}
+	return data
+}
 
 // NewWebCommandResult builds a Web-only acknowledgement event. command is an
 // optional browser-side action such as export; DeriveHistory ignores it like
@@ -896,7 +1949,60 @@ func NewWebCommandResult(text string, command ...string) any {
 // reservation), so a later request replays the image ref into the model-visible
 // history. Constructed in the same New* style as NewAssistantMessage.
 func NewUserMessageWithBlocks(text string, blocks []llm.ContentBlock) any {
-	return userMessageData{Text: text, Content: blocks}
+	return userMessageData{Text: text, Content: toWireContentBlocks(blocks)}
+}
+
+func toWireContentBlocks(blocks []llm.ContentBlock) []wireContentBlock {
+	out := make([]wireContentBlock, 0, len(blocks))
+	for _, block := range blocks {
+		item := wireContentBlock{Type: string(block.Kind), Text: block.Text, ID: block.CallID, Name: block.Name, Arguments: block.Arguments, IsError: block.IsError}
+		if block.Kind == llm.BlockToolResult {
+			item.ToolCallID = block.CallID
+			item.Content = toWireContentBlocks(block.Blocks)
+		}
+		if block.Kind == llm.BlockImage {
+			item.Type = "image"
+			item.Attachment = wireImageRef{
+				AttachmentID: block.Image.ID,
+				MediaType:    block.Image.MediaType,
+				Bytes:        block.Image.Bytes,
+				Width:        block.Image.Width,
+				Height:       block.Image.Height,
+				Name:         block.Image.Name,
+			}
+		}
+		if len(block.Raw) != 0 {
+			item.Raw = append(json.RawMessage(nil), block.Raw...)
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func fromWireContentBlocks(blocks []wireContentBlock) []llm.ContentBlock {
+	out := make([]llm.ContentBlock, 0, len(blocks))
+	for _, block := range blocks {
+		kind := llm.ContentBlockKind(block.Type)
+		if kind == "" {
+			kind = llm.BlockText
+		}
+		callID := block.ID
+		if block.ToolCallID != "" {
+			callID = block.ToolCallID
+		}
+		item := llm.ContentBlock{Kind: kind, Text: block.Text, CallID: callID, Name: block.Name, Arguments: block.Arguments, IsError: block.IsError}
+		if kind == llm.BlockImage {
+			item.Image = block.Image
+		}
+		if kind == llm.BlockToolResult {
+			item.Blocks = fromWireContentBlocks(block.Content)
+		}
+		if len(block.Raw) != 0 {
+			item.Raw = append(json.RawMessage(nil), block.Raw...)
+		}
+		out = append(out, item)
+	}
+	return out
 }
 
 // NewContextMessage builds a durable model-only user-role context message with
@@ -905,7 +2011,7 @@ func NewUserMessageWithBlocks(text string, blocks []llm.ContentBlock) any {
 func NewContextMessage(text string, blocks []llm.ContentBlock, sourceKind, sourcePlugin string) any {
 	return userMessageData{
 		Text:    text,
-		Content: blocks,
+		Content: toWireContentBlocks(blocks),
 		Source:  &messageSource{Kind: sourceKind, Plugin: sourcePlugin},
 	}
 }
@@ -920,14 +2026,35 @@ func NewUserMessageReplace(text string, start, end int64) any {
 	return userMessageData{Text: text, SurfaceOp: &SurfaceReplace{Op: surfaceReplaceOp, Start: start, End: end}}
 }
 
+// NewUserMessageReplaceWithSources is the provenance-complete compaction
+// summary constructor. Every shadowed surface node must be cited by the
+// replacement marker so replay can validate and explain the fold.
+func NewUserMessageReplaceWithSources(text string, start, end int64, sourceSeqs []uint64) any {
+	copySeqs := make([]uint64, len(sourceSeqs))
+	copy(copySeqs, sourceSeqs)
+	return userMessageData{
+		Text:            text,
+		SurfaceOp:       &SurfaceReplace{Op: surfaceReplaceOp, Start: start, End: end},
+		SourceEventSeqs: &copySeqs,
+	}
+}
+
 // NewAssistantChunk builds one assistant/chunk payload (streaming fidelity).
 func NewAssistantChunk(text string) any { return assistantChunkData{Text: text} }
+
+func NewAssistantChunkAt(turn, step int, text string) any {
+	return assistantChunkData{Turn: turn, Step: step, Chunk: map[string]any{"type": "text-delta", "index": 0, "text": text}}
+}
 
 // NewAssistantReasoning builds one assistant/reasoning payload: a streamed
 // reasoning delta (M8, D3). The model's thinking is logged as it arrives so
 // the UI can show it in order (thinking before tool calls); DeriveHistory
 // ignores these rows and uses the joined reasoning on assistant/message.
 func NewAssistantReasoning(text string) any { return assistantReasoningData{Text: text} }
+
+func NewAssistantReasoningAt(turn, step int, text string) any {
+	return map[string]any{"turn": turn, "step": step, "chunk": map[string]any{"type": "reasoning-delta", "index": 0, "text": text}}
+}
 
 // NewAssistantMessage builds the authoritative assistant/message payload that
 // closes a step. reasoning is optional (M8): when non-empty it is logged as the
@@ -951,6 +2078,49 @@ func NewAssistantMessageWithUsage(text string, toolCalls []llm.ToolCall, finishR
 	return assistantMessageData{Text: text, ToolCalls: toolCalls, FinishReason: finishReason, Reasoning: reasoning, Usage: u}
 }
 
+func NewAssistantMessageAtWithUsage(turn, step int, text string, toolCalls []llm.ToolCall, finishReason, reasoning string, usage llm.TokenUsage) any {
+	return newAssistantMessageAtWithUsage(turn, step, text, toolCalls, finishReason, reasoning, usage, nil)
+}
+
+// NewAssistantMessageAtWithUsageAndSources closes a provider step and records
+// the exact streamed assistant events that produced it. A non-nil, empty
+// source slice deliberately serializes as [] for a known empty stream.
+func NewAssistantMessageAtWithUsageAndSources(turn, step int, text string, toolCalls []llm.ToolCall, finishReason, reasoning string, usage llm.TokenUsage, sourceSeqs []uint64) any {
+	var sourcePtr *[]uint64
+	if sourceSeqs != nil {
+		copySeqs := make([]uint64, len(sourceSeqs))
+		copy(copySeqs, sourceSeqs)
+		sourcePtr = &copySeqs
+	}
+	return newAssistantMessageAtWithUsage(turn, step, text, toolCalls, finishReason, reasoning, usage, sourcePtr)
+}
+
+func newAssistantMessageAtWithUsage(turn, step int, text string, toolCalls []llm.ToolCall, finishReason, reasoning string, usage llm.TokenUsage, sourceSeqs *[]uint64) any {
+	value := NewAssistantMessageWithUsage(text, toolCalls, finishReason, reasoning, usage)
+	data := value.(assistantMessageData)
+	canonical := assistantMessageData{Turn: turn, Step: step, Usage: data.Usage, SourceEventSeqs: sourceSeqs}
+	canonical.Message = map[string]any{
+		"role":    "assistant",
+		"content": assistantContentBlocks(text, toolCalls, reasoning),
+		"source":  map[string]any{"kind": "model"},
+	}
+	return canonical
+}
+
+func assistantContentBlocks(text string, toolCalls []llm.ToolCall, reasoning string) []any {
+	blocks := make([]any, 0, 1+len(toolCalls))
+	if reasoning != "" {
+		blocks = append(blocks, map[string]any{"type": "reasoning", "text": reasoning})
+	}
+	if text != "" {
+		blocks = append(blocks, map[string]any{"type": "text", "text": text})
+	}
+	for _, call := range toolCalls {
+		blocks = append(blocks, map[string]any{"type": "tool-call", "id": call.ID, "name": call.Name, "arguments": call.Arguments})
+	}
+	return blocks
+}
+
 // NewInterruptedAssistantMessage closes a stream that was interrupted after
 // producing partial output, preserving that output for replay/history.
 func NewInterruptedAssistantMessage(text string, toolCalls []llm.ToolCall, reasoning string) any {
@@ -960,6 +2130,42 @@ func NewInterruptedAssistantMessage(text string, toolCalls []llm.ToolCall, reaso
 		Reasoning:   reasoning,
 		Interrupted: true,
 	}
+}
+
+func NewInterruptedAssistantMessageAt(turn, step int, text string, toolCalls []llm.ToolCall, reasoning string) any {
+	return newInterruptedAssistantMessageAt(turn, step, text, toolCalls, reasoning, nil)
+}
+
+// NewInterruptedAssistantMessageAtWithSources preserves provenance for a
+// partial provider stream that is closed by cancellation or transport error.
+func NewInterruptedAssistantMessageAtWithSources(turn, step int, text string, toolCalls []llm.ToolCall, reasoning string, sourceSeqs []uint64) any {
+	var sourcePtr *[]uint64
+	if sourceSeqs != nil {
+		copySeqs := make([]uint64, len(sourceSeqs))
+		copy(copySeqs, sourceSeqs)
+		sourcePtr = &copySeqs
+	}
+	return newInterruptedAssistantMessageAt(turn, step, text, toolCalls, reasoning, sourcePtr)
+}
+
+func newInterruptedAssistantMessageAt(turn, step int, text string, toolCalls []llm.ToolCall, reasoning string, sourceSeqs *[]uint64) any {
+	value := assistantMessageData{Turn: turn, Step: step, Interrupted: true, SourceEventSeqs: sourceSeqs}
+	value.Message = map[string]any{
+		"role":    "assistant",
+		"content": assistantContentBlocks(text, toolCalls, reasoning),
+		"source":  map[string]any{"kind": "model"},
+	}
+	return value
+}
+
+// AssistantSourceEventSeqs returns the provenance field and whether it was
+// present. The second result preserves the DSH distinction between omitted
+// legacy provenance and an explicit empty provider stream.
+func AssistantSourceEventSeqs(event Event) ([]uint64, bool) {
+	if event.Type != EventAssistantMessage {
+		return nil, false
+	}
+	return EventSourceEventSeqs(event)
 }
 
 // NewToolStart builds the tool/start payload logged the moment a tool call
@@ -990,6 +2196,12 @@ func NewToolResultAtWithSource(turn, step int, callID, name, output string, spil
 	return addToolResultSource(NewToolResultAt(turn, step, callID, name, output, spill), sourceSeq)
 }
 
+// NewToolResultAtWithSourceMeta is the canonical rich result constructor with
+// provider metadata retained beside the model-facing message.
+func NewToolResultAtWithSourceMeta(turn, step int, callID, name, output string, spill *SpillRef, sourceSeq uint64, meta any) any {
+	return addToolResultMeta(addToolResultSource(NewToolResultAt(turn, step, callID, name, output, spill), sourceSeq), meta)
+}
+
 // NewToolResultWithContent records a tool result carrying provider-neutral
 // content blocks, such as a read_image attachment reference.
 func NewToolResultWithContent(callID, name, output string, content []llm.ContentBlock) any {
@@ -1004,6 +2216,10 @@ func NewToolResultWithContentAt(turn, step int, callID, name, output string, con
 // NewToolResultWithContentAtSource is the source-linked rich-result form.
 func NewToolResultWithContentAtSource(turn, step int, callID, name, output string, content []llm.ContentBlock, sourceSeq uint64) any {
 	return addToolResultSource(NewToolResultWithContentAt(turn, step, callID, name, output, content), sourceSeq)
+}
+
+func NewToolResultWithContentAtSourceMeta(turn, step int, callID, name, output string, content []llm.ContentBlock, sourceSeq uint64, meta any) any {
+	return addToolResultMeta(addToolResultSource(NewToolResultWithContentAt(turn, step, callID, name, output, content), sourceSeq), meta)
 }
 
 // NewToolErrorResultAt records a structured ToolResult whose content is
@@ -1026,6 +2242,10 @@ func NewToolErrorResultAtCodeWithSource(turn, step int, callID, name, output str
 	return addToolResultSource(NewToolErrorResultAtCode(turn, step, callID, name, output, spill, code), sourceSeq)
 }
 
+func NewToolErrorResultAtCodeWithSourceMeta(turn, step int, callID, name, output string, spill *SpillRef, code string, sourceSeq uint64, meta any) any {
+	return addToolResultMeta(addToolResultSource(NewToolErrorResultAtCode(turn, step, callID, name, output, spill, code), sourceSeq), meta)
+}
+
 // NewToolErrorResultWithContentAt is the rich-content form of
 // NewToolErrorResultAt.
 func NewToolErrorResultWithContentAt(turn, step int, callID, name, output string, content []llm.ContentBlock) any {
@@ -1044,6 +2264,10 @@ func NewToolErrorResultWithContentAtCode(turn, step int, callID, name, output st
 // form of NewToolErrorResultWithContentAtCode.
 func NewToolErrorResultWithContentAtCodeWithSource(turn, step int, callID, name, output string, content []llm.ContentBlock, code string, sourceSeq uint64) any {
 	return addToolResultSource(NewToolErrorResultWithContentAtCode(turn, step, callID, name, output, content, code), sourceSeq)
+}
+
+func NewToolErrorResultWithContentAtCodeWithSourceMeta(turn, step int, callID, name, output string, content []llm.ContentBlock, code string, sourceSeq uint64, meta any) any {
+	return addToolResultMeta(addToolResultSource(NewToolErrorResultWithContentAtCode(turn, step, callID, name, output, content, code), sourceSeq), meta)
 }
 
 // NewAbortedToolResult records a tool call that was present in the assistant
@@ -1070,7 +2294,7 @@ func NewToolError(callID, name, err string) any {
 	// Legacy constructor: callers that explicitly append the literal
 	// "tool/error" event remain able to create the old compact payload. New
 	// execution code uses NewToolErrorAt and writes the dsh result envelope.
-	return toolErrorData{CallID: callID, Name: name, Error: err}
+	return toolErrorData{CallID: callID, Name: name, Error: llm.RedactDiagnostic(err)}
 }
 
 // NewToolErrorAt records an execution failure in dsh's result envelope.
@@ -1081,6 +2305,7 @@ func NewToolErrorAt(turn, step int, callID, name, err string) any {
 // NewToolErrorAtCode records a dsh-compatible structured failure while
 // preserving the stable error code selected by the execution pipeline.
 func NewToolErrorAtCode(turn, step int, callID, name, err, code string) any {
+	err = llm.RedactDiagnostic(err)
 	result := newToolResult(turn, step, callID, name, "Error: "+err, nil, true, nil, code)
 	result.Error = &toolResultErrorData{Name: toolErrorName(code), Code: code}
 	return result
@@ -1103,6 +2328,15 @@ func addToolResultSource(payload any, sourceSeq uint64) any {
 	return result
 }
 
+func addToolResultMeta(payload any, meta any) any {
+	result, ok := payload.(toolResultData)
+	if !ok || meta == nil {
+		return payload
+	}
+	result.Meta = meta
+	return result
+}
+
 func toolErrorName(code string) string {
 	switch code {
 	case "UNKNOWN_TOOL":
@@ -1113,6 +2347,10 @@ func toolErrorName(code string) string {
 		return "ToolTimeoutError"
 	case "ABORTED", "ABORTED_BEFORE_DISPATCH":
 		return "AbortError"
+	case "TOOL_NOT_STARTED":
+		return "ToolNotStartedError"
+	case "TOOL_OUTCOME_UNKNOWN":
+		return "ToolOutcomeUnknownError"
 	default:
 		return "ToolError"
 	}
@@ -1122,19 +2360,15 @@ func newToolResult(turn, step int, callID, name, output string, content []llm.Co
 	if len(content) == 0 {
 		content = []llm.ContentBlock{llm.Text(output)}
 	}
-	blocks := make([]toolResultBlockData, 0, len(content))
-	for _, block := range content {
-		if block.Kind == llm.BlockText || block.Text != "" {
-			blocks = append(blocks, toolResultBlockData{Type: "text", Text: block.Text, IsError: isError})
-		}
-	}
+	blocks := toWireContentBlocks(content)
 	if len(blocks) == 0 {
-		blocks = append(blocks, toolResultBlockData{Type: "text", Text: output, IsError: isError})
+		blocks = append(blocks, wireContentBlock{Type: "text", Text: output})
 	}
+	toolBlock := wireContentBlock{Type: "tool-result", ToolCallID: callID, Content: blocks, IsError: isError}
 	result := toolResultData{
 		Turn: turn, Step: step, CallID: callID, Name: name, Output: output,
-		Spill: spill, Code: code, Content: content,
-		Message: &toolResultMessageData{Source: toolResultSourceData{CallID: callID}, Content: blocks},
+		Spill: spill, Code: code, Content: blocks,
+		Message: &toolResultMessageData{Source: toolResultSourceData{CallID: callID}, Content: []wireContentBlock{toolBlock}},
 	}
 	if isError {
 		result.Error = &toolResultErrorData{Name: "ToolError", Code: code}
@@ -1515,8 +2749,9 @@ type scheduleDeleteData struct {
 // reaches the model through job_read's tool/result. DeriveHistory treats it as
 // opaque data.
 type scheduleFireData struct {
-	ID      string `json:"id"`
-	Payload string `json:"payload"`
+	ID           string    `json:"id"`
+	Payload      string    `json:"payload"`
+	OccurrenceAt time.Time `json:"occurrenceAt,omitempty"`
 }
 
 // NewScheduleCreate builds the schedule/create payload recorded when
@@ -1543,6 +2778,13 @@ func NewScheduleDelete(id string) any {
 // the same on-disk bound as job/done) so the payload is always lean.
 func NewScheduleFire(id, payload string) any {
 	return scheduleFireData{ID: id, Payload: summaryHead(payload)}
+}
+
+// NewScheduleFireAt adds the scheduled occurrence identity. It makes a
+// durable fire append idempotent when delivery fails after the event was
+// written but before the Agent follow-up was accepted.
+func NewScheduleFireAt(id, payload string, occurrenceAt time.Time) any {
+	return scheduleFireData{ID: id, Payload: summaryHead(payload), OccurrenceAt: occurrenceAt.UTC()}
 }
 
 // planCreateData is the plan/create payload: the tree level (scope: goal |
@@ -1627,6 +2869,17 @@ type planModeData struct {
 
 // NewPlanMode records the durable per-session plan-mode switch.
 func NewPlanMode(active bool) any { return planModeData{Active: active} }
+
+// NewPermissionPreset records the durable user-facing permission selection.
+// Enforcement is carried by the following sandbox/mode and approval/policy
+// facts; this event preserves which named bundle the user selected.
+func NewPermissionPreset(preset string) any { return map[string]string{"preset": preset} }
+
+// NewSandboxMode records the session's file-effect policy override.
+func NewSandboxMode(mode string) any { return map[string]string{"mode": mode} }
+
+// NewApprovalPolicy records the session's approval policy override.
+func NewApprovalPolicy(policy string) any { return map[string]string{"policy": policy} }
 
 // FoldPlanMode returns the last plan-mode value in an event stream. Plan mode
 // is session state, so a missing event means the default inactive state.
@@ -1727,6 +2980,7 @@ func NewSpillDelete(id string) any {
 // treats it as opaque data.
 type interactRequestData struct {
 	ID        string `json:"id"`
+	CallID    string `json:"callId,omitempty"`
 	ToolName  string `json:"toolName"`
 	Prompt    string `json:"prompt,omitempty"`
 	Args      string `json:"args,omitempty"`
@@ -1738,6 +2992,7 @@ type interactRequestData struct {
 // as opaque data.
 type interactResolveData struct {
 	ID       string `json:"id"`
+	CallID   string `json:"callId,omitempty"`
 	Approved bool   `json:"approved"`
 }
 
@@ -1770,10 +3025,23 @@ func NewInteractRequestDetail(id, toolName, prompt, args string, questions any) 
 	return interactRequestData{ID: id, ToolName: toolName, Prompt: prompt, Args: args, Questions: questions}
 }
 
+// NewInteractRequestDetailWithCallID is the correlated form used by a
+// sensitive tool gate. The request id identifies the approval record; CallID
+// identifies the model tool invocation that is blocked until the decision.
+func NewInteractRequestDetailWithCallID(id, callID, toolName, prompt, args string, questions any) any {
+	return interactRequestData{ID: id, CallID: callID, ToolName: toolName, Prompt: prompt, Args: args, Questions: questions}
+}
+
 // NewInteractResolve builds the interact/resolve payload recorded when a user
 // decision is recorded for the request with id (dispatch-m6d-2 §1 / D3).
 func NewInteractResolve(id string, approved bool) any {
 	return interactResolveData{ID: id, Approved: approved}
+}
+
+// NewInteractResolveWithCallID records the decision together with the tool
+// invocation it releases or denies.
+func NewInteractResolveWithCallID(id, callID string, approved bool) any {
+	return interactResolveData{ID: id, CallID: callID, Approved: approved}
 }
 
 // NewInteractCancel records a user-question dismissal separately from an
@@ -1819,13 +3087,17 @@ type codeDispatchStartData struct {
 }
 
 type codeDispatchData struct {
-	RootCallID   string           `json:"rootCallId,omitempty"`
-	ParentCallID string           `json:"parentCallId,omitempty"`
-	SubCallID    string           `json:"subCallId"`
-	Name         string           `json:"name"`
-	Arguments    any              `json:"arguments"`
-	IsError      bool             `json:"isError"`
-	Content      []map[string]any `json:"content"`
+	RootCallID                string            `json:"rootCallId,omitempty"`
+	ParentCallID              string            `json:"parentCallId,omitempty"`
+	SubCallID                 string            `json:"subCallId"`
+	Name                      string            `json:"name"`
+	Arguments                 any               `json:"arguments"`
+	IsError                   bool              `json:"isError"`
+	Content                   []map[string]any  `json:"content"`
+	Meta                      any               `json:"meta,omitempty"`
+	AdditionalContexts        []string          `json:"additionalContexts,omitempty"`
+	AdditionalContextMessages []userMessageData `json:"additionalContextMessages,omitempty"`
+	ConcludesTurn             bool              `json:"concludesTurn,omitempty"`
 }
 
 // NewCodeDispatchStart records the beginning of a nested Code Mode tool call.
@@ -1838,10 +3110,49 @@ func NewCodeDispatchStart(rootCallID, parentCallID, subCallID, name string, argu
 
 // NewCodeDispatch records the settled result of a nested Code Mode tool call.
 func NewCodeDispatch(rootCallID, parentCallID, subCallID, name string, arguments any, isError bool, content string) any {
+	return NewCodeDispatchWithContent(rootCallID, parentCallID, subCallID, name, arguments, isError, []map[string]any{{"type": "text", "text": content}})
+}
+
+// NewCodeDispatchWithContent records the exact ordered content blocks returned
+// by a nested tool. The text constructor above remains the compatibility form.
+func NewCodeDispatchWithContent(rootCallID, parentCallID, subCallID, name string, arguments any, isError bool, content []map[string]any) any {
+	return NewCodeDispatchWithContentMeta(rootCallID, parentCallID, subCallID, name, arguments, isError, content, nil, nil)
+}
+
+// NewCodeDispatchWithContentMeta retains provider metadata and additional
+// context handles when a nested tool supplies them.
+func NewCodeDispatchWithContentMeta(rootCallID, parentCallID, subCallID, name string, arguments any, isError bool, content []map[string]any, meta any, additionalContexts []string) any {
+	return NewCodeDispatchWithContentMetaAndMessages(rootCallID, parentCallID, subCallID, name, arguments, isError, content, meta, additionalContexts, nil)
+}
+
+// NewCodeDispatchWithContentMetaAndMessages is the rich additional-context
+// form. The legacy string handles remain in the adjacent field so old replay
+// readers can continue to decode historical events.
+func NewCodeDispatchWithContentMetaAndMessages(rootCallID, parentCallID, subCallID, name string, arguments any, isError bool, content []map[string]any, meta any, additionalContexts []string, messages []llm.Message) any {
+	return NewCodeDispatchWithContentMetaAndConclusion(rootCallID, parentCallID, subCallID, name, arguments, isError, content, meta, additionalContexts, messages, false)
+}
+
+// NewCodeDispatchWithContentMetaAndConclusion includes the successful nested
+// terminal marker for the outer Code Mode result.
+func NewCodeDispatchWithContentMetaAndConclusion(rootCallID, parentCallID, subCallID, name string, arguments any, isError bool, content []map[string]any, meta any, additionalContexts []string, messages []llm.Message, concludesTurn bool) any {
+	if len(content) == 0 {
+		content = []map[string]any{{"type": "text", "text": ""}}
+	}
+	rich := make([]userMessageData, 0, len(messages))
+	for _, message := range messages {
+		kind, plugin := message.SourceKind, message.SourcePlugin
+		if kind == "" {
+			kind = "plugin"
+		}
+		rich = append(rich, userMessageData{
+			Role: "user", Text: message.Text(), Content: toWireContentBlocks(message.Content),
+			Source: &messageSource{Kind: kind, Plugin: plugin, TeamID: message.SourceTeamID, MessageID: message.SourceMessageID, SenderID: message.SourceSenderID, SenderName: message.SourceSenderName},
+		})
+	}
 	return codeDispatchData{
 		RootCallID: rootCallID, ParentCallID: parentCallID, SubCallID: subCallID,
 		Name: name, Arguments: arguments, IsError: isError,
-		Content: []map[string]any{{"type": "text", "text": content}},
+		Content: content, Meta: meta, AdditionalContexts: append([]string(nil), additionalContexts...), AdditionalContextMessages: rich, ConcludesTurn: concludesTurn && !isError,
 	}
 }
 

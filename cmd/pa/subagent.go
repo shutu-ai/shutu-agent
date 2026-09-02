@@ -12,16 +12,22 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 
+	"github.com/jabing/shutu-agent/internal/agent"
 	"github.com/jabing/shutu-agent/internal/config"
+	"github.com/jabing/shutu-agent/internal/llm"
+	"github.com/jabing/shutu-agent/internal/prompt"
+	"github.com/jabing/shutu-agent/internal/session"
 	"github.com/jabing/shutu-agent/internal/subagent"
 	"github.com/jabing/shutu-agent/internal/tools"
 )
 
-// registerSubagent creates the SpawnProvider + Runtime and registers the four
-// subagent_* tools when subagent.enabled, and wires the D3 event sink. When
+// registerSubagent creates the SpawnProvider + Runtime and registers the
+// model-facing subagent tools when subagent.enabled, and wires the D3 event sink. When
 // subagent is disabled it creates nothing and registers nothing (D10, mirrors
 // registerJobs).
 func (a *app) registerSubagent() error {
@@ -34,17 +40,79 @@ func (a *app) registerSubagent() error {
 		// appended to by the provider (each child owns an independent log) —
 		// subagent/* events reach the parent log through the onEvent sink
 		// below (D3, serial tool path).
-		Log:    a.log,
-		LLM:    a.currentLLM(),
-		Tools:  a.reg,
+		Log: a.log,
+		ParentLogFor: func(ctx context.Context, parentSession string) *session.Log {
+			return a.subagentParentLog(parentSession)
+		},
+		BindSessionLog: func(id string, log *session.Log) {
+			a.runtimeMu.Lock()
+			if a.runtimeLogs == nil {
+				a.runtimeLogs = make(map[string]*session.Log)
+			}
+			a.runtimeLogs[id] = log
+			a.runtimeMu.Unlock()
+		},
+		LLM: a.currentLLM(),
+		LLMFor: func(ctx context.Context, parentSession string) llm.LLM {
+			provider, _, err := a.sessionProviderModelStrict(parentSession)
+			if err != nil {
+				return unavailableLLM{err: err}
+			}
+			return a.llmFor(provider)
+		},
+		Tools: a.reg,
+		ToolsFor: func(_ context.Context, parentSession string) *tools.Registry {
+			registry := a.reg.Clone()
+			log := a.subagentParentLog(parentSession)
+			if _, _, err := a.applySessionRuntimeOnStrict(parentSession, log, registry); err != nil {
+				// A child must not inherit the process-global tool surface when its
+				// parent's durable runtime cannot be reconstructed. Return a real
+				// reject-all registry so the provider fails closed at execution.
+				rejected := tools.New()
+				policy := rejected.Policy()
+				policy.Enabled = nil
+				rejected.SetPolicy(policy)
+				return rejected
+			}
+			return registry
+		},
 		Prompt: a.prompt,
-		Model:  a.cfg.Model,
-		Store:  a.store,
+		PromptFor: func(_ context.Context, parentSession string) *prompt.Builder {
+			registry := a.reg.Clone()
+			log := a.subagentParentLog(parentSession)
+			runtime, _, err := a.applySessionRuntimeOnStrict(parentSession, log, registry)
+			if err != nil {
+				return prompt.New("Session runtime configuration is unavailable; do not execute tools.")
+			}
+			return runtime.prompt
+		},
+		Model:     a.cfg.Model,
+		MaxTokens: a.cfg.MaxTokens,
+		MaxTokensFor: func(_ context.Context, parentSession string) int {
+			a.runtimeMaxTokensMu.RLock()
+			deferred := a.runtimeMaxTokens[parentSession]
+			a.runtimeMaxTokensMu.RUnlock()
+			return deferred
+		},
+		ModelFor: func(_ context.Context, parentSession string) string {
+			_, model, err := a.sessionProviderModelStrict(parentSession)
+			if err != nil {
+				return "__session_config_unavailable__"
+			}
+			return model
+		},
+		Store: a.store,
 		Report: func(childID, parentID, output string) (string, error) {
 			if reportTools == nil {
 				return "", fmt.Errorf("report: subagent tools are not ready")
 			}
 			return reportTools.ReportFromChild(childID, output)
+		},
+		ReportContext: func(ctx context.Context, childID, parentID, output string) (string, error) {
+			if reportTools == nil {
+				return "", fmt.Errorf("report: subagent tools are not ready")
+			}
+			return reportTools.ReportFromChildContext(ctx, childID, output)
 		},
 	}
 	prov := subagent.NewSpawnProvider(deps)
@@ -85,12 +153,52 @@ func (a *app) registerSubagent() error {
 			fmt.Fprintln(os.Stderr, "pa: "+typ+" event:", err)
 		}
 	}
-	st := subagent.NewSubagentToolsWithContinuable(rt, a.cfg.Subagent.MaxDepth, func() string { return a.currentID }, onEvent, true)
+	st := subagent.NewSubagentToolsWithContinuableContext(rt, a.cfg.Subagent.MaxDepth, func(ctx context.Context) string {
+		return a.runtimeSessionID(ctx)
+	}, onEvent, true)
+	st.SetSessionEventSink(func(sessionID, typ string, data any) error {
+		log, err := a.sessionLogForAgent(context.Background(), sessionID)
+		if err != nil {
+			return err
+		}
+		_, err = log.Append(typ, data)
+		return err
+	})
+	st.SetCompletionWake(func(ctx context.Context, sessionID, childID string, result subagent.Result) error {
+		if a.agentRegistry == nil || sessionID == "" {
+			return nil
+		}
+		parent, err := a.agentRegistry.Lookup(agent.ID(sessionID))
+		if err != nil {
+			// A cold parent is still recoverable from its durable
+			// subagent/end event; only a live Agent receives an inbox wake.
+			return nil
+		}
+		prompt := fmt.Sprintf("[SUBAGENT COMPLETION]\nagent_id: %s\nstop_reason: %s\noutput:\n%s", childID, result.StopReason, runeHead(result.Output, 200))
+		err = parent.Followup(prompt, map[string]string{
+			"source":     "subagent",
+			"child_id":   childID,
+			"dedupe_key": "subagent:end:" + childID,
+		})
+		if err != nil {
+			// subagent/end has already been committed by the settlement path.
+			// Retry the missing inbox receipt from that durable fact so a
+			// transient journal failure is recoverable without a restart.
+			if log, logErr := a.sessionLogForAgent(ctx, sessionID); logErr == nil {
+				if recoveryErr := a.recoverSubagentCompletionWakes(log, parent); recoveryErr != nil {
+					return errors.Join(err, recoveryErr)
+				}
+				return nil
+			}
+		}
+		return err
+	})
 	st.SetJobs(a.jobs)
 	reportTools = st
 	a.subagentTools = st
 	for _, t := range []tools.Tool{
 		st.Spawn(),
+		st.Fork(),
 		st.SpawnTeammate(),
 		st.DshSend(),
 		st.FollowupTask(),
@@ -103,4 +211,16 @@ func (a *app) registerSubagent() error {
 		}
 	}
 	return nil
+}
+
+func (a *app) subagentParentLog(sessionID string) *session.Log {
+	if sessionID == "" || (a.agentRegistry == nil && sessionID == a.currentID) {
+		return a.log
+	}
+	a.runtimeMu.Lock()
+	defer a.runtimeMu.Unlock()
+	if a.runtimeLogs == nil {
+		return nil
+	}
+	return a.runtimeLogs[sessionID]
 }

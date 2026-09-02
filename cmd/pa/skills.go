@@ -75,8 +75,14 @@ func (a *app) registerSkills() error {
 // deduplicated against the visible session surface.
 func (a *app) skillCatalogInjector() loop.PreStepInjector {
 	return loop.PreStepInjector{
+		Name: "skill", Inject: a.skillCatalogPreStep, Deduplicate: true,
+	}
+}
+
+func (a *app) skillCatalogInjectorFor(log *session.Log) loop.PreStepInjector {
+	return loop.PreStepInjector{
 		Name:        "skill",
-		Inject:      a.skillCatalogPreStep,
+		Inject:      func(ctx context.Context, text string) []llm.Message { return a.skillCatalogPreStepFor(ctx, text, log) },
 		Deduplicate: true,
 	}
 }
@@ -87,8 +93,16 @@ func (a *app) skillCatalogInjector() loop.PreStepInjector {
 // text remains unchanged in session history.
 func (a *app) skillInvocationInjector() loop.PreStepInjector {
 	return loop.PreStepInjector{
-		Name:        "skill-invocation",
-		Inject:      a.skillInvocationPreStep,
+		Name: "skill-invocation", Inject: a.skillInvocationPreStep, OncePerTurn: true,
+	}
+}
+
+func (a *app) skillInvocationInjectorFor(log *session.Log) loop.PreStepInjector {
+	return loop.PreStepInjector{
+		Name: "skill-invocation",
+		Inject: func(ctx context.Context, text string) []llm.Message {
+			return a.skillInvocationPreStepFor(ctx, text, log)
+		},
 		OncePerTurn: true,
 	}
 }
@@ -98,6 +112,10 @@ func (a *app) skillInvocationInjector() loop.PreStepInjector {
 // unreadable skill leaves the literal user text untouched. Built-in Web
 // commands win over a same-named skill, matching dsh command adjudication.
 func (a *app) skillInvocationPreStep(ctx context.Context, userText string) []llm.Message {
+	return a.skillInvocationPreStepFor(ctx, userText, a.log)
+}
+
+func (a *app) skillInvocationPreStepFor(ctx context.Context, userText string, log *session.Log) []llm.Message {
 	if a.skills == nil {
 		return nil
 	}
@@ -125,7 +143,10 @@ func (a *app) skillInvocationPreStep(ctx context.Context, userText string) []llm
 			continue
 		}
 		body := skill.TruncateSkillBody(def.Content, a.cfg.Skill.BodyMaxChars)
-		if _, err := a.log.Append(session.EventSkillLoad, session.NewSkillLoad(def.Name, def.Source, body)); err != nil {
+		if log == nil {
+			continue
+		}
+		if _, err := log.Append(session.EventSkillLoad, session.NewSkillLoad(def.Name, def.Source, body)); err != nil {
 			fmt.Fprintln(os.Stderr, "pa: skill/load event:", err)
 		}
 		messages = append(messages, llm.Message{
@@ -166,6 +187,10 @@ func (a *app) isUserSkillInvocation(ctx context.Context, text string) bool {
 // failure contributes no context (fail-open); the loop's per-injector budget
 // is a second, larger bound.
 func (a *app) skillCatalogPreStep(ctx context.Context, _ string) []llm.Message {
+	return a.skillCatalogPreStepFor(ctx, "", a.log)
+}
+
+func (a *app) skillCatalogPreStepFor(ctx context.Context, _ string, log *session.Log) []llm.Message {
 	if a.skills == nil {
 		return nil
 	}
@@ -191,8 +216,8 @@ func (a *app) skillCatalogPreStep(ctx context.Context, _ string) []llm.Message {
 	// Catalog publication is session-scoped. A process-level digest would make
 	// a new session with the same skills silently lose its skill/catalog row,
 	// even though dsh publishes the initial catalog for every session.
-	if skillCatalogEventVersion(a.log) != version {
-		if _, err := a.log.Append(session.EventSkillCatalog, session.NewSkillCatalog(len(modelCands), version)); err != nil {
+	if log != nil && skillCatalogEventVersion(log) != version {
+		if _, err := log.Append(session.EventSkillCatalog, session.NewSkillCatalog(len(modelCands), version)); err != nil {
 			fmt.Fprintln(os.Stderr, "pa: skill/catalog event:", err)
 		}
 	}

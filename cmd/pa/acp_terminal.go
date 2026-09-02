@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	agenttools "github.com/jabing/shutu-agent/internal/tools"
 	"strings"
@@ -55,7 +56,16 @@ func (t *acpTerminal) Start(command string) (string, error) {
 		return "", err
 	}
 	t.active = sess
-	_, _ = t.log.Append(session.EventTerminalStart, session.NewTerminalStart(sess.ID(), t.owner))
+	if t.log == nil {
+		_ = sess.Close()
+		t.active = nil
+		return "", errors.New("terminal session log is unavailable")
+	}
+	if _, err := t.log.Append(session.EventTerminalStart, session.NewTerminalStart(sess.ID(), t.owner)); err != nil {
+		_ = sess.Close()
+		t.active = nil
+		return "", fmt.Errorf("persist terminal start: %w", err)
+	}
 	if strings.TrimSpace(command) == "" {
 		return fmt.Sprintf("started terminal session %s", sess.ID()), nil
 	}
@@ -69,12 +79,17 @@ func (t *acpTerminal) Start(command string) (string, error) {
 }
 
 func (t *acpTerminal) Write(text string, submit bool) (string, error) {
+	return t.WriteContext(context.Background(), text, submit)
+}
+
+// WriteContext propagates registry cancellation to the persistent terminal.
+func (t *acpTerminal) WriteContext(ctx context.Context, text string, submit bool) (string, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.active == nil {
 		return "", fmt.Errorf("%w (call terminal_start first)", terminal.ErrNoActive)
 	}
-	res, err := t.active.Write(text, submit)
+	res, err := t.active.WriteContext(ctx, text, submit)
 	if err != nil {
 		return "", err
 	}
@@ -112,7 +127,15 @@ func (t *acpTerminal) Stop(reason string) error {
 	id := t.active.ID()
 	err := t.active.Close()
 	t.active = nil
-	_, _ = t.log.Append(session.EventTerminalStop, session.NewTerminalStop(id, reason))
+	if t.log == nil {
+		if err != nil {
+			return err
+		}
+		return errors.New("terminal session log is unavailable")
+	}
+	if _, appendErr := t.log.Append(session.EventTerminalStop, session.NewTerminalStop(id, reason)); appendErr != nil {
+		return errors.Join(err, fmt.Errorf("persist terminal stop: %w", appendErr))
+	}
 	return err
 }
 
@@ -128,6 +151,10 @@ type acpTerminalTool struct {
 }
 
 func (t acpTerminalTool) Name() string { return t.name }
+
+// CancellationAware only applies to terminal_write. Start/read/signal/stop
+// either do not block on foreground command progress or own terminal receipts.
+func (t acpTerminalTool) CancellationAware() bool { return t.name == acpTerminalWrite }
 
 func (t acpTerminalTool) Description() string {
 	switch t.name {
@@ -171,7 +198,7 @@ func (t acpTerminalTool) Schema() map[string]any {
 	}
 }
 
-func (t acpTerminalTool) Execute(_ context.Context, args any) (string, error) {
+func (t acpTerminalTool) Execute(ctx context.Context, args any) (string, error) {
 	switch t.name {
 	case acpTerminalStart:
 		var p struct {
@@ -193,7 +220,7 @@ func (t acpTerminalTool) Execute(_ context.Context, args any) (string, error) {
 		if p.Submit != nil {
 			submit = *p.Submit
 		}
-		return t.service.Write(p.Text, submit)
+		return t.service.WriteContext(ctx, p.Text, submit)
 	case acpTerminalRead:
 		var p struct {
 			Offset int `json:"offset"`

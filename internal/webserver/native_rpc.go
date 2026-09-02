@@ -32,8 +32,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jabing/shutu-agent/internal/attachment"
 	"github.com/jabing/shutu-agent/internal/interact"
 	"github.com/jabing/shutu-agent/internal/llm"
+	"github.com/jabing/shutu-agent/internal/pathsecure"
+	"github.com/jabing/shutu-agent/internal/profile"
+	"github.com/jabing/shutu-agent/internal/projection"
 	"github.com/jabing/shutu-agent/internal/session"
 	"github.com/jabing/shutu-agent/internal/store"
 )
@@ -62,9 +66,11 @@ var nativeSettingsSchema = map[string]any{
 }
 
 type nativeSettingsDocument struct {
-	Value    map[string]any
-	Revision int
+	Value    map[string]any `json:"value"`
+	Revision int            `json:"revision"`
 }
+
+func nativeSettingsKey(namespace string) string { return "native.settings." + namespace }
 
 func nativeSettingsSchemaFor(namespace string) map[string]any {
 	if namespace == nativeSettingsAgentPresets {
@@ -102,10 +108,11 @@ func nativeSettingsSchemaFor(namespace string) map[string]any {
 			"12": map[string]any{"uid": 12, "type": "const", "meta": map[string]any{}, "value": "anthropic-messages"},
 			"13": map[string]any{"uid": 13, "type": "const", "meta": map[string]any{}, "value": "google-generative-ai"},
 			"14": map[string]any{"uid": 14, "type": "object", "meta": map[string]any{"default": map[string]any{}}, "dict": map[string]any{
-				"id": 5, "name": 7, "contextWindow": 15, "maxTokens": 16,
+				"id": 5, "name": 7, "contextWindow": 15, "maxTokens": 16, "defaultMaxTokens": 17,
 			}},
 			"15": map[string]any{"uid": 15, "type": "number", "meta": map[string]any{}},
 			"16": map[string]any{"uid": 16, "type": "number", "meta": map[string]any{}},
+			"17": map[string]any{"uid": 17, "type": "number", "meta": map[string]any{}},
 		},
 	}
 }
@@ -456,9 +463,9 @@ func (s *Server) registerNativeRoutes(mux *http.ServeMux) {
 		"workspace.list", "workspace.create", "workspace.rename", "workspace.delete",
 		"workspace.insertBefore", "workspace.insertSessionBefore", "workspace.archiveSession",
 		"agentPreset.list", "agentPreset.select", "agentPreset.read", "agentPreset.copy", "agentPreset.openDocument", "agentPreset.remove", "settings.describe",
-		"settings.openDocument", "settings.mutate", "settings.update", "settings.replace", "credentials.describe", "credentials.set", "credentials.unset", "dynamicCordisRunner/syncInspectManifest",
+		"settings.openDocument", "settings.mutate", "settings.update", "settings.replace", "credentials.describe", "credentials.set", "credentials.unset", "runtime.capabilities", "runtime.capability", "dynamicCordisRunner/syncInspectManifest",
 		"host.openPath",
-		"dynamicCordisRunner/inventory", "llm.providers", "llm.models", "llm.discoverModels", "skill.list",
+		"dynamicCordisRunner/inventory", "runtime.profiles", "runtime.profile", "runtime.crash-contracts", "runtime.crash-contract", "llm.providers", "llm.models", "llm.discoverModels", "skill.list",
 		"subagent.list", "subagent.history", "subagent.prompt", "subagent.interrupt",
 		"goal.create", "goal.edit", "goal.pause", "goal.resume", "goal.complete", "goal.clear",
 		"goals/create", "goals/edit", "goals/pause", "goals/resume", "goals/complete", "goals/clear",
@@ -518,6 +525,12 @@ func (s *Server) handleNativeRespond(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		sessionID := s.nativeInteractionSession(interactionID)
+		if sessionID == "" && s.resolveInteractionSessionFn != nil {
+			resolvedSession, resolveErr := s.resolveInteractionSessionFn(r.Context(), interactionID)
+			if resolveErr == nil {
+				sessionID = strings.TrimSpace(resolvedSession)
+			}
+		}
 		if sessionID == "" {
 			_ = json.NewEncoder(w).Encode(nativeRPCReceipt{Accepted: false, Reason: "not-pending"})
 			return
@@ -615,6 +628,16 @@ func nativeRPCFailure(code, message string, details map[string]any) nativeRPCRes
 		details = map[string]any{}
 	}
 	return nativeRPCResult{OK: false, Error: &nativeRPCError{Code: code, Message: message, Details: details}}
+}
+
+func (s *Server) profileUnavailable(id string) nativeRPCResult {
+	descriptor, err := s.profileRegistry.Get(id)
+	if err != nil {
+		return nativeRPCFailure("profile-unknown", err.Error(), map[string]any{"profile": id})
+	}
+	return nativeRPCFailure("profile-unsupported", "runtime profile is not available", map[string]any{
+		"profile": descriptor,
+	})
 }
 
 func nativeDecode(raw json.RawMessage, value any) nativeRPCResult {
@@ -877,21 +900,21 @@ func (s *Server) nativeSettingsDescribe() nativeRPCResult {
 	})
 }
 
-func (s *Server) nativeSettingsMutate(raw json.RawMessage) nativeRPCResult {
+func (s *Server) nativeSettingsMutate(ctx context.Context, raw json.RawMessage) nativeRPCResult {
 	var req nativeSettingsViewRequest
 	if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
 		return failure
 	}
-	return s.nativeSettingsApply(req.Namespace, req.Ops, req.Expected)
+	return s.nativeSettingsApply(ctx, req.Namespace, req.Ops, req.Expected)
 }
 
-func (s *Server) nativeSettingsApply(namespace string, ops []nativeSettingsPathOp, expected *int) nativeRPCResult {
+func (s *Server) nativeSettingsApply(ctx context.Context, namespace string, ops []nativeSettingsPathOp, expected *int) nativeRPCResult {
 	namespace = strings.TrimSpace(namespace)
 	if namespace == "" {
 		return nativeRPCFailure("bad-request", "ns is required", nil)
 	}
 	if namespace == nativeSettingsAgentPresets {
-		return s.nativeAgentPresetSettingsApply(ops, expected)
+		return s.nativeAgentPresetSettingsApply(ctx, ops, expected)
 	}
 	if !nativeSettingsNamespace(namespace) {
 		return nativeRPCFailure("not-found", "native settings namespace is not registered", map[string]any{"ns": namespace})
@@ -918,6 +941,13 @@ func (s *Server) nativeSettingsApply(namespace string, ops []nativeSettingsPathO
 	}
 	if len(ops) > 0 {
 		document.Revision++
+		encoded, err := json.Marshal(document)
+		if err != nil {
+			return nativeRPCFailure("settings-rejected", "settings document is not serializable", map[string]any{"ns": namespace})
+		}
+		if err := s.store.SetSetting(ctx, nativeSettingsKey(namespace), string(encoded)); err != nil {
+			return nativeRPCFailure("settings-rejected", err.Error(), map[string]any{"ns": namespace})
+		}
 	}
 	s.nativeSettings[namespace] = document
 	return nativeRPCSuccess(s.nativeSettingsView(namespace, document))
@@ -939,7 +969,7 @@ func (s *Server) nativeSettingsView(namespace string, document nativeSettingsDoc
 // nativeAgentPresetSettingsApply is the DSH settings-provider bridge for the
 // agent-presets namespace. The browser writes only the deployment default;
 // the durable setting remains the single source used when the process starts.
-func (s *Server) nativeAgentPresetSettingsApply(ops []nativeSettingsPathOp, expected *int) nativeRPCResult {
+func (s *Server) nativeAgentPresetSettingsApply(ctx context.Context, ops []nativeSettingsPathOp, expected *int) nativeRPCResult {
 	s.nativeSettingsMu.Lock()
 	defer s.nativeSettingsMu.Unlock()
 	s.ensureNativeSettingsFromConfigLocked()
@@ -963,21 +993,44 @@ func (s *Server) nativeAgentPresetSettingsApply(ops []nativeSettingsPathOp, expe
 		return nativeRPCFailure("settings-rejected", "agent-presets.default must be a non-empty preset id", map[string]any{"ns": nativeSettingsAgentPresets})
 	}
 	defaultPreset = strings.TrimSpace(defaultPreset)
-	if !s.nativeAgentPresetAvailable(context.Background(), defaultPreset) {
+	if !s.nativeAgentPresetAvailable(ctx, defaultPreset) {
 		return nativeRPCFailure("agent-preset-invalid", "agent preset is not available", map[string]any{
 			"agentPreset": defaultPreset, "reason": "preset is not available",
 		})
 	}
-	if err := s.store.SetSetting(context.Background(), "agent_preset", defaultPreset); err != nil {
+	document.Value = next
+	document.Value["default"] = defaultPreset
+	var encoded []byte
+	if len(ops) > 0 {
+		document.Revision++
+		var err error
+		encoded, err = json.Marshal(document)
+		if err != nil {
+			return nativeRPCFailure("settings-rejected", "settings document is not serializable", map[string]any{"ns": nativeSettingsAgentPresets})
+		}
+	}
+	// agent_preset and the namespaced document are two rows behind a single
+	// logical mutation. Store the prior scalar so a failure of the second write
+	// cannot leave startup reading a different preset than settings.describe.
+	settings, err := s.store.GetSettings(ctx)
+	if err != nil {
 		return nativeRPCFailure("settings-rejected", err.Error(), map[string]any{"ns": nativeSettingsAgentPresets})
+	}
+	previousPreset := settings["agent_preset"]
+	if err := s.store.SetSetting(ctx, "agent_preset", defaultPreset); err != nil {
+		return nativeRPCFailure("settings-rejected", err.Error(), map[string]any{"ns": nativeSettingsAgentPresets})
+	}
+	if len(ops) > 0 {
+		if err := s.store.SetSetting(ctx, nativeSettingsKey(nativeSettingsAgentPresets), string(encoded)); err != nil {
+			data := map[string]any{"ns": nativeSettingsAgentPresets}
+			if rollbackErr := s.store.SetSetting(ctx, "agent_preset", previousPreset); rollbackErr != nil {
+				data["rollbackError"] = rollbackErr.Error()
+			}
+			return nativeRPCFailure("settings-rejected", err.Error(), data)
+		}
 	}
 	if setter, ok := s.nativeAgentPresetManager.(interface{ SetDefault(string) }); ok {
 		setter.SetDefault(defaultPreset)
-	}
-	document.Value = next
-	document.Value["default"] = defaultPreset
-	if len(ops) > 0 {
-		document.Revision++
 	}
 	s.nativeSettings[nativeSettingsAgentPresets] = document
 	return nativeRPCSuccess(s.nativeSettingsView(nativeSettingsAgentPresets, document))
@@ -1047,6 +1100,26 @@ func (s *Server) ensureNativeSettingsFromConfigLocked() {
 	if s.nativeSettings == nil {
 		s.nativeSettings = make(map[string]nativeSettingsDocument)
 	}
+	if s.nativeSettingsLoaded == nil {
+		s.nativeSettingsLoaded = make(map[string]bool)
+	}
+	// Native settings are durable user documents, not a process-local cache.
+	// Restore each known namespace before applying config-derived defaults. A
+	// malformed optional row is ignored so it cannot take down the host's other
+	// settings capabilities.
+	if len(s.nativeSettingsLoaded) == 0 {
+		if settings, err := s.store.GetSettings(context.Background()); err == nil {
+			for _, namespace := range []string{nativeSettingsOnboarding, nativeSettingsDeepSeek, nativeSettingsPiAI, nativeSettingsAgentPresets} {
+				s.nativeSettingsLoaded[namespace] = true
+				var document nativeSettingsDocument
+				raw := strings.TrimSpace(settings[nativeSettingsKey(namespace)])
+				if raw == "" || json.Unmarshal([]byte(raw), &document) != nil || document.Revision < 0 || document.Value == nil {
+					continue
+				}
+				s.nativeSettings[namespace] = nativeSettingsDocument{Value: cloneNativeSettingsMap(document.Value), Revision: document.Revision}
+			}
+		}
+	}
 	s.nativeSettings[nativeSettingsOnboarding] = s.nativeSettings[nativeSettingsOnboarding]
 	if s.cfgFn == nil {
 		return
@@ -1085,7 +1158,7 @@ func (s *Server) ensureNativeSettingsFromConfigLocked() {
 	if _, exists := s.nativeSettings[nativeSettingsAgentPresets]; !exists {
 		defaultPreset := "standard"
 		if s.cfgFn != nil {
-			if mode := nativeString(s.cfgFn()["mode"]); nativeAgentPresetKnown(mode) {
+			if mode := nativeString(s.cfgFn()["mode"]); nativeAgentPresetKnown(mode) && s.nativeAgentPresetAvailable(context.Background(), mode) {
 				defaultPreset = mode
 			}
 		}
@@ -1139,6 +1212,30 @@ func nativeProviderModels(provider map[string]any) []any {
 			if maxTokens := nativeNumber(model["max_tokens"]); maxTokens > 0 {
 				entry["maxTokens"] = maxTokens
 			}
+			if defaultMaxTokens := nativeNumber(model["default_max_tokens"]); defaultMaxTokens > 0 {
+				entry["defaultMaxTokens"] = defaultMaxTokens
+			}
+			if value := nativeBoolPtr(model["reasoning"]); value != nil {
+				entry["reasoning"] = *value
+			}
+			if value := nativeBoolPtr(model["tools"]); value != nil {
+				entry["tools"] = *value
+			}
+			if value := nativeBoolPtr(model["vision"]); value != nil {
+				entry["vision"] = *value
+			}
+			if input := nativeStrings(model["input"]); len(input) > 0 {
+				entry["input"] = input
+			}
+			if efforts, exists := model["reasoning_efforts"]; exists && efforts != nil {
+				entry["reasoningEfforts"] = efforts
+			}
+			if effort := nativeString(model["default_reasoning_effort"]); effort != "" {
+				entry["defaultEffort"] = effort
+			}
+			if value := nativeBoolPtr(model["audio"]); value != nil {
+				entry["audio"] = *value
+			}
 			result = append(result, entry)
 		}
 		return result
@@ -1189,6 +1286,13 @@ func nativeProviderReasoning(provider map[string]any, modelID string) map[string
 
 func nativeConfigProviderMaps(value any) []map[string]any {
 	return nativeConfigMaps(value)
+}
+
+func nativeBoolPtr(value any) *bool {
+	if typed, ok := value.(bool); ok {
+		return &typed
+	}
+	return nil
 }
 
 func nativeConfigMaps(value any) []map[string]any {
@@ -1394,9 +1498,22 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 			return failure
 		}
 		title := session.NormalizeTitle(req.Title, session.TitleMaxBytes)
+		if title == "" {
+			return nativeRPCFailure("title-invalid", "session title must contain visible characters", map[string]any{"sessionId": req.SessionID})
+		}
+		if s.nativeSessionRenameFn != nil {
+			seq, err := s.nativeSessionRenameFn(r.Context(), req.SessionID, title)
+			if err != nil {
+				return nativeStoreFailure(err)
+			}
+			return nativeRPCSuccess(map[string]any{"title": title, "seq": seq})
+		}
 		if err := s.store.SetSessionTitle(r.Context(), req.SessionID, title, session.TitleSourceUser); err != nil {
 			return nativeStoreFailure(err)
 		}
+		// Compatibility embedders without a live runtime cannot mint a log
+		// event. Production cmd/pa always wires nativeSessionRenameFn above;
+		// retain the old metadata-only path only for those embedders.
 		return nativeRPCSuccess(map[string]any{"title": title, "seq": 0})
 	case "session.prompt":
 		return s.nativeSessionPrompt(r, raw)
@@ -1507,7 +1624,7 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 	case "settings.openDocument":
 		return s.nativeSettingsOpenDocument(r, raw)
 	case "settings.mutate":
-		return s.nativeSettingsMutate(raw)
+		return s.nativeSettingsMutate(r.Context(), raw)
 	case "settings.update":
 		var req struct {
 			Namespace string         `json:"ns"`
@@ -1526,7 +1643,7 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 		for _, key := range keys {
 			ops = append(ops, nativeSettingsPathOp{Op: "set", Path: []string{key}, Value: req.Patch[key]})
 		}
-		return s.nativeSettingsApply(req.Namespace, ops, req.Expected)
+		return s.nativeSettingsApply(r.Context(), req.Namespace, ops, req.Expected)
 	case "settings.replace":
 		var req struct {
 			Namespace string         `json:"ns"`
@@ -1536,7 +1653,7 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 		if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
 			return failure
 		}
-		return s.nativeSettingsApply(req.Namespace, []nativeSettingsPathOp{{Op: "set", Value: req.Section}}, req.Expected)
+		return s.nativeSettingsApply(r.Context(), req.Namespace, []nativeSettingsPathOp{{Op: "set", Value: req.Section}}, req.Expected)
 	case "credentials.describe":
 		var req struct {
 			Refs []string `json:"refs"`
@@ -1677,9 +1794,65 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 	case "goals/create", "goals/edit", "goals/pause", "goals/resume", "goals/complete", "goals/clear":
 		return s.nativeGoalRemoteMutation(r, method, raw)
 	case "dynamicCordisRunner/syncInspectManifest":
-		return nativeRPCSuccess(nil)
+		return s.profileUnavailable(profile.IDCordisDynamicRunner)
 	case "dynamicCordisRunner/inventory":
-		return nativeRPCSuccess([]any{})
+		return s.profileUnavailable(profile.IDCordisDynamicRunner)
+	case "runtime.profiles":
+		return nativeRPCSuccess(map[string]any{
+			"default":  profile.IDStorageSQLite,
+			"profiles": s.profileRegistry.List(),
+		})
+	case "runtime.profile":
+		var request struct {
+			ID string `json:"id"`
+		}
+		if failure := nativeDecode(raw, &request); !failure.OK && failure.Error != nil {
+			return failure
+		}
+		descriptor, err := s.profileRegistry.Get(request.ID)
+		if err != nil {
+			return nativeRPCFailure("profile-unknown", err.Error(), map[string]any{"profile": request.ID})
+		}
+		if err := s.profileRegistry.Use(request.ID); err != nil {
+			return nativeRPCFailure("profile-unsupported", err.Error(), map[string]any{"profile": descriptor})
+		}
+		return nativeRPCSuccess(descriptor)
+	case "runtime.capabilities":
+		return nativeRPCSuccess(map[string]any{
+			"capabilities": profile.Classifications(),
+			"count":        len(profile.CapabilityIDs),
+		})
+	case "runtime.capability":
+		var request struct {
+			ID string `json:"id"`
+		}
+		if failure := nativeDecode(raw, &request); !failure.OK && failure.Error != nil {
+			return failure
+		}
+		capability, err := profile.GetCapability(request.ID)
+		if err != nil {
+			return nativeRPCFailure("capability-unknown", err.Error(), map[string]any{"capability": request.ID})
+		}
+		if capability.State != profile.StateAvailable {
+			return nativeRPCFailure("capability-unsupported", capability.Reason, map[string]any{"capability": capability})
+		}
+		return nativeRPCSuccess(capability)
+	case "runtime.crash-contracts":
+		return nativeRPCSuccess(map[string]any{
+			"contracts": s.crashContracts.List(),
+		})
+	case "runtime.crash-contract":
+		var request struct {
+			ID string `json:"id"`
+		}
+		if failure := nativeDecode(raw, &request); !failure.OK && failure.Error != nil {
+			return failure
+		}
+		contract, err := s.crashContracts.Get(request.ID)
+		if err != nil {
+			return nativeRPCFailure("crash-boundary-unknown", err.Error(), map[string]any{"boundary": request.ID})
+		}
+		return nativeRPCSuccess(contract)
 	default:
 		return nativeRPCFailure("not-supported", "native RPC method is not implemented", map[string]any{"method": method})
 	}
@@ -2126,6 +2299,13 @@ func (s *Server) nativeLLMModels() nativeRPCResult {
 			}
 			if reasoning := nativeProviderReasoning(provider, modelID); reasoning != nil {
 				entry["reasoning"] = reasoning
+			} else if value := nativeBoolPtr(model["reasoning"]); value != nil {
+				entry["reasoning"] = *value
+			}
+			for _, key := range []string{"contextWindow", "maxTokens", "defaultMaxTokens", "tools", "vision", "audio", "input", "reasoningEfforts", "defaultEffort"} {
+				if value, exists := model[key]; exists {
+					entry[key] = value
+				}
 			}
 			items = append(items, entry)
 		}
@@ -2145,6 +2325,13 @@ func (s *Server) nativeLLMModels() nativeRPCResult {
 // session.models. Provider candidates are discovery/catalog suggestions for
 // settings and must never become selectable session routes by themselves.
 func nativeConfiguredProviderModels(provider map[string]any) []any {
+	if models := nativeConfigMaps(provider["catalog_models"]); len(models) > 0 {
+		result := make([]any, 0, len(models))
+		for _, model := range models {
+			result = append(result, model)
+		}
+		return result
+	}
 	if models := nativeProviderModels(provider); len(models) > 0 {
 		if nativeConfigMaps(provider["models"]) != nil {
 			return models
@@ -2201,6 +2388,30 @@ func (s *Server) nativeLLMDiscoverModels(r *http.Request, raw json.RawMessage) n
 		}
 		if model.MaxTokens > 0 {
 			entry["maxTokens"] = model.MaxTokens
+		}
+		if model.DefaultMaxTokens > 0 {
+			entry["defaultMaxTokens"] = model.DefaultMaxTokens
+		}
+		if model.Reasoning != nil {
+			entry["reasoning"] = *model.Reasoning
+		}
+		if model.ReasoningEfforts != nil {
+			entry["reasoningEfforts"] = model.ReasoningEfforts
+		}
+		if model.DefaultReasoningEffort != "" {
+			entry["defaultEffort"] = model.DefaultReasoningEffort
+		}
+		if model.Tools != nil {
+			entry["tools"] = *model.Tools
+		}
+		if model.Vision != nil {
+			entry["vision"] = *model.Vision
+		}
+		if len(model.Input) > 0 {
+			entry["input"] = append([]string(nil), model.Input...)
+		}
+		if model.Audio != nil {
+			entry["audio"] = *model.Audio
 		}
 		entries = append(entries, entry)
 	}
@@ -2576,7 +2787,7 @@ func (s *Server) nativeAgentPresetList(r *http.Request) nativeRPCResult {
 	}
 	defaultPreset := "standard"
 	if s.cfgFn != nil {
-		if mode := nativeString(s.cfgFn()["mode"]); nativeAgentPresetKnown(mode) {
+		if mode := nativeString(s.cfgFn()["mode"]); nativeAgentPresetKnown(mode) && s.nativeAgentPresetAvailable(r.Context(), mode) {
 			defaultPreset = mode
 		}
 	}
@@ -2589,10 +2800,12 @@ func (s *Server) nativeAgentPresetList(r *http.Request) nativeRPCResult {
 			"id": "standard", "trust": "system", "isDefault": defaultPreset == "standard",
 			"name": "Standard", "description": "标准 Shutu 能力集合",
 		},
-		map[string]any{
+	}
+	if s.nativeCodeAvailable() {
+		presets = append(presets, map[string]any{
 			"id": "code", "trust": "system", "isDefault": defaultPreset == "code",
 			"name": "Code", "description": "标准能力加程序化 Code Mode",
-		},
+		})
 	}
 	return nativeRPCSuccess(map[string]any{
 		"presets": presets, "authorable": false, "hasDocument": false,
@@ -2600,6 +2813,9 @@ func (s *Server) nativeAgentPresetList(r *http.Request) nativeRPCResult {
 }
 
 func (s *Server) nativeAgentPresetAvailable(ctx context.Context, preset string) bool {
+	if preset == "code" && !s.nativeCodeAvailable() {
+		return false
+	}
 	if nativeAgentPresetKnown(preset) {
 		return true
 	}
@@ -2634,11 +2850,30 @@ func (s *Server) nativeAgentPresetDefault(ctx context.Context) string {
 		}
 	}
 	if s.cfgFn != nil {
-		if mode := nativeString(s.cfgFn()["mode"]); nativeAgentPresetKnown(mode) {
+		if mode := nativeString(s.cfgFn()["mode"]); nativeAgentPresetKnown(mode) && s.nativeAgentPresetAvailable(ctx, mode) {
 			return mode
 		}
 	}
 	return "standard"
+}
+
+// nativeCodeAvailable is derived from the composition root's live capability
+// view. A configured code preference is not enough: the external runtime and
+// run_code registration must have succeeded before native clients may select
+// or advertise the code preset. Legacy embedders without a config provider
+// retain the historical optimistic catalog.
+func (s *Server) nativeCodeAvailable() bool {
+	if s.cfgFn == nil {
+		return true
+	}
+	cfg := s.cfgFn()
+	if value, ok := cfg["code_available"]; ok {
+		return nativeBool(value)
+	}
+	if value, ok := cfg["code_enabled"]; ok {
+		return nativeBool(value)
+	}
+	return true
 }
 
 func nativeAgentPresetKnown(preset string) bool {
@@ -2854,8 +3089,15 @@ func (s *Server) nativeSessionModels(r *http.Request, raw json.RawMessage) nativ
 	if effort != "" {
 		current["reasoningEffort"] = effort
 	}
+	routable := provider != "" && model != ""
+	if routable && s.sessionModelValidateFn != nil {
+		if err := s.sessionModelValidateFn(r.Context(), req.SessionID, provider, model, effort); err != nil {
+			routable = false
+			current["routeError"] = err.Error()
+		}
+	}
 	value["current"] = current
-	value["routable"] = provider != "" && model != ""
+	value["routable"] = routable
 	return nativeRPCSuccess(value)
 }
 
@@ -2873,6 +3115,22 @@ func (s *Server) nativeSessionSelectModel(r *http.Request, raw json.RawMessage) 
 	}
 	if _, err := s.store.GetSessionMeta(r.Context(), req.SessionID); err != nil {
 		return nativeStoreFailure(err)
+	}
+	if s.sessionModelValidateFn != nil {
+		if err := s.sessionModelValidateFn(r.Context(), req.SessionID, req.Provider, req.Model, req.ReasoningEffort); err != nil {
+			code := "model-select-failed"
+			switch {
+			case errors.Is(err, llm.ErrProviderUnavailable):
+				code = "provider-unavailable"
+			case errors.Is(err, llm.ErrCapabilityUnavailable):
+				code = "model-unavailable"
+			case strings.Contains(err.Error(), "reasoning effort"):
+				code = "bad-request"
+			}
+			return nativeRPCFailure(code, err.Error(), map[string]any{
+				"provider": req.Provider, "model": req.Model,
+			})
+		}
 	}
 	configs, ok := s.store.(store.SessionConfigStore)
 	if !ok {
@@ -3039,13 +3297,13 @@ func (s *Server) nativeSessionList(r *http.Request) nativeRPCResult {
 		// advance it. This is critical for 100k+ event sessions while a turn is
 		// still appending to the same database.
 		if events, _, loadErr := s.store.LoadSessionPage(r.Context(), m.ID, 0, 0, nativeSessionListTailLimit); loadErr == nil {
-			cursor := newNativeProjectionCursor()
-			cursor.setContextWindow(s.contextWindowForSession(m.ID))
+			tailCursor := newNativeProjectionCursor()
+			tailCursor.setContextWindow(s.contextWindowForSession(m.ID))
 			for _, ev := range events {
-				cursor.project(m.ID, ev)
+				tailCursor.project(m.ID, ev)
 			}
-			metadata := cursor.list
-			item.Blank = metadata.blank
+			metadata := tailCursor.list
+			item.Blank = metadata.Blank
 			item.ParentSessionID, item.Origin, _ = nativeSessionLineage(events)
 			if configs, ok := s.store.(store.SessionConfigStore); ok {
 				if config, configErr := configs.GetSessionConfig(r.Context(), m.ID); configErr == nil {
@@ -3053,8 +3311,8 @@ func (s *Server) nativeSessionList(r *http.Request) nativeRPCResult {
 				}
 			}
 			item.UpdatedAt = m.UpdatedAt.UnixMilli()
-			if metadata.lastPromptAt != nil && *metadata.lastPromptAt > item.UpdatedAt {
-				item.UpdatedAt = *metadata.lastPromptAt
+			if metadata.LastPromptAt != nil && *metadata.LastPromptAt > item.UpdatedAt {
+				item.UpdatedAt = *metadata.LastPromptAt
 			}
 			permission := ""
 			if configs, ok := s.store.(store.SessionConfigStore); ok {
@@ -3066,11 +3324,51 @@ func (s *Server) nativeSessionList(r *http.Request) nativeRPCResult {
 			if len(events) > 0 {
 				lastSeq = int64(events[len(events)-1].Seq)
 			}
-			baseline := cursor.projectionBlock(m.Title, lastSeq, permission)
-			if limits := s.nativeImageLimitsProjection(); limits != nil {
-				baseline.Values["imageLimits"] = limits
+			// The bounded tail is sufficient for sidebar metadata, but it is not
+			// sufficient to build a full state projection. Reuse an exact durable
+			// checkpoint when available; on a miss, replay the complete raw log and
+			// only then write a checkpoint. Never persist a tail-only fold at the
+			// full session revision.
+			if cached, ok := s.nativeCachedProjection(r.Context(), m.ID, uint64(maxInt64(lastSeq, 0))); ok {
+				baseline := cached.Block
+				if baseline.Values == nil {
+					baseline.Values = make(map[string]any)
+				}
+				baseline.Values["title"] = m.Title
+				if limits := s.nativeImageLimitsProjection(); limits != nil {
+					baseline.Values["imageLimits"] = limits
+				}
+				if cachedMetadata, metadataOK := nativeSessionListMetadataFromValues(baseline.Values); metadataOK {
+					metadata = cachedMetadata
+					item.Blank = metadata.Blank
+					if metadata.LastPromptAt != nil && *metadata.LastPromptAt > item.UpdatedAt {
+						item.UpdatedAt = *metadata.LastPromptAt
+					}
+				}
+				item.Projections = &baseline
+			} else if fullEvents, fullErr := loadRawSession(r.Context(), s.store, m.ID); fullErr == nil {
+				fullCursor := newNativeProjectionCursor()
+				fullCursor.setContextWindow(s.contextWindowForSession(m.ID))
+				for _, ev := range fullEvents {
+					fullCursor.project(m.ID, ev)
+				}
+				metadata = fullCursor.list
+				item.Blank = metadata.Blank
+				if metadata.LastPromptAt != nil && *metadata.LastPromptAt > item.UpdatedAt {
+					item.UpdatedAt = *metadata.LastPromptAt
+				}
+				item.ParentSessionID, item.Origin, _ = nativeSessionLineage(fullEvents)
+				fullLastSeq := int64(-1)
+				if len(fullEvents) > 0 {
+					fullLastSeq = int64(fullEvents[len(fullEvents)-1].Seq)
+				}
+				baseline := fullCursor.projectionBlock(m.Title, fullLastSeq, permission)
+				if limits := s.nativeImageLimitsProjection(); limits != nil {
+					baseline.Values["imageLimits"] = limits
+				}
+				item.Projections = &baseline
+				s.saveNativeProjection(r.Context(), m.ID, fullLastSeq, baseline, fullCursor.surfaceSnapshot())
 			}
-			item.Projections = &baseline
 		}
 		if s.statusFn != nil {
 			item.Running = s.statusFn(r.Context(), m).State == "ongoing"
@@ -3106,9 +3404,13 @@ func (s *Server) nativeSessionHistory(r *http.Request, raw json.RawMessage) nati
 	if limit <= 0 || limit > maxEventPageLimit {
 		limit = defaultEventPageLimit
 	}
-	events, err := s.store.LoadSession(r.Context(), req.SessionID)
+	events, err := loadNativeProjectedSession(r.Context(), s.store, req.SessionID)
 	if err != nil {
 		return nativeStoreFailure(err)
+	}
+	canonical, err := projection.Build(events)
+	if err != nil {
+		return nativeStoreFailure(fmt.Errorf("native history projection: %w", err))
 	}
 	meta, err := s.store.GetSessionMeta(r.Context(), req.SessionID)
 	if err != nil {
@@ -3125,6 +3427,10 @@ func (s *Server) nativeSessionHistory(r *http.Request, raw json.RawMessage) nati
 	start, end = nativeHistoryTransportBounds(start, end)
 	for _, event := range projected[start:end] {
 		entries = append(entries, nativeHistoryEntry{Event: event})
+	}
+	title := meta.Title
+	if strings.TrimSpace(title) == "" {
+		title = canonical.Title
 	}
 	header := nativeSessionHeader{
 		Version:   0,
@@ -3151,13 +3457,46 @@ func (s *Server) nativeSessionHistory(r *http.Request, raw json.RawMessage) nati
 		if len(events) > 0 {
 			lastSeq = int64(events[len(events)-1].Seq)
 		}
-		baseline := projection.projectionBlock(meta.Title, lastSeq, permission)
+		baseline := projection.projectionBlock(title, lastSeq, permission)
 		if limits := s.nativeImageLimitsProjection(); limits != nil {
 			baseline.Values["imageLimits"] = limits
 		}
+		if cached, ok := s.nativeCachedProjection(r.Context(), req.SessionID, uint64(maxInt64(lastSeq, 0))); ok {
+			baseline = cached.Block
+			baseline.Values["title"] = title
+			if cached.Surface != nil {
+				value["surface"] = cached.Surface
+			}
+		}
 		value["projections"] = baseline
+		s.saveNativeProjection(r.Context(), req.SessionID, lastSeq, baseline, projection.surfaceSnapshot())
 	}
 	return nativeRPCSuccess(value)
+}
+
+func loadRawSession(ctx context.Context, st store.Store, sessionID string) ([]session.Event, error) {
+	if raw, ok := st.(store.SessionRawStore); ok {
+		return raw.LoadSessionRaw(ctx, sessionID)
+	}
+	return st.LoadSession(ctx, sessionID)
+}
+
+// loadNativeProjectedSession keeps the raw-store open-tail behavior needed by
+// live history, while still enforcing the durable event vocabulary before a
+// client-facing projection is derived.  Recovery/lifecycle validation remains
+// owned by Store.LoadSession; this boundary only prevents an unknown persisted
+// event from being relabeled as an ignorable wire extension.
+func loadNativeProjectedSession(ctx context.Context, st store.Store, sessionID string) ([]session.Event, error) {
+	events, err := loadRawSession(ctx, st, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	for _, event := range events {
+		if err := session.ValidateDurableEvent(event.Type, event.Data); err != nil {
+			return nil, fmt.Errorf("web: invalid durable event at seq %d: %w", event.Seq, err)
+		}
+	}
+	return events, nil
 }
 
 // nativeHistoryPageBounds mirrors DSH's message-boundary history contract.
@@ -3313,7 +3652,7 @@ func (s *Server) nativeSessionFork(r *http.Request, raw json.RawMessage) nativeR
 	if req.SessionID == "" {
 		return nativeRPCFailure("bad-request", "sessionId is required", nil)
 	}
-	events, err := s.store.LoadSession(r.Context(), req.SessionID)
+	events, err := loadRawSession(r.Context(), s.store, req.SessionID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return nativeRPCFailure("session-not-found", "session not found", map[string]any{"sessionId": req.SessionID})
@@ -3324,56 +3663,22 @@ func (s *Server) nativeSessionFork(r *http.Request, raw json.RawMessage) nativeR
 	if end < 0 {
 		return nativeRPCFailure("fork-unavailable", "session has no completed turn to fork", map[string]any{"sessionId": req.SessionID})
 	}
-	meta, err := s.store.GetSessionMeta(r.Context(), req.SessionID)
+	forkStore, ok := s.store.(store.SessionForkStore)
+	if !ok {
+		return nativeRPCFailure("not-supported", "atomic session fork is unavailable", map[string]any{"sessionId": req.SessionID})
+	}
+	forkID, err := store.GenerateReservedID(r.Context(), s.store, "session", newSessionID)
 	if err != nil {
-		return nativeStoreFailure(err)
-	}
-	forkID, err := newSessionID()
-	if err != nil {
 		return nativeRPCFailure("fork-failed", err.Error(), nil)
 	}
-	if err := s.store.CreateSession(r.Context(), forkID, time.Now().UTC()); err != nil {
+	// The store reads the parent header, sidebar projection, runtime config,
+	// and closed seed under one SQLite transaction. Publishing those pieces via
+	// separate Store calls would let a crash expose a runnable child whose
+	// transcript and metadata describe different states.
+	if err := forkStore.ForkSessionWithOptions(r.Context(), req.SessionID, forkID, events[end].Seq, store.SessionForkOptions{
+		InheritParentMetadata: true,
+	}); err != nil {
 		return nativeRPCFailure("fork-failed", err.Error(), nil)
-	}
-	cleanup := func() {
-		_ = s.store.DeleteSession(context.Background(), forkID)
-	}
-	cloned := make([]session.Event, end+1)
-	for index, event := range events[:end+1] {
-		cloned[index] = event
-		cloned[index].Seq = uint64(index + 1)
-	}
-	if err := s.store.AppendEvents(r.Context(), forkID, cloned); err != nil {
-		cleanup()
-		return nativeRPCFailure("fork-failed", err.Error(), nil)
-	}
-	if meta.Title != "" {
-		if err := s.store.SetSessionTitle(r.Context(), forkID, meta.Title, meta.TitleSource); err != nil {
-			cleanup()
-			return nativeRPCFailure("fork-failed", err.Error(), nil)
-		}
-	}
-	if meta.WorkspaceID != "" {
-		if err := s.store.SetSessionWorkspace(r.Context(), forkID, meta.WorkspaceID); err != nil {
-			cleanup()
-			return nativeRPCFailure("fork-failed", err.Error(), nil)
-		}
-	}
-	if meta.CWD != "" {
-		if headers, ok := s.store.(store.SessionHeaderStore); ok {
-			if err := headers.SetSessionCWD(r.Context(), forkID, meta.CWD); err != nil {
-				cleanup()
-				return nativeRPCFailure("fork-failed", err.Error(), nil)
-			}
-		}
-	}
-	if configs, ok := s.store.(store.SessionConfigStore); ok {
-		if config, configErr := configs.GetSessionConfig(r.Context(), req.SessionID); configErr == nil {
-			if err := configs.SetSessionConfig(r.Context(), forkID, config); err != nil {
-				cleanup()
-				return nativeRPCFailure("fork-failed", err.Error(), nil)
-			}
-		}
 	}
 	// A fork is a new live session as well. Attach it to every resident native
 	// mux before returning so the first follow-up prompt is not missed.
@@ -3384,7 +3689,7 @@ func (s *Server) nativeSessionFork(r *http.Request, raw json.RawMessage) nativeR
 func nativeForkBoundary(events []session.Event, atSeq *uint64) int {
 	lastCompleted := -1
 	for index, event := range events {
-		if event.Type == session.EventTurnEnd {
+		if event.Type == session.EventTurnEnd && !nativeInterruptedTurnEnd(event) {
 			lastCompleted = index
 			if atSeq != nil && event.Seq >= *atSeq {
 				return index
@@ -3392,6 +3697,17 @@ func nativeForkBoundary(events []session.Event, atSeq *uint64) int {
 		}
 	}
 	return lastCompleted
+}
+
+func nativeInterruptedTurnEnd(event session.Event) bool {
+	var data struct {
+		Status string `json:"status"`
+		Reason string `json:"reason"`
+	}
+	if json.Unmarshal(event.Data, &data) != nil {
+		return false
+	}
+	return data.Status == "interrupted" || data.Reason == "interrupted"
 }
 
 func (s *Server) nativeSessionUpdateQueue(r *http.Request, raw json.RawMessage) nativeRPCResult {
@@ -3453,8 +3769,18 @@ func (s *Server) nativeSessionPrompt(r *http.Request, raw json.RawMessage) nativ
 	if req.Mode != "queue" && req.Mode != "steer" {
 		return nativeRPCFailure("bad-request", "mode must be queue or steer", nil)
 	}
+	req.SessionID = strings.TrimSpace(req.SessionID)
+	if req.SessionID == "" {
+		return nativeRPCFailure("bad-request", "sessionId is required", nil)
+	}
+	if _, err := s.store.GetSessionMeta(r.Context(), req.SessionID); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nativeRPCFailure("session-not-found", "session not found", map[string]any{"sessionId": req.SessionID})
+		}
+		return nativeStoreFailure(err)
+	}
 	var text string
-	images := make([]llm.ImageRef, 0)
+	imageInputs := make([]attachment.ImageInput, 0)
 	for _, part := range req.Content {
 		switch part.Type {
 		case "text":
@@ -3475,17 +3801,30 @@ func (s *Server) nativeSessionPrompt(r *http.Request, raw json.RawMessage) nativ
 			if err != nil {
 				return nativeRPCFailure("bad-request", "image data must be Base64", map[string]any{"message": err.Error()})
 			}
-			ref, err := s.att.SaveImage(strings.TrimSpace(part.MediaType), data, maxWebImageBytes)
-			if err != nil {
-				return nativeRPCFailure("attachment-error", err.Error(), nil)
-			}
-			images = append(images, ref)
+			imageInputs = append(imageInputs, attachment.ImageInput{
+				MediaType: strings.TrimSpace(part.MediaType),
+				Data:      data,
+			})
 		default:
 			return nativeRPCFailure("bad-request", "unsupported prompt content type", nil)
 		}
 	}
-	if strings.TrimSpace(text) == "" && len(images) == 0 {
+	if strings.TrimSpace(text) == "" && len(imageInputs) == 0 {
 		return nativeRPCFailure("bad-request", "text or image content is required", nil)
+	}
+	if len(imageInputs) > 0 && s.nativeImageCapabilityFn != nil && !s.nativeImageCapabilityFn(r.Context(), req.SessionID) {
+		return nativeRPCFailure("not-supported", "image prompt capability is unavailable for this session", map[string]any{"sessionId": req.SessionID})
+	}
+	// Rich prompt admission is one batch boundary: validate every image before
+	// publishing the first object. This matches ACP/MCP and prevents a late
+	// malformed image from leaving earlier attachments behind.
+	images := make([]llm.ImageRef, 0, len(imageInputs))
+	if len(imageInputs) > 0 {
+		refs, err := s.att.SaveImages(imageInputs, maxWebImageBytes)
+		if err != nil {
+			return nativeRPCFailure("attachment-error", err.Error(), nil)
+		}
+		images = refs
 	}
 	// DSH uses queue mode for a prompt submitted while another turn is active.
 	// Let the composition root's queue owner accept it immediately; it will
@@ -3595,9 +3934,9 @@ func nativeWorkspaceCanonicalPath(rawPath string) (string, error) {
 	if path == "" {
 		return "", errors.New("workspace path is required")
 	}
-	abs, err := filepath.Abs(path)
+	abs, err := pathsecure.ResolveExisting(path)
 	if err != nil {
-		return "", fmt.Errorf("resolve workspace path: %w", err)
+		return "", fmt.Errorf("workspace path %q is unavailable: %w", path, err)
 	}
 	info, err := os.Stat(abs)
 	if err != nil {
@@ -3606,11 +3945,7 @@ func nativeWorkspaceCanonicalPath(rawPath string) (string, error) {
 	if !info.IsDir() {
 		return "", fmt.Errorf("workspace path %q is not a directory", abs)
 	}
-	canonical, err := filepath.EvalSymlinks(abs)
-	if err != nil {
-		return "", fmt.Errorf("canonicalize workspace path %q: %w", abs, err)
-	}
-	return filepath.Clean(canonical), nil
+	return filepath.Clean(abs), nil
 }
 
 func (s *Server) nativeWorkspaceCreate(r *http.Request, rawPath string) nativeRPCResult {
@@ -3836,6 +4171,10 @@ func (s *Server) handleNativeMuxWebSocket(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		return
 	}
+	if !s.trackNativeConnection(conn) {
+		return
+	}
+	defer s.untrackNativeConnection(conn)
 	ctx, cancel := contextWithConnection(r)
 	defer cancel()
 	defer conn.Close()
@@ -3876,11 +4215,21 @@ func (s *Server) handleNativeMuxWebSocket(w http.ResponseWriter, r *http.Request
 		if kind == "" {
 			kind = knownKind
 		}
-		if ev.Type == session.EventInteractResolve && kind == "question" {
+		if (ev.Type == session.EventInteractResolve || ev.Type == session.EventApprovalDecided) && kind == "question" {
+			outcome := "answered"
+			if ev.Type == session.EventApprovalDecided {
+				var fact struct {
+					Outcome string `json:"outcome"`
+				}
+				_ = json.Unmarshal(ev.Data, &fact)
+				if fact.Outcome == string(interact.StatusCanceled) {
+					outcome = "cancelled"
+				}
+			}
 			method = "question/resolved"
 			payload = map[string]any{
 				"type": "question/resolved", "sessionId": sessionID,
-				"questionRpcId": id, "outcome": "answered",
+				"questionRpcId": id, "outcome": outcome,
 			}
 		}
 		if ev.Type == session.EventInteractCancel && kind == "question" {
@@ -3900,7 +4249,7 @@ func (s *Server) handleNativeMuxWebSocket(w http.ResponseWriter, r *http.Request
 			return
 		}
 		_ = writeWithID(method, payload, id)
-		if ev.Type == session.EventInteractResolve || ev.Type == session.EventInteractCancel {
+		if ev.Type == session.EventInteractResolve || ev.Type == session.EventInteractCancel || ev.Type == session.EventApprovalDecided {
 			interactionKindsMu.Lock()
 			delete(interactionKinds, id)
 			interactionKindsMu.Unlock()
@@ -3956,6 +4305,19 @@ func (s *Server) handleNativeMuxWebSocket(w http.ResponseWriter, r *http.Request
 		for _, ev := range events {
 			projection.project(meta.ID, ev)
 		}
+		if lastSeq >= 0 {
+			permission := ""
+			if configs, ok := s.store.(store.SessionConfigStore); ok {
+				if config, configErr := configs.GetSessionConfig(ctx, meta.ID); configErr == nil {
+					permission = config.Permission
+				}
+			}
+			checkpoint := projection.projectionBlock(meta.Title, lastSeq, permission)
+			if limits := s.nativeImageLimitsProjection(); limits != nil {
+				checkpoint.Values["imageLimits"] = limits
+			}
+			s.saveNativeProjection(ctx, meta.ID, lastSeq, checkpoint, projection.surfaceSnapshot())
+		}
 		if err := write(nativeSubscribedFrame{Type: "session/subscribed", SessionID: meta.ID, LastSeq: lastSeq}); err != nil {
 			forgetSubscription()
 			return err
@@ -4009,7 +4371,25 @@ func (s *Server) handleNativeMuxWebSocket(w http.ResponseWriter, r *http.Request
 			projectionMu.Lock()
 			projected := projection.project(meta.ID, ev)
 			changes := projection.projectionChanges()
+			checkpoint := nativeProjectionBlock{}
+			checkpointSurface := map[string]any(nil)
+			if nativeProjectionCheckpointEvent(ev.Type) {
+				permission := ""
+				if configs, ok := s.store.(store.SessionConfigStore); ok {
+					if config, configErr := configs.GetSessionConfig(ctx, meta.ID); configErr == nil {
+						permission = config.Permission
+					}
+				}
+				checkpoint = projection.projectionBlock(meta.Title, int64(ev.Seq), permission)
+				if limits := s.nativeImageLimitsProjection(); limits != nil {
+					checkpoint.Values["imageLimits"] = limits
+				}
+				checkpointSurface = projection.surfaceSnapshot()
+			}
 			projectionMu.Unlock()
+			if nativeProjectionCheckpointEvent(ev.Type) {
+				s.saveNativeProjection(ctx, meta.ID, int64(ev.Seq), checkpoint, checkpointSurface)
+			}
 			_ = write(nativeSessionEventFrame{Type: "session/event", SessionID: meta.ID, Event: projected})
 			for key, value := range changes {
 				_ = write(nativeProjectionFrame{Type: "session/projection", SessionID: meta.ID, Key: key, Value: value, Seq: ev.Seq})
@@ -4071,6 +4451,10 @@ func (s *Server) handleNativeHostWebSocket(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		return
 	}
+	if !s.trackNativeConnection(conn) {
+		return
+	}
+	defer s.untrackNativeConnection(conn)
 	ctx, cancel := contextWithConnection(r)
 	defer cancel()
 	defer conn.Close()
@@ -4423,6 +4807,25 @@ func nativeInteractionFrame(sessionID string, ev session.Event) (string, any, st
 			return "", nil, "", "", false
 		}
 		return nativePendingInteractionFrame(sessionID, item)
+	case session.EventApprovalAsked:
+		var item struct {
+			ID        string              `json:"id"`
+			CallID    string              `json:"callId"`
+			ToolName  string              `json:"toolName"`
+			Prompt    string              `json:"prompt"`
+			Reason    string              `json:"reason"`
+			Questions []interact.Question `json:"questions"`
+		}
+		if err := json.Unmarshal(ev.Data, &item); err != nil || item.ID == "" || item.ToolName == "" {
+			return "", nil, "", "", false
+		}
+		if item.Prompt == "" {
+			item.Prompt = item.Reason
+		}
+		return nativePendingInteractionFrame(sessionID, interact.Request{
+			ID: item.ID, CallID: item.CallID, ToolName: item.ToolName,
+			Prompt: item.Prompt, Questions: item.Questions,
+		})
 	case session.EventInteractResolve:
 		var fact struct {
 			ID       string `json:"id"`
@@ -4438,6 +4841,18 @@ func nativeInteractionFrame(sessionID string, ev session.Event) (string, any, st
 		return "approval/resolved", map[string]any{
 			"type": "approval/resolved", "sessionId": sessionID,
 			"approvalId": fact.ID, "outcome": outcome,
+		}, fact.ID, "", true
+	case session.EventApprovalDecided:
+		var fact struct {
+			ID      string `json:"id"`
+			Outcome string `json:"outcome"`
+		}
+		if err := json.Unmarshal(ev.Data, &fact); err != nil || fact.ID == "" || fact.Outcome == "" {
+			return "", nil, "", "", false
+		}
+		return "approval/resolved", map[string]any{
+			"type": "approval/resolved", "sessionId": sessionID,
+			"approvalId": fact.ID, "outcome": fact.Outcome,
 		}, fact.ID, "", true
 	case session.EventInteractCancel:
 		var fact struct {

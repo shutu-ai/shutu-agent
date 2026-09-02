@@ -31,8 +31,8 @@ func TestOffloadRequestImagesUnderBudgetUnchanged(t *testing.T) {
 // addition makes the total exactly equal to the budget is kept (only a total
 // strictly over the budget offloads).
 func TestOffloadRequestImagesExactBudgetKept(t *testing.T) {
-	msgs := []Message{{Role: RoleUser, Content: []ContentBlock{imageBlock(10)}}}
-	got := OffloadRequestImages(msgs, 10)
+	msgs := []Message{{Role: RoleUser, Content: []ContentBlock{imageBlock(6)}}}
+	got := OffloadRequestImages(msgs, 8) // base64(6) = 8
 	if got[0].Content[0].Kind != BlockImage {
 		t.Fatal("an image exactly at the budget must be kept")
 	}
@@ -43,16 +43,16 @@ func TestOffloadRequestImagesExactBudgetKept(t *testing.T) {
 // the placeholder, while every earlier in-budget image stays.
 func TestOffloadRequestImagesOverBudgetReplacesOldest(t *testing.T) {
 	msgs := []Message{
-		{Role: RoleUser, Content: []ContentBlock{Text("a"), imageBlock(6)}}, // acc 6
-		{Role: RoleUser, Content: []ContentBlock{imageBlock(6)}},            // acc 12 > 10 → replaced
+		{Role: RoleUser, Content: []ContentBlock{Text("a"), imageBlock(3)}}, // base64 4
+		{Role: RoleUser, Content: []ContentBlock{imageBlock(6)}},            // base64 8; total 12 > 8
 	}
-	got := OffloadRequestImages(msgs, 10)
-	if got[0].Content[1].Kind != BlockImage {
-		t.Fatal("the oldest in-budget image must stay")
+	got := OffloadRequestImages(msgs, 8)
+	if got[0].Content[1].Kind != BlockText {
+		t.Fatal("the oldest image must be replaced first")
 	}
 	b := got[1].Content[0]
-	if b.Kind != BlockText || b.Text != OffloadedImageText {
-		t.Fatalf("over-budget image = %+v, want the OffloadedImageText placeholder", b)
+	if b.Kind != BlockImage {
+		t.Fatalf("newest image = %+v, want it retained", b)
 	}
 }
 
@@ -60,17 +60,17 @@ func TestOffloadRequestImagesOverBudgetReplacesOldest(t *testing.T) {
 // in one message with several images, each is judged in turn — the first fits,
 // the later ones are replaced (dispatch-m8-3b §2: 同一消息多图逐个判断).
 func TestOffloadRequestImagesMultipleInOneMessage(t *testing.T) {
-	msgs := []Message{{Role: RoleUser, Content: []ContentBlock{imageBlock(6), imageBlock(6), imageBlock(6)}}}
-	got := OffloadRequestImages(msgs, 10)
+	msgs := []Message{{Role: RoleUser, Content: []ContentBlock{imageBlock(3), imageBlock(3), imageBlock(3)}}}
+	got := OffloadRequestImages(msgs, 8)
 	c := got[0].Content
-	wantKinds := []ContentBlockKind{BlockImage, BlockText, BlockText}
+	wantKinds := []ContentBlockKind{BlockText, BlockImage, BlockImage}
 	for i, want := range wantKinds {
 		if c[i].Kind != want {
 			t.Errorf("block %d kind = %s, want %s", i, c[i].Kind, want)
 		}
 	}
-	if c[1].Text != OffloadedImageText || c[2].Text != OffloadedImageText {
-		t.Fatalf("placeholders = %+v, want OffloadedImageText", c[1:])
+	if c[0].Text != OffloadedImageText {
+		t.Fatalf("placeholder = %+v, want OffloadedImageText", c[0])
 	}
 }
 
@@ -79,18 +79,18 @@ func TestOffloadRequestImagesMultipleInOneMessage(t *testing.T) {
 // are not displaced and the over-budget image is replaced in place.
 func TestOffloadRequestImagesPlaceholderPosition(t *testing.T) {
 	msgs := []Message{{Role: RoleUser, Content: []ContentBlock{
-		Text("t0"), imageBlock(6), Text("t1"), imageBlock(6), Text("t2"),
+		Text("t0"), imageBlock(3), Text("t1"), imageBlock(3), Text("t2"),
 	}}}
-	got := OffloadRequestImages(msgs, 10) // the second image (index 3) is over budget
+	got := OffloadRequestImages(msgs, 6) // the oldest image (index 1) is removed
 	c := got[0].Content
 	if c[0].Text != "t0" || c[2].Text != "t1" || c[4].Text != "t2" {
 		t.Fatalf("text blocks displaced: %+v", c)
 	}
-	if c[1].Kind != BlockImage {
-		t.Fatal("first (in-budget) image must be kept")
+	if c[1].Kind != BlockText || c[1].Text != OffloadedImageText {
+		t.Fatal("oldest image must be replaced in place")
 	}
-	if c[3].Kind != BlockText || c[3].Text != OffloadedImageText {
-		t.Fatalf("over-budget image must be replaced in place: %+v", c[3])
+	if c[3].Kind != BlockImage {
+		t.Fatalf("newest image must be retained: %+v", c[3])
 	}
 }
 
@@ -113,14 +113,25 @@ func TestOffloadRequestImagesNoBudget(t *testing.T) {
 func TestOffloadRequestImagesNestedToolResult(t *testing.T) {
 	msgs := []Message{{Role: RoleUser, Content: []ContentBlock{
 		Text("a"),
-		{Kind: BlockToolResult, Blocks: []ContentBlock{imageBlock(6), imageBlock(6)}},
+		{Kind: BlockToolResult, Blocks: []ContentBlock{imageBlock(3), imageBlock(3)}},
 	}}}
-	got := OffloadRequestImages(msgs, 10)
+	got := OffloadRequestImages(msgs, 6)
 	nested := got[0].Content[1].Blocks
-	if nested[0].Kind != BlockImage {
-		t.Fatal("the first nested image (6 <= 10) must be kept")
+	if nested[0].Kind != BlockText || nested[0].Text != OffloadedImageText {
+		t.Fatal("the oldest nested image must be replaced")
 	}
-	if nested[1].Kind != BlockText || nested[1].Text != OffloadedImageText {
-		t.Fatalf("the second nested image must be replaced: %+v", nested[1])
+	if nested[1].Kind != BlockImage {
+		t.Fatalf("the newest nested image must be retained: %+v", nested[1])
+	}
+}
+
+func TestOffloadRequestImagesDoesNotMutateDurableMessages(t *testing.T) {
+	msgs := []Message{{Role: RoleUser, Content: []ContentBlock{imageBlock(3), imageBlock(3)}}}
+	got := OffloadRequestImages(msgs, 6)
+	if got[0].Content[0].Kind != BlockText || msgs[0].Content[0].Kind != BlockImage {
+		t.Fatalf("offload mutated input: got=%+v input=%+v", got, msgs)
+	}
+	if &got[0] == &msgs[0] || &got[0].Content[0] == &msgs[0].Content[0] {
+		t.Fatal("over-budget offload must detach changed message/content")
 	}
 }

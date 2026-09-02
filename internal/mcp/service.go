@@ -22,15 +22,19 @@
 // Requests are foreground and serial (design.md §10 D5): exactly one JSON-RPC
 // round trip is in flight at a time, and each round trip is bounded by a
 // per-request timeout (DefaultTimeout when the caller gives no earlier
-// deadline) enforced through a read deadline on the stdout pipe. The reader is
-// a synchronous newline scanner — there are no background goroutines, so Close
-// cannot leak one (the sole goroutine exec.Cmd may spawn for stderr capture is
-// drained by Wait inside Close).
+// deadline) enforced through a read deadline on the stdout pipe. The raw
+// stdio client has no lifecycle supervisor; NewReconnectingClient adds one
+// explicitly for long-lived bridges and Close drains it. The reader is
+// a synchronous newline scanner. The raw client's request reader is drained
+// by Close; the optional reconnect wrapper owns and joins its separate
+// supervisor goroutine.
 package mcp
 
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -85,6 +89,46 @@ type Client interface {
 	Close() error
 }
 
+// ConfiguredFactory is an optional extension for factories that preserve the
+// complete per-server configuration. The original New seam remains
+// source-compatible for factories that only support command and args.
+type ConfiguredFactory interface {
+	NewConfigured(ctx context.Context, server McpServer) (Client, error)
+}
+
+// ToolListChangedHandler is an optional live-discovery seam. MCP servers may
+// notify clients that their advertised tool set changed; consumers that
+// publish bridged tools can then perform a fresh tools/list and replace the
+// published generation. Clients without this optional interface retain the
+// snapshot-at-start behavior.
+type ToolListChangedHandler interface {
+	SetToolListChangedHandler(func())
+}
+
+// ConnectionLostHandler is an optional transport lifecycle seam. A client
+// invokes it after a live connection becomes unusable; implementations must
+// not invoke the callback while holding their request mutex. The reconnect
+// supervisor uses this signal to restore a connection without waiting for the
+// next model tool call.
+type ConnectionLostHandler interface {
+	SetConnectionLostHandler(func(error))
+}
+
+// ReconnectedHandler is implemented by the reconnecting wrapper. Consumers
+// use it to refresh dynamic tool schemas after a successful reconnect.
+type ReconnectedHandler interface {
+	SetReconnectedHandler(func())
+}
+
+// ReconnectExhaustedHandler is implemented by the reconnecting wrapper. The
+// callback fires once when the outage budget is exhausted or the generation
+// close barrier fails. Consumers that publish generation-scoped tools should
+// withdraw them at this point; keeping stale tools callable would diverge from
+// the reference supervisor's terminal-failure contract.
+type ReconnectExhaustedHandler interface {
+	SetReconnectExhaustedHandler(func())
+}
+
 // Factory builds Clients from a command line (design.md §10 D2). The default
 // factory (NewStdioFactory) returns stdioClient instances; a different MCP
 // transport implements Factory to swap the backend without touching consumers.
@@ -92,6 +136,67 @@ type Factory interface {
 	// New returns a Client for the given command and args, ready for Start.
 	// The returned client is idle until Start is called.
 	New(ctx context.Context, cmd string, args []string) (Client, error)
+}
+
+// HTTPFactory is the optional transport extension implemented by factories
+// that can build MCP Streamable HTTP clients. Keeping it separate from Factory
+// preserves the existing stdio test seam and lets embedders deliberately
+// reject transports they do not support.
+type HTTPFactory interface {
+	NewHTTP(ctx context.Context, endpoint string, headers map[string]string) (Client, error)
+}
+
+// ValidateServer enforces the reference MCP namespace and transport contract
+// before a client is created. Empty Transport is the legacy stdio spelling.
+func ValidateServer(server McpServer) error {
+	if len(server.Name) < 1 || len(server.Name) > 32 {
+		return fmt.Errorf("mcp: server name must contain 1-32 ASCII letters, digits, '_' or '-'")
+	}
+	for _, char := range server.Name {
+		if !((char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') || char == '_' || char == '-') {
+			return fmt.Errorf("mcp: server name %q contains an invalid character", server.Name)
+		}
+	}
+	switch strings.ToLower(strings.TrimSpace(server.Transport)) {
+	case "", "stdio":
+		if strings.TrimSpace(server.Cmd) == "" {
+			return fmt.Errorf("mcp: stdio server %q command is required", server.Name)
+		}
+	case "streamable-http", "http", "https":
+		if strings.TrimSpace(server.URL) == "" {
+			return fmt.Errorf("mcp: Streamable HTTP server %q URL is required", server.Name)
+		}
+	default:
+		return fmt.Errorf("mcp: unsupported transport %q", server.Transport)
+	}
+	return nil
+}
+
+// NewClientForServer selects the configured MCP transport. An empty transport
+// is the legacy stdio spelling. The helper is shared by the REPL and ACP so a
+// server cannot accidentally use HTTP in one surface and stdio in another.
+func NewClientForServer(ctx context.Context, f Factory, server McpServer) (Client, error) {
+	if f == nil {
+		return nil, errors.New("mcp: nil factory")
+	}
+	if err := ValidateServer(server); err != nil {
+		return nil, err
+	}
+	if configured, ok := f.(ConfiguredFactory); ok {
+		return configured.NewConfigured(ctx, server)
+	}
+	switch strings.ToLower(strings.TrimSpace(server.Transport)) {
+	case "", "stdio":
+		return f.New(ctx, server.Cmd, server.Args)
+	case "streamable-http", "http", "https":
+		hf, ok := f.(HTTPFactory)
+		if !ok {
+			return nil, fmt.Errorf("mcp: factory does not support Streamable HTTP")
+		}
+		return hf.NewHTTP(ctx, server.URL, server.Headers)
+	default:
+		return nil, fmt.Errorf("mcp: unsupported transport %q", server.Transport)
+	}
 }
 
 // NewStdioClient returns the default Client for a stdio MCP server: the given

@@ -2,12 +2,37 @@ package goal
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/jabing/shutu-agent/internal/plan"
 	"github.com/jabing/shutu-agent/internal/session"
 )
+
+func TestDriverStopsBeforeRunnerWhenStatusEventPersistenceFails(t *testing.T) {
+	e := plan.NewEngine(nil)
+	t.Cleanup(func() { _ = e.Close() })
+	g, err := e.CreateGoal(context.Background(), "ship", "Ship the feature")
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := session.New()
+	want := errors.New("durable store unavailable")
+	log.SetSink(func(session.Event) error { return want })
+	runs := 0
+	d := &Driver{Plans: e, Log: log, MaxRounds: 1, Runner: func(context.Context, string) error {
+		runs++
+		return nil
+	}}
+	_, err = d.Run(context.Background(), g.ID)
+	if err == nil || !errors.Is(err, want) {
+		t.Fatalf("Driver.Run error = %v, want durable status event error %v", err, want)
+	}
+	if runs != 0 {
+		t.Fatalf("runner calls = %d, want 0 after status event failure", runs)
+	}
+}
 
 func TestDriverContinuesSameSessionUntilGoalDone(t *testing.T) {
 	e := plan.NewEngine(nil)

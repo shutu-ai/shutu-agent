@@ -8,7 +8,9 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -18,6 +20,9 @@ import (
 	"time"
 
 	"github.com/jabing/shutu-agent/internal/jobs"
+	"github.com/jabing/shutu-agent/internal/pathsecure"
+	"github.com/jabing/shutu-agent/internal/runtimectx"
+	"github.com/jabing/shutu-agent/internal/session"
 	"github.com/jabing/shutu-agent/internal/terminal"
 	"github.com/jabing/shutu-agent/internal/tools"
 )
@@ -51,6 +56,10 @@ func (persistentShellTool) OutputSchema() map[string]any {
 	return map[string]any{"type": "string"}
 }
 
+// CancellationAware is explicit: context cancellation resets the persistent
+// terminal and closes its owned process tree after interrupting foreground work.
+func (persistentShellTool) CancellationAware() bool { return true }
+
 func (t persistentShellTool) Execute(ctx context.Context, args any) (string, error) {
 	var in struct {
 		Command string `json:"command"`
@@ -61,23 +70,30 @@ func (t persistentShellTool) Execute(ctx context.Context, args any) (string, err
 	if strings.TrimSpace(in.Command) == "" {
 		return "", fmt.Errorf("%s: command must be a non-empty string", t.name)
 	}
-	rec, err := t.app.minimalPersistentShell(t.name, t.shell)
+	rec, err := t.app.minimalPersistentShell(ctx, t.name, t.shell)
 	if err != nil {
 		return "", err
 	}
 	rec.mu.Lock()
-	result, writeErr := rec.sess.Write(persistentShellCommand(t.shell, in.Command), true)
+	result, writeErr := rec.sess.WriteContext(ctx, persistentShellCommand(t.shell, in.Command), true)
 	rec.mu.Unlock()
 	if writeErr != nil {
-		t.app.removeModelTerminal(rec)
+		stopErr := t.app.removeModelTerminal(ctx, rec)
+		if stopErr != nil {
+			return "", fmt.Errorf("%s: %w; terminal reset: %v", t.name, writeErr, stopErr)
+		}
 		return "", fmt.Errorf("%s: %w", t.name, writeErr)
 	}
 	if result.Status.Kind == "exited" {
-		t.app.removeModelTerminal(rec)
+		if err := t.app.removeModelTerminal(ctx, rec); err != nil {
+			return "", fmt.Errorf("%s: persist terminal stop: %w", t.name, err)
+		}
 		return persistentShellExitResult(result.Viewport, result.Status.ExitCode), nil
 	}
 	if result.Wait == terminal.WaitTimeout {
-		t.app.removeModelTerminal(rec)
+		if err := t.app.removeModelTerminal(ctx, rec); err != nil {
+			return "", fmt.Errorf("%s: persist terminal stop: %w", t.name, err)
+		}
 		return "Your command timed out. Below is partial output:\n" + result.Viewport +
 			"\nThe persistent " + t.name + " shell was reset; the next call starts from the workspace with a fresh current directory and environment.", nil
 	}
@@ -176,23 +192,29 @@ func (a *app) registerMinimalPersistentShell() error {
 	return a.reg.Register(persistentShellTool{app: a, name: name, shell: shell, description: description})
 }
 
-func (a *app) minimalPersistentShell(name, shell string) (*modelTerminalRecord, error) {
+func (a *app) minimalPersistentShell(ctx context.Context, name, shell string) (*modelTerminalRecord, error) {
+	owner := a.terminalOwner(ctx)
+	cwd := a.sessionCWDFor(owner)
 	a.modelTermMu.Lock()
 	defer a.modelTermMu.Unlock()
 	for _, rec := range a.modelTerms {
-		if rec.owner == a.currentID && rec.typ == minimalPersistentShellType && !rec.closing {
+		if rec.owner == owner && rec.typ == minimalPersistentShellType && !rec.closing {
 			return rec, nil
 		}
 	}
 	sess, err := terminal.NewSession(terminal.SessionOpts{
-		Shell: shell, Args: append([]string(nil), a.cfg.Terminal.Args...), Workdir: a.sessionCWD(),
+		Shell: shell, Args: append([]string(nil), a.cfg.Terminal.Args...), Workdir: cwd,
 		IdleMS: persistentShellIdleMS(a.cfg.Terminal.ReadIdleMS), TimeoutMS: a.cfg.Terminal.ReadTimeoutMS,
 		ScrollbackMaxBytes: a.cfg.Terminal.ScrollbackMaxBytes, ScrollbackLines: a.cfg.Terminal.ScrollbackLines,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("%s: start persistent shell: %w", name, err)
 	}
-	rec := &modelTerminalRecord{owner: a.currentID, typ: minimalPersistentShellType, cwd: a.sessionCWD(), sess: sess}
+	if err := a.appendModelTerminalEvent(ctx, session.EventTerminalStart, session.NewTerminalStart(sess.ID(), owner)); err != nil {
+		_ = sess.Close()
+		return nil, fmt.Errorf("%s: persist terminal start: %w", name, err)
+	}
+	rec := &modelTerminalRecord{owner: owner, typ: minimalPersistentShellType, cwd: cwd, sess: sess}
 	a.modelTerms[sess.ID()] = rec
 	return rec, nil
 }
@@ -208,29 +230,49 @@ func persistentShellIdleMS(configured int) int {
 	return configured
 }
 
-func (a *app) removeModelTerminal(rec *modelTerminalRecord) {
+func (a *app) removeModelTerminal(ctx context.Context, rec *modelTerminalRecord) error {
+	return a.stopModelTerminal(ctx, rec, "shell_reset")
+}
+
+func (a *app) stopModelTerminal(ctx context.Context, rec *modelTerminalRecord, reason string) error {
 	if rec == nil {
-		return
+		return nil
 	}
 	a.modelTermMu.Lock()
 	if current, ok := a.modelTerms[rec.sess.ID()]; ok && current == rec {
 		delete(a.modelTerms, rec.sess.ID())
 	}
+	if rec.stopRecorded {
+		a.modelTermMu.Unlock()
+		return nil
+	}
+	rec.stopRecorded = true
 	rec.closing = true
 	a.modelTermMu.Unlock()
 	rec.mu.Lock()
-	_ = rec.sess.Close()
+	closeErr := rec.sess.Close()
 	rec.mu.Unlock()
+	// The process has already been closed above. Keep the terminal lifecycle
+	// auditable even when a command timeout/exit resets the minimal shell.
+	appendErr := a.appendModelTerminalEvent(ctx, session.EventTerminalStop, session.NewTerminalStop(rec.sess.ID(), reason))
+	if closeErr != nil && appendErr != nil {
+		return fmt.Errorf("close: %v; persist stop: %w", closeErr, appendErr)
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	return appendErr
 }
 
 type modelTerminalRecord struct {
-	owner   string
-	name    string
-	typ     string
-	cwd     string
-	sess    *terminal.Session
-	mu      sync.Mutex
-	closing bool
+	owner        string
+	name         string
+	typ          string
+	cwd          string
+	sess         *terminal.Session
+	mu           sync.Mutex
+	closing      bool
+	stopRecorded bool
 }
 
 type modelTerminalTool struct {
@@ -239,6 +281,11 @@ type modelTerminalTool struct {
 }
 
 func (t modelTerminalTool) Name() string { return t.kind }
+
+// CancellationAware only covers terminal_send. Other persistent terminal
+// operations are non-blocking or own lifecycle receipts that must not be
+// abandoned because the HTTP/Agent call context ended.
+func (t modelTerminalTool) CancellationAware() bool { return t.kind == "terminal_send" }
 
 func (t modelTerminalTool) Description() string {
 	switch t.kind {
@@ -398,16 +445,34 @@ func (a *app) registerModelTerminalTools() error {
 }
 
 func (a *app) currentModelTerminal(id string) (*modelTerminalRecord, error) {
+	return a.currentModelTerminalFor(a.currentID, id)
+}
+
+func (a *app) currentModelTerminalFor(owner, id string) (*modelTerminalRecord, error) {
 	a.modelTermMu.Lock()
 	rec, ok := a.modelTerms[id]
+	if ok && (rec == nil || rec.owner != owner || rec.closing) {
+		ok = false
+	}
 	a.modelTermMu.Unlock()
-	if !ok || rec.owner != a.currentID {
+	if !ok {
 		return nil, fmt.Errorf("terminal session %q not found", id)
 	}
 	return rec, nil
 }
 
+func (a *app) terminalOwner(ctx context.Context) string {
+	if id := runtimectx.SessionID(ctx); id != "" {
+		return id
+	}
+	if a.agentRegistry != nil {
+		return ""
+	}
+	return a.currentID
+}
+
 func (a *app) executeModelTerminal(ctx context.Context, kind string, args any) (any, error) {
+	owner := a.terminalOwner(ctx)
 	switch kind {
 	case "terminal_open":
 		var in struct{ Type, Name, Cwd string }
@@ -417,18 +482,19 @@ func (a *app) executeModelTerminal(ctx context.Context, kind string, args any) (
 		if in.Type != "shell" {
 			return nil, fmt.Errorf("terminal_open: unsupported type %q", in.Type)
 		}
-		cwd := in.Cwd
-		if cwd == "" {
-			cwd = a.sessionCWD()
-		} else if !filepath.IsAbs(cwd) {
-			cwd = filepath.Join(a.sessionCWD(), cwd)
-		}
-		cwd, _ = filepath.Abs(cwd)
-		sess, err := terminal.NewSession(terminal.SessionOpts{Shell: a.cfg.Terminal.Shell, Args: a.cfg.Terminal.Args, Workdir: cwd, IdleMS: a.cfg.Terminal.ReadIdleMS, TimeoutMS: a.cfg.Terminal.ReadTimeoutMS, ScrollbackMaxBytes: a.cfg.Terminal.ScrollbackMaxBytes, ScrollbackLines: a.cfg.Terminal.ScrollbackLines})
+		cwd, err := a.resolveModelTerminalCWD(owner, in.Cwd)
 		if err != nil {
 			return nil, err
 		}
-		rec := &modelTerminalRecord{owner: a.currentID, name: in.Name, typ: in.Type, cwd: cwd, sess: sess}
+		sess, err := terminal.NewSession(terminal.SessionOpts{Shell: a.cfg.Terminal.Shell, Args: a.cfg.Terminal.Args, Workdir: cwd, IdleMS: persistentShellIdleMS(a.cfg.Terminal.ReadIdleMS), TimeoutMS: a.cfg.Terminal.ReadTimeoutMS, ScrollbackMaxBytes: a.cfg.Terminal.ScrollbackMaxBytes, ScrollbackLines: a.cfg.Terminal.ScrollbackLines})
+		if err != nil {
+			return nil, err
+		}
+		if err := a.appendModelTerminalEvent(ctx, session.EventTerminalStart, session.NewTerminalStart(sess.ID(), owner)); err != nil {
+			_ = sess.Close()
+			return nil, fmt.Errorf("terminal_open: persist terminal start: %w", err)
+		}
+		rec := &modelTerminalRecord{owner: owner, name: in.Name, typ: in.Type, cwd: cwd, sess: sess}
 		a.modelTermMu.Lock()
 		a.modelTerms[sess.ID()] = rec
 		a.modelTermMu.Unlock()
@@ -440,7 +506,7 @@ func (a *app) executeModelTerminal(ctx context.Context, kind string, args any) (
 		a.modelTermMu.Lock()
 		ids := make([]string, 0, len(a.modelTerms))
 		for id, rec := range a.modelTerms {
-			if rec.owner == a.currentID && !rec.closing {
+			if rec.owner == owner && !rec.closing {
 				ids = append(ids, id)
 			}
 		}
@@ -462,7 +528,7 @@ func (a *app) executeModelTerminal(ctx context.Context, kind string, args any) (
 		if in.Count == 0 {
 			in.Count = 500
 		}
-		rec, err := a.currentModelTerminal(in.SessionID)
+		rec, err := a.currentModelTerminalFor(owner, in.SessionID)
 		if err != nil {
 			return nil, err
 		}
@@ -479,7 +545,7 @@ func (a *app) executeModelTerminal(ctx context.Context, kind string, args any) (
 		if err := tools.DecodeArgs(args, &in); err != nil {
 			return nil, err
 		}
-		rec, err := a.currentModelTerminal(in.SessionID)
+		rec, err := a.currentModelTerminalFor(owner, in.SessionID)
 		if err != nil {
 			return nil, err
 		}
@@ -491,11 +557,12 @@ func (a *app) executeModelTerminal(ctx context.Context, kind string, args any) (
 			if a.jobs == nil {
 				return nil, fmt.Errorf("terminal_send: jobs are disabled")
 			}
-			id, err := a.jobs.Start(ctx, jobs.JobStart{Kind: jobs.Kind("pty-send"), Label: in.SessionID + ": " + in.Text, OwnerSession: a.currentID, OutputLimitBytes: 256 * 1024,
+			id, err := a.jobs.Start(ctx, jobs.JobStart{Kind: jobs.Kind("pty-send"), Label: in.SessionID + ": terminal input", OwnerSession: owner, OutputLimitBytes: 256 * 1024,
+				Correlation: jobs.CorrelationFromContext(ctx),
 				Run: func(jobCtx context.Context) (jobs.JobOutcome, error) {
 					rec.mu.Lock()
 					defer rec.mu.Unlock()
-					res, err := rec.sess.Write(in.Text, submit)
+					res, err := rec.sess.WriteContext(jobCtx, in.Text, submit)
 					if err != nil {
 						return jobs.JobOutcome{}, err
 					}
@@ -509,7 +576,7 @@ func (a *app) executeModelTerminal(ctx context.Context, kind string, args any) (
 			return map[string]any{"kind": "background", "jobId": id}, nil
 		}
 		rec.mu.Lock()
-		res, err := rec.sess.Write(in.Text, submit)
+		res, err := rec.sess.WriteContext(ctx, in.Text, submit)
 		rec.mu.Unlock()
 		if err != nil {
 			return nil, err
@@ -520,22 +587,27 @@ func (a *app) executeModelTerminal(ctx context.Context, kind string, args any) (
 		if err := tools.DecodeArgs(args, &in); err != nil {
 			return nil, err
 		}
-		rec, err := a.currentModelTerminal(in.SessionID)
+		rec, err := a.currentModelTerminalFor(owner, in.SessionID)
 		if err != nil {
 			return nil, err
 		}
 		rec.mu.Lock()
-		defer rec.mu.Unlock()
 		switch in.Signal {
 		case "SIGINT":
 			err = rec.sess.Signal("interrupt")
 		case "SIGTERM", "SIGHUP":
-			err = rec.sess.Close()
+			rec.mu.Unlock()
+			if err := a.stopModelTerminal(ctx, rec, "signal"); err != nil {
+				return nil, fmt.Errorf("terminal_signal: %w", err)
+			}
+			return map[string]any{"delivered": true, "targetPgid": rec.sess.PID()}, nil
 		case "SIGKILL":
+			rec.mu.Unlock()
 			return nil, fmt.Errorf("terminal_signal: shell-targeted SIGKILL is rejected; use terminal_close")
 		default:
 			err = fmt.Errorf("terminal_signal: unsupported signal %q", in.Signal)
 		}
+		rec.mu.Unlock()
 		if err != nil {
 			return nil, err
 		}
@@ -549,7 +621,7 @@ func (a *app) executeModelTerminal(ctx context.Context, kind string, args any) (
 		}
 		a.modelTermMu.Lock()
 		rec, ok := a.modelTerms[in.SessionID]
-		if !ok || rec.owner != a.currentID {
+		if !ok || rec.owner != owner {
 			a.modelTermMu.Unlock()
 			return nil, fmt.Errorf("terminal session %q not found", in.SessionID)
 		}
@@ -557,21 +629,144 @@ func (a *app) executeModelTerminal(ctx context.Context, kind string, args any) (
 			a.modelTermMu.Unlock()
 			return map[string]any{"sessionId": in.SessionID, "outcome": "already-closing"}, nil
 		}
-		rec.closing = true
 		a.modelTermMu.Unlock()
-		rec.mu.Lock()
-		err := rec.sess.Close()
-		rec.mu.Unlock()
-		a.modelTermMu.Lock()
-		delete(a.modelTerms, in.SessionID)
-		a.modelTermMu.Unlock()
-		if err != nil {
-			return nil, err
+		if err := a.stopModelTerminal(ctx, rec, "tool_close"); err != nil {
+			return nil, fmt.Errorf("terminal_close: %w", err)
 		}
 		return map[string]any{"sessionId": in.SessionID, "outcome": "closed"}, nil
 	default:
 		return nil, fmt.Errorf("unknown terminal tool %q", kind)
 	}
+}
+
+// resolveModelTerminalCWD makes the session workspace an actual authority
+// boundary for model-owned persistent terminals. A lexical relative-path
+// check is not enough: an in-workspace symlink can otherwise redirect the
+// shell outside the session's workspace.
+func (a *app) resolveModelTerminalCWD(owner, requested string) (string, error) {
+	root := strings.TrimSpace(a.sessionCWDFor(owner))
+	if root == "" {
+		return "", fmt.Errorf("terminal_open: session workspace is unavailable")
+	}
+	root, err := pathsecure.ResolveExisting(root)
+	if err != nil {
+		return "", fmt.Errorf("terminal_open: resolve workspace: %w", err)
+	}
+	cwd := strings.TrimSpace(requested)
+	if cwd == "" {
+		cwd = root
+	} else if !filepath.IsAbs(cwd) {
+		cwd = filepath.Join(root, cwd)
+	}
+	cwd, err = pathsecure.ResolveExisting(cwd)
+	if err != nil {
+		return "", fmt.Errorf("terminal_open: resolve cwd: %w", err)
+	}
+	info, err := os.Stat(cwd)
+	if err != nil {
+		return "", fmt.Errorf("terminal_open: cwd is unavailable: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("terminal_open: cwd is not a directory")
+	}
+	rel, err := filepath.Rel(root, cwd)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("terminal_open: cwd %q escapes session workspace", requested)
+	}
+	return filepath.Clean(cwd), nil
+}
+
+// appendModelTerminalEvent uses the addressed Agent sink when present and
+// only falls back to the legacy current-session log for direct CLI/tests.
+// Unlike a best-effort observer, a failed lifecycle append rejects the tool
+// operation so a terminal cannot become invisible to durable replay.
+func (a *app) appendModelTerminalEvent(ctx context.Context, typ string, data any) error {
+	if runtime, ok := runtimectx.Get(ctx); ok {
+		if runtime.Emit == nil {
+			return fmt.Errorf("terminal: durable runtime sink is unavailable")
+		}
+		return runtime.Emit(typ, data)
+	}
+	log := a.runtimeLog(ctx)
+	if log == nil {
+		return fmt.Errorf("terminal: session log is unavailable")
+	}
+	_, err := log.Append(typ, data)
+	return err
+}
+
+// recoverTerminalClaims releases terminal/start claims left open by a prior
+// process before their owner can materialize. The receipt is the authority
+// for whether a terminal is addressable; this cold pass cannot resurrect or
+// inspect the old process, so it appends exactly one `process_restart` stop
+// edge and never touches terminals already live in this process.
+func (a *app) recoverTerminalClaims(log *session.Log, owner string) error {
+	if log == nil {
+		return errors.New("terminal: recovery log is unavailable")
+	}
+	owner = strings.TrimSpace(owner)
+	if owner == "" {
+		return nil
+	}
+	a.modelTermMu.Lock()
+	for _, rec := range a.modelTerms {
+		if rec != nil && rec.owner == owner && !rec.closing {
+			a.modelTermMu.Unlock()
+			return nil
+		}
+	}
+	a.modelTermMu.Unlock()
+
+	events := log.Events()
+	open := make(map[string]bool)
+	order := make([]string, 0, len(events))
+	var firstErr error
+	for _, event := range events {
+		// Session logs mix audit-only facts such as schedule/change with
+		// terminal lifecycle records. Only terminal records participate in
+		// owner close; unfiltered parsing would make any unrelated id-less
+		// event wedge Agent disposal.
+		if event.Type != session.EventTerminalStart && event.Type != session.EventTerminalStop {
+			continue
+		}
+		var payload struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(event.Data, &payload); err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("decode terminal %s event %d: %w", event.Type, event.Seq, err)
+			}
+			continue
+		}
+		id := strings.TrimSpace(payload.ID)
+		if id == "" {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("terminal %s event %d has no id", event.Type, event.Seq)
+			}
+			continue
+		}
+		switch event.Type {
+		case session.EventTerminalStart:
+			if _, seen := open[id]; !seen {
+				order = append(order, id)
+			}
+			open[id] = true
+		case session.EventTerminalStop:
+			open[id] = false
+		}
+	}
+	if firstErr != nil {
+		return firstErr
+	}
+	for _, id := range order {
+		if !open[id] {
+			continue
+		}
+		if _, err := log.Append(session.EventTerminalStop, session.NewTerminalStop(id, "process_restart")); err != nil {
+			return fmt.Errorf("terminal: release stale claim %s: %w", id, err)
+		}
+	}
+	return nil
 }
 
 func (a *app) modelTerminalOpenValue(rec *modelTerminalRecord) map[string]any {
@@ -612,17 +807,88 @@ func modelWaitReason(reason terminal.WaitReason) string {
 
 func (a *app) closeModelTerminalSessions() {
 	a.modelTermMu.Lock()
-	records := make([]*modelTerminalRecord, 0, len(a.modelTerms))
+	owners := make([]string, 0, len(a.modelTerms))
+	seen := make(map[string]struct{})
 	for _, rec := range a.modelTerms {
-		if !rec.closing {
+		if rec != nil && rec.owner != "" {
+			if _, ok := seen[rec.owner]; !ok {
+				seen[rec.owner] = struct{}{}
+				owners = append(owners, rec.owner)
+			}
+		}
+	}
+	a.modelTermMu.Unlock()
+	for _, owner := range owners {
+		_ = a.closeModelTerminalOwner(owner)
+	}
+	// Unowned terminals are only possible through legacy embedders. Keep the
+	// process shutdown path responsible for those records as well.
+	a.modelTermMu.Lock()
+	legacy := make([]*modelTerminalRecord, 0)
+	for _, rec := range a.modelTerms {
+		if rec != nil && rec.owner == "" && !rec.closing {
+			rec.closing = true
+			legacy = append(legacy, rec)
+		}
+	}
+	a.modelTermMu.Unlock()
+	for _, rec := range legacy {
+		id, owner := rec.sess.ID(), rec.owner
+		rec.mu.Lock()
+		_ = rec.sess.Close()
+		rec.mu.Unlock()
+		// Shutdown is still part of the durable lifecycle. Resolve the owner's
+		// log explicitly; using runtimeLog with a background context here could
+		// accidentally append a child session's stop to the REPL current log.
+		if log, err := a.sessionLogForAgent(context.Background(), owner); err == nil && log != nil {
+			_, _ = log.Append(session.EventTerminalStop, session.NewTerminalStop(id, "process_shutdown"))
+		}
+	}
+}
+
+// closeModelTerminalOwner is the Agent-scope terminal disposer. Persistent
+// model terminals are owned by the session that opened them; process-wide
+// shutdown alone is too late because a Web/ACP session can be closed and
+// recreated while the host remains alive.
+func (a *app) closeModelTerminalOwner(owner string) error {
+	if strings.TrimSpace(owner) == "" {
+		return nil
+	}
+	a.modelTermStopMu.Lock()
+	defer a.modelTermStopMu.Unlock()
+	a.modelTermMu.Lock()
+	records := make([]*modelTerminalRecord, 0)
+	for _, rec := range a.modelTerms {
+		if rec != nil && rec.owner == owner && !rec.stopRecorded {
 			rec.closing = true
 			records = append(records, rec)
 		}
 	}
 	a.modelTermMu.Unlock()
+	var first error
 	for _, rec := range records {
 		rec.mu.Lock()
-		_ = rec.sess.Close()
+		err := rec.sess.Close()
 		rec.mu.Unlock()
+		if err != nil && first == nil {
+			first = err
+		}
+		var receiptErr error
+		if log, logErr := a.sessionLogForAgent(context.Background(), owner); logErr == nil && log != nil {
+			_, receiptErr = log.Append(session.EventTerminalStop, session.NewTerminalStop(rec.sess.ID(), "agent_scope_close"))
+		} else if first == nil && logErr != nil {
+			receiptErr = logErr
+		}
+		if receiptErr == nil {
+			a.modelTermMu.Lock()
+			rec.stopRecorded = true
+			if current, ok := a.modelTerms[rec.sess.ID()]; ok && current == rec {
+				delete(a.modelTerms, rec.sess.ID())
+			}
+			a.modelTermMu.Unlock()
+		} else if first == nil {
+			first = fmt.Errorf("terminal: persist stop %s: %w", rec.sess.ID(), receiptErr)
+		}
 	}
+	return first
 }

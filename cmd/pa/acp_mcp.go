@@ -7,8 +7,12 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/jabing/shutu-agent/internal/attachment"
+	"github.com/jabing/shutu-agent/internal/config"
 	"github.com/jabing/shutu-agent/internal/mcp"
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 	"github.com/jabing/shutu-agent/internal/session"
 	agenttools "github.com/jabing/shutu-agent/internal/tools"
 )
@@ -17,13 +21,16 @@ import (
 // does not use app.mcp: those clients belong to the REPL's global session and
 // may capture its mutable current-session state.
 type acpMCP struct {
-	mu         sync.Mutex
-	owner      string
-	log        *session.Log
-	clients    map[string]mcp.Client
-	advertised map[string]acpMCPToolRef
-	byServer   map[string][]mcp.Tool
-	closed     bool
+	mu             sync.Mutex
+	owner          string
+	log            *session.Log
+	clients        map[string]mcp.Client
+	advertised     map[string]acpMCPToolRef
+	byServer       map[string][]mcp.Tool
+	closed         bool
+	attachments    *attachment.Store
+	maxImageBytes  int
+	imageAdmission func(context.Context) error
 }
 
 type acpMCPToolRef struct {
@@ -33,6 +40,10 @@ type acpMCPToolRef struct {
 }
 
 func newACPMCP(ctx context.Context, a *app, owner string, log *session.Log) (*acpMCP, error) {
+	return newACPMCPWithConfig(ctx, a, owner, log, a.providerConfigSnapshot())
+}
+
+func newACPMCPWithConfig(ctx context.Context, a *app, owner string, log *session.Log, cfg config.Config) (*acpMCP, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -41,27 +52,27 @@ func newACPMCP(ctx context.Context, a *app, owner string, log *session.Log) (*ac
 		f = mcp.NewStdioFactory()
 	}
 	s := &acpMCP{
-		owner:      owner,
-		log:        log,
-		clients:    make(map[string]mcp.Client),
-		advertised: make(map[string]acpMCPToolRef),
-		byServer:   make(map[string][]mcp.Tool),
+		owner:          owner,
+		log:            log,
+		clients:        make(map[string]mcp.Client),
+		advertised:     make(map[string]acpMCPToolRef),
+		byServer:       make(map[string][]mcp.Tool),
+		attachments:    a.attachStore,
+		maxImageBytes:  cfg.LLM.Multimodal.MaxImageBytes,
+		imageAdmission: a.mcpImageAdmission,
 	}
-	for _, srv := range a.cfg.Mcp.Servers {
+	for _, srv := range cfg.Mcp.Servers {
 		name := strings.TrimSpace(srv.Name)
-		if name == "" {
+		mapped := mcp.McpServer{Name: name, Transport: srv.Transport, Cmd: srv.Cmd, Args: srv.Args, URL: srv.URL, Headers: srv.Headers, Env: srv.Env, Cwd: srv.Cwd, ToolCallTimeout: time.Duration(srv.ToolCallTimeoutMS) * time.Millisecond}
+		if err := mcp.ValidateServer(mapped); err != nil {
 			_ = s.Close()
-			return nil, errors.New("ACP MCP server name must not be empty")
-		}
-		if strings.TrimSpace(srv.Cmd) == "" {
-			_ = s.Close()
-			return nil, fmt.Errorf("ACP MCP server %q command must not be empty", name)
+			return nil, fmt.Errorf("ACP MCP invalid server %q: %w", name, err)
 		}
 		if _, exists := s.clients[name]; exists {
 			_ = s.Close()
 			return nil, fmt.Errorf("ACP MCP server %q is configured more than once", name)
 		}
-		client, err := f.New(ctx, srv.Cmd, srv.Args)
+		client, err := mcp.NewClientForServer(ctx, f, mapped)
 		if err != nil {
 			_ = s.Close()
 			return nil, fmt.Errorf("ACP MCP create server %q: %w", name, err)
@@ -123,85 +134,109 @@ func (s *acpMCP) tools() []agenttools.Tool {
 }
 
 func (s *acpMCP) list(server string) (string, error) {
+	return s.listContext(context.Background(), server)
+}
+
+func (s *acpMCP) listContext(ctx context.Context, server string) (string, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
+		s.mu.Unlock()
 		return "", errors.New("ACP MCP service is closed")
 	}
 	tools, ok := s.byServer[server]
+	tools = append([]mcp.Tool(nil), tools...)
+	s.mu.Unlock()
 	if !ok {
 		return "", fmt.Errorf("mcp_list: unknown server %q", server)
 	}
-	if s.log != nil {
-		_, _ = s.log.Append(session.EventMcpList, session.NewMcpList(len(tools)))
+	if err := s.emitEvent(ctx, session.EventMcpList, session.NewMcpList(len(tools))); err != nil {
+		return "", fmt.Errorf("mcp_list: persist event: %w", err)
 	}
 	return formatACPMPCToolList(tools), nil
 }
 
 func (s *acpMCP) call(server, name string, args map[string]any) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return "", errors.New("ACP MCP service is closed")
-	}
-	client, ok := s.clients[server]
-	if !ok {
-		return "", fmt.Errorf("mcp_call: unknown server %q", server)
-	}
-	if strings.TrimSpace(name) == "" {
-		return "", errors.New("mcp_call: empty tool name")
-	}
-	result, err := client.Call(context.Background(), name, args)
-	if err != nil {
-		return "", fmt.Errorf("mcp_call: %s.%s: %w", server, name, err)
-	}
-	if s.log != nil {
-		_, _ = s.log.Append(session.EventMcpCall, session.NewMcpCall(name, result.IsError))
-	}
-	return mcp.FormatCallResult(result), nil
+	return s.callContext(context.Background(), server, name, args)
 }
 
 func (s *acpMCP) callContext(ctx context.Context, server, name string, args map[string]any) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.closed {
-		return "", errors.New("ACP MCP service is closed")
-	}
-	client, ok := s.clients[server]
-	if !ok {
-		return "", fmt.Errorf("mcp_call: unknown server %q", server)
-	}
-	if strings.TrimSpace(name) == "" {
-		return "", errors.New("mcp_call: empty tool name")
-	}
-	result, err := client.Call(ctx, name, args)
+	result, err := s.callContextResult(ctx, server, name, args)
 	if err != nil {
-		return "", fmt.Errorf("mcp_call: %s.%s: %w", server, name, err)
-	}
-	if s.log != nil {
-		_, _ = s.log.Append(session.EventMcpCall, session.NewMcpCall(name, result.IsError))
+		return "", err
 	}
 	return mcp.FormatCallResult(result), nil
 }
 
-func (s *acpMCP) callAdvertised(ctx context.Context, fullName string, args map[string]any) (string, error) {
+func (s *acpMCP) callContextResult(ctx context.Context, server, name string, args map[string]any) (mcp.CallResult, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.closed {
-		return "", errors.New("ACP MCP service is closed")
+		s.mu.Unlock()
+		return mcp.CallResult{}, errors.New("ACP MCP service is closed")
 	}
-	ref, ok := s.advertised[fullName]
+	client, ok := s.clients[server]
+	s.mu.Unlock()
 	if !ok {
-		return "", fmt.Errorf("unknown MCP tool %q", fullName)
+		return mcp.CallResult{}, fmt.Errorf("mcp_call: unknown server %q", server)
 	}
-	result, err := ref.client.Call(ctx, ref.tool.Name, args)
+	if strings.TrimSpace(name) == "" {
+		return mcp.CallResult{}, errors.New("mcp_call: empty tool name")
+	}
+	result, err := callMCPWithReconnect(ctx, client, name, args)
 	if err != nil {
-		return "", fmt.Errorf("%s: %w", fullName, err)
+		return mcp.CallResult{}, fmt.Errorf("mcp_call: %s.%s: %w", server, name, err)
 	}
-	if s.log != nil {
-		_, _ = s.log.Append(session.EventMcpCall, session.NewMcpCall(ref.tool.Name, result.IsError))
+	if err := s.emitEvent(ctx, session.EventMcpCall, session.NewMcpCall(name, result.IsError)); err != nil {
+		return mcp.CallResult{}, fmt.Errorf("mcp_call: persist event: %w", err)
+	}
+	return result, nil
+}
+
+func (s *acpMCP) callAdvertised(ctx context.Context, fullName string, args map[string]any) (string, error) {
+	result, err := s.callAdvertisedResult(ctx, fullName, args)
+	if err != nil {
+		return "", err
 	}
 	return mcp.FormatCallResult(result), nil
+}
+
+func (s *acpMCP) callAdvertisedResult(ctx context.Context, fullName string, args map[string]any) (mcp.CallResult, error) {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return mcp.CallResult{}, errors.New("ACP MCP service is closed")
+	}
+	ref, ok := s.advertised[fullName]
+	s.mu.Unlock()
+	if !ok {
+		return mcp.CallResult{}, fmt.Errorf("unknown MCP tool %q", fullName)
+	}
+	result, err := callMCPWithReconnect(ctx, ref.client, ref.tool.Name, args)
+	if err != nil {
+		return mcp.CallResult{}, fmt.Errorf("%s: %w", fullName, err)
+	}
+	if err := s.emitEvent(ctx, session.EventMcpCall, session.NewMcpCall(ref.tool.Name, result.IsError)); err != nil {
+		return mcp.CallResult{}, fmt.Errorf("%s: persist event: %w", fullName, err)
+	}
+	return result, nil
+}
+
+// emitEvent uses the Agent-owned runtime sink when present. Direct ACP calls
+// without a runtime context fall back to this session's own log.
+func (s *acpMCP) emitEvent(ctx context.Context, typ string, data any) error {
+	if err := runtimectx.Emit(ctx, typ, data); err != nil {
+		return err
+	}
+	if _, ok := runtimectx.Get(ctx); ok {
+		return nil
+	}
+	s.mu.Lock()
+	log := s.log
+	s.mu.Unlock()
+	if log == nil {
+		return nil
+	}
+	_, err := log.Append(typ, data)
+	return err
 }
 
 func (s *acpMCP) closeClients() error {
@@ -240,12 +275,59 @@ type acpMCPTool struct {
 func (t acpMCPTool) Name() string           { return t.name }
 func (t acpMCPTool) Description() string    { return t.tool.Description }
 func (t acpMCPTool) Schema() map[string]any { return normalizeSchema(t.tool.InputSchema) }
+func (t acpMCPTool) OutputSchema() map[string]any {
+	structured := map[string]any{}
+	required := []string{"content"}
+	if t.tool.OutputSchema != nil {
+		structured = normalizeOutputSchema(t.tool.OutputSchema)
+		required = append(required, "structuredContent")
+	}
+	return map[string]any{
+		"type": "object", "additionalProperties": false,
+		"properties": map[string]any{
+			"content":           map[string]any{"type": "array", "items": map[string]any{}},
+			"structuredContent": structured,
+		},
+		"required": required,
+	}
+}
 func (t acpMCPTool) Execute(ctx context.Context, args any) (string, error) {
+	result, err := t.ExecuteResult(ctx, args)
+	return result.Output, err
+}
+
+func (t acpMCPTool) ExecuteResult(ctx context.Context, args any) (agenttools.ToolResult, error) {
+	if t.tool.TaskSupport == "required" {
+		return agenttools.ToolResult{}, fmt.Errorf("%s: MCP task-based execution is not supported", t.name)
+	}
 	var values map[string]any
 	if err := agenttools.DecodeArgs(args, &values); err != nil {
-		return "", fmt.Errorf("%s: %w", t.name, err)
+		return agenttools.ToolResult{}, fmt.Errorf("%s: %w", t.name, err)
 	}
-	return t.service.callAdvertised(ctx, t.name, values)
+	result, err := t.service.callAdvertisedResult(ctx, t.name, values)
+	if err != nil {
+		return agenttools.ToolResult{}, err
+	}
+	value := map[string]any{"content": result.Content}
+	if result.StructuredContentSet {
+		value["structuredContent"] = result.StructuredContent
+	}
+	contentStore := t.service.attachments
+	contentAdmission := t.service.imageAdmission
+	if result.IsError {
+		contentStore = nil
+		contentAdmission = nil
+	}
+	content := projectMcpContentWithAdmission(ctx, t.name, result.Content, contentStore, t.service.maxImageBytes, contentAdmission)
+	if result.IsError {
+		return agenttools.ToolResult{
+			Output:  mcp.FormatCallResult(result),
+			Content: content,
+			IsError: true,
+			Error:   &agenttools.ErrorInfo{Name: "MCPToolError", Code: "MCP_TOOL_ERROR"},
+		}, nil
+	}
+	return agenttools.ToolResult{Value: value, Output: mcp.FormatCallResult(result), Content: content}, nil
 }
 
 type acpMCPListTool struct{ service *acpMCP }
@@ -264,14 +346,14 @@ func (acpMCPListTool) Schema() map[string]any {
 		"additionalProperties": false,
 	}
 }
-func (t acpMCPListTool) Execute(_ context.Context, args any) (string, error) {
+func (t acpMCPListTool) Execute(ctx context.Context, args any) (string, error) {
 	var values struct {
 		Server string `json:"server"`
 	}
 	if err := agenttools.DecodeArgs(args, &values); err != nil {
 		return "", fmt.Errorf("mcp_list: %w", err)
 	}
-	return t.service.list(values.Server)
+	return t.service.listContext(ctx, values.Server)
 }
 
 type acpMCPCallTool struct{ service *acpMCP }
@@ -293,15 +375,47 @@ func (acpMCPCallTool) Schema() map[string]any {
 	}
 }
 func (t acpMCPCallTool) Execute(ctx context.Context, args any) (string, error) {
+	result, err := t.ExecuteResult(ctx, args)
+	return result.Output, err
+}
+
+func (t acpMCPCallTool) ExecuteResult(ctx context.Context, args any) (agenttools.ToolResult, error) {
 	var values struct {
 		Server string         `json:"server"`
 		Tool   string         `json:"tool"`
 		Args   map[string]any `json:"args"`
 	}
 	if err := agenttools.DecodeArgs(args, &values); err != nil {
-		return "", fmt.Errorf("mcp_call: %w", err)
+		return agenttools.ToolResult{}, fmt.Errorf("mcp_call: %w", err)
 	}
-	return t.service.callContext(ctx, values.Server, values.Tool, values.Args)
+	result, err := t.service.callContextResult(ctx, values.Server, values.Tool, values.Args)
+	if err != nil {
+		return agenttools.ToolResult{}, err
+	}
+	value := map[string]any{"content": result.Content}
+	if result.StructuredContentSet {
+		value["structuredContent"] = result.StructuredContent
+	}
+	contentStore := t.service.attachments
+	contentAdmission := t.service.imageAdmission
+	if result.IsError {
+		contentStore = nil
+		contentAdmission = nil
+	}
+	content := projectMcpContentWithAdmission(ctx, mcp.ToolCallName, result.Content, contentStore, t.service.maxImageBytes, contentAdmission)
+	if result.IsError {
+		return agenttools.ToolResult{
+			Output:  mcp.FormatCallResult(result),
+			Content: content,
+			IsError: true,
+			Error:   &agenttools.ErrorInfo{Name: "MCPToolError", Code: "MCP_TOOL_ERROR"},
+		}, nil
+	}
+	return agenttools.ToolResult{
+		Value:   value,
+		Output:  mcp.FormatCallResult(result),
+		Content: content,
+	}, nil
 }
 
 func formatACPMPCToolList(tools []mcp.Tool) string {

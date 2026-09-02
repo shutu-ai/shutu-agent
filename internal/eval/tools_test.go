@@ -3,9 +3,11 @@ package eval
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 	"github.com/jabing/shutu-agent/internal/session"
 )
 
@@ -97,6 +99,18 @@ func TestEvalToolsRun(t *testing.T) {
 	if d.ID != "eval-1" || d.TaskID != "todo-7" || d.Verdict != "pass" ||
 		d.Reason != "criteria met" || d.EvaluatorKind != "rule" || d.CriteriaCount != 2 {
 		t.Errorf("eval/run payload = %+v, want the lean summary", d)
+	}
+}
+
+func TestEvalRunDurableEventFailureIsReturned(t *testing.T) {
+	et := newTestTools(t, &mockEvaluator{verdict: VerdictPass, reason: "ok", kind: "rule"}, nil)
+	ctx := runtimectx.With(context.Background(), runtimectx.Runtime{
+		SessionID: "session-1",
+		Emit:      func(string, any) error { return errors.New("durable sink unavailable") },
+	})
+	_, err := et.Run().Execute(ctx, json.RawMessage(`{"task_id":"t1","output":"done","criteria":["contains:done"]}`))
+	if err == nil || !strings.Contains(err.Error(), "persist event") {
+		t.Fatalf("eval durable event error = %v, want persist event failure", err)
 	}
 }
 

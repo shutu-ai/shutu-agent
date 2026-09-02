@@ -18,24 +18,12 @@ import (
 type engine struct {
 	prov Provider
 
-	mu      sync.Mutex
-	goalSeq int
-	planSeq int
-	todoSeq int
-	closed  bool
-}
-
-// ProviderPlans returns the full plan projection, including standalone plans.
-// It is intentionally an engine-only read seam used by the Web state snapshot;
-// normal model consumers continue to use the goal-rooted Engine.List API.
-func (e *engine) ProviderPlans(ctx context.Context) ([]Plan, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if err := e.checkOpen(); err != nil {
-		return nil, err
-	}
-	return e.prov.ListPlans(ctx)
+	mu        sync.Mutex
+	goalSeq   int
+	planSeq   int
+	todoSeq   int
+	closed    bool
+	closeDone chan struct{}
 }
 
 // NewEngine returns an engine backed by prov; a nil prov selects the default
@@ -45,7 +33,7 @@ func NewEngine(prov Provider) *engine {
 	if prov == nil {
 		prov = newMemProvider()
 	}
-	return &engine{prov: prov}
+	return &engine{prov: prov, closeDone: make(chan struct{})}
 }
 
 // CreateGoal validates the title and creates a pending goal with a fresh
@@ -529,14 +517,21 @@ func (e *engine) checkOpen() error {
 func (e *engine) Close() error {
 	e.mu.Lock()
 	if e.closed {
+		done := e.closeDone
 		e.mu.Unlock()
+		if done != nil {
+			<-done
+		}
 		return nil
 	}
 	e.closed = true
 	prov := e.prov
 	e.mu.Unlock()
 	if c, ok := prov.(closer); ok {
-		return c.Close()
+		err := c.Close()
+		close(e.closeDone)
+		return err
 	}
+	close(e.closeDone)
 	return nil
 }

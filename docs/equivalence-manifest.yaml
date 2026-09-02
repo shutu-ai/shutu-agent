@@ -1,0 +1,231 @@
+schemaVersion: 1
+kind: shutu-dsh-capability-equivalence
+asOf: 2026-09-02
+status: fail
+claimAllowed: false
+
+reference:
+  repository: deepseek-harness
+  root: ../deepseek-harness
+  commit: 141eb6fef83422698aef7a981029e843e8161534
+  tag: dsh-v0.1.0-rc.8
+  profiles:
+    - dsh-base
+    - web
+    - headless
+
+subject:
+  repository: shutu-agent
+  runtime: go
+  baseCommit: bfc6ad8084e9e34614d6d60829ccaa9350654073
+  worktreeState: dirty
+
+scope:
+  required:
+    - agent-turn-step-waterfall
+    - durable-session-history-and-replay
+    - scoped-tool-registry-and-policy
+    - approval-and-interaction
+    - sandbox-and-code-runtime
+    - subagent-and-agent-ownership
+    - persistence-and-cross-process-recovery
+    - acp-mcp-sdk-lifecycle
+  profileOptional:
+    - e2b
+    - python-code-runtime
+    - cordis-dynamic-runner
+    - cordis-inspect
+    - client-modules-hmr
+    - agent-teams
+    - codex-provider
+    - claude-provider
+  architectureExcluded:
+    - internal DSH worker-thread code-runtime transport; Shutu uses an enforcing permission-model subprocess with the same observable budgets
+    - dynamic Cordis host runner and inspect transport
+    - browser client module graph and runtime HMR publisher
+    - Team roster/mailbox/task-DAG model surface
+
+modelSurface:
+  compatibilityExtensions:
+    - get_time
+    - mcp_list
+    - mcp_call
+  recentlyRepaired:
+    - subagent_fork
+    - subagent_atomic_start_receipt
+    - sticky_max_tokens_turn_outcome
+    - approval_timeout_waterfall_replay
+    - mcp_default_allowlist
+    - sqlite_append_sequence_guard
+    - atomic_session_fork_publication
+    - atomic_web_rest_fork_publication
+    - atomic_session_creation_publication
+    - mcp_diagnostic_secret_redaction
+    - versioned_tool_catalog_json
+    - sqlite_cross_process_id_reservation
+    - team_member_identity_reservation_boundary
+    - team_member_reservation_receipt_transaction
+    - terminal_cold_claim_stop_receipt
+    - workflow_addressed_durable_event_sink
+    - workflow_receipt_failure_closes_external_admission
+    - workflow_worker_protocol_fail_closed
+    - workflow_late_response_fail_closed
+    - workflow_restart_safe_opaque_run_ids
+    - workflow_member_record_after_child_publication
+    - parent_tool_workflow_record_projection
+    - workflow_record_fold_invariant
+    - provider_route_availability_admission
+    - canonical_tool_contract_projection
+    - web_context_estimate_uses_shared_projection
+    - code_mode_web_advertisement_fail_closed
+    - explicit_tool_registration_provenance
+    - generation_guarded_plugin_tool_publisher
+    - persistent_terminal_context_abort
+    - explicit_tool_cancellation_classification
+    - audited_long_running_tool_cancellation
+    - versioned_catalog_manifest_integrity
+    - cli_catalog_manifest_export_verify
+    - acp_sdk_catalog_inventory_revision
+    - model_catalog_route_capability_seam
+    - native_session_model_route_admission
+    - model_tool_reasoning_capability_admission
+    - dedicated_credential_vault_and_sqlite_boundary
+    - credential_cross_process_refresh_and_stream_lease_drain
+    - credential_backend_failure_generation_fence
+    - job_completion_recovery_wake_budget_fence
+    - mcp_initial_failure_retry_supervision
+    - mcp_generation_guarded_list_changed
+    - mcp_http_generation_session_retirement
+    - provider_generation_cross_process_cold_rebuild
+    - job_owner_sqlite_cold_materialization
+    - provider_credential_revocation_protocol_matrix
+    - web_provider_credentials_dedicated_vault
+    - session_agent_dynamic_runtime_journal
+    - subagent_control_plane_ownership_matrix
+    - job_terminal_owner_receipt_boundary
+    - team_identity_orphan_reservation_recovery
+    - team_fold_cas_mailbox_authority
+    - canonical_worker_death_retry_compaction_replay
+    - provider_wire_failure_policy_matrix
+    - durable_surface_replacement_write_provenance
+    - model_route_context_and_acp_pinning
+    - deepseek_reference_catalog_metadata
+    - tool_family_runtime_sink_isolation
+    - manifest_blocker_and_report_contract
+    - task_register_evidence_lint
+    - runtime_profile_fail_closed_registry
+    - code_mode_close_cancels_bindings_and_process_tree
+    - code_mode_preserves_unknown_rich_wire_metadata
+    - shared_goal_plan_projection_for_web_state
+    - external_crash_boundary_contract_registry
+    - mcp_timeout_test_request_boundary
+    - telemetry_spill_panic_secret_egress_redaction
+    - security_crash_dump_policy_fail_closed
+    - durable_schedule_crash_replay_receipt
+    - terminal_owner_audit_event_filter
+    - mcp_auth_failure_no_replay
+    - mcp_required_task_pretransport_rejection
+    - mcp_dynamic_call_at_most_once
+    - mcp_dynamic_task_pretransport_rejection
+    - mcp_reconnect_exhaustion_tool_withdrawal
+    - provider_model_catalog_deep_copy_boundary
+    - sdk_subscription_terminal_failure_preservation
+    - sdk_close_unstarted_subscription_settlement
+    - canonical_durable_event_projection_boundary
+    - unknown_rich_block_registry_preservation
+    - projection_live_cold_cursor_equivalence
+    - acp_external_process_disconnect_cleanup
+    - mcp_stdio_server_ping_response
+    - sqlite_jsonl_corruption_matrix
+    - sqlite_jsonl_storage_lifecycle_matrix
+    - model_level_input_modality_projection
+    - custom_provider_catalog_default_model
+    - model_catalog_admission_validation
+    - model_level_reasoning_effort_wire_map
+    - node_permission_probe_transient_contention_retry
+    - shared_query_event_surface_projection
+    - agent_publication_disposal_receipt_boundary
+    - web_authorization_replay_shutdown_matrix
+    - model_selection_image_history_capability_boundary
+    - model_selection_pending_inbox_image_boundary
+    - telemetry_bounded_shutdown_route_identity
+    - machine_readable_profile_capability_classification
+    - runtime_sandbox_and_codemode_host_probe_advertisement
+    - code_preset_runtime_capability_advertisement
+    - revision_bound_native_projection_checkpoint_writeback
+    - core_tool_negative_error_code_contract
+    - prepared_dispatch_cancellation_boundary
+    - pre_cancelled_tool_pipeline_short_circuit
+    - late_cancellation_context_preservation
+    - cancellation_failure_precedence
+    - tool_preparation_failure_result_observer
+    - native_session_list_full_revision_checkpoint
+    - native_session_rename_canonical_event
+    - web_session_rename_canonical_event
+    - shared_rich_title_projection
+    - shared_session_list_metadata_projection
+    - web_session_list_human_prompt_activity_projection
+    - native_owned_model_metadata_projection
+    - provider_owned_model_catalog_contract_seam
+    - cross_entry_core_turn_contract
+    - native_nested_message_projection
+    - deepseek_wire_and_sdk_failure_boundary
+    - deepseek_image_budget_and_tool_result_wire
+    - provider_catalog_runtime_forwarding
+    - node_permission_enforcement_capability_probe
+    - first_party_capacity_and_modality_facts
+    - generic_reasoning_fail_closed_boundary
+    - reasoning_request_wire_completion
+    - reasoning_budget_loop_propagation
+    - cross_module_negative_capability_matrix
+    - durable_unknown_event_fail_closed
+    - node_permission_probe_contention_budget
+    - sdk_shutdown_creation_fence
+    - interaction_restore_raw_projection_boundary
+    - closed_durable_event_admission_all_stores
+    - automatic_title_user_pin_serialization
+    - external_fault_schema_reload_matrix
+    - plugin_call_generation_receipt_boundary
+    - native_projected_history_durable_admission_boundary
+    - windows_job_object_process_tree_termination
+    - provider_request_attribution_and_session_headers
+    - sdk_transport_close_pending_cleanup
+    - sdk_status_event_ordering_boundary
+    - sdk_runtime_child_cross_entry_fixture
+    - acp_client_disconnect_session_cleanup
+    - acp_runtime_log_sequence_authority
+    - sqlite_tail_recovery_conflict_retry
+    - acp_second_independent_client_lifecycle
+    - mcp_stdio_effect_once_across_restart
+    - remote_catalog_bounded_fault_matrix
+    - mcp_transport_close_interrupt_boundary
+    - projection_cache_monotonic_concurrent_rebuild
+    - reference_acp_runtime_client_matrix
+    - code_mode_cross_platform_worker_resource_matrix
+
+openBlockers:
+  - A3.1
+  - A8.3
+  - A9.3
+  - A9.4
+  - A9.5
+
+evidence:
+  taskList: docs/dsh-equivalence-tasks.md
+  taskRegister: docs/equivalence-task-register.yaml
+  reportGenerator: scripts/equivalence-report.ps1
+  toolParity: docs/dsh-tool-capability-parity.md
+  coreFixture: docs/evidence/dsh-equivalence/core-turn-contract.json
+  referenceReplay: docs/evidence/dsh-equivalence/reference-replay.md
+
+verification:
+  local:
+    goTest: 'full go test -p 1 ./... passed on the managed Windows host with external writable TEMP/TMP plus isolated GOCACHE/GOMODCACHE; repository-local TEMP/TMP remains an invalid fixture environment because it discovers subject .dsh/.agents/skills'
+    goVet: passed
+    goBuild: passed for current and Darwin/Linux code package cross-builds
+    strictRace: unverified
+    webTests: passed
+    webBuild: passed
+    webManifest: passed
+    coreReferenceReplay: unverified
+    fullReleaseGate: blocked-by-claimAllowed

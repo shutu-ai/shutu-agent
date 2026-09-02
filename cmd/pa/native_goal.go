@@ -7,46 +7,71 @@ import (
 	"strings"
 
 	"github.com/jabing/shutu-agent/internal/plan"
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 	"github.com/jabing/shutu-agent/internal/session"
 	"github.com/jabing/shutu-agent/internal/webserver"
 )
 
-// nativeGoalMutation is the composition-root side of DSH's mutation-only
-// goal.* API. The active session log remains the durable source of truth; the
-// plan engine is updated first and its corresponding fact is then appended.
-func (a *app) nativeGoalMutation(ctx context.Context, mutation webserver.NativeGoalMutation) (webserver.NativeGoalMutationResult, error) {
-	a.turnMu.Lock()
-	defer a.turnMu.Unlock()
+type nativeGoalRuntime struct {
+	engine    plan.Engine
+	log       *session.Log
+	sessionID string
+}
 
-	if a.plans == nil || a.log == nil || a.currentID == "" {
+// nativeGoalMutation is the composition-root side of DSH's mutation-only
+// goal.* API. The addressed session, rather than the process-global REPL
+// selection, owns both the plan projection and durable event log.
+func (a *app) nativeGoalMutation(ctx context.Context, mutation webserver.NativeGoalMutation) (webserver.NativeGoalMutationResult, error) {
+	if a.plans == nil {
 		return webserver.NativeGoalMutationResult{}, errors.New("planning is not available for the active session")
 	}
-	if strings.TrimSpace(mutation.SessionID) != a.currentID {
-		return webserver.NativeGoalMutationResult{}, fmt.Errorf("session %q is not the active session", mutation.SessionID)
+	sessionID := strings.TrimSpace(mutation.SessionID)
+	if sessionID == "" {
+		return webserver.NativeGoalMutationResult{}, errors.New("session id is required")
 	}
+	ctx = runtimectx.With(ctx, runtimectx.Runtime{SessionID: sessionID})
+	log, err := a.sessionLogForAgent(ctx, sessionID)
+	if err != nil {
+		// Bare app instances used by direct CLI/unit tests may not have a
+		// store yet. This fallback is safe only for the same explicitly
+		// addressed current session; non-current sessions must have their own
+		// durable runtime materialized.
+		if a.agentRegistry != nil || sessionID != a.currentID || a.log == nil {
+			return webserver.NativeGoalMutationResult{}, err
+		}
+		log = a.log
+	}
+	engine, err := a.planEngineFor(ctx)
+	if err != nil {
+		return webserver.NativeGoalMutationResult{}, err
+	}
+	runtime := nativeGoalRuntime{engine: engine, log: log, sessionID: sessionID}
+	a.nativeGoalMu.Lock()
+	defer a.nativeGoalMu.Unlock()
 
 	switch mutation.Action {
 	case "goal.create":
-		return a.nativeCreateGoal(ctx, mutation)
+		return a.nativeCreateGoal(ctx, runtime, mutation)
 	case "goal.edit":
-		return a.nativeEditGoal(ctx, mutation)
+		return a.nativeEditGoal(ctx, runtime, mutation)
 	case "goal.pause":
-		return a.nativeSetGoalStatus(ctx, mutation, plan.StatusPaused)
+		return a.nativeSetGoalStatus(ctx, runtime, mutation, plan.StatusPaused)
 	case "goal.resume":
-		return a.nativeSetGoalStatus(ctx, mutation, plan.StatusInProgress)
+		return a.nativeSetGoalStatus(ctx, runtime, mutation, plan.StatusInProgress)
 	case "goal.complete":
-		return a.nativeSetGoalStatus(ctx, mutation, plan.StatusDone)
+		return a.nativeSetGoalStatus(ctx, runtime, mutation, plan.StatusDone)
 	case "goal.clear":
-		return a.nativeClearGoal(ctx, mutation)
+		return a.nativeClearGoal(ctx, runtime, mutation)
 	default:
 		return webserver.NativeGoalMutationResult{}, fmt.Errorf("unknown native goal action %q", mutation.Action)
 	}
 }
 
-func (a *app) nativeCreateGoal(ctx context.Context, mutation webserver.NativeGoalMutation) (webserver.NativeGoalMutationResult, error) {
-	if _, ok, err := a.currentGoal(ctx); err != nil {
+func (a *app) nativeCreateGoal(ctx context.Context, runtime nativeGoalRuntime, mutation webserver.NativeGoalMutation) (webserver.NativeGoalMutationResult, error) {
+	activeGoalID, err := a.currentActiveGoalFor(ctx, runtime.sessionID, runtime.log)
+	if err != nil {
 		return webserver.NativeGoalMutationResult{}, err
-	} else if ok {
+	} else if activeGoalID != "" {
 		return webserver.NativeGoalMutationResult{}, errors.New("a goal is already active")
 	}
 	objective := strings.TrimSpace(valueOrEmpty(mutation.Objective))
@@ -55,8 +80,7 @@ func (a *app) nativeCreateGoal(ctx context.Context, mutation webserver.NativeGoa
 	}
 	title := nativeGoalTitle(objective)
 	var created plan.Goal
-	var err error
-	if creator, ok := a.plans.(interface {
+	if creator, ok := runtime.engine.(interface {
 		CreateGoalWithMaxRounds(context.Context, string, string, int) (plan.Goal, error)
 	}); ok {
 		maxRounds := plan.DefaultMaxGoalRounds
@@ -65,12 +89,12 @@ func (a *app) nativeCreateGoal(ctx context.Context, mutation webserver.NativeGoa
 		}
 		created, err = creator.CreateGoalWithMaxRounds(ctx, title, objective, maxRounds)
 	} else {
-		created, err = a.plans.CreateGoal(ctx, title, objective)
+		created, err = runtime.engine.CreateGoal(ctx, title, objective)
 	}
 	if err != nil {
 		return webserver.NativeGoalMutationResult{}, err
 	}
-	if _, err := a.log.Append(session.EventPlanCreate, session.NewPlanCreate(string(plan.ScopeGoal), created.ID, created.Title, nil, map[string]any{
+	if _, err := runtime.log.Append(session.EventPlanCreate, session.NewPlanCreate(string(plan.ScopeGoal), created.ID, created.Title, nil, map[string]any{
 		"objective":     created.Objective,
 		"status":        created.Status,
 		"revision":      created.Revision,
@@ -80,16 +104,16 @@ func (a *app) nativeCreateGoal(ctx context.Context, mutation webserver.NativeGoa
 	})); err != nil {
 		return webserver.NativeGoalMutationResult{}, err
 	}
-	a.setGoalActivation(a.currentID, true)
+	a.setGoalActivation(runtime.sessionID, true)
 	return webserver.NativeGoalMutationResult{GoalID: created.ID, Revision: created.Revision}, nil
 }
 
-func (a *app) nativeEditGoal(ctx context.Context, mutation webserver.NativeGoalMutation) (webserver.NativeGoalMutationResult, error) {
-	current, err := a.nativeGoalByID(ctx, mutation.GoalID, mutation.Revision)
+func (a *app) nativeEditGoal(ctx context.Context, runtime nativeGoalRuntime, mutation webserver.NativeGoalMutation) (webserver.NativeGoalMutationResult, error) {
+	current, err := a.nativeGoalByID(ctx, runtime.engine, mutation.GoalID, mutation.Revision)
 	if err != nil {
 		return webserver.NativeGoalMutationResult{}, err
 	}
-	updater, ok := a.plans.(interface {
+	updater, ok := runtime.engine.(interface {
 		UpdateGoalIfRevision(context.Context, string, int, *string, *int) (plan.Goal, error)
 	})
 	if !ok {
@@ -99,7 +123,7 @@ func (a *app) nativeEditGoal(ctx context.Context, mutation webserver.NativeGoalM
 	if err != nil {
 		return webserver.NativeGoalMutationResult{}, err
 	}
-	if _, err := a.log.Append(session.EventPlanUpdate, session.NewPlanUpdate(string(plan.ScopeGoal), updated.ID, map[string]any{
+	if _, err := runtime.log.Append(session.EventPlanUpdate, session.NewPlanUpdate(string(plan.ScopeGoal), updated.ID, map[string]any{
 		"title":     updated.Title,
 		"objective": updated.Objective,
 		"maxRounds": updated.MaxRounds,
@@ -109,8 +133,8 @@ func (a *app) nativeEditGoal(ctx context.Context, mutation webserver.NativeGoalM
 	return webserver.NativeGoalMutationResult{GoalID: updated.ID, Revision: updated.Revision}, nil
 }
 
-func (a *app) nativeSetGoalStatus(ctx context.Context, mutation webserver.NativeGoalMutation, status plan.Status) (webserver.NativeGoalMutationResult, error) {
-	current, err := a.nativeGoalByID(ctx, mutation.GoalID, mutation.Revision)
+func (a *app) nativeSetGoalStatus(ctx context.Context, runtime nativeGoalRuntime, mutation webserver.NativeGoalMutation, status plan.Status) (webserver.NativeGoalMutationResult, error) {
+	current, err := a.nativeGoalByID(ctx, runtime.engine, mutation.GoalID, mutation.Revision)
 	if err != nil {
 		return webserver.NativeGoalMutationResult{}, err
 	}
@@ -128,44 +152,44 @@ func (a *app) nativeSetGoalStatus(ctx context.Context, mutation webserver.Native
 			return webserver.NativeGoalMutationResult{}, fmt.Errorf("goal is already terminal (%s)", current.Status)
 		}
 	}
-	if setter, ok := a.plans.(interface {
+	if setter, ok := runtime.engine.(interface {
 		SetGoalStatusIfRevision(context.Context, string, int, plan.Status) error
 	}); ok {
 		err = setter.SetGoalStatusIfRevision(ctx, current.ID, mutation.Revision, status)
 	} else {
-		err = a.plans.SetStatus(ctx, string(plan.ScopeGoal), current.ID, status)
+		err = runtime.engine.SetStatus(ctx, string(plan.ScopeGoal), current.ID, status)
 	}
 	if err != nil {
 		return webserver.NativeGoalMutationResult{}, err
 	}
-	if _, err := a.log.Append(session.EventPlanStatus, session.NewPlanStatus(string(plan.ScopeGoal), current.ID, string(status))); err != nil {
+	if _, err := runtime.log.Append(session.EventPlanStatus, session.NewPlanStatus(string(plan.ScopeGoal), current.ID, string(status))); err != nil {
 		return webserver.NativeGoalMutationResult{}, err
 	}
-	a.setGoalActivation(a.currentID, status == plan.StatusInProgress || status == plan.StatusPending)
-	updated, err := a.nativeGoalByID(ctx, current.ID, 0)
+	a.setGoalActivation(runtime.sessionID, status == plan.StatusInProgress || status == plan.StatusPending)
+	updated, err := a.nativeGoalByID(ctx, runtime.engine, current.ID, 0)
 	if err != nil {
 		return webserver.NativeGoalMutationResult{}, err
 	}
 	return webserver.NativeGoalMutationResult{GoalID: updated.ID, Revision: updated.Revision}, nil
 }
 
-func (a *app) nativeClearGoal(ctx context.Context, mutation webserver.NativeGoalMutation) (webserver.NativeGoalMutationResult, error) {
-	current, err := a.nativeGoalByID(ctx, mutation.GoalID, mutation.Revision)
+func (a *app) nativeClearGoal(ctx context.Context, runtime nativeGoalRuntime, mutation webserver.NativeGoalMutation) (webserver.NativeGoalMutationResult, error) {
+	current, err := a.nativeGoalByID(ctx, runtime.engine, mutation.GoalID, mutation.Revision)
 	if err != nil {
 		return webserver.NativeGoalMutationResult{}, err
 	}
-	if err := a.plans.Remove(ctx, string(plan.ScopeGoal), current.ID); err != nil {
+	if err := runtime.engine.Remove(ctx, string(plan.ScopeGoal), current.ID); err != nil {
 		return webserver.NativeGoalMutationResult{}, err
 	}
-	if _, err := a.log.Append(session.EventPlanDelete, session.NewPlanDelete(string(plan.ScopeGoal), current.ID)); err != nil {
+	if _, err := runtime.log.Append(session.EventPlanDelete, session.NewPlanDelete(string(plan.ScopeGoal), current.ID)); err != nil {
 		return webserver.NativeGoalMutationResult{}, err
 	}
-	a.setGoalActivation(a.currentID, false)
+	a.setGoalActivation(runtime.sessionID, false)
 	return webserver.NativeGoalMutationResult{GoalID: current.ID, Revision: current.Revision + 1, Cleared: true}, nil
 }
 
-func (a *app) nativeGoalByID(ctx context.Context, id string, revision int) (plan.Goal, error) {
-	goals, err := a.plans.List(ctx)
+func (a *app) nativeGoalByID(ctx context.Context, engine plan.Engine, id string, revision int) (plan.Goal, error) {
+	goals, err := engine.List(ctx)
 	if err != nil {
 		return plan.Goal{}, err
 	}

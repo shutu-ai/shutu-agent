@@ -97,8 +97,11 @@ export interface ProviderView {
 
 export interface MCPServerView {
   name?: string
+  transport?: string
   cmd?: string
   args?: string[]
+  url?: string
+  headers?: Record<string, string>
   connected?: boolean
   tool_count?: number
   enabled?: boolean
@@ -130,6 +133,13 @@ export interface ContextView {
   used_tokens: number
   context_window: number
   percent: number
+	completion_ledger?: {
+		assistantTokens: number
+		reasoningTokens: number
+		toolCallTokens: number
+		toolResultTokens: number
+		attachmentBytes: number
+	}
 }
 
 export interface TodoView {
@@ -313,6 +323,12 @@ export interface ConfigView {
   web_server_addr?: string
   tools_enabled?: string[]
   tools_enabled_count?: number
+  tool_catalog?: {
+    schemaVersion?: number
+    revision?: number
+    digest?: string
+    tools?: { name: string; visible?: boolean; profile?: string }[]
+  }
   providers?: ProviderView[]
   mcp_servers?: MCPServerView[]
   commands?: CommandView[]
@@ -385,7 +401,7 @@ export interface WebApi {
   saveProvider(provider: { id: string; name?: string; base_url?: string; model?: string; api_key?: string; protocol?: string; models?: ProviderModelView[]; custom?: boolean }, signal?: AbortSignal): Promise<void>
   deleteProvider(id: string, signal?: AbortSignal): Promise<void>
   discoverProvider(values: { provider: string; base_url?: string; protocol?: string; api_key?: string }, signal?: AbortSignal): Promise<ProviderModelView[]>
-  manageMcp(action: 'add' | 'update' | 'delete', values: { original_name?: string; name?: string; cmd?: string; args?: string[] }, signal?: AbortSignal): Promise<MCPServerView[]>
+  manageMcp(action: 'add' | 'update' | 'delete', values: { original_name?: string; name?: string; transport?: string; cmd?: string; args?: string[]; url?: string; headers?: Record<string, string> }, signal?: AbortSignal): Promise<MCPServerView[]>
   refreshMcp(signal?: AbortSignal): Promise<MCPServerView[]>
   listSubagents(sessionId: string, signal?: AbortSignal): Promise<SubagentView[]>
   listJobs(sessionId: string, signal?: AbortSignal): Promise<JobView[]>
@@ -557,7 +573,7 @@ export class ShutuApi implements WebApi {
     return this.json<{ models: ProviderModelView[] }>('/api/config/provider/discover', { method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(values) }).then(result => result.models ?? [])
   }
 
-  manageMcp(action: 'add' | 'update' | 'delete', values: { original_name?: string; name?: string; cmd?: string; args?: string[] }, signal?: AbortSignal): Promise<MCPServerView[]> {
+  manageMcp(action: 'add' | 'update' | 'delete', values: { original_name?: string; name?: string; transport?: string; cmd?: string; args?: string[]; url?: string; headers?: Record<string, string> }, signal?: AbortSignal): Promise<MCPServerView[]> {
     return this.json<{ servers: MCPServerView[] }>('/api/config/mcp', { method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, ...values }) }).then(result => result.servers ?? [])
   }
 

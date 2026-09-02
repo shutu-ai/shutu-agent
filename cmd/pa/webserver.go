@@ -17,8 +17,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,10 +30,14 @@ import (
 	"github.com/jabing/shutu-agent/internal/config"
 	"github.com/jabing/shutu-agent/internal/interact"
 	"github.com/jabing/shutu-agent/internal/llm"
+	"github.com/jabing/shutu-agent/internal/meter"
 	"github.com/jabing/shutu-agent/internal/plan"
+	"github.com/jabing/shutu-agent/internal/projection"
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 	"github.com/jabing/shutu-agent/internal/session"
 	"github.com/jabing/shutu-agent/internal/spill"
 	"github.com/jabing/shutu-agent/internal/store"
+	"github.com/jabing/shutu-agent/internal/tools"
 	"github.com/jabing/shutu-agent/internal/webserver"
 )
 
@@ -44,8 +50,14 @@ import (
 const eventHubBuffer = 256
 
 type eventHub struct {
-	mu   sync.Mutex
-	subs map[string]map[chan session.Event]struct{}
+	mu      sync.Mutex
+	subs    map[string]map[chan session.Event]struct{}
+	allSubs map[chan eventHubEvent]struct{}
+}
+
+type eventHubEvent struct {
+	sessionID string
+	event     session.Event
 }
 
 type webQueueMessage struct {
@@ -57,7 +69,7 @@ type webQueueMessage struct {
 
 // NewEventHub returns an empty event hub.
 func NewEventHub() *eventHub {
-	return &eventHub{subs: make(map[string]map[chan session.Event]struct{})}
+	return &eventHub{subs: make(map[string]map[chan session.Event]struct{}), allSubs: make(map[chan eventHubEvent]struct{})}
 }
 
 // Publish broadcasts ev to every subscriber of the session (non-blocking: a
@@ -71,6 +83,12 @@ func (h *eventHub) Publish(sessionID string, ev session.Event) {
 		case ch <- ev:
 		default:
 			// Buffer full: drop this slow subscriber.
+		}
+	}
+	for ch := range h.allSubs {
+		select {
+		case ch <- eventHubEvent{sessionID: sessionID, event: ev}:
+		default:
 		}
 	}
 }
@@ -96,6 +114,27 @@ func (h *eventHub) Subscribe(sessionID string) (chan session.Event, func()) {
 			if len(set) == 0 {
 				delete(h.subs, sessionID)
 			}
+		}
+		h.mu.Unlock()
+	}
+}
+
+// SubscribeAll registers a process-lifetime observer. SDK clients need this
+// rather than a per-session subscription because a session tree can create
+// child sessions after the prompt has already been admitted.
+func (h *eventHub) SubscribeAll() (chan eventHubEvent, func()) {
+	ch := make(chan eventHubEvent, eventHubBuffer)
+	h.mu.Lock()
+	if h.allSubs == nil {
+		h.allSubs = make(map[chan eventHubEvent]struct{})
+	}
+	h.allSubs[ch] = struct{}{}
+	h.mu.Unlock()
+	return ch, func() {
+		h.mu.Lock()
+		if _, ok := h.allSubs[ch]; ok {
+			delete(h.allSubs, ch)
+			close(ch)
 		}
 		h.mu.Unlock()
 	}
@@ -157,6 +196,16 @@ func (a *app) registerWebServer() error {
 	// exposes web_server.token or any key — the webserver only forwards it.
 	srv.SetConfigProvider(a.webConfig)
 	srv.SetContextWindow(a.contextWindowOf)
+	srv.SetContextMeter(func(sessionID string, events []session.Event) (meter.Measurement, error) {
+		if a.usageMeter == nil {
+			return meter.Measurement{}, errors.New("usage meter is unavailable")
+		}
+		var restored session.Log
+		if err := restored.Restore(events); err != nil {
+			return meter.Measurement{}, err
+		}
+		return a.usageMeter.Measure(sessionID, &restored, nil), nil
+	})
 	srv.SetSessionStateProvider(a.webSessionState)
 	srv.SetTurnStopper(a.stopTurn)
 	// M10 W4 (ADR D-WEB2-H): inject the read-only subagent and background-job
@@ -183,11 +232,18 @@ func (a *app) registerWebServer() error {
 	if a.attachStore != nil {
 		srv.SetAttachmentStore(a.attachStore)
 	}
+	srv.SetNativeImageCapabilityResolver(func(_ context.Context, sessionID string) bool {
+		return a.multimodalEnabled() && a.attachStore != nil && a.llmSupportsImagesForSession(sessionID)
+	})
 	// P5.1 (模型选择实时生效): wire the live model switch.
 	srv.SetModelSwitcher(func(ctx context.Context, provider, model, effort string) error {
 		return a.webSwitchModel(ctx, provider, model, effort)
 	})
+	srv.SetSessionModelValidator(a.validateSessionModelSelection)
 	srv.SetNativeDefaultModelSaver(a.saveNativeDefaultModel)
+	// Native session.rename must use the same live log as prompts and mux
+	// projections, so the returned seq is a real session/title event boundary.
+	srv.SetNativeSessionRenamer(a.nativeRenameSession)
 	// M11 (增加提供方 / 增加自定义提供方): wire the provider-management API. A
 	// "save" of a built-in provider stores only the API-key override (custom:false);
 	// a "save" of a custom provider (custom:true) persists the full profile + key;
@@ -197,7 +253,10 @@ func (a *app) registerWebServer() error {
 		case "save":
 			models := make([]customModel, 0, len(edit.Models))
 			for _, m := range edit.Models {
-				models = append(models, customModel{ID: m.ID, Name: m.Name, ContextWindow: m.ContextWindow, MaxTokens: m.MaxTokens})
+				models = append(models, customModel{
+					ID: m.ID, Name: m.Name, Input: append([]string(nil), m.Input...), ReasoningEfforts: cloneReasoningEfforts(m.ReasoningEfforts), DefaultReasoningEffort: m.DefaultReasoningEffort, DefaultMaxTokens: m.DefaultMaxTokens, ContextWindow: m.ContextWindow, MaxTokens: m.MaxTokens,
+					Reasoning: m.Reasoning, Tools: m.Tools, Vision: m.Vision, Audio: m.Audio,
+				})
 			}
 			if edit.Custom {
 				return a.webSaveCustomProvider(ctx, edit.ID, edit.Name, edit.BaseURL, edit.Model, edit.APIKey, edit.Protocol, models)
@@ -234,7 +293,10 @@ func (a *app) registerWebServer() error {
 		}
 		out := make([]webserver.ProviderModel, 0, len(models))
 		for _, m := range models {
-			out = append(out, webserver.ProviderModel{ID: m.ID, Name: m.Name, ContextWindow: m.ContextWindow, MaxTokens: m.MaxTokens})
+			out = append(out, webserver.ProviderModel{
+				ID: m.ID, Name: m.Name, Input: append([]string(nil), m.Input...), ReasoningEfforts: cloneReasoningEfforts(m.ReasoningEfforts), DefaultReasoningEffort: m.DefaultReasoningEffort, DefaultMaxTokens: m.DefaultMaxTokens, ContextWindow: m.ContextWindow, MaxTokens: m.MaxTokens,
+				Reasoning: m.Reasoning, Tools: m.Tools, Vision: m.Vision, Audio: m.Audio,
+			})
 		}
 		return out, nil
 	})
@@ -248,44 +310,14 @@ func (a *app) registerWebServer() error {
 	// sensitive-tool gate is waiting on. The engine is optional by capability;
 	// an unconfigured interact seam answers 501 from the generic server.
 	if a.interacts != nil {
+		answerer := a.approvalAnswerer()
 		srv.SetInteractionManager(
-			func(ctx context.Context, sessionID string) ([]interact.Request, error) {
-				items, err := a.interacts.List(ctx)
-				if err != nil || sessionID == "" {
-					return items, err
-				}
-				filtered := make([]interact.Request, 0, len(items))
-				for _, item := range items {
-					if a.interactionBelongsTo(item.ID, sessionID) {
-						filtered = append(filtered, item)
-					}
-				}
-				return filtered, nil
-			},
+			answerer.List,
 			func(ctx context.Context, sessionID, id string, status interact.ApprovalStatus, answer string) error {
-				if !a.interactionBelongsTo(id, sessionID) {
-					return interact.ErrUnknownRequest
-				}
-				var err error
-				if answerResolver, ok := a.interacts.(interact.AnswerResolver); ok {
-					_, err = answerResolver.ResolveWithAnswer(ctx, id, status, answer)
-				} else {
-					_, err = a.interacts.Resolve(ctx, id, status)
-				}
-				if err != nil {
-					return err
-				}
-				if a.log != nil {
-					if status == interact.StatusCanceled {
-						_, _ = a.log.Append(session.EventInteractCancel, session.NewInteractCancel(id))
-					} else {
-						approved := status == interact.StatusApproved
-						_, _ = a.log.Append(session.EventInteractResolve, session.NewInteractResolve(id, approved))
-					}
-				}
-				return nil
+				return answerer.Resolve(ctx, sessionID, id, status, answer, false)
 			},
 		)
+		srv.SetInteractionSessionResolver(a.interactionSession)
 	}
 	a.webserver = srv
 	go func() {
@@ -308,6 +340,13 @@ func (m nativeCommandManager) List(_ context.Context, _ string) ([]webserver.Nat
 	commands := m.app.webCommandCatalog()
 	out := make([]webserver.NativeCommand, 0, len(commands))
 	for _, command := range commands {
+		if command["kind"] != "command" {
+			// User-invocable skills are model-turn inputs in this application,
+			// not entries in the native human-command registry. Advertising them
+			// here would make commands/execute claim a command while Web routes
+			// the same line into a normal Agent turn.
+			continue
+		}
 		name := strings.TrimSpace(command["name"])
 		hint := strings.TrimSpace(command["hint"])
 		if name == "" || hint == "" {
@@ -318,7 +357,7 @@ func (m nativeCommandManager) List(_ context.Context, _ string) ([]webserver.Nat
 			description = strings.TrimSpace(strings.TrimPrefix(description, "Skill: "))
 		}
 		out = append(out, webserver.NativeCommand{
-			Name: name, Description: description, InputHint: hint,
+			Name: name, Description: description, InputHint: hint, Images: name == "plan",
 		})
 	}
 	return out, nil
@@ -336,7 +375,7 @@ func (m nativeCommandManager) Execute(ctx context.Context, sessionID, line strin
 	name := strings.TrimPrefix(fields[0], "/")
 	known := false
 	for _, command := range m.app.webCommandCatalog() {
-		if command["name"] == name {
+		if command["kind"] == "command" && command["name"] == name {
 			known = true
 			break
 		}
@@ -344,13 +383,64 @@ func (m nativeCommandManager) Execute(ctx context.Context, sessionID, line strin
 	if !known {
 		return webserver.NativeCommandExecution{}, false, nil
 	}
+	commandLogCtx := runtimectx.With(ctx, runtimectx.Runtime{SessionID: sessionID})
+	log := m.app.webLog(commandLogCtx)
+	if log == nil && m.app.agentRegistry != nil {
+		var err error
+		log, err = m.app.sessionLogForAgent(ctx, sessionID)
+		if err != nil {
+			return webserver.NativeCommandExecution{}, true, err
+		}
+	}
+	if log == nil {
+		return webserver.NativeCommandExecution{}, true, errors.New("session log unavailable")
+	}
+	startSeq := log.NextSeq()
 	if err := m.app.webMessage(ctx, sessionID, line, images); err != nil {
 		return webserver.NativeCommandExecution{}, true, err
 	}
-	return webserver.NativeCommandExecution{
-		CommandID: fmt.Sprintf("shutu-cmd-%d", time.Now().UnixNano()),
-		Result:    webserver.NativeCommandResult{Kind: "success"},
-	}, true, nil
+	return nativeCommandExecutionFromEvents(log.Events(), startSeq), true, nil
+}
+
+// nativeCommandExecutionFromEvents returns the command execution that the
+// Web command path actually committed. Keeping this derived from the same
+// durable rows avoids the old native adapter bug that invented a second
+// command ID and discarded the command result text.
+func nativeCommandExecutionFromEvents(events []session.Event, startSeq uint64) webserver.NativeCommandExecution {
+	var execution webserver.NativeCommandExecution
+	for _, event := range events {
+		if event.Seq < startSeq {
+			continue
+		}
+		switch event.Type {
+		case session.EventCommandRun:
+			var data struct {
+				CommandID string `json:"commandId"`
+			}
+			if json.Unmarshal(event.Data, &data) == nil {
+				execution.CommandID = data.CommandID
+			}
+		case session.EventCommandDone:
+			var data struct {
+				CommandID      string  `json:"commandId"`
+				Kind           string  `json:"kind"`
+				Text           string  `json:"text"`
+				SourceEventSeq *uint64 `json:"sourceEventSeq"`
+			}
+			if json.Unmarshal(event.Data, &data) == nil && data.CommandID == execution.CommandID {
+				execution.Result.Kind = data.Kind
+				execution.Result.SourceEventSeq = data.SourceEventSeq
+			}
+		case session.EventWebCommandResult:
+			var data struct {
+				Text string `json:"text"`
+			}
+			if json.Unmarshal(event.Data, &data) == nil {
+				execution.Result.Text = data.Text
+			}
+		}
+	}
+	return execution
 }
 
 // webSessionState reconstructs the durable state projection for an arbitrary
@@ -362,34 +452,24 @@ func (a *app) webSessionState(ctx context.Context, sessionID string) (map[string
 	if err != nil {
 		return nil, err
 	}
+	snapshot, err := projection.Build(events)
+	if err != nil {
+		return nil, err
+	}
 	state := map[string]any{
 		"session_id":   sessionID,
-		"plan_mode":    session.FoldPlanMode(events),
+		"plan_mode":    snapshot.PlanMode.Active,
 		"plan_enabled": a.plans != nil,
 	}
 	if a.plans != nil {
-		projection := plan.NewEngine(plan.NewMemProvider())
-		restorer, ok := any(projection).(plan.EventRestorer)
-		if !ok {
-			return nil, errors.New("plan projection cannot restore session state")
-		}
-		if err := restorer.Restore(events); err != nil {
-			return nil, err
-		}
-		goals, err := projection.List(ctx)
-		if err != nil {
-			return nil, err
-		}
-		plans, err := projectionProviderPlans(ctx, projection)
-		if err != nil {
-			return nil, err
-		}
-		state["goals"] = goals
-		state["plans"] = plans
-		_ = projection.Close()
+		state["goals"] = projectionEntitiesForWeb(snapshot.Goals)
+		state["plans"] = projectionEntitiesForWeb(snapshot.Plans)
 	} else {
 		state["goals"] = []plan.Goal{}
 		state["plans"] = []plan.Plan{}
+	}
+	if snapshot.Team != nil {
+		state["team"] = snapshot.Team
 	}
 	if a.spills == nil {
 		state["memory_enabled"] = false
@@ -405,21 +485,36 @@ func (a *app) webSessionState(ctx context.Context, sessionID string) (map[string
 	return state, nil
 }
 
-// projectionProviderPlans reads the disposable provider behind a replay-only
-// plan engine. The public Engine intentionally exposes the goal-rooted tree;
-// the Web state snapshot also needs standalone plans, so the provider remains
-// the narrow read boundary here.
-func projectionProviderPlans(ctx context.Context, engine plan.Engine) ([]plan.Plan, error) {
-	providerEngine, ok := engine.(interface {
-		ProviderPlans(context.Context) ([]plan.Plan, error)
-	})
-	if ok {
-		return providerEngine.ProviderPlans(ctx)
+// projectionEntitiesForWeb is the sole wire adapter for generic control
+// entities. The durable projection owns the fold; this function only adds the
+// canonical identity/status fields expected by the existing Web contract.
+func projectionEntitiesForWeb(entities []projection.Entity) []map[string]any {
+	out := make([]map[string]any, 0, len(entities))
+	for _, entity := range entities {
+		record := make(map[string]any, len(entity.Data)+4)
+		for key, value := range entity.Data {
+			record[key] = value
+		}
+		record["id"] = entity.ID
+		if entity.Scope != "" {
+			record["scope"] = entity.Scope
+		}
+		if entity.Name != "" {
+			record["name"] = entity.Name
+		}
+		if entity.Status != "" {
+			record["status"] = entity.Status
+		}
+		record["seq"] = entity.Seq
+		out = append(out, record)
 	}
-	return []plan.Plan{}, nil
+	return out
 }
 
 func (a *app) webQueueList(ctx context.Context, sessionID string) ([]webserver.QueueItem, error) {
+	if err := a.requireAddressedSession(ctx, sessionID); err != nil {
+		return nil, err
+	}
 	a.webQueueMu.Lock()
 	defer a.webQueueMu.Unlock()
 	queued := a.webQueue[sessionID]
@@ -433,9 +528,15 @@ func (a *app) webQueueList(ctx context.Context, sessionID string) ([]webserver.Q
 }
 
 func (a *app) webQueueEnqueue(ctx context.Context, sessionID, text string) (webserver.QueueItem, error) {
+	if err := a.requireRunning(); err != nil {
+		return webserver.QueueItem{}, err
+	}
 	text = strings.TrimSpace(text)
 	if sessionID == "" {
 		return webserver.QueueItem{}, errors.New("session id is required")
+	}
+	if err := a.requireAddressedSession(ctx, sessionID); err != nil {
+		return webserver.QueueItem{}, err
 	}
 	if text == "" {
 		return webserver.QueueItem{}, errors.New("text is required")
@@ -462,6 +563,12 @@ func (a *app) webQueueEnqueue(ctx context.Context, sessionID, text string) (webs
 }
 
 func (a *app) webQueueUpdate(ctx context.Context, sessionID, itemID, action string) error {
+	if err := a.requireRunning(); err != nil {
+		return err
+	}
+	if err := a.requireAddressedSession(ctx, sessionID); err != nil {
+		return err
+	}
 	if action != "move_first" && action != "delete" && action != "steer" {
 		return fmt.Errorf("unsupported queue action %q", action)
 	}
@@ -495,7 +602,31 @@ func (a *app) webQueueUpdate(ctx context.Context, sessionID, itemID, action stri
 	return nil
 }
 
-func (a *app) webQueueEdit(_ context.Context, sessionID, itemID, text string) error {
+// requireAddressedSession is the application-side trust fence for Web
+// callbacks that mutate process-local session state. Generic webserver tests
+// may use an in-memory callback without a store; production app callbacks
+// always have the durable session catalog and must reject guessed IDs before
+// queueing work.
+func (a *app) requireAddressedSession(ctx context.Context, sessionID string) error {
+	if strings.TrimSpace(sessionID) == "" {
+		return errors.New("session id is required")
+	}
+	if a == nil || a.store == nil {
+		return nil
+	}
+	if _, err := a.store.GetSessionMeta(ctx, strings.TrimSpace(sessionID)); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (a *app) webQueueEdit(ctx context.Context, sessionID, itemID, text string) error {
+	if err := a.requireRunning(); err != nil {
+		return err
+	}
+	if err := a.requireAddressedSession(ctx, sessionID); err != nil {
+		return err
+	}
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return errors.New("text is required")
@@ -514,9 +645,13 @@ func (a *app) webQueueEdit(_ context.Context, sessionID, itemID, text string) er
 }
 
 func (a *app) webTurnRunning(sessionID string) bool {
-	v := a.runningSession.Load()
-	running, _ := v.(string)
-	return running != "" && (sessionID == "" || running == sessionID)
+	if sessionID == "" {
+		a.runningMu.Lock()
+		running := len(a.runningSessions) > 0
+		a.runningMu.Unlock()
+		return running
+	}
+	return a.isSessionRunning(sessionID)
 }
 
 func (a *app) drainWebQueue(sessionID string) {
@@ -557,41 +692,106 @@ func (a *app) webMessage(ctx context.Context, sessionID, text string, images []l
 		return errors.New("empty message text")
 	}
 	defer a.drainWebQueue(sessionID)
+	// Agent-backed sessions already own independent loop/runtime state. Keep
+	// their command and ordinary-message paths serialized only within the
+	// addressed session; using the process-global legacy turn lock here would make two
+	// browser conversations contend for one another's turn boundary.
+	if a.agentRegistry != nil && sessionID != "" {
+		unlock := a.lockWebSession(sessionID)
+		defer unlock()
+	}
 	// Sensitive-tool approvals raised during a Web turn are resolved by the
 	// browser approval card, not by the REPL stdin prompt.
 	ctx = withWebApprovalContext(ctx)
-	if sessionID != "" && sessionID != a.currentID {
+	// Agent-backed sessions are independent runtime objects. Only the legacy
+	// command path needs to activate the process-global compatibility session.
+	if a.agentRegistry == nil && sessionID != "" && sessionID != a.currentID {
 		if err := a.resumeSession(ctx, sessionID); err != nil {
 			return err
 		}
+	}
+	if a.agentRegistry != nil && sessionID != "" {
+		log, err := a.sessionLogForAgent(ctx, sessionID)
+		if err != nil {
+			return err
+		}
+		// Slash commands run before the Agent loop installs its own runtime
+		// context. Install the addressed session here so command-side durable
+		// projections cannot fall back to the process-global a.log/currentID.
+		ctx = runtimectx.With(ctx, runtimectx.Runtime{
+			SessionID: sessionID,
+			Emit: func(typ string, data any) error {
+				if log == nil {
+					return errors.New("no active session")
+				}
+				_, err := log.Append(typ, data)
+				return err
+			},
+		})
 	}
 	// dsh 斜杠命令 (输入条 "/"): a leading "/" routes to a command handler that
 	// appends a rendered result to the session — no LLM turn. Session-switching
 	// commands (/new, /resume) stay on the sidebar/+ menu, which already drive
 	// them through the session manager.
-	if len(images) == 0 && strings.HasPrefix(strings.TrimSpace(text), "/") && !a.isUserSkillInvocation(ctx, strings.TrimSpace(text)) {
-		trimmed := strings.TrimSpace(text)
-		if strings.HasPrefix(trimmed, "/plan") && (len(trimmed) == len("/plan") || trimmed[len("/plan")] == ' ' || trimmed[len("/plan")] == '\t') {
-			a.turnMu.Lock()
-			submit, err := a.webPlanCommand(ctx, strings.TrimSpace(trimmed[len("/plan"):]))
-			a.turnMu.Unlock()
+	trimmedText := strings.TrimSpace(text)
+	isPlanCommand := isPlanCommandLine(trimmedText)
+	if strings.HasPrefix(trimmedText, "/") && !a.isUserSkillInvocation(ctx, trimmedText) {
+		if len(images) > 0 && !isPlanCommand {
+			return fmt.Errorf("command %q does not accept image attachments", strings.Fields(trimmedText)[0])
+		}
+		trimmed := trimmedText
+		if isPlanCommand {
+			planLog := a.webLog(ctx)
+			planID, startErr := appendCommandRun(planLog, "plan", strings.TrimSpace(trimmed[len("/plan"):]))
+			if startErr != nil {
+				return startErr
+			}
+			finishPlan := func(kind, result string) error {
+				return appendCommandDone(planLog, planID, kind, result)
+			}
+			var submit bool
+			var err error
+			if a.agentRegistry == nil {
+				a.sessionStateMu.Lock()
+				submit, err = a.webPlanCommandWithImages(ctx, strings.TrimSpace(trimmed[len("/plan"):]), images)
+				a.sessionStateMu.Unlock()
+			} else {
+				submit, err = a.webPlanCommandWithImages(ctx, strings.TrimSpace(trimmed[len("/plan"):]), images)
+			}
 			if err != nil {
+				_ = finishPlan("error", err.Error())
 				return err
 			}
 			if submit {
-				if err := a.runTurn(ctx, strings.TrimSpace(trimmed[len("/plan"):]), false); err != nil {
+				content := planContent(strings.TrimSpace(trimmed[len("/plan"):]), images)
+				var turnErr error
+				if len(content) > 0 {
+					turnErr = a.runTurnContentFor(ctx, sessionID, content, false)
+				} else {
+					turnErr = a.runTurnFor(ctx, sessionID, strings.TrimSpace(trimmed[len("/plan"):]), false)
+				}
+				if err := turnErr; err != nil {
+					_ = finishPlan("error", err.Error())
 					return err
 				}
 			}
-			return a.runIdleGoal(ctx, false)
+			if err := finishPlan("success", ""); err != nil {
+				return err
+			}
+			return a.runIdleGoalFor(ctx, sessionID, a.webLog(ctx), false)
 		}
-		a.turnMu.Lock()
-		err := a.webCommand(ctx, trimmed)
-		a.turnMu.Unlock()
+		var err error
+		if a.agentRegistry == nil {
+			a.sessionStateMu.Lock()
+			err = a.webCommand(ctx, trimmed)
+			a.sessionStateMu.Unlock()
+		} else {
+			err = a.webCommand(ctx, trimmed)
+		}
 		if err != nil {
 			return err
 		}
-		return a.runIdleGoal(ctx, false)
+		return a.runIdleGoalFor(ctx, sessionID, a.webLog(ctx), false)
 	}
 	if len(images) > 0 {
 		if !a.multimodalEnabled() || a.attachStore == nil {
@@ -601,10 +801,18 @@ func (a *app) webMessage(ctx context.Context, sessionID, text string, images []l
 		for _, img := range images {
 			blocks = append(blocks, llm.ContentBlock{Kind: llm.BlockImage, Image: img})
 		}
-		if a.log == nil {
+		imageLog := a.log
+		if a.agentRegistry != nil {
+			var err error
+			imageLog, err = a.sessionLogForAgent(ctx, sessionID)
+			if err != nil {
+				return err
+			}
+		}
+		if imageLog == nil {
 			return fmt.Errorf("no active session")
 		}
-		if _, err := a.log.Append(session.EventUserMessage, session.NewUserMessageWithBlocks("", blocks)); err != nil {
+		if _, err := imageLog.Append(session.EventUserMessage, session.NewUserMessageWithBlocks("", blocks)); err != nil {
 			return fmt.Errorf("web message: log image: %w", err)
 		}
 	}
@@ -622,22 +830,26 @@ func (a *app) webMessage(ctx context.Context, sessionID, text string, images []l
 	}
 	turnBase = withWebApprovalContext(turnBase)
 	turnCtx, cancel := context.WithCancel(turnBase)
-	a.setTurnCancel(cancel)
-	defer func() { a.clearTurnCancel(); cancel() }()
+	a.setTurnCancel(sessionID, cancel)
+	defer func() { a.clearTurnCancel(sessionID); cancel() }()
 	if err := a.runTurnFor(turnCtx, sessionID, text, false); err != nil {
 		return err
 	}
 	// Keep Web and REPL turn completion identical: persist long-term memories
 	// before title/goal continuation runs.
-	a.spillAutoSpill(turnCtx)
+	postLog := a.log
+	if a.agentRegistry != nil {
+		postLog, _ = a.sessionLogForAgent(turnCtx, sessionID)
+	}
+	a.spillAutoSpillFor(turnCtx, sessionID, postLog)
 	// session-title alignment (dsh): after the first eligible message, the
 	// deterministic fallback is stored and the asynchronous model title is
-	// scheduled. This runs after the turn, outside turnMu, so it never delays
+	// scheduled. This runs after the turn, outside the legacy turn lock, so it never delays
 	// the answer.
 	a.ensureSessionTitle(turnCtx, sessionID)
 	// Goal driver idle/followup: the outer web turn has settled, so each
 	// continuation round can acquire the shared turn lock independently.
-	if err := a.runIdleGoal(turnCtx, false); err != nil {
+	if err := a.runIdleGoalFor(turnCtx, sessionID, postLog, false); err != nil {
 		return err
 	}
 	// dsh-session-status: keep this session out of the finished-but-unviewed
@@ -647,6 +859,24 @@ func (a *app) webMessage(ctx context.Context, sessionID, text string, images []l
 	return nil
 }
 
+// lockWebSession returns an unlock function for command/turn mutations in one
+// Agent-backed Web session. The lock objects are process-local coordination;
+// durable event sequence allocation remains owned by session.Log/store.
+func (a *app) lockWebSession(sessionID string) func() {
+	a.webSessionMu.Lock()
+	if a.webSessionLocks == nil {
+		a.webSessionLocks = make(map[string]*sync.Mutex)
+	}
+	lock := a.webSessionLocks[sessionID]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		a.webSessionLocks[sessionID] = lock
+	}
+	a.webSessionMu.Unlock()
+	lock.Lock()
+	return lock.Unlock
+}
+
 // webCommand handles a leading "/" in a web composer message (dsh 斜杠命令
 // 对齐, ①③⑤): it appends the command as a user/message, dispatches it, and
 // appends the result as an assistant/message so the web chat renders the whole
@@ -654,56 +884,96 @@ func (a *app) webMessage(ctx context.Context, sessionID, text string, images []l
 // a turn, so the SSE stream renders them. Session-switching commands (/new,
 // /resume) are deliberately not routed here — the sidebar and the composer "+"
 // menu already drive them through the session manager.
-func (a *app) webCommand(ctx context.Context, line string) error {
+func (a *app) webCommandLegacy(ctx context.Context, line string) (err error) {
+	// Keep the historical entry point on the canonical command lifecycle. The
+	// old implementation below is retained only for source compatibility and
+	// must never execute because it predates the command result contract.
+	if a != nil {
+		return a.webCommand(ctx, line)
+	}
+
+	log := a.webLog(ctx)
+	if log == nil {
+		return errors.New("no active session")
+	}
 	fields := strings.Fields(line)
 	if len(fields) == 0 {
 		return errors.New("empty command")
 	}
 	name := fields[0]
 	args := fields[1:]
+	commandID := ""
+	commandKind := "success"
+	commandText := ""
+	if isWebCommandName(strings.TrimPrefix(name, "/")) {
+		commandID, err = appendCommandRun(log, strings.TrimPrefix(name, "/"), commandArgs(line, name))
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if err != nil {
+				commandKind = "error"
+				commandText = err.Error()
+			}
+			if appendErr := appendCommandDone(log, commandID, commandKind, commandText); err == nil && appendErr != nil {
+				err = appendErr
+			}
+		}()
+	}
 	if name == "/feedback" {
 		result, err := a.webFeedback(ctx, strings.TrimSpace(line[len(name):]))
 		if err != nil {
+			commandKind = "error"
+			commandText = err.Error()
+		} else {
+			commandText = result
 			result = "⚠ " + err.Error()
 		}
-		_, appendErr := a.log.Append(session.EventWebCommandResult, session.NewWebCommandResult(result, "feedback"))
+		_, appendErr := log.Append(session.EventWebCommandResult, session.NewWebCommandResult(result, "feedback"))
 		if appendErr != nil {
 			return appendErr
 		}
 		return nil
 	}
 	if name == "/plan" {
-		_, err := a.webPlanCommand(ctx, strings.TrimSpace(line[len(name):]))
+		_, err = a.webPlanCommand(ctx, strings.TrimSpace(line[len(name):]))
 		return err
 	}
 	if name == "/export" {
 		if len(args) > 0 {
-			return a.appendWebCommandResult("The Web /export command does not accept a path.")
+			commandKind = "error"
+			commandText = "The Web /export command does not accept a path."
+			return a.appendWebCommandResultOn(log, "The Web /export command does not accept a path.")
 		}
-		return a.appendWebCommandResult("Session log download requested.", "export")
+		commandText = "Session log download requested."
+		return a.appendWebCommandResultOn(log, "Session log download requested.", "export")
 	}
-	if _, err := a.log.Append(session.EventUserMessage, session.NewUserMessage(line)); err != nil {
+	if _, err := log.Append(session.EventUserMessage, session.NewUserMessage(line)); err != nil {
 		return err
 	}
 	result, err := a.execWebCommand(ctx, name, args)
 	if err != nil {
+		commandKind = "error"
+		commandText = err.Error()
+	} else {
+		commandText = result
 		result = "⚠ " + err.Error()
 	}
-	if _, err := a.log.Append(session.EventAssistantMessage, session.NewAssistantMessage(result, nil, "stop")); err != nil {
+	if _, err := log.Append(session.EventAssistantMessage, session.NewAssistantMessage(result, nil, "stop")); err != nil {
 		return err
 	}
 	return nil
 }
 
-// execWebCommand dispatches a single web slash command and returns the
-// model-facing result text (a non-nil error means an invalid command or bad
-// args; the caller renders it as the assistant reply).
+// execWebCommand dispatches a single web slash command and returns its UI
+// result text (a non-nil error means an invalid command or bad args). The
+// caller persists this as web/command-result, never as assistant history.
 func (a *app) execWebCommand(ctx context.Context, name string, args []string) (string, error) {
 	switch name {
 	case "/help":
 		return a.webHelp(), nil
 	case "/status":
-		return a.webStatus(), nil
+		return a.webStatus(ctx), nil
 	case "/compact":
 		return a.webCompact(ctx, args)
 	case "/permission":
@@ -758,32 +1028,77 @@ func (a *app) webHelp() string {
 // model turn or user/message event is created. The Web-only acknowledgement is
 // emitted separately by webCommand so it remains visible in the transcript.
 func (a *app) webFeedback(ctx context.Context, text string) (string, error) {
-	_ = ctx // kept in the command signature for parity with the other handlers
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return "", errors.New("Feedback text is required. Usage: /feedback <text>")
 	}
-	if a.log == nil {
+	log := a.webLog(ctx)
+	if log == nil {
 		return "", errors.New("no active session")
 	}
-	if _, err := a.log.Append(session.EventFeedbackRecord, session.NewFeedbackRecord(text)); err != nil {
+	if _, err := log.Append(session.EventFeedbackRecord, session.NewFeedbackRecord(text)); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("Feedback recorded for session %s", a.currentID), nil
+	anonymousID, err := a.feedbackAnonymousUserID()
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("Feedback recorded for session %s\nAnonymous user: %s. Session sharing is not configured.", a.webSessionID(ctx), anonymousID), nil
 }
 
 // webStatus returns the current provider / model / mode summary (dsh 输入条
 // 状态命令, mirrors the REPL /help's llm line).
-func (a *app) webStatus() string {
-	return fmt.Sprintf("provider=%s model=%s mode=%s",
-		a.cfg.LLM.Provider, llmProviderModel(a.cfg, a.cfg.LLM.Provider), a.cfg.Mode)
+func (a *app) webStatus(ctx context.Context) string {
+	cfg := a.providerConfigSnapshot()
+	provider := cfg.LLM.Provider
+	model := llmProviderModel(cfg, provider)
+	mode := cfg.Mode
+	if id := a.webSessionID(ctx); id != "" {
+		if scs, ok := a.store.(store.SessionConfigStore); ok {
+			if selected, err := scs.GetSessionConfig(ctx, id); err == nil {
+				if selected.Provider != "" {
+					provider = selected.Provider
+				}
+				if selected.Model != "" {
+					model = selected.Model
+				} else {
+					model = llmProviderModel(cfg, provider)
+				}
+				if selected.AgentPreset != "" {
+					mode = selected.AgentPreset
+				}
+			}
+		}
+	}
+	return fmt.Sprintf("provider=%s model=%s mode=%s", provider, model, mode)
 }
 
 // webCompact runs the same manual compaction as the REPL and formats the
 // report as an assistant message for the Web SSE stream.
 func (a *app) webCompact(ctx context.Context, args []string) (string, error) {
-	if a.compaction == nil {
+	sessionID := a.webSessionID(ctx)
+	log := a.webLog(ctx)
+	engine := a.compactionEngineFor(ctx, sessionID)
+	if log == nil || engine == nil {
 		return "compaction: disabled (compaction.enabled=false)", nil
+	}
+	if a.agentRegistry != nil && sessionID != "" {
+		handle, err := a.sessionAgent(sessionID)
+		if err != nil {
+			return "", err
+		}
+		var res *compaction.Result
+		err = handle.RunMaintenance(func(taskCtx context.Context) error {
+			return a.compactSession(taskCtx, engine, log, args, &res)
+		})
+		if err != nil {
+			return "", err
+		}
+		if res == nil {
+			return "compaction: nothing to compact", nil
+		}
+		return fmt.Sprintf("compacted %d events (seq %d..%d), saved %d tokens (id %s)\nsummary: %s",
+			len(res.ShadowedSeqs), res.ShadowedRange[0], res.ShadowedRange[1], res.ShadowedTokens, res.CompactionID, res.Summary), nil
 	}
 	var res *compaction.Result
 	var err error
@@ -794,13 +1109,13 @@ func (a *app) webCompact(ctx context.Context, args []string) (string, error) {
 		if e1 != nil || e2 != nil {
 			return "", fmt.Errorf("usage: /compact region <start> <end> (integer event seqs)")
 		}
-		res, err = a.compactAndLog(ctx, "manual /compact region command", "manual",
-			func() (*compaction.Result, error) { return a.compaction.CompactRegion(ctx, a.log, start, end) })
+		res, err = a.compactAndLogOn(ctx, log, "manual /compact region command", "manual",
+			func() (*compaction.Result, error) { return engine.CompactRegion(ctx, log, start, end) })
 	case len(args) != 0:
 		return "", fmt.Errorf("usage: /compact or /compact region <start> <end>")
 	default:
-		res, err = a.compactAndLog(ctx, "manual /compact command", "manual",
-			func() (*compaction.Result, error) { return a.compaction.CompactNow(ctx, a.log) })
+		res, err = a.compactAndLogOn(ctx, log, "manual /compact command", "manual",
+			func() (*compaction.Result, error) { return engine.CompactNow(ctx, log) })
 	}
 	if err != nil {
 		return "", err
@@ -821,9 +1136,10 @@ func (a *app) webPermission(ctx context.Context, args []string) (string, error) 
 		return "", fmt.Errorf("usage: /permission [readonly|standard|full]")
 	}
 	current := "standard"
-	if a.currentID != "" {
+	sessionID := a.webSessionID(ctx)
+	if sessionID != "" {
 		if scs, ok := a.store.(store.SessionConfigStore); ok {
-			cfg, err := scs.GetSessionConfig(ctx, a.currentID)
+			cfg, err := scs.GetSessionConfig(ctx, sessionID)
 			if err != nil {
 				return "", err
 			}
@@ -852,25 +1168,68 @@ func (a *app) webPermission(ctx context.Context, args []string) (string, error) 
 		return fmt.Sprintf("current preset %s (available: %s)", current, available), nil
 	}
 	next := args[0]
-	if next != "readonly" && next != "standard" && next != "full" {
+	if next != "readonly" && next != "standard" && next != "full" && next != "read-only" && next != "workspace-write" && next != "danger-full-access" {
 		return "", fmt.Errorf("unknown preset %q (available: %s)", next, available)
 	}
-	if a.currentID != "" {
+	stored, preset, sandboxMode, approvalPolicy := permissionBundle(next)
+	if sessionID != "" {
 		scs, ok := a.store.(store.SessionConfigStore)
 		if !ok {
 			return "", errors.New("session permission overrides are unsupported by this store")
 		}
-		cfg, err := scs.GetSessionConfig(ctx, a.currentID)
+		cfg, err := scs.GetSessionConfig(ctx, sessionID)
 		if err != nil {
 			return "", err
 		}
-		if err := scs.UpdateSessionConfig(ctx, a.currentID, cfg.Provider, cfg.Model, cfg.ReasoningEffort, next); err != nil {
+		if err := scs.UpdateSessionConfig(ctx, sessionID, cfg.Provider, cfg.Model, cfg.ReasoningEffort, stored); err != nil {
 			return "", err
 		}
-	} else if err := a.store.SetSetting(ctx, "permission_preset", next); err != nil {
+		if a.interacts != nil {
+			if controller, ok := a.interacts.(interact.PolicyController); ok {
+				if err := controller.SetSessionPolicy(sessionID, interact.ApprovalPolicy(approvalPolicy)); err != nil {
+					return "", err
+				}
+			}
+		}
+		log := a.webLog(ctx)
+		if log == nil {
+			return "", errors.New("permission switch requires a durable session log")
+		}
+		for _, item := range []struct {
+			typ  string
+			data any
+		}{
+			{session.EventPermissionPreset, session.NewPermissionPreset(preset)},
+			{session.EventSandboxMode, session.NewSandboxMode(sandboxMode)},
+			{session.EventApprovalPolicy, session.NewApprovalPolicy(approvalPolicy)},
+		} {
+			if _, err := log.Append(item.typ, item.data); err != nil {
+				return "", fmt.Errorf("persist permission change: %w", err)
+			}
+		}
+	} else if err := a.store.SetSetting(ctx, "permission_preset", stored); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("preset %s", next), nil
+}
+
+// permissionBundle keeps the legacy storage values used by the Go execution
+// policy while emitting the reference Harness vocabulary on the session log.
+func permissionBundle(value string) (stored, preset, sandboxMode, approvalPolicy string) {
+	switch value {
+	case "read-only":
+		return "readonly", "read-only", "read-only", "ask"
+	case "workspace-write":
+		return "standard", "workspace-write", "workspace-write", "ask"
+	case "danger-full-access":
+		return "full", "danger-full-access", "danger-full-access", "never"
+	case "readonly":
+		return "readonly", "read-only", "read-only", "ask"
+	case "full":
+		return "full", "danger-full-access", "danger-full-access", "never"
+	default:
+		return "standard", "workspace-write", "workspace-write", "ask"
+	}
 }
 
 // webCommandCatalog is the backend-owned discovery view used by the web
@@ -964,49 +1323,132 @@ func (a *app) webSkillCatalog() []map[string]string {
 // becomes model history. A non-empty suffix tells webMessage to submit that
 // suffix as the next ordinary user turn after enabling plan mode.
 func (a *app) webPlanCommand(ctx context.Context, suffix string) (bool, error) {
-	if a.log == nil {
+	return a.webPlanCommandWithImages(ctx, suffix, nil)
+}
+
+func (a *app) webPlanCommandWithImages(ctx context.Context, suffix string, images []llm.ImageRef) (bool, error) {
+	log := a.webLog(ctx)
+	if log == nil {
 		return false, errors.New("no active session")
 	}
-	active := session.FoldPlanMode(a.log.Events())
+	active, err := currentPlanModeActive(log)
+	if err != nil {
+		return false, err
+	}
 	trimmed := strings.TrimSpace(suffix)
+	if len(images) > 0 {
+		if trimmed == "off" {
+			return false, errors.New("Image attachments cannot accompany /plan off.")
+		}
+		if !a.multimodalEnabled() || a.attachStore == nil {
+			return false, fmt.Errorf("multimodal disabled (llm.multimodal.enabled=false)")
+		}
+	}
+	if a.agentRegistry != nil {
+		sessionID := a.runtimeSessionID(ctx)
+		if trimmed == "off" {
+			action, err := a.setPlanModeFor(ctx, sessionID, log, false)
+			if err != nil {
+				return false, err
+			}
+			text := "Plan mode off."
+			switch {
+			case action == planModeQueued:
+				text = "Leaving plan mode (applies from the next step)."
+			case action == planModeCancelled:
+				text = "Plan mode entry cancelled."
+			case action == planModeNoop && !active:
+				text = "Plan mode is already inactive."
+			}
+			return false, a.appendWebCommandResultOn(log, text, "plan")
+		}
+		action, err := a.setPlanModeFor(ctx, sessionID, log, true)
+		if err != nil {
+			return false, err
+		}
+		content := planContent(trimmed, images)
+		if len(content) > 0 && action == planModeQueued {
+			if steered, steerErr := a.steerPlanContent(sessionID, content); steerErr != nil {
+				return false, steerErr
+			} else if steered {
+				return false, a.appendWebCommandResultOn(log, "Entering plan mode (applies from the next step). Use /plan off to leave.", "plan")
+			}
+		}
+		if len(content) == 0 {
+			if action == planModeQueued {
+				return false, a.appendWebCommandResultOn(log, "Entering plan mode (applies from the next step). Use /plan off to leave.", "plan")
+			}
+			return false, a.appendWebCommandResultOn(log, "Plan mode on. Use /plan off to leave.", "plan")
+		}
+		return true, a.appendWebCommandResultOn(log, "Plan mode on. Use /plan off to leave.", "plan")
+	}
 	if trimmed == "off" {
 		if !active {
-			return false, a.appendWebCommandResult("Plan mode is already inactive.", "plan")
+			return false, a.appendWebCommandResultOn(log, "Plan mode is already inactive.", "plan")
 		}
-		if _, err := a.log.Append(session.EventPlanMode, session.NewPlanMode(false)); err != nil {
+		if _, err := log.Append(session.EventPlanMode, session.NewPlanMode(false)); err != nil {
 			return false, err
 		}
-		return false, a.appendWebCommandResult("Plan mode off.", "plan")
+		return false, a.appendWebCommandResultOn(log, "Plan mode off.", "plan")
 	}
 	if !active {
-		if _, err := a.log.Append(session.EventPlanMode, session.NewPlanMode(true)); err != nil {
+		if _, err := log.Append(session.EventPlanMode, session.NewPlanMode(true)); err != nil {
 			return false, err
 		}
-		if trimmed == "" {
-			return false, a.appendWebCommandResult("Plan mode on. Use /plan off to leave.", "plan")
+		if trimmed == "" && len(images) == 0 {
+			return false, a.appendWebCommandResultOn(log, "Plan mode on. Use /plan off to leave.", "plan")
 		}
-		return true, a.appendWebCommandResult("Plan mode on. Use /plan off to leave.", "plan")
+		return true, a.appendWebCommandResultOn(log, "Plan mode on. Use /plan off to leave.", "plan")
 	}
-	if trimmed == "" {
-		return false, a.appendWebCommandResult("Plan mode is already active. Use /plan off to leave.", "plan")
+	if trimmed == "" && len(images) == 0 {
+		return false, a.appendWebCommandResultOn(log, "Plan mode is already active. Use /plan off to leave.", "plan")
 	}
-	return true, a.appendWebCommandResult("Plan mode already active. Submitting the message in plan mode.", "plan")
+	return true, a.appendWebCommandResultOn(log, "Plan mode already active. Submitting the message in plan mode.", "plan")
 }
 
 func (a *app) appendWebCommandResult(text string, command ...string) error {
-	if a.log == nil {
+	return a.appendWebCommandResultOn(a.log, text, command...)
+}
+
+func (a *app) appendWebCommandResultOn(log *session.Log, text string, command ...string) error {
+	if log == nil {
 		return errors.New("no active session")
 	}
-	_, err := a.log.Append(session.EventWebCommandResult, session.NewWebCommandResult(text, command...))
+	_, err := log.Append(session.EventWebCommandResult, session.NewWebCommandResult(text, command...))
 	return err
+}
+
+// webSessionID/webLog are the command-path equivalent of runtimeSessionID and
+// runtimeLog. They keep Web slash commands on the addressed Agent session.
+// Once Agent runtimes are mounted, a missing request identity fails closed;
+// only the legacy REPL keeps the current-session fallback.
+func (a *app) webSessionID(ctx context.Context) string {
+	if id := runtimectx.SessionID(ctx); id != "" {
+		return id
+	}
+	if a.agentRegistry != nil {
+		return ""
+	}
+	return a.currentID
+}
+
+func (a *app) webLog(ctx context.Context) *session.Log {
+	if id := runtimectx.SessionID(ctx); id != "" {
+		return a.runtimeLog(ctx)
+	}
+	if a.agentRegistry != nil {
+		return nil
+	}
+	return a.log
 }
 
 // currentGoal returns the newest non-terminal goal in the current session.
 func (a *app) currentGoal(ctx context.Context) (plan.Goal, bool, error) {
-	if a.plans == nil {
-		return plan.Goal{}, false, errors.New("planning is disabled")
+	engine, err := a.planEngineFor(ctx)
+	if err != nil {
+		return plan.Goal{}, false, err
 	}
-	goals, err := a.plans.List(ctx)
+	goals, err := engine.List(ctx)
 	if err != nil {
 		return plan.Goal{}, false, err
 	}
@@ -1014,8 +1456,8 @@ func (a *app) currentGoal(ctx context.Context) (plan.Goal, bool, error) {
 	for _, g := range goals {
 		byID[g.ID] = g
 	}
-	if a.log != nil {
-		events := a.log.Events()
+	if log := a.webLog(ctx); log != nil {
+		events := log.Events()
 		for i := len(events) - 1; i >= 0; i-- {
 			if events[i].Type != session.EventPlanCreate {
 				continue
@@ -1057,6 +1499,12 @@ func renderWebGoal(g plan.Goal) string {
 // webGoalCommand follows dsh's /goal grammar while using the existing plan
 // engine as the durable projection.
 func (a *app) webGoalCommand(ctx context.Context, input string) (string, error) {
+	log := a.webLog(ctx)
+	engine, engineErr := a.planEngineFor(ctx)
+	if engineErr != nil {
+		return "", engineErr
+	}
+	sessionID := a.webSessionID(ctx)
 	input = strings.TrimSpace(input)
 	if input == "" {
 		g, ok, err := a.currentGoal(ctx)
@@ -1076,13 +1524,16 @@ func (a *app) webGoalCommand(ctx context.Context, input string) (string, error) 
 		if !ok {
 			return "No goal to clear.", nil
 		}
-		if err := a.plans.Remove(ctx, string(plan.ScopeGoal), g.ID); err != nil {
+		if err := engine.Remove(ctx, string(plan.ScopeGoal), g.ID); err != nil {
 			return "", err
 		}
-		if _, err := a.log.Append(session.EventPlanDelete, session.NewPlanDelete(string(plan.ScopeGoal), g.ID)); err != nil {
+		if log == nil {
+			return "", errors.New("no active session")
+		}
+		if _, err := log.Append(session.EventPlanDelete, session.NewPlanDelete(string(plan.ScopeGoal), g.ID)); err != nil {
 			return "", err
 		}
-		a.setGoalActivation(a.currentID, false)
+		a.setGoalActivation(sessionID, false)
 		return "Goal cleared.", nil
 	}
 	if input == "pause" || input == "resume" {
@@ -1100,23 +1551,26 @@ func (a *app) webGoalCommand(ctx context.Context, input string) (string, error) 
 			message = "Goal resumed."
 		}
 		var statusErr error
-		if setter, ok := a.plans.(interface {
+		if setter, ok := engine.(interface {
 			SetGoalStatusIfRevision(context.Context, string, int, plan.Status) error
 		}); ok {
 			statusErr = setter.SetGoalStatusIfRevision(ctx, g.ID, g.Revision, st)
 		} else {
-			statusErr = a.plans.SetStatus(ctx, string(plan.ScopeGoal), g.ID, st)
+			statusErr = engine.SetStatus(ctx, string(plan.ScopeGoal), g.ID, st)
 		}
 		if statusErr != nil {
 			return "", statusErr
 		}
-		if _, err := a.log.Append(session.EventPlanStatus, session.NewPlanStatus(string(plan.ScopeGoal), g.ID, string(st))); err != nil {
+		if log == nil {
+			return "", errors.New("no active session")
+		}
+		if _, err := log.Append(session.EventPlanStatus, session.NewPlanStatus(string(plan.ScopeGoal), g.ID, string(st))); err != nil {
 			return "", err
 		}
 		if input == "resume" {
-			a.setGoalActivation(a.currentID, true)
+			a.setGoalActivation(sessionID, true)
 		} else {
-			a.setGoalActivation(a.currentID, false)
+			a.setGoalActivation(sessionID, false)
 		}
 		return message, nil
 	}
@@ -1133,11 +1587,14 @@ func (a *app) webGoalCommand(ctx context.Context, input string) (string, error) 
 		}
 		objective := strings.TrimSpace(strings.TrimPrefix(input, "edit "))
 		title := strings.Fields(objective)[0]
-		updated, err := a.plans.UpdateGoal(ctx, g.ID, title, objective)
+		updated, err := engine.UpdateGoal(ctx, g.ID, title, objective)
 		if err != nil {
 			return "", err
 		}
-		if _, err := a.log.Append(session.EventPlanUpdate, session.NewPlanUpdate(string(plan.ScopeGoal), updated.ID, map[string]any{"title": updated.Title, "objective": updated.Objective})); err != nil {
+		if log == nil {
+			return "", errors.New("no active session")
+		}
+		if _, err := log.Append(session.EventPlanUpdate, session.NewPlanUpdate(string(plan.ScopeGoal), updated.ID, map[string]any{"title": updated.Title, "objective": updated.Objective})); err != nil {
 			return "", err
 		}
 		return "Goal updated.\n" + renderWebGoal(updated), nil
@@ -1164,17 +1621,55 @@ func (a *app) webPlanGoal(ctx context.Context, args []string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	res, err := a.reg.Execute(ctx, "create_goal", payload)
+	if a.reg == nil {
+		return "", errors.New("tool registry is unavailable")
+	}
+	registry := a.reg
+	var restore func()
+	// Agent-backed Web commands must use the same session-owned registry view
+	// as an Agent turn. Executing against a.reg would bypass the addressed
+	// session's permission/mode policy and let tool closures observe the legacy
+	// process-global owner. The legacy REPL keeps the original registry path.
+	if sessionID := a.webSessionID(ctx); a.agentRegistry != nil && sessionID != "" {
+		log := a.webLog(ctx)
+		if log == nil {
+			return "", fmt.Errorf("session %q runtime is unavailable", sessionID)
+		}
+		registry = a.reg.Clone()
+		registry.SetOwner(tools.Owner{SessionID: sessionID, NextSeq: log.NextSeq})
+		_, restore, err = a.applySessionRuntimeOnStrict(sessionID, log, registry)
+		if err != nil {
+			return "", err
+		}
+		defer restore()
+	}
+	res, err := registry.Execute(ctx, "create_goal", payload)
 	if err != nil {
 		return "", err
 	}
-	a.setGoalActivation(a.currentID, true)
+	a.setGoalActivation(a.webSessionID(ctx), true)
 	return res.Output, nil
 }
 
 // webSessionManager implements the session new/resume API (ADR D-WEB2-C),
 // reusing the REPL's newSession/resumeSession.
 func (a *app) webSessionManager(ctx context.Context, action, id string) (string, error) {
+	// Agent-backed web sessions are independent runtime objects. Do not reuse
+	// the REPL's currentID/log switch, otherwise two browser tabs can redirect
+	// each other's command fallbacks and workspace selection.
+	if a.agentRegistry != nil {
+		switch action {
+		case "new":
+			return a.newAgentSession(ctx)
+		case "resume":
+			if err := a.resumeAgentSession(ctx, id); err != nil {
+				return "", err
+			}
+			return id, nil
+		default:
+			return "", fmt.Errorf("unknown session action %q", action)
+		}
+	}
 	switch action {
 	case "new":
 		if err := a.newSession(ctx); err != nil {
@@ -1199,14 +1694,6 @@ func (a *app) webSessionManager(ctx context.Context, action, id string) (string,
 // settings page cannot leak credentials. Field names are snake_case. P5.1 adds
 // the live model panel: the currently active provider's model plus the
 // registered providers (id/available/model/candidates) for the pickers.
-// builtinContextWindows are the known DeepSeek catalog defaults (dsh
-// llm-deepseek DEFAULT_CONTEXT_WINDOW: 1,000,000 for both V4 models); unknown
-// models fall back to the webserver's defaultContextWindow (1M, dsh default).
-var builtinContextWindows = map[string]int{
-	"deepseek-v4-flash": 1000000,
-	"deepseek-v4-pro":   1000000,
-}
-
 // contextWindowOf resolves the effective model's context window for the
 // ContextMeter (dsh resolveModelInfo: the configured model-directory entry's
 // capacity wins, then the catalog default). It honors the per-session
@@ -1214,62 +1701,7 @@ var builtinContextWindows = map[string]int{
 // handlers) and falls back to the global selection. An unknown model returns
 // 0 and the webserver applies its own defaultContextWindow.
 func (a *app) contextWindowOf(sessionID string) int {
-	provider, model := "", ""
-	if scs, ok := a.store.(store.SessionConfigStore); ok && sessionID != "" {
-		if cfg, err := scs.GetSessionConfig(context.Background(), sessionID); err == nil {
-			if cfg.Provider != "" {
-				provider = cfg.Provider
-			}
-			if cfg.Model != "" {
-				model = cfg.Model
-			}
-		}
-	}
-	if provider == "" {
-		provider = a.cfg.LLM.Provider
-	}
-	if model == "" {
-		model = llmProviderModel(a.cfg, provider)
-	}
-	if model == "" {
-		return 0
-	}
-	// The configured directory is authoritative for its provider (dsh
-	// resolveModelInfo: configured?.contextWindow first).
-	if w := a.directoryContextWindow(provider, model); w > 0 {
-		return w
-	}
-	if w, ok := builtinContextWindows[model]; ok {
-		return w
-	}
-	return 0
-}
-
-// directoryContextWindow looks up the configured model-directory entry's
-// context window for (provider, model): the persisted built-in profile models
-// (llm.profile.<id>.models) or the custom provider's model list. 0 means the
-// entry is absent or carries no capacity.
-func (a *app) directoryContextWindow(provider, model string) int {
-	if provider == "" {
-		return 0
-	}
-	if bp, ok := a.builtinProfiles[provider]; ok {
-		for _, m := range bp.Models {
-			if m.ID == model {
-				return m.ContextWindow
-			}
-		}
-	}
-	for _, cp := range a.customProviders {
-		if cp.ID == provider {
-			for _, m := range cp.Models {
-				if m.ID == model {
-					return m.ContextWindow
-				}
-			}
-		}
-	}
-	return 0
+	return a.modelCapabilityFor(sessionID).ContextWindow
 }
 
 // persistDefaultModelSelection stores the shared DSH Agent default. The
@@ -1300,29 +1732,34 @@ func (a *app) persistDefaultModelSelection(ctx context.Context, provider, model,
 // sessions created afterwards. The current session has already received its
 // own durable override in nativeSessionSelectModel.
 func (a *app) saveNativeDefaultModel(ctx context.Context, provider, model, effort string) {
-	a.turnMu.Lock()
-	defer a.turnMu.Unlock()
+	a.controlMu.Lock()
+	defer a.controlMu.Unlock()
 	selection := persistedModelSelection{
 		Provider:        strings.TrimSpace(provider),
 		Model:           strings.TrimSpace(model),
 		ReasoningEffort: strings.TrimSpace(effort),
 	}
+	a.providerMu.Lock()
 	applyModelSelectionToConfig(&a.cfg, selection)
+	a.providerMu.Unlock()
 	a.persistDefaultModelSelection(ctx, selection.Provider, selection.Model, selection.ReasoningEffort)
 }
 
 // setTurnCancel registers the web turn's cancel func for the running turn.
-func (a *app) setTurnCancel(cancel context.CancelFunc) {
+func (a *app) setTurnCancel(sessionID string, cancel context.CancelFunc) {
 	a.cancelMu.Lock()
 	defer a.cancelMu.Unlock()
-	a.turnCancel = cancel
+	if a.turnCancels == nil {
+		a.turnCancels = make(map[string]context.CancelFunc)
+	}
+	a.turnCancels[sessionID] = cancel
 }
 
 // clearTurnCancel drops the registered cancel func once the turn settles.
-func (a *app) clearTurnCancel() {
+func (a *app) clearTurnCancel(sessionID string) {
 	a.cancelMu.Lock()
 	defer a.cancelMu.Unlock()
-	a.turnCancel = nil
+	delete(a.turnCancels, sessionID)
 }
 
 // stopTurn cancels the running web turn (POST /api/sessions/{id}/stop). It is a
@@ -1331,69 +1768,87 @@ func (a *app) clearTurnCancel() {
 func (a *app) stopTurn(sessionID string) error {
 	a.cancelMu.Lock()
 	defer a.cancelMu.Unlock()
-	if a.turnCancel == nil {
+	cancel := a.turnCancels[sessionID]
+	if cancel == nil {
 		return errors.New("no turn running")
 	}
-	if sessionID != "" && sessionID != a.currentID {
-		return errors.New("turn belongs to another session")
-	}
-	a.turnCancel()
+	cancel()
 	return nil
 }
 
 func (a *app) webConfig() map[string]any {
-	tools := a.webToolCatalog()
+	_, catalog, err := a.webToolCatalog()
+	if err != nil {
+		// The legacy config endpoint has no error return. A broken canonical
+		// inventory must not silently look like an empty deployment.
+		panic(fmt.Sprintf("pa: build web tool catalog: %v", err))
+	}
+	a.providerMu.RLock()
+	cfg := a.cfg
+	a.providerMu.RUnlock()
 	return map[string]any{
 		`commands`:            a.webCommandCatalog(),
-		"model":               llmProviderModel(a.cfg, a.cfg.LLM.Provider),
-		"base_url":            a.cfg.BaseURL,
-		"llm_provider":        a.cfg.LLM.Provider,
-		"reasoning_effort":    a.cfg.ReasoningEffort,
-		"mode":                a.cfg.Mode,
+		"model":               llmProviderModel(cfg, cfg.LLM.Provider),
+		"base_url":            cfg.BaseURL,
+		"llm_provider":        cfg.LLM.Provider,
+		"reasoning_effort":    cfg.ReasoningEffort,
+		"mode":                cfg.Mode,
 		"providers":           a.webProviders(), // P5.1 live model pickers
 		"mcp_servers":         a.webMCPServers(),
-		"tools_enabled":       tools,
-		"tools_enabled_count": len(tools),
+		"tools_enabled":       catalog.Names(),
+		"tools_enabled_count": len(catalog.Tools),
+		"tool_catalog":        catalog,
 
 		// Capability gates (dsh 对齐: 默认全开, nil*bool→on; 显式 enabled:false 关).
-		"terminal_enabled":   config.Enabled(a.cfg.Terminal.Enabled),
-		"fs_enabled":         config.Enabled(a.cfg.Fs.Enabled),
-		"fs_search_enabled":  config.Enabled(a.cfg.FsSearch.Enabled),
-		"ralph_enabled":      config.Enabled(a.cfg.Ralph.Enabled),
-		"workflow_enabled":   config.Enabled(a.cfg.Workflow.Enabled),
-		"jobs_enabled":       config.Enabled(a.cfg.Jobs.Enabled),
-		"subagent_enabled":   config.Enabled(a.cfg.Subagent.Enabled),
-		"web_enabled":        config.Enabled(a.cfg.Web.Enabled),
-		"eval_enabled":       config.Enabled(a.cfg.Eval.Enabled),
-		"code_enabled":       config.Enabled(a.cfg.Code.Enabled),
-		"interact_enabled":   config.Enabled(a.cfg.Interact.Enabled),
-		"mcp_enabled":        config.Enabled(a.cfg.Mcp.Enabled),
-		"skill_enabled":      config.Enabled(a.cfg.Skill.Enabled),
-		"schedule_enabled":   config.Enabled(a.cfg.Schedule.Enabled),
-		"plan_enabled":       config.Enabled(a.cfg.Plan.Enabled),
-		"spill_enabled":      config.Enabled(a.cfg.Spill.Enabled),
-		"compaction_enabled": config.Enabled(a.cfg.Compaction.Enabled),
-		"multimodal_enabled": a.multimodalEnabled(),
+		"terminal_enabled":  config.Enabled(cfg.Terminal.Enabled),
+		"fs_enabled":        config.Enabled(cfg.Fs.Enabled),
+		"fs_search_enabled": config.Enabled(cfg.FsSearch.Enabled),
+		"ralph_enabled":     config.Enabled(cfg.Ralph.Enabled),
+		"workflow_enabled":  config.Enabled(cfg.Workflow.Enabled),
+		"jobs_enabled":      config.Enabled(cfg.Jobs.Enabled),
+		"subagent_enabled":  config.Enabled(cfg.Subagent.Enabled),
+		"web_enabled":       config.Enabled(cfg.Web.Enabled),
+		"eval_enabled":      config.Enabled(cfg.Eval.Enabled),
+		"code_enabled":      config.Enabled(cfg.Code.Enabled) && a.code != nil,
+		// code_available is the runtime truth, not merely the configured
+		// preference. Native/Web clients must not advertise the code preset when
+		// registerCode could not install run_code (for example when the external
+		// Node permission runtime is unavailable).
+		"code_available":     a.code != nil,
+		"interact_enabled":   config.Enabled(cfg.Interact.Enabled),
+		"mcp_enabled":        config.Enabled(cfg.Mcp.Enabled),
+		"skill_enabled":      config.Enabled(cfg.Skill.Enabled),
+		"schedule_enabled":   config.Enabled(cfg.Schedule.Enabled),
+		"plan_enabled":       config.Enabled(cfg.Plan.Enabled),
+		"spill_enabled":      config.Enabled(cfg.Spill.Enabled),
+		"compaction_enabled": config.Enabled(cfg.Compaction.Enabled),
+		"multimodal_enabled": cfg.LLM.Multimodal.Enabled != nil && *cfg.LLM.Multimodal.Enabled,
 
-		"web_server_addr": a.cfg.WebServer.Addr,
+		"web_server_addr": cfg.WebServer.Addr,
 	}
 }
 
-func (a *app) webToolCatalog() []string {
+func (a *app) webToolCatalog() ([]string, tools.CatalogManifest, error) {
 	if a.reg == nil {
-		return []string{}
+		manifest, err := tools.NewCatalogManifest(nil)
+		return []string{}, manifest, err
 	}
-	specs := a.reg.Specs()
-	tools := make([]string, 0, len(specs))
-	for _, spec := range specs {
-		tools = append(tools, spec.Name)
+	manifest, err := a.reg.CatalogManifest()
+	if err != nil {
+		return nil, tools.CatalogManifest{}, err
 	}
-	return tools
+	if err := tools.ValidateCatalogManifest(manifest); err != nil {
+		return nil, tools.CatalogManifest{}, err
+	}
+	return manifest.Names(), manifest, nil
 }
 
 func (a *app) webMCPServers() []map[string]any {
-	servers := make([]map[string]any, 0, len(a.cfg.Mcp.Servers))
-	for i, server := range a.cfg.Mcp.Servers {
+	a.providerMu.RLock()
+	cfg := a.cfg
+	a.providerMu.RUnlock()
+	servers := make([]map[string]any, 0, len(cfg.Mcp.Servers))
+	for _, server := range cfg.Mcp.Servers {
 		prefix := "mcp__" + server.Name + "__"
 		toolCount := 0
 		if a.reg != nil {
@@ -1403,9 +1858,11 @@ func (a *app) webMCPServers() []map[string]any {
 				}
 			}
 		}
+		_, connected := a.mcpClientForServer(server.Name)
 		servers = append(servers, map[string]any{
-			"name": server.Name, "cmd": server.Cmd, "args": server.Args,
-			"enabled": config.Enabled(a.cfg.Mcp.Enabled), "connected": i < len(a.mcp),
+			"name": server.Name, "transport": server.Transport, "cmd": server.Cmd, "args": redactMCPArgs(server.Args), "url": redactMCPURL(server.URL), "headers": redactMCPHeaders(server.Headers), "env": redactMCPEnv(server.Env), "cwd": server.Cwd, "tool_call_timeout_ms": server.ToolCallTimeoutMS,
+			"fail_on_startup_error": server.FailOnStartupError,
+			"enabled":               config.Enabled(cfg.Mcp.Enabled), "connected": connected,
 			"tool_count": toolCount,
 		})
 	}
@@ -1413,23 +1870,24 @@ func (a *app) webMCPServers() []map[string]any {
 }
 
 func (a *app) webRefreshMCP(ctx context.Context) ([]map[string]any, error) {
-	servers := make([]map[string]any, 0, len(a.cfg.Mcp.Servers))
-	for i, server := range a.cfg.Mcp.Servers {
-		row := map[string]any{"name": server.Name, "cmd": server.Cmd, "args": server.Args, "enabled": config.Enabled(a.cfg.Mcp.Enabled), "connected": false, "tool_count": 0}
-		if i >= len(a.mcp) {
+	cfg := a.providerConfigSnapshot()
+	servers := make([]map[string]any, 0, len(cfg.Mcp.Servers))
+	for _, server := range cfg.Mcp.Servers {
+		row := map[string]any{"name": server.Name, "transport": server.Transport, "cmd": server.Cmd, "args": redactMCPArgs(server.Args), "url": redactMCPURL(server.URL), "headers": redactMCPHeaders(server.Headers), "env": redactMCPEnv(server.Env), "cwd": server.Cwd, "tool_call_timeout_ms": server.ToolCallTimeoutMS, "fail_on_startup_error": server.FailOnStartupError, "enabled": config.Enabled(cfg.Mcp.Enabled), "connected": false, "tool_count": 0}
+		client, ok := a.mcpClientForServer(server.Name)
+		if !ok {
 			row["error"] = "client is not connected"
 			servers = append(servers, row)
 			continue
 		}
-		client := a.mcp[i]
 		if err := client.Start(ctx); err != nil {
-			row["error"] = err.Error()
+			row["error"] = redactMCPError(err, server)
 			servers = append(servers, row)
 			continue
 		}
 		advertised, err := client.ListTools(ctx)
 		if err != nil {
-			row["error"] = err.Error()
+			row["error"] = redactMCPError(err, server)
 		} else {
 			row["connected"] = true
 			row["tool_count"] = len(advertised)
@@ -1437,6 +1895,245 @@ func (a *app) webRefreshMCP(ctx context.Context) ([]map[string]any, error) {
 		servers = append(servers, row)
 	}
 	return servers, nil
+}
+
+func redactMCPHeaders(headers map[string]string) map[string]string {
+	if len(headers) == 0 {
+		return map[string]string{}
+	}
+	redacted := make(map[string]string, len(headers))
+	for key, value := range headers {
+		if strings.TrimSpace(value) == "" {
+			redacted[key] = ""
+		} else {
+			redacted[key] = "[redacted]"
+		}
+	}
+	return redacted
+}
+
+func redactMCPEnv(env map[string]string) map[string]string {
+	if len(env) == 0 {
+		return map[string]string{}
+	}
+	redacted := make(map[string]string, len(env))
+	for key, value := range env {
+		if value == "" {
+			redacted[key] = ""
+		} else {
+			redacted[key] = redactedMCPValue
+		}
+	}
+	return redacted
+}
+
+func restoreMCPEnv(projected, previous map[string]string) map[string]string {
+	if projected == nil {
+		return cloneMCPHeaders(previous)
+	}
+	result := make(map[string]string, len(projected))
+	for key, value := range projected {
+		if value == redactedMCPValue {
+			if old, ok := previous[key]; ok {
+				result[key] = old
+			}
+			continue
+		}
+		result[key] = value
+	}
+	return result
+}
+
+const redactedMCPValue = "[redacted]"
+
+// redactMCPArgs protects credential-shaped command-line values crossing the
+// Web inventory boundary. It intentionally preserves the flag spelling and
+// argument count so diagnostics remain useful. A masked value sent back by a
+// settings client is restored from the existing configuration by
+// restoreMCPArgs; this makes projection redaction non-destructive.
+func redactMCPArgs(args []string) []string {
+	if len(args) == 0 {
+		return []string{}
+	}
+	out := append([]string(nil), args...)
+	awaitingValue := false
+	for i, arg := range args {
+		if awaitingValue {
+			out[i] = redactedMCPValue
+			awaitingValue = false
+			continue
+		}
+		name, value, hasValue := splitMCPArg(arg)
+		if hasValue && sensitiveMCPArgName(name) {
+			out[i] = strings.TrimSuffix(arg, value) + redactedMCPValue
+			continue
+		}
+		if !hasValue && sensitiveMCPArgName(name) {
+			awaitingValue = true
+		}
+		if !hasValue && sensitiveMCPEnvAssignment(arg) {
+			key := strings.SplitN(arg, "=", 2)[0]
+			out[i] = key + "=" + redactedMCPValue
+		}
+	}
+	return out
+}
+
+func splitMCPArg(arg string) (name, value string, hasValue bool) {
+	trimmed := strings.TrimSpace(arg)
+	if strings.HasPrefix(trimmed, "--") {
+		if at := strings.IndexByte(trimmed, '='); at > 2 {
+			return trimmed[:at], trimmed[at+1:], true
+		}
+		return trimmed, "", false
+	}
+	if at := strings.IndexByte(trimmed, '='); at > 0 {
+		return trimmed[:at], trimmed[at+1:], true
+	}
+	return trimmed, "", false
+}
+
+func normalizedMCPArgName(name string) string {
+	name = strings.TrimLeft(strings.ToLower(strings.TrimSpace(name)), "-")
+	name = strings.ReplaceAll(name, "-", "")
+	name = strings.ReplaceAll(name, "_", "")
+	return name
+}
+
+func sensitiveMCPArgName(name string) bool {
+	switch normalizedMCPArgName(name) {
+	case "apikey", "token", "accesstoken", "password", "passwd", "secret", "clientsecret", "authorization", "auth", "bearer", "header", "credential", "credentials", "privatekey":
+		return true
+	default:
+		return false
+	}
+}
+
+func sensitiveMCPEnvAssignment(arg string) bool {
+	if strings.HasPrefix(arg, "-") {
+		return false
+	}
+	key, _, ok := strings.Cut(arg, "=")
+	return ok && sensitiveMCPArgName(key)
+}
+
+func restoreMCPArgs(masked, previous []string) []string {
+	out := append([]string(nil), masked...)
+	for i := range out {
+		if i >= len(previous) {
+			continue
+		}
+		if out[i] == redactedMCPValue || strings.HasSuffix(out[i], "="+redactedMCPValue) {
+			out[i] = previous[i]
+		}
+	}
+	return out
+}
+
+func mergeMCPHeaders(next, previous map[string]string) map[string]string {
+	merged := cloneMCPHeaders(next)
+	for key, value := range merged {
+		if value == redactedMCPValue {
+			if old, ok := previous[key]; ok {
+				merged[key] = old
+			}
+		}
+	}
+	return merged
+}
+
+func redactMCPURL(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	if parsed.User != nil {
+		if password, ok := parsed.User.Password(); ok && password != "" {
+			parsed.User = url.UserPassword(parsed.User.Username(), redactedMCPValue)
+		}
+	}
+	query := parsed.Query()
+	changed := false
+	for key, values := range query {
+		if !sensitiveMCPArgName(key) {
+			continue
+		}
+		for i := range values {
+			if values[i] != "" {
+				values[i] = redactedMCPValue
+				changed = true
+			}
+		}
+		query[key] = values
+	}
+	if changed {
+		parsed.RawQuery = query.Encode()
+	}
+	return parsed.String()
+}
+
+func restoreMCPURL(masked, previous string) string {
+	maskedURL, maskedErr := url.Parse(masked)
+	previousURL, previousErr := url.Parse(previous)
+	if maskedErr != nil || previousErr != nil {
+		return masked
+	}
+	if maskedURL.User != nil && previousURL.User != nil {
+		if password, ok := maskedURL.User.Password(); ok && password == redactedMCPValue {
+			if previousPassword, previousOK := previousURL.User.Password(); previousOK {
+				maskedURL.User = url.UserPassword(maskedURL.User.Username(), previousPassword)
+			}
+		}
+	}
+	query := maskedURL.Query()
+	previousQuery := previousURL.Query()
+	changed := false
+	for key, values := range query {
+		if !sensitiveMCPArgName(key) {
+			continue
+		}
+		oldValues := previousQuery[key]
+		for i := range values {
+			if values[i] == redactedMCPValue && i < len(oldValues) {
+				values[i] = oldValues[i]
+				changed = true
+			}
+		}
+		query[key] = values
+	}
+	if changed {
+		maskedURL.RawQuery = query.Encode()
+	}
+	return maskedURL.String()
+}
+
+func redactMCPError(err error, server config.McpServer) string {
+	if err == nil {
+		return ""
+	}
+	message := err.Error()
+	maskedArgs := redactMCPArgs(server.Args)
+	for i, value := range server.Args {
+		if i < len(maskedArgs) && maskedArgs[i] != value && value != "" {
+			message = strings.ReplaceAll(message, value, maskedArgs[i])
+		}
+	}
+	for key, value := range server.Headers {
+		if value != "" {
+			message = strings.ReplaceAll(message, value, redactedMCPValue)
+		}
+		message = strings.ReplaceAll(message, key+": "+value, key+": "+redactedMCPValue)
+	}
+	for key, value := range server.Env {
+		if value != "" {
+			message = strings.ReplaceAll(message, value, redactedMCPValue)
+		}
+		message = strings.ReplaceAll(message, key+"="+value, key+"="+redactedMCPValue)
+	}
+	if server.URL != "" {
+		message = strings.ReplaceAll(message, server.URL, redactMCPURL(server.URL))
+	}
+	return message
 }
 
 func (a *app) webManageMCP(ctx context.Context, action string, edit webserver.MCPServerEdit) ([]map[string]any, error) {
@@ -1450,14 +2147,26 @@ func (a *app) webManageMCP(ctx context.Context, action string, edit webserver.MC
 			return nil, errors.New("mcp server name is required")
 		}
 	} else {
-		if name == "" || strings.TrimSpace(edit.Cmd) == "" {
-			return nil, errors.New("mcp server name and command are required")
+		transport := strings.ToLower(strings.TrimSpace(edit.Transport))
+		if transport == "" {
+			transport = "stdio"
+		}
+		if transport == "http" || transport == "https" {
+			transport = "streamable-http"
+		}
+		if transport != "stdio" && transport != "streamable-http" {
+			return nil, fmt.Errorf("unsupported mcp transport %q", edit.Transport)
+		}
+		if name == "" || (transport == "stdio" && strings.TrimSpace(edit.Cmd) == "") || (transport == "streamable-http" && strings.TrimSpace(edit.URL) == "") {
+			return nil, errors.New("mcp server name and transport endpoint are required")
 		}
 		if strings.ContainsAny(name, `/\\`) || strings.ContainsAny(name, " \t\r\n") {
 			return nil, errors.New("mcp server name must not contain spaces or path separators")
 		}
 	}
+	a.providerMu.RLock()
 	next := append([]config.McpServer(nil), a.cfg.Mcp.Servers...)
+	a.providerMu.RUnlock()
 	find := func(key string) int {
 		for i := range next {
 			if next[i].Name == key {
@@ -1471,7 +2180,22 @@ func (a *app) webManageMCP(ctx context.Context, action string, edit webserver.MC
 		if find(name) >= 0 {
 			return nil, fmt.Errorf("mcp server %q already exists", name)
 		}
-		next = append(next, config.McpServer{Name: name, Cmd: strings.TrimSpace(edit.Cmd), Args: append([]string(nil), edit.Args...)})
+		failOnStartup := false
+		if edit.FailOnStartupError != nil {
+			failOnStartup = *edit.FailOnStartupError
+		}
+		timeout := 60000
+		if edit.ToolCallTimeoutMS != nil {
+			timeout = *edit.ToolCallTimeoutMS
+		}
+		if timeout <= 0 {
+			return nil, errors.New("mcp tool call timeout must be positive")
+		}
+		cwd := ""
+		if edit.Cwd != nil {
+			cwd = strings.TrimSpace(*edit.Cwd)
+		}
+		next = append(next, config.McpServer{Name: name, Transport: normalizedMCPTransport(edit.Transport), Cmd: strings.TrimSpace(edit.Cmd), Args: append([]string(nil), edit.Args...), URL: strings.TrimSpace(edit.URL), Headers: cloneMCPHeaders(edit.Headers), Env: cloneMCPHeaders(edit.Env), Cwd: cwd, ToolCallTimeoutMS: timeout, FailOnStartupError: failOnStartup})
 	case "update":
 		if original == "" {
 			original = name
@@ -1483,7 +2207,23 @@ func (a *app) webManageMCP(ctx context.Context, action string, edit webserver.MC
 		if name != original && find(name) >= 0 {
 			return nil, fmt.Errorf("mcp server %q already exists", name)
 		}
-		next[idx] = config.McpServer{Name: name, Cmd: strings.TrimSpace(edit.Cmd), Args: append([]string(nil), edit.Args...)}
+		previous := next[idx]
+		failOnStartup := previous.FailOnStartupError
+		if edit.FailOnStartupError != nil {
+			failOnStartup = *edit.FailOnStartupError
+		}
+		timeout := previous.ToolCallTimeoutMS
+		if edit.ToolCallTimeoutMS != nil {
+			timeout = *edit.ToolCallTimeoutMS
+		}
+		if timeout <= 0 {
+			return nil, errors.New("mcp tool call timeout must be positive")
+		}
+		cwd := previous.Cwd
+		if edit.Cwd != nil {
+			cwd = strings.TrimSpace(*edit.Cwd)
+		}
+		next[idx] = config.McpServer{Name: name, Transport: normalizedMCPTransport(edit.Transport), Cmd: strings.TrimSpace(edit.Cmd), Args: restoreMCPArgs(edit.Args, previous.Args), URL: restoreMCPURL(strings.TrimSpace(edit.URL), previous.URL), Headers: mergeMCPHeaders(edit.Headers, previous.Headers), Env: restoreMCPEnv(edit.Env, previous.Env), Cwd: cwd, ToolCallTimeoutMS: timeout, FailOnStartupError: failOnStartup}
 	case "delete":
 		idx := find(original)
 		if idx < 0 {
@@ -1498,8 +2238,32 @@ func (a *app) webManageMCP(ctx context.Context, action string, edit webserver.MC
 	if err := a.store.SetSetting(ctx, "mcp.servers", string(raw)); err != nil {
 		return nil, err
 	}
-	a.cfg.Mcp.Servers = next
+	a.providerMu.Lock()
+	a.cfg.Mcp.Servers = append([]config.McpServer(nil), next...)
+	a.providerMu.Unlock()
 	return a.webMCPServers(), nil
+}
+
+func normalizedMCPTransport(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return "stdio"
+	}
+	if value == "http" || value == "https" {
+		return "streamable-http"
+	}
+	return value
+}
+
+func cloneMCPHeaders(headers map[string]string) map[string]string {
+	if headers == nil {
+		return nil
+	}
+	out := make(map[string]string, len(headers))
+	for key, value := range headers {
+		out[key] = value
+	}
+	return out
 }
 
 // modelReasoning describes one model's selectable thinking efforts (dsh
@@ -1517,40 +2281,74 @@ type modelEffort struct {
 	Name string `json:"name"`
 }
 
-// deepseekReasoning mirrors dsh's llm-deepseek catalog for the V4 models
-// (REASONING_EFFORTS: off/low/high/max, default high).
-var deepseekReasoning = modelReasoning{
-	Efforts: []modelEffort{
-		{ID: "off", Name: "Off"},
-		{ID: "low", Name: "Low"},
-		{ID: "high", Name: "High"},
-		{ID: "max", Name: "Max"},
-	},
-	DefaultEffort: "high",
-}
-
-// reasoningFor returns the reasoning capability for a candidate model of a
-// provider ("" → none). DeepSeek's V4 models offer off/high/max; everything
-// else has no effort selector yet.
-func reasoningFor(provider, model string) *modelReasoning {
-	if provider == "deepseek-official" && (model == "deepseek-v4-flash" || model == "deepseek-v4-pro") {
-		r := deepseekReasoning
-		return &r
-	}
-	return nil
-}
-
 // providerReasoning returns the per-model reasoning catalog for a built-in
 // provider: model id → its effort choices. Only providers whose models declare
 // a reasoning capability contribute entries; the rest return an empty map.
 func providerReasoning(id string) map[string]modelReasoning {
+	return reasoningCatalogForModels(builtinModelCatalog[id])
+}
+
+func reasoningCatalogForModels(models []customModel) map[string]modelReasoning {
 	out := map[string]modelReasoning{}
-	for _, m := range modelCandidates(id) {
-		if r := reasoningFor(id, m); r != nil {
-			out[m] = *r
+	for _, m := range models {
+		if m.Reasoning == nil || !*m.Reasoning {
+			if len(m.ReasoningEfforts) == 0 {
+				continue
+			}
+		}
+		if len(m.ReasoningEfforts) > 0 {
+			ids := make([]string, 0, len(m.ReasoningEfforts))
+			for id := range m.ReasoningEfforts {
+				ids = append(ids, strings.ToLower(strings.TrimSpace(id)))
+			}
+			sort.Slice(ids, func(i, j int) bool { return reasoningEffortRank(ids[i]) < reasoningEffortRank(ids[j]) })
+			efforts := make([]modelEffort, 0, len(ids))
+			for _, id := range ids {
+				efforts = append(efforts, modelEffort{ID: id, Name: reasoningEffortName(id)})
+			}
+			defaultEffort := strings.ToLower(strings.TrimSpace(m.DefaultReasoningEffort))
+			if defaultEffort == "" {
+				for _, effort := range efforts {
+					if effort.ID != "off" {
+						defaultEffort = effort.ID
+						break
+					}
+				}
+			}
+			out[m.ID] = modelReasoning{Efforts: efforts, DefaultEffort: defaultEffort}
+			continue
+		}
+		defaultEffort := strings.ToLower(strings.TrimSpace(m.DefaultReasoningEffort))
+		if defaultEffort == "" {
+			defaultEffort = "high"
+		}
+		out[m.ID] = modelReasoning{
+			Efforts: []modelEffort{
+				{ID: "off", Name: "Off"},
+				{ID: "low", Name: "Low"},
+				{ID: "high", Name: "High"},
+				{ID: "max", Name: "Max"},
+			},
+			DefaultEffort: defaultEffort,
 		}
 	}
 	return out
+}
+
+func reasoningEffortRank(id string) int {
+	for rank, candidate := range []string{"off", "minimal", "low", "medium", "high", "xhigh", "max"} {
+		if id == candidate {
+			return rank
+		}
+	}
+	return 100
+}
+
+func reasoningEffortName(id string) string {
+	if id == "" {
+		return id
+	}
+	return strings.ToUpper(id[:1]) + id[1:]
 }
 
 // webProviders returns the known providers for the P5.1/M11 model pickers:
@@ -1569,7 +2367,13 @@ func (a *app) webProviders() []map[string]any {
 	if reg == nil {
 		return nil
 	}
-	out := make([]map[string]any, 0, len(builtinProviders)+len(a.customProviders))
+	a.providerMu.RLock()
+	cfg := a.cfg
+	profiles := cloneBuiltinProfiles(a.builtinProfiles)
+	keys := cloneStringMap(a.llmKeys)
+	customProviders := append([]customProviderProfile(nil), a.customProviders...)
+	a.providerMu.RUnlock()
+	out := make([]map[string]any, 0, len(builtinProviders)+len(customProviders))
 	// Built-in provider directory (M11-pi-ai): every provider pi-ai can
 	// authenticate with an API key is listed, registered or not, so the settings
 	// page can add their key. deepseek/openai/anthropic keep their
@@ -1579,19 +2383,17 @@ func (a *app) webProviders() []map[string]any {
 		model := bp.model
 		baseURL := bp.baseURL
 		if bp.id == "deepseek-official" || bp.id == "openai" || bp.id == "anthropic" {
-			model = llmProviderModel(a.cfg, bp.id)
-			baseURL = llmProviderBaseURL(a.cfg, bp.id)
+			model = llmProviderModel(cfg, bp.id)
+			baseURL = llmProviderBaseURL(cfg, bp.id)
 		}
 		// dsh ProviderEditor 自定义设置 对齐: a persisted llm.profile.<id>
 		// override wins over config.yaml for base URL / model / model list.
-		prof, overridden := a.builtinProfiles[bp.id]
+		prof, overridden := profiles[bp.id]
 		if overridden {
 			if prof.BaseURL != "" {
 				baseURL = prof.BaseURL
 			}
-			if prof.Model != "" {
-				model = prof.Model
-			}
+			model = effectiveProfileModel(prof, model)
 		}
 		registered := false
 		available := false
@@ -1607,7 +2409,7 @@ func (a *app) webProviders() []map[string]any {
 			"custom":           false,
 			"registered":       registered,
 			"available":        available,
-			"configured":       a.providerKey(bp.id) != "",
+			"configured":       providerKeyFromSnapshot(keys, bp.id) != "",
 			"model":            model,
 			"base_url":         baseURL,
 			"candidates":       modelCandidates(bp.id),
@@ -1616,34 +2418,45 @@ func (a *app) webProviders() []map[string]any {
 			"profile_override": overridden,
 		}
 		if overridden && len(prof.Models) > 0 {
+			entry["reasoning"] = reasoningCatalogForModels(prof.Models)
+		}
+		if rows := modelCatalogRows(bp.id, profiles, customProviders); len(rows) > 0 {
+			entry["catalog_models"] = rows
+		}
+		if overridden && len(prof.Models) > 0 {
 			entry["models"] = prof.Models
 		}
 		out = append(out, entry)
 	}
 	// M11 custom providers from settings.
-	for _, cp := range a.customProviders {
+	for _, cp := range customProviders {
+		model := effectiveCustomProviderModel(cp)
 		registered := false
 		available := false
 		if p, err := reg.Get(cp.ID); err == nil {
 			registered = true
 			available = p.Available()
 		}
-		out = append(out, map[string]any{
+		entry := map[string]any{
 			"id":             cp.ID,
 			"name":           cp.Name,
 			"custom":         true,
 			"registered":     registered,
 			"available":      available,
-			"configured":     a.providerKey(cp.ID) != "",
-			"model":          cp.Model,
+			"configured":     providerKeyFromSnapshot(keys, cp.ID) != "",
+			"model":          model,
 			"base_url":       cp.BaseURL,
 			"candidates":     nil,
 			"env_var":        llmKeyEnv(cp.ID),
 			"protocol":       cp.Protocol,
 			"protocol_label": protocolLabel(providerProtocol(cp.Protocol)),
 			"models":         cp.Models,
-			"reasoning":      nil,
-		})
+			"reasoning":      reasoningCatalogForModels(cp.Models),
+		}
+		if rows := modelCatalogRows(cp.ID, profiles, customProviders); len(rows) > 0 {
+			entry["catalog_models"] = rows
+		}
+		out = append(out, entry)
 	}
 	return out
 }
@@ -1652,12 +2465,25 @@ func (a *app) webProviders() []map[string]any {
 // /api/config/provider): it writes the API-key override (llm.key.<id>) and,
 // when the edit carries 自定义设置 changes (dsh ProviderEditor 对齐), a profile
 // override (llm.profile.<id> = base_url / model / model list), then rebuilds the
-// registry so the change applies immediately (no restart). It runs under turnMu
+// registry so the change applies immediately (no restart). It runs under the
+// control lock and the legacy turn lock
 // (D5 serial). An empty api_key removes the key override, falling back to the
 // env var; an empty base_url/model/models removes the profile override.
-func (a *app) webSaveProvider(ctx context.Context, id, apiKey, baseURL, model string, models []customModel) error {
-	a.turnMu.Lock()
-	defer a.turnMu.Unlock()
+func (a *app) webSaveProvider(ctx context.Context, id, apiKey, baseURL, model string, models []customModel) (err error) {
+	if err := validateCustomModels(models); err != nil {
+		return err
+	}
+	a.sessionStateMu.Lock()
+	defer a.sessionStateMu.Unlock()
+	a.controlMu.Lock()
+	defer a.controlMu.Unlock()
+	a.providerStateMu.Lock()
+	stateReleased := false
+	defer func() {
+		if !stateReleased {
+			a.providerStateMu.Unlock()
+		}
+	}()
 	if a.llmReg == nil {
 		return fmt.Errorf("llm not registered")
 	}
@@ -1665,19 +2491,53 @@ func (a *app) webSaveProvider(ctx context.Context, id, apiKey, baseURL, model st
 	if id == "" {
 		return errors.New("provider id is required")
 	}
+	oldSettings, err := a.store.GetSettings(ctx)
+	if err != nil {
+		return err
+	}
+	oldCredential, oldCredentialPresent := a.credentialOverride(id)
+	a.providerMu.RLock()
+	oldKeys := cloneStringMap(a.llmKeys)
+	oldProfiles := cloneBuiltinProfiles(a.builtinProfiles)
+	a.providerMu.RUnlock()
+	mutated := false
+	committed := false
+	defer func() {
+		if committed || !mutated {
+			return
+		}
+		rollbackErr := a.restoreProviderCredential(ctx, id, oldCredential, oldCredentialPresent)
+		rollbackErr = errors.Join(rollbackErr, a.restoreProviderSettings(oldSettings, id, "llm.profile."))
+		a.providerMu.Lock()
+		a.llmKeys = oldKeys
+		a.builtinProfiles = oldProfiles
+		a.providerMu.Unlock()
+		if rebuildErr := a.registerLLMUnlocked(); rebuildErr != nil {
+			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("provider registry rollback: %w", rebuildErr))
+		}
+		if rollbackErr != nil {
+			err = errors.Join(err, fmt.Errorf("provider edit rollback: %w", rollbackErr))
+		}
+	}()
 	if apiKey != "" {
-		if err := a.store.SetSetting(ctx, "llm.key."+id, apiKey); err != nil {
+		if err := a.setProviderCredential(ctx, id, apiKey); err != nil {
 			return err
 		}
+		mutated = true
+		a.providerMu.Lock()
 		if a.llmKeys == nil {
 			a.llmKeys = map[string]string{}
 		}
 		a.llmKeys[id] = apiKey
+		a.providerMu.Unlock()
 	} else {
-		if err := a.store.DeleteSetting(ctx, "llm.key."+id); err != nil {
+		if err := a.deleteProviderCredential(ctx, id); err != nil {
 			return err
 		}
+		mutated = true
+		a.providerMu.Lock()
 		delete(a.llmKeys, id)
+		a.providerMu.Unlock()
 	}
 	// 自定义设置 override: persist base_url / model / model list when any is
 	// non-empty; an all-empty edit clears a stored profile back to config.yaml.
@@ -1703,23 +2563,37 @@ func (a *app) webSaveProvider(ctx context.Context, id, apiKey, baseURL, model st
 		if err := a.store.SetSetting(ctx, "llm.profile."+id, string(raw)); err != nil {
 			return err
 		}
+		mutated = true
+		a.providerMu.Lock()
 		if a.builtinProfiles == nil {
 			a.builtinProfiles = map[string]builtinProviderProfile{}
 		}
 		a.builtinProfiles[id] = builtinProviderProfile{BaseURL: baseURL, Model: model, Models: models}
-	} else if _, ok := a.builtinProfiles[id]; ok {
-		if err := a.store.DeleteSetting(ctx, "llm.profile."+id); err != nil {
-			return err
+		a.providerMu.Unlock()
+	} else {
+		a.providerMu.RLock()
+		_, profileExists := a.builtinProfiles[id]
+		a.providerMu.RUnlock()
+		if profileExists {
+			if err := a.store.DeleteSetting(ctx, "llm.profile."+id); err != nil {
+				return err
+			}
+			mutated = true
+			a.providerMu.Lock()
+			delete(a.builtinProfiles, id)
+			a.providerMu.Unlock()
 		}
-		delete(a.builtinProfiles, id)
 	}
 	// Rebuild the registry so the new key/profile is live immediately.
-	if err := a.registerLLM(); err != nil {
+	if err := a.registerLLMUnlocked(); err != nil {
 		return err
 	}
+	a.providerStateMu.Unlock()
+	stateReleased = true
 	if a.compaction != nil {
 		_ = a.registerCompaction()
 	}
+	committed = true
 	return nil
 }
 
@@ -1732,9 +2606,21 @@ func (a *app) webSaveProvider(ctx context.Context, id, apiKey, baseURL, model st
 // the multi-model list (M11-pi-ai ModelListEditor 对齐): the effective default
 // model is the first entry, or the legacy single model argument when the list
 // is empty (a hand-declared provider needs at least one).
-func (a *app) webSaveCustomProvider(ctx context.Context, id, name, baseURL, model, apiKey, protocol string, models []customModel) error {
-	a.turnMu.Lock()
-	defer a.turnMu.Unlock()
+func (a *app) webSaveCustomProvider(ctx context.Context, id, name, baseURL, model, apiKey, protocol string, models []customModel) (err error) {
+	if err := validateCustomModels(models); err != nil {
+		return err
+	}
+	a.sessionStateMu.Lock()
+	defer a.sessionStateMu.Unlock()
+	a.controlMu.Lock()
+	defer a.controlMu.Unlock()
+	a.providerStateMu.Lock()
+	stateReleased := false
+	defer func() {
+		if !stateReleased {
+			a.providerStateMu.Unlock()
+		}
+	}()
 	if a.llmReg == nil {
 		return fmt.Errorf("llm not registered")
 	}
@@ -1782,6 +2668,34 @@ func (a *app) webSaveCustomProvider(ctx context.Context, id, name, baseURL, mode
 	} else if model == "" {
 		return errors.New("at least one model is required")
 	}
+	oldSettings, err := a.store.GetSettings(ctx)
+	if err != nil {
+		return err
+	}
+	oldCredential, oldCredentialPresent := a.credentialOverride(id)
+	a.providerMu.RLock()
+	oldKeys := cloneStringMap(a.llmKeys)
+	oldProviders := append([]customProviderProfile(nil), a.customProviders...)
+	a.providerMu.RUnlock()
+	mutated := false
+	committed := false
+	defer func() {
+		if committed || !mutated {
+			return
+		}
+		rollbackErr := a.restoreProviderCredential(ctx, id, oldCredential, oldCredentialPresent)
+		rollbackErr = errors.Join(rollbackErr, a.restoreProviderSettings(oldSettings, id, "llm.custom."))
+		a.providerMu.Lock()
+		a.llmKeys = oldKeys
+		a.customProviders = oldProviders
+		a.providerMu.Unlock()
+		if rebuildErr := a.registerLLMUnlocked(); rebuildErr != nil {
+			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("provider registry rollback: %w", rebuildErr))
+		}
+		if rollbackErr != nil {
+			err = errors.Join(err, fmt.Errorf("custom provider rollback: %w", rollbackErr))
+		}
+	}()
 	raw, err := json.Marshal(customProviderProfile{ID: id, Name: name, BaseURL: baseURL, Model: model, Protocol: protocol, Models: models})
 	if err != nil {
 		return err
@@ -1789,16 +2703,21 @@ func (a *app) webSaveCustomProvider(ctx context.Context, id, name, baseURL, mode
 	if err := a.store.SetSetting(ctx, "llm.custom."+id, string(raw)); err != nil {
 		return err
 	}
+	mutated = true
 	if apiKey != "" {
-		if err := a.store.SetSetting(ctx, "llm.key."+id, apiKey); err != nil {
+		if err := a.setProviderCredential(ctx, id, apiKey); err != nil {
 			return err
 		}
+		mutated = true
+		a.providerMu.Lock()
 		if a.llmKeys == nil {
 			a.llmKeys = map[string]string{}
 		}
 		a.llmKeys[id] = apiKey
+		a.providerMu.Unlock()
 	}
 	profile := customProviderProfile{ID: id, Name: name, BaseURL: baseURL, Model: model, Protocol: protocol, Models: models}
+	a.providerMu.Lock()
 	replaced := false
 	for i := range a.customProviders {
 		if a.customProviders[i].ID == id {
@@ -1810,21 +2729,141 @@ func (a *app) webSaveCustomProvider(ctx context.Context, id, name, baseURL, mode
 	if !replaced {
 		a.customProviders = append(a.customProviders, profile)
 	}
-	if err := a.registerLLM(); err != nil {
+	a.providerMu.Unlock()
+	if err := a.registerLLMUnlocked(); err != nil {
 		return err
 	}
+	a.providerStateMu.Unlock()
+	stateReleased = true
 	if a.compaction != nil {
 		_ = a.registerCompaction()
 	}
+	committed = true
 	return nil
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
+}
+
+func cloneBuiltinProfiles(in map[string]builtinProviderProfile) map[string]builtinProviderProfile {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]builtinProviderProfile, len(in))
+	for key, profile := range in {
+		profile.Models = cloneCustomModels(profile.Models)
+		out[key] = profile
+	}
+	return out
+}
+
+func cloneCustomModels(in []customModel) []customModel {
+	if in == nil {
+		return nil
+	}
+	out := make([]customModel, len(in))
+	for i, model := range in {
+		out[i] = model
+		out[i].Input = append([]string(nil), model.Input...)
+		out[i].ReasoningEfforts = cloneReasoningEfforts(model.ReasoningEfforts)
+	}
+	return out
+}
+
+func cloneReasoningEfforts(in map[string]*string) map[string]*string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]*string, len(in))
+	for effort, wire := range in {
+		if wire == nil {
+			out[effort] = nil
+			continue
+		}
+		value := *wire
+		out[effort] = &value
+	}
+	return out
+}
+
+// setProviderCredential is the single Web provider-key persistence seam.
+// Production uses the dedicated credential backend; the llm.key setting branch
+// is retained only for lightweight embedders that predate the credential vault.
+func (a *app) setProviderCredential(ctx context.Context, provider, value string) error {
+	if a.credentials != nil {
+		return a.credentials.Set(ctx, llmKeyEnv(provider), value)
+	}
+	return a.store.SetSetting(ctx, "llm.key."+provider, value)
+}
+
+func (a *app) deleteProviderCredential(ctx context.Context, provider string) error {
+	if a.credentials != nil {
+		return a.credentials.Unset(ctx, llmKeyEnv(provider))
+	}
+	return a.store.DeleteSetting(ctx, "llm.key."+provider)
+}
+
+// restoreProviderCredential returns the dedicated credential boundary to its
+// pre-edit state. Presence—not non-empty generic settings—is authoritative for
+// whether an override existed before the failed Web mutation.
+func (a *app) restoreProviderCredential(ctx context.Context, provider, value string, present bool) error {
+	if present && value != "" {
+		return a.setProviderCredential(ctx, provider, value)
+	}
+	return a.deleteProviderCredential(ctx, provider)
+}
+
+// restoreProviderSettings restores only settings touched by one provider edit.
+// It uses a process context because rollback must still run when the HTTP
+// request that initiated the edit has already been canceled.
+func (a *app) restoreProviderSettings(previous map[string]string, id string, prefixes ...string) error {
+	if a.store == nil {
+		return nil
+	}
+	ctx := context.Background()
+	if a.baseCtx != nil && a.baseCtx.Err() == nil {
+		ctx = a.baseCtx
+	}
+	var first error
+	for _, prefix := range prefixes {
+		key := prefix + id
+		value, present := previous[key]
+		var err error
+		if present {
+			err = a.store.SetSetting(ctx, key, value)
+		} else {
+			err = a.store.DeleteSetting(ctx, key)
+		}
+		if err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
 }
 
 // webDeleteCustomProvider removes a custom provider declaration (M11, DELETE
 // /api/config/provider): it deletes llm.custom.<id> and its key override, then
 // rebuilds the registry. Built-in providers cannot be removed.
-func (a *app) webDeleteCustomProvider(ctx context.Context, id string) error {
-	a.turnMu.Lock()
-	defer a.turnMu.Unlock()
+func (a *app) webDeleteCustomProvider(ctx context.Context, id string) (err error) {
+	a.sessionStateMu.Lock()
+	defer a.sessionStateMu.Unlock()
+	a.controlMu.Lock()
+	defer a.controlMu.Unlock()
+	a.providerStateMu.Lock()
+	stateReleased := false
+	defer func() {
+		if !stateReleased {
+			a.providerStateMu.Unlock()
+		}
+	}()
 	if a.llmReg == nil {
 		return fmt.Errorf("llm not registered")
 	}
@@ -1832,6 +2871,7 @@ func (a *app) webDeleteCustomProvider(ctx context.Context, id string) error {
 	if _, ok := builtinProviderByID(id); ok {
 		return errors.New("built-in providers cannot be removed")
 	}
+	a.providerMu.RLock()
 	found := false
 	for _, cp := range a.customProviders {
 		if cp.ID == id {
@@ -1839,15 +2879,53 @@ func (a *app) webDeleteCustomProvider(ctx context.Context, id string) error {
 			break
 		}
 	}
+	a.providerMu.RUnlock()
 	if !found {
 		return fmt.Errorf("custom provider %q not found", id)
 	}
+	oldSettings, err := a.store.GetSettings(ctx)
+	if err != nil {
+		return err
+	}
+	oldCredential, oldCredentialPresent := a.credentialOverride(id)
+	a.providerMu.RLock()
+	oldKeys := cloneStringMap(a.llmKeys)
+	oldProviders := append([]customProviderProfile(nil), a.customProviders...)
+	a.providerMu.RUnlock()
+	mutated := false
+	committed := false
+	defer func() {
+		if committed || !mutated {
+			return
+		}
+		rollbackErr := a.restoreProviderCredential(ctx, id, oldCredential, oldCredentialPresent)
+		rollbackErr = errors.Join(rollbackErr, a.restoreProviderSettings(oldSettings, id, "llm.custom."))
+		a.providerMu.Lock()
+		a.llmKeys = oldKeys
+		a.customProviders = oldProviders
+		a.providerMu.Unlock()
+		// registerLLM publishes only after a complete build. Rebuild the prior
+		// snapshot so a failed delete cannot leave the durable and live
+		// registries diverged.
+		if rebuildErr := a.registerLLMUnlocked(); rebuildErr != nil {
+			if rollbackErr == nil {
+				rollbackErr = rebuildErr
+			} else {
+				rollbackErr = errors.Join(rollbackErr, rebuildErr)
+			}
+		}
+		if rollbackErr != nil {
+			err = errors.Join(err, fmt.Errorf("custom provider delete rollback: %w", rollbackErr))
+		}
+	}()
 	if err := a.store.DeleteSetting(ctx, "llm.custom."+id); err != nil {
 		return err
 	}
-	if err := a.store.DeleteSetting(ctx, "llm.key."+id); err != nil {
+	mutated = true
+	if err := a.deleteProviderCredential(ctx, id); err != nil {
 		return err
 	}
+	a.providerMu.Lock()
 	kept := a.customProviders[:0]
 	for _, cp := range a.customProviders {
 		if cp.ID != id {
@@ -1856,11 +2934,17 @@ func (a *app) webDeleteCustomProvider(ctx context.Context, id string) error {
 	}
 	a.customProviders = kept
 	delete(a.llmKeys, id)
-	if err := a.registerLLM(); err != nil {
+	a.providerMu.Unlock()
+	if err := a.registerLLMUnlocked(); err != nil {
 		return err
 	}
+	a.providerStateMu.Unlock()
+	stateReleased = true
+	committed = true
 	if a.compaction != nil {
-		_ = a.registerCompaction()
+		if err := a.registerCompaction(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -1897,7 +2981,8 @@ func validProviderRoute(id string) bool {
 
 // webSwitchModel implements POST /api/config/model (P5.1, 模型选择实时生效): it
 // validates and applies a live provider/model/reasoning-effort change, then
-// rebuilds the selected LLM provider — no restart. It runs under turnMu (D5
+// rebuilds the selected LLM provider — no restart. It runs under the control
+// lock and legacy turn lock (D5
 // serial: no turn is in flight while the selection swaps) and registerLLM
 // publishes the new pointer under llmMu, so the very next message (buildLoop
 // re-wires every turn) talks to the new provider. The accepted selection is
@@ -1905,28 +2990,52 @@ func validProviderRoute(id string) bool {
 // remains the base configuration. Fail-closed: on error the previous selection
 // is fully restored.
 func (a *app) webSwitchModel(ctx context.Context, provider, model, effort string) error {
-	a.turnMu.Lock()
-	defer a.turnMu.Unlock()
+	a.sessionStateMu.Lock()
+	defer a.sessionStateMu.Unlock()
+	a.controlMu.Lock()
+	defer a.controlMu.Unlock()
+	// Hold the publication barrier across both the config mutation and the
+	// complete registry rebuild. Agent-backed turns take its read side when
+	// resolving their runtime, so they see either the old pair or the new pair,
+	// never a new provider id against an old registry.
+	a.providerStateMu.Lock()
 	if a.llmReg == nil {
+		a.providerStateMu.Unlock()
 		return fmt.Errorf("llm not registered")
 	}
 	if provider != "" {
 		p, err := a.llmReg.Get(provider)
 		if err != nil {
+			a.providerStateMu.Unlock()
 			return fmt.Errorf("unknown provider %q (registered: %s)", provider, llmProviderIDs(a.llmReg))
 		}
 		if !p.Available() {
+			a.providerStateMu.Unlock()
 			return fmt.Errorf("provider %q not available (missing %s)", provider, llmCredentialEnv(provider))
 		}
 	}
+	a.providerMu.RLock()
+	currentCfg := a.cfg.Clone()
+	a.providerMu.RUnlock()
 	target := provider
 	if target == "" {
-		target = a.cfg.LLM.Provider
+		target = currentCfg.LLM.Provider
+	}
+	candidateModel := model
+	if candidateModel == "" {
+		candidateModel = llmProviderModel(currentCfg, target)
+	}
+	if effort != "" {
+		if err := validateModelCapabilityForSelection(a.modelCapabilityForRouteWithConfig(currentCfg, target, candidateModel), effort); err != nil {
+			a.providerStateMu.Unlock()
+			return err
+		}
 	}
 	// Snapshot for rollback.
-	oldProvider := a.cfg.LLM.Provider
-	oldModel, oldOpenAI, oldAnthropic := a.cfg.Model, a.cfg.LLM.OpenAI.Model, a.cfg.LLM.Anthropic.Model
-	oldEffort := a.cfg.ReasoningEffort
+	oldProvider := currentCfg.LLM.Provider
+	oldModel, oldOpenAI, oldAnthropic := currentCfg.Model, currentCfg.LLM.OpenAI.Model, currentCfg.LLM.Anthropic.Model
+	oldEffort := currentCfg.ReasoningEffort
+	a.providerMu.Lock()
 	if provider != "" {
 		a.cfg.LLM.Provider = provider
 	}
@@ -1943,23 +3052,33 @@ func (a *app) webSwitchModel(ctx context.Context, provider, model, effort string
 	// dsh 思考强度 (ModelSelect effort): "off"|"low"|"high"|"max"; a change to
 	// "" clears the runtime selection back to the provider default.
 	switch effort {
-	case "", "off", "low", "high", "max":
+	case "", "off", "minimal", "low", "medium", "high", "xhigh", "max":
 		a.cfg.ReasoningEffort = effort
 	default:
+		a.providerMu.Unlock()
+		a.providerStateMu.Unlock()
 		return fmt.Errorf("unknown reasoning effort %q (want off|low|high|max)", effort)
 	}
-	if err := a.registerLLM(); err != nil {
+	a.providerMu.Unlock()
+	if err := a.registerLLMUnlocked(); err != nil {
 		// Restore the previous selection — never leave a half-applied switch.
+		a.providerMu.Lock()
 		a.cfg.LLM.Provider = oldProvider
 		a.cfg.Model, a.cfg.LLM.OpenAI.Model, a.cfg.LLM.Anthropic.Model = oldModel, oldOpenAI, oldAnthropic
 		a.cfg.ReasoningEffort = oldEffort
+		a.providerMu.Unlock()
+		a.providerStateMu.Unlock()
 		return err
 	}
+	a.providerStateMu.Unlock()
 	// Rebuild compaction on the new provider so auto-summaries follow the switch.
 	if a.compaction != nil {
 		_ = a.registerCompaction()
 	}
-	a.persistDefaultModelSelection(ctx, a.cfg.LLM.Provider, llmProviderModel(a.cfg, a.cfg.LLM.Provider), a.cfg.ReasoningEffort)
+	a.providerMu.RLock()
+	acceptedCfg := a.cfg.Clone()
+	a.providerMu.RUnlock()
+	a.persistDefaultModelSelection(ctx, acceptedCfg.LLM.Provider, llmProviderModel(acceptedCfg, acceptedCfg.LLM.Provider), acceptedCfg.ReasoningEffort)
 	return nil
 }
 

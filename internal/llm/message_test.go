@@ -1,6 +1,9 @@
 package llm
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestTextBuildsTextBlock(t *testing.T) {
 	b := Text("hello")
@@ -63,6 +66,47 @@ func TestMessageHasImage(t *testing.T) {
 	}}}
 	if !nested.HasImage() {
 		t.Fatal("message with a nested image block must have an image")
+	}
+}
+
+func TestValidateRequestBlocksRejectsMergeExtensibleInput(t *testing.T) {
+	tests := []struct {
+		name    string
+		message Message
+	}{
+		{"audio", Message{Content: []ContentBlock{{
+			Kind: "audio", Raw: json.RawMessage(`{"type":"audio","data":"aGk=","mimeType":"audio/wav"}`),
+		}}}},
+		{"nested tool result", Message{Role: RoleTool, Content: []ContentBlock{{
+			Kind: BlockToolResult, CallID: "call", Blocks: []ContentBlock{{Kind: "resource"}},
+		}}}},
+		{"unknown extension", Message{Content: []ContentBlock{{
+			Kind: "x-plugin/card", Raw: json.RawMessage(`{"type":"x-plugin/card"}`),
+		}}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if !test.message.HasUnsupportedInput() {
+				t.Fatalf("message = %#v, want unsupported request input", test.message)
+			}
+			err := ValidateRequestBlocks("test-provider", []Message{test.message})
+			facts, ok := FailureFacts(err)
+			if !ok || facts.Code != "UNSUPPORTED_INPUT_CONTENT" {
+				t.Fatalf("error = %v, want UNSUPPORTED_INPUT_CONTENT", err)
+			}
+		})
+	}
+}
+
+func TestValidateRequestBlocksAcceptsCoreVocabulary(t *testing.T) {
+	messages := []Message{
+		{Content: []ContentBlock{Text("hello"), {Kind: BlockReasoning, Text: "why"}}},
+		{Role: RoleTool, Content: []ContentBlock{{
+			Kind: BlockToolResult, CallID: "call", Blocks: []ContentBlock{Text("result")},
+		}}},
+	}
+	if err := ValidateRequestBlocks("test-provider", messages); err != nil {
+		t.Fatalf("core request content rejected: %v", err)
 	}
 }
 

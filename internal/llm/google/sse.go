@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -76,14 +75,17 @@ type wireChunk struct {
 // parts → StreamTextDelta, thought:true parts → StreamReasoningDelta, and
 // functionCall parts → accumulated llm.ToolCalls (in first-seen order).
 type streamReader struct {
-	dec  *sseDecoder
-	resp *http.Response
-	done bool
+	dec             *sseDecoder
+	resp            *http.Response
+	done            bool
+	credentialLease llm.CredentialLease
 
 	finishReason string
+	sawTerminal  bool
 	reasoning    strings.Builder
 	toolCalls    []llm.ToolCall
 	usage        llm.TokenUsage
+	sawContent   bool
 }
 
 func (r *streamReader) Next() (llm.StreamEvent, error) {
@@ -95,34 +97,48 @@ func (r *streamReader) Next() (llm.StreamEvent, error) {
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				// Gemini carries the finish reason on the final candidate chunk
-				// (never a separate completed event); a clean EOF therefore
-				// always finishes the stream.
+				// (never a separate completed event). EOF before that marker is a
+				// truncated provider stream and must not be promoted to success.
+				if !r.sawTerminal {
+					r.close()
+					return llm.StreamEvent{}, llm.NewFailureError("google: stream ended without finish reason", "STREAM_CLOSED", err)
+				}
 				return r.finish("stop"), nil
 			}
-			return llm.StreamEvent{}, err
+			r.close()
+			return llm.StreamEvent{}, llm.NewFailureError("google: stream read failed: "+err.Error(), "STREAM_CLOSED", err)
 		}
 		if strings.TrimSpace(payload) == "" {
 			continue
 		}
 		var chunk wireChunk
 		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
-			return llm.StreamEvent{}, fmt.Errorf("google: malformed SSE payload: %w", err)
+			r.close()
+			return llm.StreamEvent{}, llm.NewFailureError("google: malformed SSE payload: "+err.Error(), "MALFORMED_RESPONSE", err)
 		}
 		if chunk.UsageMetadata != nil {
 			r.usage = llm.TokenUsage{
-				InputTokens:       chunk.UsageMetadata.PromptTokenCount,
-				OutputTokens:      chunk.UsageMetadata.CandidatesTokenCount,
-				TotalTokens:       chunk.UsageMetadata.TotalTokenCount,
-				CachedInputTokens: chunk.UsageMetadata.CachedContentTokenCount,
-				ReasoningTokens:   chunk.UsageMetadata.ThoughtsTokenCount,
+				InputTokens:     chunk.UsageMetadata.PromptTokenCount,
+				OutputTokens:    chunk.UsageMetadata.CandidatesTokenCount,
+				TotalTokens:     chunk.UsageMetadata.TotalTokenCount,
+				CacheReadTokens: chunk.UsageMetadata.CachedContentTokenCount,
+				ReasoningTokens: chunk.UsageMetadata.ThoughtsTokenCount,
+			}
+			// Gemini's prompt token count includes cached content. Keep the
+			// explicit usage buckets disjoint like the reference adapters.
+			r.usage.InputTokens -= r.usage.CacheReadTokens
+			if r.usage.InputTokens < 0 {
+				r.usage.InputTokens = 0
 			}
 		}
 		for _, cand := range chunk.Candidates {
 			if cand.FinishReason != "" {
+				r.sawTerminal = true
 				r.finishReason = mapFinishReason(cand.FinishReason)
 			}
 			for _, p := range cand.Content.Parts {
 				if p.FunctionCall != nil {
+					r.sawContent = true
 					args, _ := json.Marshal(p.FunctionCall.Args)
 					r.toolCalls = append(r.toolCalls, llm.ToolCall{
 						ID:        p.FunctionCall.Name + "-call",
@@ -135,9 +151,11 @@ func (r *streamReader) Next() (llm.StreamEvent, error) {
 					continue
 				}
 				if p.Thought {
+					r.sawContent = true
 					r.reasoning.WriteString(p.Text)
 					return llm.StreamEvent{Kind: llm.StreamReasoningDelta, Text: p.Text}, nil
 				}
+				r.sawContent = true
 				return llm.StreamEvent{Kind: llm.StreamTextDelta, Text: p.Text}, nil
 			}
 		}
@@ -149,16 +167,31 @@ func (r *streamReader) Next() (llm.StreamEvent, error) {
 // to "stop" when the stream never reported one.
 func (r *streamReader) finish(fallback string) llm.StreamEvent {
 	r.done = true
+	r.close()
 	reason := r.finishReason
 	if reason == "" {
 		reason = fallback
 	}
-	return llm.StreamEvent{
+	result := llm.StreamEvent{
 		Kind:         llm.StreamFinish,
 		FinishReason: reason,
 		ToolCalls:    r.toolCalls,
 		Reasoning:    r.reasoning.String(),
 		Usage:        r.usage,
+	}
+	if !r.sawContent && reason == "stop" {
+		result.Failure = &llm.Failure{Message: "google: completed stream contained no content", Code: "EMPTY_RESPONSE"}
+	}
+	return result
+}
+
+func (r *streamReader) close() {
+	if r.resp != nil && r.resp.Body != nil {
+		_ = r.resp.Body.Close()
+	}
+	if r.credentialLease != nil {
+		r.credentialLease.Release()
+		r.credentialLease = nil
 	}
 }
 

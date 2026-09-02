@@ -6,14 +6,93 @@ package webserver
 // history replay and live mux delivery.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
 	"unicode/utf16"
 
+	"github.com/jabing/shutu-agent/internal/meter"
+	"github.com/jabing/shutu-agent/internal/projection"
 	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/jabing/shutu-agent/internal/store"
 )
+
+// Version 2 invalidates checkpoints written by the old session.list path,
+// which could fold only the bounded tail while labelling the result with the
+// complete session revision. Those rows are structurally valid but
+// semantically incomplete and must never be reused after upgrade.
+const nativeProjectionCacheVersion = 2
+
+type nativeProjectionCachePayload struct {
+	Block   nativeProjectionBlock `json:"block"`
+	Surface map[string]any        `json:"surface"`
+}
+
+// nativeProjectionCheckpointEvent bounds write-behind traffic to events that
+// can materially change the durable conversation/state projection. Streaming
+// chunks still reach the live client immediately; they do not force one
+// SQLite write per token. A later history request remains the authoritative
+// repair path when a checkpoint intentionally lags a non-checkpoint event.
+func nativeProjectionCheckpointEvent(eventType string) bool {
+	switch eventType {
+	case session.EventTurnEnd, session.EventUserMessage, session.EventAssistantMessage,
+		session.EventToolResult, session.EventLLMRequestEnd, session.EventCompactionEnd,
+		session.EventPlanCreate, session.EventPlanUpdate, session.EventPlanStatus,
+		session.EventPlanDelete, session.EventPlanMode, session.EventSessionTitle, "todo/write",
+		"permission/preset", "sandbox/mode":
+		return true
+	default:
+		return false
+	}
+}
+
+// nativeCachedProjection reads only an exact-revision checkpoint. A stale
+// row is deliberately ignored and a schema mismatch is invalidated; the
+// durable event log remains the authority and the caller will rebuild it.
+func (s *Server) nativeCachedProjection(ctx context.Context, sessionID string, revision uint64) (*nativeProjectionCachePayload, bool) {
+	cache, ok := s.store.(store.SessionProjectionCacheStore)
+	if !ok || revision == 0 {
+		return nil, false
+	}
+	row, err := cache.GetProjectionCache(ctx, sessionID)
+	if err != nil {
+		return nil, false
+	}
+	if row.SessionID == "" {
+		return nil, false
+	}
+	if row.Version != nativeProjectionCacheVersion || row.Revision != revision {
+		if row.Version != nativeProjectionCacheVersion {
+			_ = cache.DeleteProjectionCache(context.Background(), sessionID)
+		}
+		return nil, false
+	}
+	var payload nativeProjectionCachePayload
+	if err := json.Unmarshal(row.Payload, &payload); err != nil || payload.Block.Values == nil {
+		_ = cache.DeleteProjectionCache(context.Background(), sessionID)
+		return nil, false
+	}
+	return &payload, true
+}
+
+// saveNativeProjection is fail-soft by design. A lost cache write costs a
+// longer replay on the next read but must never turn a committed session or
+// Web request into a failure.
+func (s *Server) saveNativeProjection(ctx context.Context, sessionID string, revision int64, block nativeProjectionBlock, surface map[string]any) {
+	cache, ok := s.store.(store.SessionProjectionCacheStore)
+	if !ok || revision < 0 {
+		return
+	}
+	payload, err := json.Marshal(nativeProjectionCachePayload{Block: block, Surface: surface})
+	if err != nil {
+		return
+	}
+	_ = cache.PutProjectionCache(ctx, store.ProjectionCacheRow{
+		SessionID: sessionID, Version: nativeProjectionCacheVersion, Revision: uint64(revision), Payload: payload,
+	})
+}
 
 type nativeProjectionCursor struct {
 	turn              int
@@ -34,10 +113,13 @@ type nativeProjectionCursor struct {
 	goal              map[string]any
 	subagent          nativeProjectionSubagentState
 	context           nativeProjectionContextBreakdown
+	completion        meter.CompletionProjection
 	list              nativeProjectionSessionListMetadata
+	canonical         *projection.Cursor
 }
 
 func newNativeProjectionCursor() *nativeProjectionCursor {
+	canonical, _ := projection.NewCursor(nil)
 	values := make(map[string]any)
 	stats := &nativeProjectionSessionStats{}
 	values["sessionStats"] = nativeSessionStatsValue(stats)
@@ -46,11 +128,16 @@ func newNativeProjectionCursor() *nativeProjectionCursor {
 		"cacheReadTokens": int64(0), "cacheWriteTokens": int64(0),
 	}
 	values["contextPressure"] = map[string]any{}
+	values["completionLedger"] = map[string]any{
+		"assistantTokens": int64(0), "reasoningTokens": int64(0),
+		"toolCallTokens": int64(0), "toolResultTokens": int64(0),
+		"attachmentBytes": int64(0),
+	}
 	values["goal"] = nil
 	values["plan"] = map[string]any{"active": false, "pending": false}
 	return &nativeProjectionCursor{
 		turn: -1, values: values, changed: make(map[string]any), stats: *stats,
-		list: nativeProjectionSessionListMetadata{blank: true},
+		list: session.NewSessionListMetadata(), canonical: canonical,
 	}
 }
 
@@ -69,8 +156,32 @@ func (c *nativeProjectionCursor) setContextWindow(window int) {
 
 func (c *nativeProjectionCursor) project(sessionID string, ev session.Event) nativeSessionEvent {
 	data := nativeJSONObject(ev.Data)
+	canonicalAccepted := false
+	if c.canonical != nil {
+		// The native adapter still owns DSH wire normalization, but the shared
+		// projection owns the durable surface list used by reconnect snapshots.
+		// A bounded/truncated page may begin mid-stream or contain a legacy
+		// alias; keep the adapter fallback for that transport-only case.
+		if nativeSurfaceOp(data) != nil && ev.Type != session.EventUserMessage {
+			// Current durable compaction markers are user/message events. Older
+			// native fixtures may carry a replacement marker on an assistant
+			// row; that adapter-only form is intentionally not admitted into the
+			// canonical model projection.
+			c.canonical = nil
+		} else if err := c.canonical.Append(ev); err != nil {
+			c.canonical = nil
+		} else {
+			canonicalAccepted = true
+		}
+	}
 	c.changed = make(map[string]any)
 	c.foldProjection(ev, data)
+	if canonicalAccepted {
+		// Keep live control frames on the same canonical state used by the
+		// reconnect checkpoint. The native adapter still decides wire shape,
+		// but it no longer decides the value for these shared fields.
+		c.syncCanonicalControlChanges(ev)
+	}
 	projectedType := ev.Type
 	projectedData := data
 	ignorable := false
@@ -102,7 +213,7 @@ func (c *nativeProjectionCursor) project(sessionID string, ev session.Event) nat
 	case session.EventStepEnd:
 		step := nativeNonNegative(nativeEventInt(data, "step", c.step))
 		projectedData = map[string]any{"turn": nativeNonNegative(c.turn), "step": step}
-	case session.EventLLMRequestStart:
+	case session.EventRequestHeader, "llm/request_start":
 		c.provider = nativeEventString(data, "provider")
 		c.model = nativeEventString(data, "model")
 		c.requestID = nativeEventString(data, "requestId", "request_id")
@@ -110,9 +221,16 @@ func (c *nativeProjectionCursor) project(sessionID string, ev session.Event) nat
 		if c.requestHeaderSeen {
 			reason = "update"
 		}
+		if explicit := nativeEventString(data, "reason"); explicit != "" {
+			reason = explicit
+		}
+		header := nativeEventObject(data, "header")
+		if header == nil {
+			header = nativeLLMRequestHeader(data)
+		}
 		projectedType = "request/header"
 		projectedData = map[string]any{
-			"header": nativeLLMRequestHeader(data),
+			"header": header,
 			"reason": reason,
 		}
 		c.requestHeaderSeen = true
@@ -129,6 +247,12 @@ func (c *nativeProjectionCursor) project(sessionID string, ev session.Event) nat
 			chunkType = "reasoning-delta"
 		}
 		text := nativeEventString(data, "text")
+		if text == "" {
+			// The canonical replay fixture and SDK/provider adapters may carry
+			// the chunk envelope under data.chunk.  Accept both wire forms so
+			// native history does not silently erase a real delta.
+			text = nativeEventString(nativeEventObject(data, "chunk"), "text")
+		}
 		projectedType = session.EventAssistantChunk
 		projectedData = map[string]any{
 			"turn": nativeNonNegative(c.turn),
@@ -157,9 +281,19 @@ func (c *nativeProjectionCursor) project(sessionID string, ev session.Event) nat
 		projectedData = c.toolResultData(sessionID, ev.Seq, data, ev.Type == "tool/error")
 	case session.EventLLMRetry:
 		projectedData = c.retryData(sessionID, ev.Seq, data)
+	case session.EventLLMRetryStarted:
+		projectedData = map[string]any{
+			"retryId": nativeEventString(data, "retryId", "retry_id"),
+			"turn":    nativeNonNegative(nativeEventInt(data, "turn", c.turn)),
+			"step":    nativeNonNegative(nativeEventInt(data, "step", c.step)),
+			"retry":   nativeEventInt(data, "retry", nativeEventInt(data, "attempt", 1)),
+		}
 	case session.EventCompactionStart, session.EventCompactionSummary,
 		session.EventCompactionEnd, session.EventCompactionPrune:
 		ignorable = true
+	case session.EventCommandRun, session.EventCommandDone:
+		// Command lifecycle facts are already in the canonical dsh shape and
+		// remain outside model history.
 	}
 	if projectedType == session.EventUserMessage || projectedType == session.EventAssistantMessage || projectedType == session.EventToolResult {
 		surfaceOp, sourceEventSeqs = c.projectSurface(ev.Seq, data)
@@ -250,18 +384,16 @@ type nativeProjectionContextClaim struct {
 	tokens int64
 }
 
-type nativeProjectionSessionListMetadata struct {
-	blank        bool
-	lastPromptAt *int64
-}
+type nativeProjectionSessionListMetadata = session.SessionListMetadata
 
 func (c *nativeProjectionCursor) foldProjection(ev session.Event, data map[string]any) {
 	c.foldSessionStats(ev, data)
 	c.foldSubagent(ev, data)
 	c.foldContextBreakdown(ev, data)
 	c.foldSessionListMetadata(ev, data)
+	c.foldCompletion(ev)
 	switch ev.Type {
-	case "session/title":
+	case session.EventSessionTitle:
 		c.setProjectionValue("title", nativeEventString(data, "title", "text"))
 	case "todo/write":
 		if todos, ok := nativeTodoItems(nativeEventValue(data, "items", "todos")); ok {
@@ -303,13 +435,22 @@ func (c *nativeProjectionCursor) foldProjection(ev session.Event, data map[strin
 	case session.EventGoalRoundEnd:
 		c.updateGoalStatus(ev, data)
 	case "permission/preset":
-		c.setProjectionValue("permissions", nativePermissionProjection(nativeEventString(data, "currentValue", "current", "permission")))
+		c.setProjectionValue("permissions", nativePermissionProjection(nativeEventString(data, "currentValue", "current", "permission", "preset")))
+	case "sandbox/mode":
+		mode := nativeEventString(data, "mode")
+		permission := "standard"
+		if mode == "read-only" || mode == "readonly" {
+			permission = "readonly"
+		} else if mode == "danger-full-access" {
+			permission = "full"
+		}
+		c.setProjectionValue("permissions", nativePermissionProjection(permission))
 	case session.EventPlanMode:
 		c.setProjectionValue("plan", map[string]any{
 			"active":  nativeEventBool(data, "active"),
 			"pending": nativeEventBool(data, "pending"),
 		})
-	case session.EventLLMRequestStart:
+	case session.EventRequestHeader, "llm/request_start":
 		if contextWindow := nativeEventInt64(data, "contextWindow", "context_window"); contextWindow > 0 {
 			context := nativeProjectionMap(c.values["contextPressure"])
 			context["contextWindow"] = contextWindow
@@ -330,43 +471,84 @@ func (c *nativeProjectionCursor) foldProjection(ev session.Event, data map[strin
 	}
 }
 
+// foldCompletion keeps the native state projection on the same committed
+// output ledger as the Go meter. The cursor is replayed from the ordered log,
+// so adding one event at a time is equivalent to ProjectCompletion over the
+// complete history and does not count transient assistant chunks.
+func (c *nativeProjectionCursor) foldCompletion(ev session.Event) {
+	if ev.Type != session.EventAssistantMessage && ev.Type != session.EventToolResult {
+		return
+	}
+	delta := meter.ProjectCompletion([]session.Event{ev})
+	c.completion.AssistantTokens += delta.AssistantTokens
+	c.completion.ReasoningTokens += delta.ReasoningTokens
+	c.completion.ToolCallTokens += delta.ToolCallTokens
+	c.completion.ToolResultTokens += delta.ToolResultTokens
+	c.completion.AttachmentBytes += delta.AttachmentBytes
+	c.setProjectionValue("completionLedger", map[string]any{
+		"assistantTokens":  int64(c.completion.AssistantTokens),
+		"reasoningTokens":  int64(c.completion.ReasoningTokens),
+		"toolCallTokens":   int64(c.completion.ToolCallTokens),
+		"toolResultTokens": int64(c.completion.ToolResultTokens),
+		"attachmentBytes":  c.completion.AttachmentBytes,
+	})
+}
+
 func (c *nativeProjectionCursor) foldSessionListMetadata(ev session.Event, data map[string]any) {
-	if ev.Type == session.EventTurnStart {
-		c.list.blank = false
-	}
-	if ev.Type != session.EventUserMessage {
-		return
-	}
-	source := nativeEventObject(data, "source")
-	if source != nil && nativeEventString(source, "kind") != "user" {
-		return
-	}
-	now := ev.At.UnixMilli()
-	if now < 0 {
-		now = 0
-	}
-	c.list.lastPromptAt = &now
+	_ = data
+	c.list.Apply(ev)
 }
 
 func nativeSessionListMetadataValue(metadata *nativeProjectionSessionListMetadata) map[string]any {
-	value := map[string]any{"blank": metadata.blank}
-	if metadata.lastPromptAt == nil {
+	value := map[string]any{"blank": metadata.Blank}
+	if metadata.LastPromptAt == nil {
 		value["lastPromptAt"] = nil
 	} else {
-		value["lastPromptAt"] = *metadata.lastPromptAt
+		value["lastPromptAt"] = *metadata.LastPromptAt
 	}
 	return value
+}
+
+// nativeSessionListMetadataFromValues decodes the small list hint from a
+// durable projection checkpoint. It is deliberately strict: if an older or
+// malformed checkpoint does not carry the hint, callers keep their local
+// fallback instead of inventing a blank/non-blank state.
+func nativeSessionListMetadataFromValues(values map[string]any) (nativeProjectionSessionListMetadata, bool) {
+	raw, ok := values["sessionListMetadata"].(map[string]any)
+	if !ok {
+		return nativeProjectionSessionListMetadata{}, false
+	}
+	blank, ok := raw["blank"].(bool)
+	if !ok {
+		return nativeProjectionSessionListMetadata{}, false
+	}
+	metadata := nativeProjectionSessionListMetadata{Blank: blank}
+	if value, present := raw["lastPromptAt"]; present && value != nil {
+		switch number := value.(type) {
+		case int64:
+			metadata.LastPromptAt = &number
+		case float64:
+			converted := int64(number)
+			if float64(converted) != number {
+				return nativeProjectionSessionListMetadata{}, false
+			}
+			metadata.LastPromptAt = &converted
+		default:
+			return nativeProjectionSessionListMetadata{}, false
+		}
+	}
+	return metadata, true
 }
 
 func (c *nativeProjectionCursor) foldContextBreakdown(ev session.Event, data map[string]any) {
 	breakdown := &c.context
 	switch ev.Type {
-	case "request/header", session.EventLLMRequestStart:
+	case session.EventRequestHeader, "llm/request_start":
 		header := data
 		if nested := nativeEventObject(data, "header"); nested != nil {
 			header = nested
 		}
-		if ev.Type == session.EventLLMRequestStart {
+		if ev.Type == "llm/request_start" {
 			header = nativeLLMRequestHeader(data)
 		}
 		breakdown.systemTokens = 0
@@ -1031,7 +1213,130 @@ func (c *nativeProjectionCursor) projectionBlock(title string, lastSeq int64, pe
 		values["sessionListMetadata"] = nativeSessionListMetadataValue(&c.list)
 	}
 	values["permissions"] = nativePermissionProjection(firstNonEmpty(permission...))
+	if c.canonical != nil {
+		snapshot := c.canonical.Snapshot()
+		if snapshot.Permission != "" {
+			values["permissions"] = nativePermissionProjection(snapshot.Permission)
+		}
+		values["plan"] = map[string]any{
+			"active":  snapshot.PlanMode.Active,
+			"pending": snapshot.PlanMode.Pending,
+		}
+		values["goal"] = canonicalGoalValue(snapshot)
+		values["todos"] = canonicalTodosValue(snapshot)
+		values["sessionListMetadata"] = nativeSessionListMetadataValue(&snapshot.SessionList)
+	}
 	return nativeProjectionBlock{AsOfSeq: lastSeq, Values: values}
+}
+
+func (c *nativeProjectionCursor) syncCanonicalControlChanges(ev session.Event) {
+	snapshot := c.canonical.Snapshot()
+	switch ev.Type {
+	case "permission/preset", "sandbox/mode":
+		c.changed["permissions"] = nativePermissionProjection(snapshot.Permission)
+	case session.EventPlanMode:
+		c.changed["plan"] = map[string]any{
+			"active":  snapshot.PlanMode.Active,
+			"pending": snapshot.PlanMode.Pending,
+		}
+	case session.EventGoalRoundStart, session.EventGoalRoundEnd:
+		c.changed["goal"] = canonicalGoalValue(snapshot)
+	case session.EventTodoWrite:
+		c.changed["todos"] = canonicalTodosValue(snapshot)
+	case session.EventPlanCreate, session.EventPlanUpdate, session.EventPlanStatus, session.EventPlanDelete:
+		scope := nativeEventString(nativeJSONObject(ev.Data), "scope")
+		if scope == "goal" {
+			c.changed["goal"] = canonicalGoalValue(snapshot)
+		}
+		if scope == "todo" {
+			c.changed["todos"] = canonicalTodosValue(snapshot)
+		}
+	}
+}
+
+// canonicalGoalValue converts the durable shared goal entity into the compact
+// DSH GoalView shape. Activation remains a runtime concern; all durable goal
+// fields and lifecycle timestamps come from the canonical projection.
+func canonicalGoalValue(snapshot projection.Snapshot) any {
+	var goal *projection.Entity
+	for index := len(snapshot.Goals) - 1; index >= 0; index-- {
+		candidate := &snapshot.Goals[index]
+		if candidate.Status == "done" || candidate.Status == "cancelled" || candidate.Status == "canceled" {
+			continue
+		}
+		goal = candidate
+		break
+	}
+	if goal == nil {
+		return nil
+	}
+	data := goal.Data
+	revision := projectionInt(data, "revision")
+	if revision < 1 {
+		revision = 1
+	}
+	maxRounds := projectionInt(data, "maxRounds", "maxGoalRounds")
+	goalValue := map[string]any{
+		"id":            goal.ID,
+		"revision":      revision,
+		"objective":     nativeEventString(data, "objective"),
+		"phase":         nativeGoalPhase(goal.Status),
+		"roundsStarted": projectionInt(data, "roundsStarted"),
+		"maxGoalRounds": maxRounds,
+	}
+	if reason := nativeEventString(data, "reason", "blockedReason"); reason != "" && goalValue["phase"] == "blocked" {
+		goalValue["blockedReason"] = map[string]any{"code": "blocked", "message": reason}
+	}
+	createdAt := goal.CreatedAt
+	if createdAt == 0 {
+		createdAt = goal.UpdatedAt
+	}
+	updatedAt := goal.UpdatedAt
+	if updatedAt == 0 {
+		updatedAt = createdAt
+	}
+	return map[string]any{
+		"goal":          goalValue,
+		"roundsStarted": projectionInt(data, "roundsStarted"),
+		"createdAt":     createdAt,
+		"updatedAt":     updatedAt,
+	}
+}
+
+func projectionInt(data map[string]any, keys ...string) int {
+	for _, key := range keys {
+		if number, ok := data[key].(float64); ok && number >= 0 && number == float64(int(number)) {
+			return int(number)
+		}
+		if number, ok := data[key].(int); ok {
+			return number
+		}
+	}
+	return 0
+}
+
+func canonicalTodosValue(snapshot projection.Snapshot) any {
+	if snapshot.Todos != nil {
+		if raw, ok := snapshot.Todos["todos"]; ok {
+			if items, valid := nativeTodoItems(raw); valid {
+				return nativeTodoValues(items)
+			}
+		}
+	}
+	items := make([]map[string]any, 0)
+	for _, entity := range snapshot.PlanTodos {
+		item := nativeProjectionMap(entity.Data)
+		item["id"] = entity.ID
+		item["content"] = nativeEventString(item, "content", "title", "objective", "text")
+		if entity.Status != "" {
+			item["status"] = entity.Status
+		}
+		items = append(items, item)
+	}
+	if len(items) == 0 {
+		return nil
+	}
+	return nativeTodoValues(items)
 }
 
 func nativeProjectionValueCopy(value any) any {
@@ -1183,6 +1488,15 @@ func nativeLLMRequestHeader(data map[string]any) map[string]any {
 	if effort := nativeEventString(data, "reasoningEffort", "reasoning_effort"); effort != "" {
 		config["reasoningEffort"] = effort
 	}
+	if maxTokens := nativeEventInt(data, "maxTokens", 0); maxTokens > 0 {
+		config["maxTokens"] = maxTokens
+	}
+	if temperature, ok := nativeEventFloat64(data, "temperature"); ok {
+		config["temperature"] = temperature
+	}
+	if stop := nativeEventStrings(data, "stop"); len(stop) != 0 {
+		config["stop"] = stop
+	}
 	return map[string]any{
 		"config": config,
 		"system": system,
@@ -1192,15 +1506,31 @@ func nativeLLMRequestHeader(data map[string]any) map[string]any {
 
 func (c *nativeProjectionCursor) assistantMessageData(sessionID string, seq uint64, data map[string]any) map[string]any {
 	content := nativeMessageContent(nativeEventValue(data, "content"))
+	messageData := nativeEventObject(data, "message")
+	if len(content) == 0 && messageData != nil {
+		content = nativeMessageContent(nativeEventValue(messageData, "content"))
+	}
 	if len(content) == 0 {
 		content = make([]any, 0, 2)
-		if reasoning := nativeEventString(data, "reasoning"); reasoning != "" {
+		reasoning := nativeEventString(data, "reasoning")
+		if reasoning == "" && messageData != nil {
+			reasoning = nativeEventString(messageData, "reasoning")
+		}
+		if reasoning != "" {
 			content = append(content, map[string]any{"type": "reasoning", "text": reasoning})
 		}
-		if text := nativeEventString(data, "text"); text != "" || len(content) == 0 {
+		text := nativeEventString(data, "text")
+		if text == "" && messageData != nil {
+			text = nativeEventString(messageData, "text")
+		}
+		if text != "" || len(content) == 0 {
 			content = append(content, map[string]any{"type": "text", "text": text})
 		}
-		for _, call := range nativeEventArray(data, "toolCalls", "tool_calls") {
+		calls := nativeEventArray(data, "toolCalls", "tool_calls")
+		if len(calls) == 0 && messageData != nil {
+			calls = nativeEventArray(messageData, "toolCalls", "tool_calls")
+		}
+		for _, call := range calls {
 			content = append(content, map[string]any{
 				"type":      "tool-call",
 				"id":        nativeEventString(call, "id", "callId"),
@@ -1209,14 +1539,26 @@ func (c *nativeProjectionCursor) assistantMessageData(sessionID string, seq uint
 			})
 		}
 	}
+	provider := nativeEventString(data, "provider")
+	model := nativeEventString(data, "model")
+	if messageData != nil {
+		if source := nativeEventObject(messageData, "source"); source != nil {
+			if provider == "" {
+				provider = nativeEventString(source, "provider")
+			}
+			if model == "" {
+				model = nativeEventString(source, "model")
+			}
+		}
+	}
 	message := map[string]any{
 		"id":      nativeMessageID(sessionID, seq),
 		"role":    "assistant",
 		"content": content,
 		"source": map[string]any{
 			"kind":     "model",
-			"provider": c.provider,
-			"model":    c.model,
+			"provider": firstNonEmpty(provider, c.provider),
+			"model":    firstNonEmpty(model, c.model),
 		},
 	}
 	if message["source"].(map[string]any)["provider"] == "" {
@@ -1275,6 +1617,15 @@ func (c *nativeProjectionCursor) toolResultData(sessionID string, seq uint64, da
 	} else if forcedError || nativeEventString(data, "error") != "" {
 		result["error"] = map[string]any{"name": "ToolError", "code": "TOOL_ERROR"}
 	}
+	if meta := nativeEventValue(data, "meta"); meta != nil {
+		result["meta"] = meta
+	}
+	if spill := nativeEventValue(data, "spill"); spill != nil {
+		result["spill"] = spill
+	}
+	if code := nativeEventString(data, "code"); code != "" {
+		result["code"] = code
+	}
 	return result
 }
 
@@ -1282,6 +1633,17 @@ func nativeToolResultBlocks(data map[string]any, fallback string, isError bool) 
 	if message := nativeEventObject(data, "message"); message != nil {
 		if raw := nativeEventValue(message, "content"); raw != nil {
 			if blocks := nativeMessageContent(raw); len(blocks) > 0 {
+				// Canonical Harness ToolResultMessage carries one outer
+				// tool-result block. The tool/result event projection already
+				// supplies that outer block, so expose only its nested content
+				// here to avoid double wrapping during replay.
+				if len(blocks) == 1 {
+					if block, ok := blocks[0].(map[string]any); ok && block["type"] == "tool-result" {
+						if nested := nativeMessageContent(block["content"]); len(nested) > 0 {
+							return nested
+						}
+					}
+				}
 				return blocks
 			}
 		}
@@ -1299,9 +1661,14 @@ func nativeToolResultBlocks(data map[string]any, fallback string, isError bool) 
 
 func (c *nativeProjectionCursor) retryData(sessionID string, seq uint64, data map[string]any) map[string]any {
 	retry := nativeEventInt(data, "retry", nativeEventInt(data, "attempt", 1))
+	turn := nativeNonNegative(nativeEventInt(data, "turn", c.turn))
+	retryID := nativeEventString(data, "retryId", "retry_id")
+	if retryID == "" {
+		retryID = fmt.Sprintf("%s:retry:%d:%d", sessionID, turn, retry)
+	}
 	result := map[string]any{
-		"retryId":    fmt.Sprintf("%s:retry:%d:%d", sessionID, nativeNonNegative(nativeEventInt(data, "turn", c.turn)), retry),
-		"turn":       nativeNonNegative(nativeEventInt(data, "turn", c.turn)),
+		"retryId":    retryID,
+		"turn":       turn,
 		"step":       nativeNonNegative(nativeEventInt(data, "step", c.step)),
 		"provider":   nativeEventString(data, "provider"),
 		"mode":       nativeEventString(data, "mode"),
@@ -1449,6 +1816,42 @@ func nativeEventArray(object map[string]any, keys ...string) []map[string]any {
 func nativeEventString(object map[string]any, keys ...string) string {
 	value, _ := nativeEventValue(object, keys...).(string)
 	return value
+}
+
+func nativeEventStrings(object map[string]any, keys ...string) []string {
+	value := nativeEventValue(object, keys...)
+	items, ok := value.([]any)
+	if !ok {
+		if strings, ok := value.([]string); ok {
+			return append([]string(nil), strings...)
+		}
+		return nil
+	}
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		if text, ok := item.(string); ok {
+			result = append(result, text)
+		}
+	}
+	return result
+}
+
+func nativeEventFloat64(object map[string]any, keys ...string) (float64, bool) {
+	value := nativeEventValue(object, keys...)
+	switch number := value.(type) {
+	case float64:
+		return number, true
+	case json.Number:
+		parsed, err := number.Float64()
+		return parsed, err == nil
+	case float32:
+		return float64(number), true
+	case int:
+		return float64(number), true
+	case int64:
+		return float64(number), true
+	}
+	return 0, false
 }
 
 func nativeNonNegative(value int) int {
@@ -1608,6 +2011,17 @@ func (c *nativeProjectionCursor) projectSurface(seq uint64, data map[string]any)
 }
 
 func (c *nativeProjectionCursor) surfaceSnapshot() map[string]any {
+	if c.canonical != nil {
+		snapshot := c.canonical.Snapshot()
+		nodes := make([]any, 0, len(snapshot.Surface))
+		for _, entry := range snapshot.Surface {
+			nodes = append(nodes, entry.Seq)
+		}
+		return map[string]any{
+			"nodes":             nodes,
+			"replaceGeneration": c.surfaceGeneration,
+		}
+	}
 	nodes := make([]any, 0, len(c.surface))
 	for _, seq := range c.surface {
 		nodes = append(nodes, seq)
@@ -1620,9 +2034,9 @@ func (c *nativeProjectionCursor) surfaceSnapshot() map[string]any {
 
 func nativeDSHEventType(typ string) bool {
 	switch typ {
-	case "assistant/chunk", "assistant/message", "compaction/end", "compaction/prune", "compaction/start",
-		"compaction/summary", "feedback/record", "goal/change", "llm/retry", "permission/preset", "plan/mode",
-		"request/context", "request/header", "schedule/change", "session/end-seed", "session/title",
+	case "assistant/chunk", "assistant/message", "command/run", "command/done", "compaction/end", "compaction/prune", "compaction/start",
+		"compaction/summary", "feedback/record", "goal/change", "llm/retry", "llm/retry-started", "permission/preset", "sandbox/mode", "approval/asked", "approval/decided", "approval/policy", "plan/mode",
+		"request/context", "request/header", "schedule/change", "session/end-seed", session.EventSessionTitle,
 		"session/title-llm-request", "step/end", "step/start", "subagent/descriptor", "todo/write", "tool/call",
 		"tool/result", "tool/code-dispatch-start", "tool/code-dispatch", "turn/end", "turn/start", "user/message":
 		return true

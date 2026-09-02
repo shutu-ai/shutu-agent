@@ -31,12 +31,16 @@ package code
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	agenttools "github.com/jabing/shutu-agent/internal/tools"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/jabing/shutu-agent/internal/llm"
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 	"github.com/jabing/shutu-agent/internal/session"
+	agenttools "github.com/jabing/shutu-agent/internal/tools"
 )
 
 // ToolRunName is the code-sandbox tool (whitelisted when code.enabled; see
@@ -50,10 +54,11 @@ const ToolRunName = "run_code"
 // constructor's signature the seam contract and the tool package decoupled
 // from config (D2).
 type CodeTools struct {
-	e       Engine
-	runtime ProgramRuntime
-	binding ProgramBinding
-	onEvent func(typ string, data any)
+	e          Engine
+	runtime    ProgramRuntime
+	binding    ProgramBinding
+	onEvent    func(typ string, data any)
+	onEventErr func(typ string, data any) error
 
 	// DefaultTimeout is the sandbox deadline applied when the model omits the
 	// per-call timeout (code.timeout; 0 ⇒ the provider default 30s). Set by the
@@ -63,6 +68,14 @@ type CodeTools struct {
 	// (code.max_output; 0 ⇒ the provider default 64KiB). The model cannot
 	// override it. Set by the composition root.
 	DefaultMaxOutput int
+	// DefaultComputeMS and DefaultMaxWallMS are the independent TypeScript
+	// worker budgets. They are separate from DefaultTimeout, which remains the
+	// legacy shell-provider setting.
+	DefaultComputeMS int
+	DefaultMaxWallMS int
+	// MaxOldGenerationSizeMB is forwarded to the subprocess runtime as a heap
+	// ceiling when non-zero.
+	MaxOldGenerationSizeMB int
 	// DefaultCwd is the sandbox working directory used when the model omits
 	// cwd when no resolver is installed (code.sandbox_dir; empty ⇒ the provider
 	// default <project>/.sandbox). Set by the composition root.
@@ -70,7 +83,19 @@ type CodeTools struct {
 	// DefaultCwdFunc resolves the default execution directory at call time. The
 	// composition root uses this to bind run_code to the active session workspace
 	// while preserving an explicit cwd override from the model.
-	DefaultCwdFunc func() string
+	DefaultCwdFunc        func() string
+	DefaultCwdContextFunc func(context.Context) string
+	// DefaultMode is the per-call sandbox authority used by the legacy shell
+	// consumer. The composition root sets this to workspace-write; providers
+	// without an enforcing backend reject it rather than running unconfined.
+	DefaultMode             SandboxMode
+	RequireStrongSandbox    bool
+	RequireNetworkIsolation bool
+	// MaxParallelSubCalls and IsConcurrencySafe are forwarded to the
+	// TypeScript runtime's per-program dispatch gate. The host normally fills
+	// the classifier from tools.Registry; nil preserves standalone behavior.
+	MaxParallelSubCalls int
+	IsConcurrencySafe   func(name string, args any) bool
 }
 
 // NewCodeTools returns the run_code tool bundle bound to an Engine. onEvent,
@@ -83,12 +108,17 @@ func NewCodeTools(e Engine, onEvent func(typ string, data any)) *CodeTools {
 // NewCodeToolsWithRuntime returns a DSH-compatible TypeScript Code Mode tool
 // bundle. The host installs the registry bridge through SetBinding.
 func NewCodeToolsWithRuntime(runtime ProgramRuntime, onEvent func(typ string, data any)) *CodeTools {
-	return &CodeTools{runtime: runtime, onEvent: onEvent}
+	return &CodeTools{runtime: runtime, onEvent: onEvent, MaxParallelSubCalls: defaultMaxParallelSubCalls}
 }
 
 // SetBinding installs the host-side dispatch bridge used by tools.<name>() in
 // a TypeScript program.
 func (t *CodeTools) SetBinding(binding ProgramBinding) { t.binding = binding }
+
+// SetErrorSink lets a composition root enforce durable event failures for
+// legacy calls that do not carry a runtime context. Runtime Emit callbacks
+// already return errors and take precedence.
+func (t *CodeTools) SetErrorSink(sink func(typ string, data any) error) { t.onEventErr = sink }
 
 // Run returns the run_code tool.
 func (t *CodeTools) Run() CodeRunTool { return CodeRunTool{t: t} }
@@ -100,6 +130,17 @@ func (t *CodeTools) emit(typ string, data any) {
 	}
 }
 
+func (t *CodeTools) emitContext(ctx context.Context, typ string, data any) error {
+	if runtime, ok := runtimectx.Get(ctx); ok && runtime.Emit != nil {
+		return runtime.Emit(typ, data)
+	}
+	if t.onEventErr != nil {
+		return t.onEventErr(typ, data)
+	}
+	t.emit(typ, data)
+	return nil
+}
+
 // CodeRunTool executes TypeScript Code Mode through ProgramRuntime in the
 // production wiring. The legacy Engine constructor remains available for
 // isolated shell-seam tests; it is not used by cmd/pa's PTC path.
@@ -108,6 +149,10 @@ type CodeRunTool struct {
 }
 
 func (CodeRunTool) Name() string { return ToolRunName }
+
+// CancellationAware is explicit: both runtime and local-command execution
+// derive their deadlines from the registry context.
+func (CodeRunTool) CancellationAware() bool { return true }
 
 func (t CodeRunTool) Description() string {
 	if t.t.runtime != nil {
@@ -203,10 +248,13 @@ func (t CodeRunTool) Execute(ctx context.Context, args any) (string, error) {
 		return "", fmt.Errorf("run_code: cancelled: %w", err)
 	}
 	req := RunRequest{
-		Lang:      lang,
-		Code:      a.Code,
-		MaxOutput: t.t.DefaultMaxOutput,
-		Cwd:       a.Cwd,
+		Lang:                    lang,
+		Code:                    a.Code,
+		Mode:                    t.t.DefaultMode,
+		MaxOutput:               t.t.DefaultMaxOutput,
+		Cwd:                     a.Cwd,
+		RequireStrongIsolation:  t.t.RequireStrongSandbox,
+		RequireNetworkIsolation: t.t.RequireNetworkIsolation,
 	}
 	if a.Timeout > 0 {
 		req.Timeout = time.Duration(a.Timeout * float64(time.Second))
@@ -215,7 +263,9 @@ func (t CodeRunTool) Execute(ctx context.Context, args any) (string, error) {
 	}
 	if req.Cwd == "" {
 		req.Cwd = t.t.DefaultCwd
-		if t.t.DefaultCwdFunc != nil {
+		if t.t.DefaultCwdContextFunc != nil {
+			req.Cwd = t.t.DefaultCwdContextFunc(ctx)
+		} else if t.t.DefaultCwdFunc != nil {
 			req.Cwd = t.t.DefaultCwdFunc()
 		}
 	}
@@ -225,7 +275,9 @@ func (t CodeRunTool) Execute(ctx context.Context, args any) (string, error) {
 	}
 	// code/run is a log-only fact (D3) carrying the language and the outcome
 	// markers; the full stdout/stderr live in the tool/result the loop logs.
-	t.t.emit(session.EventCodeRun, session.NewCodeRun(lang, res.ExitCode, res.TimedOut, res.Truncated))
+	if err := t.t.emitContext(ctx, session.EventCodeRun, session.NewCodeRun(lang, res.ExitCode, res.TimedOut, res.Truncated)); err != nil {
+		return "", fmt.Errorf("run_code: persist event: %w", err)
+	}
 	return formatResult(res), nil
 }
 
@@ -247,53 +299,156 @@ func (t CodeRunTool) executeProgramResult(ctx context.Context, args any) (Progra
 		return ProgramResult{}, fmt.Errorf("run_code: TypeScript tool binding is not configured")
 	}
 	cwd := t.t.DefaultCwd
-	if t.t.DefaultCwdFunc != nil {
+	if t.t.DefaultCwdContextFunc != nil {
+		cwd = t.t.DefaultCwdContextFunc(ctx)
+	} else if t.t.DefaultCwdFunc != nil {
 		cwd = t.t.DefaultCwdFunc()
 	}
 	parentCallID := agenttools.CallIDFromContext(ctx)
+	if strings.TrimSpace(parentCallID) == "" {
+		// Standalone consumers may not install a registry call context, but the
+		// durable nested-dispatch contract still requires a non-empty root.
+		parentCallID = fmt.Sprintf("run_code:%d", time.Now().UnixNano())
+	}
+	// Binding calls may overlap. Keep deferred contexts in submission order,
+	// matching the reference scheduler's post-result FIFO rather than the
+	// nondeterministic order in which host callbacks happen to settle.
+	var additionalContextsMu sync.Mutex
+	additionalContextBuckets := make(map[int][]llm.Message)
+	nextBindingOrder := 0
+	nestedConcludesTurn := false
 	binding := func(bindingCtx context.Context, request ProgramBindingRequest) (any, error) {
+		additionalContextsMu.Lock()
+		bindingOrder := nextBindingOrder
+		nextBindingOrder++
+		additionalContextsMu.Unlock()
 		// Keep nested dispatch visible in the trajectory while its canonical
 		// value remains private to the current TypeScript program.
-		t.t.emit(session.EventCodeDispatchStart, session.NewCodeDispatchStart(
+		if err := t.t.emitContext(bindingCtx, session.EventCodeDispatchStart, session.NewCodeDispatchStart(
 			parentCallID, parentCallID, request.CallID, request.Name, request.Args,
-		))
-		value, bindingErr := t.t.binding(bindingCtx, request)
-		content := formatProgramBindingValue(value)
-		if bindingErr != nil {
-			content = bindingErr.Error()
+		)); err != nil {
+			return nil, fmt.Errorf("code dispatch start: %w", err)
 		}
-		t.t.emit(session.EventCodeDispatch, session.NewCodeDispatch(
+		value, bindingErr := t.t.binding(bindingCtx, request)
+		content := []map[string]any{{"type": "text", "text": formatProgramBindingValue(value)}}
+		var dispatchMeta any
+		var additionalContexts []string
+		var additionalContextMessages []llm.Message
+		var concludesTurn bool
+		switch rich := value.(type) {
+		case ProgramBindingResult:
+			value = rich.Value
+			content = rich.Content
+			dispatchMeta = rich.Meta
+			additionalContexts = rich.AdditionalContexts
+			additionalContextMessages = cloneCodeContextMessages(rich.AdditionalContextMessages)
+			concludesTurn = rich.ConcludesTurn
+		case *ProgramBindingResult:
+			if rich != nil {
+				value = rich.Value
+				content = rich.Content
+				dispatchMeta = rich.Meta
+				additionalContexts = rich.AdditionalContexts
+				additionalContextMessages = cloneCodeContextMessages(rich.AdditionalContextMessages)
+				concludesTurn = rich.ConcludesTurn
+			}
+		}
+		if bindingErr != nil {
+			content = []map[string]any{{"type": "text", "text": bindingErr.Error()}}
+		}
+		if len(additionalContextMessages) > 0 {
+			additionalContextsMu.Lock()
+			additionalContextBuckets[bindingOrder] = additionalContextMessages
+			additionalContextsMu.Unlock()
+		}
+		if concludesTurn {
+			additionalContextsMu.Lock()
+			nestedConcludesTurn = true
+			additionalContextsMu.Unlock()
+		}
+		emitErr := t.t.emitContext(bindingCtx, session.EventCodeDispatch, session.NewCodeDispatchWithContentMetaAndConclusion(
 			parentCallID, parentCallID, request.CallID, request.Name, request.Args,
-			bindingErr != nil, content,
+			bindingErr != nil, content, dispatchMeta, additionalContexts, additionalContextMessages, concludesTurn,
 		))
+		if emitErr != nil {
+			if bindingErr != nil {
+				return nil, errors.Join(bindingErr, fmt.Errorf("code dispatch: %w", emitErr))
+			}
+			return nil, fmt.Errorf("code dispatch: %w", emitErr)
+		}
 		return value, bindingErr
 	}
 	result, err := t.t.runtime.RunProgram(ctx, ProgramRequest{
-		Code:         a.Code,
-		Cwd:          cwd,
-		Timeout:      t.t.DefaultTimeout,
-		MaxOutput:    t.t.DefaultMaxOutput,
-		ParentCallID: parentCallID,
-		Binding:      binding,
+		Code:                   a.Code,
+		Cwd:                    cwd,
+		Timeout:                t.t.DefaultTimeout,
+		ComputeMS:              t.t.DefaultComputeMS,
+		MaxWallMS:              t.t.DefaultMaxWallMS,
+		MaxOutput:              t.t.DefaultMaxOutput,
+		MaxOldGenerationSizeMB: t.t.MaxOldGenerationSizeMB,
+		ParentCallID:           parentCallID,
+		Binding:                binding,
+		Bindings:               []ProgramBindingNamespace{{Global: "tools"}},
+		MaxParallelSubCalls:    t.t.MaxParallelSubCalls,
+		IsConcurrencySafe:      t.t.IsConcurrencySafe,
 	})
 	if err != nil {
 		return ProgramResult{}, fmt.Errorf("run_code: %w", err)
 	}
-	if result.Failure != nil {
-		message := fmt.Sprintf("code run failed (%s): %s", result.Failure.Kind, result.Failure.Message)
-		if len(result.Logs) > 0 {
-			message += "\nCaptured output:\n" + strings.Join(result.Logs, "\n")
-		}
-		return ProgramResult{}, fmt.Errorf("%s", message)
+	if err := validateProgramOutputBudget(result, t.t.DefaultMaxOutput); err != nil {
+		return ProgramResult{}, fmt.Errorf("run_code: %w", err)
 	}
-	t.t.emit(session.EventCodeRun, session.NewCodeRun("typescript", 0, false, result.Truncated))
+	additionalContextsMu.Lock()
+	for index := 0; index < nextBindingOrder; index++ {
+		result.AdditionalContextMessages = append(result.AdditionalContextMessages, additionalContextBuckets[index]...)
+	}
+	result.ConcludesTurn = nestedConcludesTurn
+	additionalContextsMu.Unlock()
+	if result.Failure != nil {
+		// Keep the structured result alive so ExecuteResult can carry deferred
+		// contexts even when the outer program fails. The legacy string Execute
+		// adapter below converts this settled failure back to an error.
+		return result, nil
+	}
+	if err := t.t.emitContext(ctx, session.EventCodeRun, session.NewCodeRun("typescript", 0, false, result.Truncated)); err != nil {
+		return ProgramResult{}, fmt.Errorf("run_code: persist event: %w", err)
+	}
 	return result, nil
+}
+
+// validateProgramOutputBudget applies the same outer-result accounting to
+// Code Mode's structured completion that the runtime already applies to log
+// capture. The subprocess cannot know the final return value until the
+// program completes, so this final gate prevents a large returned object from
+// bypassing the configured output quota.
+func validateProgramOutputBudget(result ProgramResult, limit int) error {
+	if limit <= 0 {
+		return nil
+	}
+	envelope := struct {
+		Logs   []string `json:"logs"`
+		Result any      `json:"result,omitempty"`
+	}{Logs: result.Logs}
+	if result.HasValue {
+		envelope.Result = result.Value
+	}
+	encoded, err := json.Marshal(envelope)
+	if err != nil {
+		return fmt.Errorf("program output is not lossless JSON: %w", err)
+	}
+	if len(encoded) > limit {
+		return fmt.Errorf("program output exceeded %d bytes", limit)
+	}
+	return nil
 }
 
 func (t CodeRunTool) executeProgram(ctx context.Context, args any) (string, error) {
 	result, err := t.executeProgramResult(ctx, args)
 	if err != nil {
 		return "", err
+	}
+	if result.Failure != nil {
+		return "", fmt.Errorf("%s", programFailureMessage(result))
 	}
 	return formatProgramResult(result), nil
 }
@@ -313,6 +468,14 @@ func (t CodeRunTool) ExecuteResult(ctx context.Context, args any) (agenttools.To
 	if err != nil {
 		return agenttools.ToolResult{}, err
 	}
+	if result.Failure != nil {
+		return agenttools.ToolResult{
+			Output:                    programFailureMessage(result),
+			AdditionalContextMessages: cloneCodeContextMessages(result.AdditionalContextMessages),
+			IsError:                   true,
+			Error:                     &agenttools.ErrorInfo{Name: "CodeRunFailedError", Code: "CODE_RUN_FAILED"},
+		}, nil
+	}
 	logs := make([]any, len(result.Logs))
 	for i, line := range result.Logs {
 		logs[i] = line
@@ -321,7 +484,18 @@ func (t CodeRunTool) ExecuteResult(ctx context.Context, args any) (agenttools.To
 	if result.HasValue {
 		value["result"] = result.Value
 	}
-	return agenttools.ToolResult{Value: value, Output: formatProgramResult(result)}, nil
+	return agenttools.ToolResult{Value: value, Output: formatProgramResult(result), AdditionalContextMessages: cloneCodeContextMessages(result.AdditionalContextMessages)}, nil
+}
+
+func programFailureMessage(result ProgramResult) string {
+	if result.Failure == nil {
+		return "code run failed"
+	}
+	message := fmt.Sprintf("code run failed (%s): %s", result.Failure.Kind, result.Failure.Message)
+	if len(result.Logs) > 0 {
+		message += "\nCaptured output:\n" + strings.Join(result.Logs, "\n")
+	}
+	return message
 }
 
 func formatProgramResult(result ProgramResult) string {

@@ -12,7 +12,7 @@ package llm
 // the request image budget over its limit (dispatch-m8-3b §2, dsh
 // OFFLOADED_IMAGE_TEXT 同款). It becomes a plain text block so the model sees
 // a readable placeholder instead of a dropped image.
-const OffloadedImageText = "[image omitted]"
+const OffloadedImageText = "[image omitted to keep the request within its image limit; older images are omitted first. If this image is still needed, read its file again when a path is available; otherwise ask the user to attach it again.]"
 
 // OffloadRequestImages enforces the request image-byte budget (maxBytes; the
 // providers' New applies the 20MiB default, dispatch-m8-3b §4) on a chat
@@ -28,11 +28,36 @@ func OffloadRequestImages(msgs []Message, maxBytes int) []Message {
 	if maxBytes <= 0 {
 		return msgs
 	}
-	var acc int64
-	for i := range msgs {
-		offloadBlocks(&msgs[i].Content, int64(maxBytes), &acc)
+	lengths := make([]int64, 0)
+	for _, message := range msgs {
+		collectImageBase64Lengths(message.Content, &lengths)
 	}
-	return msgs
+	var total int64
+	for _, length := range lengths {
+		if length > maxInt64-total {
+			total = maxInt64
+			break
+		}
+		total += length
+	}
+	remove := 0
+	for remove < len(lengths) && total > int64(maxBytes) {
+		total -= lengths[remove]
+		remove++
+	}
+	if remove == 0 {
+		return msgs
+	}
+	remaining := remove
+	out := make([]Message, len(msgs))
+	for i, message := range msgs {
+		out[i] = message
+		content, changed := replaceOldestImages(message.Content, &remaining)
+		if changed {
+			out[i].Content = content
+		}
+	}
+	return out
 }
 
 // offloadBlocks walks one message's content block list, accumulating every
@@ -40,18 +65,63 @@ func OffloadRequestImages(msgs []Message, maxBytes int) []Message {
 // any image whose addition pushes the total over maxBytes with an
 // OffloadedImageText text block. Nested blocks (tool results) are recursed
 // into. The replacement preserves the block's position in the list.
-func offloadBlocks(blocks *[]ContentBlock, maxBytes int64, acc *int64) {
-	for i := range *blocks {
-		b := &(*blocks)[i]
-		if b.Kind == BlockImage {
-			*acc += b.Image.Bytes
-			if *acc > maxBytes {
-				(*blocks)[i] = Text(OffloadedImageText)
-			}
+const maxInt64 = int64(^uint64(0) >> 1)
+
+func imageBase64Length(bytes int64) int64 {
+	if bytes <= 0 {
+		return 0
+	}
+	if bytes > maxInt64-2 {
+		return maxInt64
+	}
+	groups := (bytes + 2) / 3
+	if groups > maxInt64/4 {
+		return maxInt64
+	}
+	return groups * 4
+}
+
+func collectImageBase64Lengths(blocks []ContentBlock, lengths *[]int64) {
+	for _, block := range blocks {
+		if block.Kind == BlockImage {
+			*lengths = append(*lengths, imageBase64Length(block.Image.Bytes))
 			continue
 		}
-		if len(b.Blocks) > 0 {
-			offloadBlocks(&b.Blocks, maxBytes, acc)
+		if len(block.Blocks) > 0 {
+			collectImageBase64Lengths(block.Blocks, lengths)
 		}
 	}
+}
+
+func replaceOldestImages(blocks []ContentBlock, remaining *int) ([]ContentBlock, bool) {
+	var out []ContentBlock
+	for i, block := range blocks {
+		if block.Kind == BlockImage && *remaining > 0 {
+			*remaining = *remaining - 1
+			if out == nil {
+				out = append([]ContentBlock(nil), blocks[:i]...)
+			}
+			out = append(out, Text(OffloadedImageText))
+			continue
+		}
+		updated := block
+		changed := false
+		if len(block.Blocks) > 0 {
+			var nested []ContentBlock
+			nested, changed = replaceOldestImages(block.Blocks, remaining)
+			if changed {
+				updated.Blocks = nested
+			}
+		}
+		if changed && out == nil {
+			out = append([]ContentBlock(nil), blocks[:i]...)
+		}
+		if out != nil {
+			out = append(out, updated)
+		}
+	}
+	if out == nil {
+		return blocks, false
+	}
+	return out, true
 }

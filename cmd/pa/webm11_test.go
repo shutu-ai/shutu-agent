@@ -9,11 +9,15 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/jabing/shutu-agent/internal/config"
+	"github.com/jabing/shutu-agent/internal/credential"
+	"github.com/jabing/shutu-agent/internal/llm"
 	"github.com/jabing/shutu-agent/internal/store"
 )
 
@@ -45,6 +49,132 @@ func m11App(t *testing.T) (*app, *store.SQLiteStore) {
 		t.Fatalf("registerLLM: %v", err)
 	}
 	return a, st
+}
+
+// vaultedM11App is the production credential boundary: Web provider edits must
+// write dedicated credential records, never generic llm.key.* settings.
+func vaultedM11App(t *testing.T) (*app, *store.SQLiteStore) {
+	t.Helper()
+	t.Setenv("DEEPSEEK_API_KEY", "env-key")
+	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "vaulted.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	vault, err := credential.New(context.Background(), st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &app{
+		cfg: config.Config{
+			Model: "deepseek-chat",
+			LLM:   config.LLMConfig{Provider: "deepseek-official"},
+		},
+		store:       st,
+		credentials: vault,
+		llmKeys:     map[string]string{"deepseek-official": "env-key"},
+	}
+	if err := a.registerLLM(); err != nil {
+		t.Fatalf("registerLLM: %v", err)
+	}
+	return a, st
+}
+
+func TestWebProviderCredentialUsesDedicatedVault(t *testing.T) {
+	a, st := vaultedM11App(t)
+	ctx := context.Background()
+
+	if err := a.webSaveProvider(ctx, "openai", "vault-secret", "", "", nil); err != nil {
+		t.Fatalf("webSaveProvider: %v", err)
+	}
+	settings, err := st.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := settings["llm.key.openai"]; ok {
+		t.Fatalf("Web provider key leaked into generic settings: %q", settings["llm.key.openai"])
+	}
+	record, err := st.GetCredentialRecord(ctx, "OPENAI_API_KEY")
+	if err != nil || string(record.Value) != "vault-secret" || record.Revoked {
+		t.Fatalf("dedicated credential = %+v, %v; want active vault-secret", record, err)
+	}
+	if got := a.providerKey("openai"); got != "vault-secret" {
+		t.Fatalf("provider key = %q, want vault-secret", got)
+	}
+
+	if err := a.webSaveProvider(ctx, "openai", "", "", "", nil); err != nil {
+		t.Fatalf("webSaveProvider(clear): %v", err)
+	}
+	if _, err := st.GetCredentialRecord(ctx, "OPENAI_API_KEY"); err == nil {
+		t.Fatal("cleared credential remained in dedicated backend")
+	}
+	if got := a.providerKey("openai"); got != "" {
+		t.Fatalf("provider key after clear = %q, want empty", got)
+	}
+}
+
+func TestWebProviderCredentialRollbackKeepsDedicatedVault(t *testing.T) {
+	a, st := vaultedM11App(t)
+	ctx := context.Background()
+	if err := a.webSaveProvider(ctx, "deepseek-official", "before-secret", "", "", nil); err != nil {
+		t.Fatalf("save initial credential: %v", err)
+	}
+
+	// An unusable profile makes registerLLM fail after the credential mutation.
+	err := a.webSaveProvider(ctx, "deepseek-official", "failed-secret", "http://", "broken-model", nil)
+	if err == nil {
+		t.Fatal("invalid provider profile unexpectedly succeeded")
+	}
+	settings, err := st.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := settings["llm.key.deepseek-official"]; ok {
+		t.Fatal("rollback leaked a provider credential into generic settings")
+	}
+	record, err := st.GetCredentialRecord(ctx, "DEEPSEEK_API_KEY")
+	if err != nil || string(record.Value) != "before-secret" || record.Revoked {
+		t.Fatalf("rolled-back credential = %+v, %v; want active before-secret", record, err)
+	}
+	if got := a.providerKey("deepseek-official"); got != "before-secret" {
+		t.Fatalf("provider key after rollback = %q, want before-secret", got)
+	}
+}
+
+func TestWebCustomProviderCredentialUsesDedicatedVault(t *testing.T) {
+	a, st := vaultedM11App(t)
+	ctx := context.Background()
+	if err := a.webSaveCustomProvider(ctx, "vault-custom", "Vault", "http://localhost:11434/v1", "model", "custom-secret", "", nil); err != nil {
+		t.Fatalf("webSaveCustomProvider: %v", err)
+	}
+	settings, err := st.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := settings["llm.key.vault-custom"]; ok {
+		t.Fatal("custom provider key leaked into generic settings")
+	}
+	if _, ok := settings["llm.custom.vault-custom"]; !ok {
+		t.Fatal("custom provider profile was not persisted")
+	}
+	record, err := st.GetCredentialRecord(ctx, "VAULT_CUSTOM_API_KEY")
+	if err != nil || string(record.Value) != "custom-secret" || record.Revoked {
+		t.Fatalf("custom credential = %+v, %v; want active custom-secret", record, err)
+	}
+
+	if err := a.webDeleteCustomProvider(ctx, "vault-custom"); err != nil {
+		t.Fatalf("webDeleteCustomProvider: %v", err)
+	}
+	settings, err = st.GetSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := settings["llm.custom.vault-custom"]; ok {
+		t.Fatal("custom provider profile remained after delete")
+	}
+	if _, err := st.GetCredentialRecord(ctx, "VAULT_CUSTOM_API_KEY"); err == nil {
+		t.Fatal("custom credential remained after delete")
+	}
 }
 
 // TestWebProviderKeyOverride verifies M11 key precedence: a key configured via
@@ -84,6 +214,24 @@ func TestWebProviderKeyOverride(t *testing.T) {
 	}
 	if got, _ := st.GetSettings(context.Background()); got["llm.key.deepseek-official"] != "" {
 		t.Fatalf("llm.key.deepseek-official should be deleted after clear, got %q", got["llm.key.deepseek-official"])
+	}
+}
+
+func TestWebProviderCatalogNeverProjectsCredentialValues(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "env-only-secret")
+	a, _ := m11App(t)
+	if err := a.webSaveProvider(context.Background(), "deepseek-official", "persisted-secret", "", "", nil); err != nil {
+		t.Fatalf("persist provider key: %v", err)
+	}
+	view, err := json.Marshal(a.webConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	serialized := string(view)
+	for _, secret := range []string{"env-only-secret", "persisted-secret"} {
+		if strings.Contains(serialized, secret) {
+			t.Fatalf("web provider catalog projects credential %q: %s", secret, serialized)
+		}
 	}
 }
 
@@ -205,6 +353,26 @@ func TestWebCustomProviderLifecycle(t *testing.T) {
 	}
 }
 
+func TestWebProviderEditRollsBackSettingsWhenRegistryRebuildFails(t *testing.T) {
+	a, st := m11App(t)
+	// Force the final registry selection to fail after the edit has touched
+	// durable settings. The edit must not leave a half-applied key/profile.
+	a.cfg.LLM.Provider = "missing-provider"
+	if err := a.webSaveProvider(context.Background(), "deepseek-official", "temporary-key", "https://changed.example/v1", "changed-model", nil); err == nil {
+		t.Fatal("provider edit with an unresolvable selected route should fail")
+	}
+	settings, err := st.GetSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings["llm.key.deepseek-official"] != "" || settings["llm.profile.deepseek-official"] != "" {
+		t.Fatalf("failed provider edit left settings: %#v", settings)
+	}
+	if _, err := a.llmReg.Get("deepseek-official"); err != nil {
+		t.Fatalf("old registry disappeared after failed edit: %v", err)
+	}
+}
+
 // TestWebCustomProviderValidation verifies the M11 fail-closed rules: id/name/
 // base_url/model are required, a custom route cannot shadow a built-in, an
 // invalid route is rejected, and deleting a built-in is rejected.
@@ -244,6 +412,39 @@ func TestWebCustomProviderValidation(t *testing.T) {
 	// Valid route characters are accepted.
 	if err := a.webSaveCustomProvider(context.Background(), "my-llm-2", "X", "http://x/v1", "m", "", "", nil); err != nil {
 		t.Errorf("valid route rejected: %v", err)
+	}
+}
+
+func TestWebDeleteCustomProviderRollsBackOnRegistryFailure(t *testing.T) {
+	a, st := m11App(t)
+	if err := a.webSaveCustomProvider(context.Background(), "rollback-provider", "Rollback", "http://gw.example/v1", "model-1", "rollback-key", "", nil); err != nil {
+		t.Fatalf("webSaveCustomProvider: %v", err)
+	}
+
+	// Make the provider being deleted the selected provider. Once removed, the
+	// registry build must fail; the delete operation must then restore both the
+	// settings rows and the live registry snapshot.
+	a.providerMu.Lock()
+	a.cfg.LLM.Provider = "rollback-provider"
+	a.providerMu.Unlock()
+	if err := a.webDeleteCustomProvider(context.Background(), "rollback-provider"); err == nil {
+		t.Fatal("deleting the selected provider should fail closed")
+	}
+	settings, err := st.GetSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings["llm.custom.rollback-provider"] == "" || settings["llm.key.rollback-provider"] != "rollback-key" {
+		t.Fatalf("provider settings after rollback = %#v", settings)
+	}
+	a.providerMu.RLock()
+	providerCount := len(a.customProviders)
+	a.providerMu.RUnlock()
+	if providerCount != 1 {
+		t.Fatalf("custom provider count after rollback = %d, want 1", providerCount)
+	}
+	if _, err := a.llmReg.Get("rollback-provider"); err != nil {
+		t.Fatalf("live registry after rollback: %v", err)
 	}
 }
 
@@ -520,9 +721,9 @@ func findProvider(list []map[string]any, id string) map[string]any {
 
 // TestContextWindowOf verifies the ContextMeter budget resolution (dsh
 // resolveModelInfo): the configured model-directory entry's capacity wins over
-// the DeepSeek catalog default (1,000,000, dsh DEFAULT_CONTEXT_WINDOW), the
-// per-session selection beats the globals, and an unknown model resolves to 0
-// (the webserver then applies its own defaultContextWindow).
+// the one composition-root fallback (1,000,000, dsh DEFAULT_CONTEXT_WINDOW),
+// and the per-session selection beats the globals. The webserver no longer owns
+// a second unknown-model default.
 func TestContextWindowOf(t *testing.T) {
 	a, st := m11App(t)
 	ctx := context.Background()
@@ -534,8 +735,8 @@ func TestContextWindowOf(t *testing.T) {
 	}
 	// A model outside the catalog → 0 (webserver default applies).
 	a.cfg.Model = "deepseek-chat"
-	if w := a.contextWindowOf(""); w != 0 {
-		t.Fatalf("unknown model window = %d, want 0", w)
+	if w := a.contextWindowOf(""); w != 1000000 {
+		t.Fatalf("unknown model window = %d, want 1000000", w)
 	}
 
 	// Per-session provider+model selection is honored.
@@ -577,7 +778,92 @@ func TestContextWindowOf(t *testing.T) {
 	if err := st.SetSessionConfig(ctx, "s1", store.SessionConfig{Provider: "my-gw", Model: "gw-a"}); err != nil {
 		t.Fatal(err)
 	}
-	if w := a.contextWindowOf("s1"); w != 0 {
-		t.Fatalf("capacity-less custom model window = %d, want 0", w)
+	if w := a.contextWindowOf("s1"); w != 1000000 {
+		t.Fatalf("capacity-less custom model window = %d, want 1000000", w)
+	}
+
+	// The same fallback must reach loop assembly for context. The model's output
+	// capacity is deliberately not promoted into a request cap.
+	route := a.buildLoop(func(string) {}, func(error) {}, "s1", "my-gw", "gw-a", "", "standard", nil)
+	if got := route.ContextWindow(); got != 1000000 {
+		t.Fatalf("loop fallback window = %d, want 1000000", got)
+	}
+}
+
+func TestModelCapabilityDrivesLoopRoute(t *testing.T) {
+	a, st := m11App(t)
+	ctx := context.Background()
+	if err := st.CreateSession(ctx, "catalog-route", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	yes, no := true, false
+	a.customProviders = []customProviderProfile{{
+		ID: "my-gw", Name: "My Gateway", Model: "gw-a",
+		Models: []customModel{{
+			ID: "gw-a", ContextWindow: 32000, MaxTokens: 1024,
+			Reasoning: &yes, Tools: &no, Vision: &yes, Audio: &no,
+		}},
+	}}
+	if err := st.SetSessionConfig(ctx, "catalog-route", store.SessionConfig{
+		Provider: "my-gw", Model: "gw-a",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	capability := a.modelCapabilityFor("catalog-route")
+	if capability.ContextWindow != 32000 || capability.MaxTokens != 1024 ||
+		!capability.Reasoning || capability.Tools || !capability.Vision || capability.Audio {
+		t.Fatalf("catalog capability = %+v", capability)
+	}
+
+	route := a.buildLoop(func(string) {}, func(error) {}, "catalog-route", "my-gw", "gw-a", "", "standard", nil)
+	if route.MaxTokens() != 0 || route.ContextWindow() != 32000 {
+		t.Fatalf("loop route limits = max %d/context %d, want 0/32000", route.MaxTokens(), route.ContextWindow())
+	}
+	if specs := modelToolSpecs(capability, "standard", []llm.ToolSchema{{Name: "read"}}); len(specs) != 0 {
+		t.Fatalf("tool-disabled route specs = %#v, want empty", specs)
+	}
+}
+
+func TestValidateSessionModelSelectionUsesRuntimeAdmission(t *testing.T) {
+	a, st := m11App(t)
+	ctx := context.Background()
+	if err := st.CreateSession(ctx, "model-validator", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.validateSessionModelSelection(ctx, "model-validator", "deepseek-official", "deepseek-v4-flash", "high"); err != nil {
+		t.Fatalf("available route rejected: %v", err)
+	}
+	err := a.validateSessionModelSelection(ctx, "model-validator", "dormant-provider", "model", "")
+	if !errors.Is(err, llm.ErrProviderUnavailable) {
+		t.Fatalf("unavailable provider error = %v, want ErrProviderUnavailable", err)
+	}
+	err = a.validateSessionModelSelection(ctx, "model-validator", "deepseek-official", "deepseek-v4-flash", "sometimes")
+	if err == nil || !strings.Contains(err.Error(), "reasoning effort") {
+		t.Fatalf("invalid effort error = %v", err)
+	}
+}
+
+func TestModelSelectionRejectsExplicitUnsupportedReasoning(t *testing.T) {
+	a, st := m11App(t)
+	ctx := context.Background()
+	if err := st.CreateSession(ctx, "no-reasoning", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	yes, no := true, false
+	a.customProviders = []customProviderProfile{{
+		ID: "my-gw", Name: "My Gateway", Model: "basic",
+		Models: []customModel{{ID: "basic", ContextWindow: 8000, Reasoning: &no, Tools: &yes, Vision: &no, Audio: &no}},
+	}}
+	capability := a.modelCapabilityForRoute("my-gw", "basic")
+	err := validateModelCapabilityForSelection(capability, "high")
+	if !errors.Is(err, llm.ErrCapabilityUnavailable) {
+		t.Fatalf("unsupported reasoning error = %v, want ErrCapabilityUnavailable", err)
+	}
+	if got := effectiveModelReasoningEffort(a.modelCapabilityForRoute("my-gw", "basic"), "high"); got != "" {
+		t.Fatalf("fallback effort = %q, want empty", got)
+	}
+	if err := validateModelCapabilityForSelection(capability, ""); err != nil {
+		t.Fatalf("clearing effort rejected: %v", err)
 	}
 }

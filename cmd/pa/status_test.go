@@ -37,6 +37,23 @@ func TestSessionStatusRunning(t *testing.T) {
 	}
 }
 
+func TestSessionStatusTracksConcurrentAgentRuns(t *testing.T) {
+	a := &app{}
+	a.beginSessionRun("s1")
+	a.beginSessionRun("s2")
+	if !a.isSessionRunning("s1") || !a.isSessionRunning("s2") {
+		t.Fatalf("concurrent running sessions not retained: %#v", a.runningSessions)
+	}
+	a.endSessionRun("s1")
+	if a.isSessionRunning("s1") || !a.isSessionRunning("s2") {
+		t.Fatalf("ending s1 changed s2 state: %#v", a.runningSessions)
+	}
+	a.endSessionRun("s2")
+	if a.isSessionRunning("s2") {
+		t.Fatal("ended s2 remains running")
+	}
+}
+
 func TestSessionStatusCompletedUnviewed(t *testing.T) {
 	a := &app{}
 	updated := time.Now().UTC().Add(-time.Minute)

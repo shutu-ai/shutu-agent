@@ -104,7 +104,9 @@ func (t StrReplaceEditorTool) Execute(ctx context.Context, args any) (string, er
 			return "", fmt.Errorf("str_replace_editor: create: %w", err)
 		}
 		t.observe(ctx, in.Path)
-		t.t.emit(session.EventFsWrite, session.NewFsWrite(in.Path))
+		if err := t.t.emitContext(ctx, session.EventFsWrite, session.NewFsWrite(in.Path)); err != nil {
+			return "", fmt.Errorf("str_replace_editor: persist create event: %w", err)
+		}
 		return fmt.Sprintf("New file created successfully at: %s", in.Path), nil
 	case "str_replace":
 		if in.OldStr == "" {
@@ -167,18 +169,20 @@ func (t StrReplaceEditorTool) writeEdited(ctx context.Context, path, content str
 		return "", fmt.Errorf("str_replace_editor: %w", err)
 	}
 	t.observe(ctx, path)
-	t.t.emit(session.EventFsWrite, session.NewFsWrite(path))
+	if err := t.t.emitContext(ctx, session.EventFsWrite, session.NewFsWrite(path)); err != nil {
+		return "", fmt.Errorf("str_replace_editor: persist write event: %w", err)
+	}
 	return fmt.Sprintf("The file %s has been edited successfully.", path), nil
 }
 
 func (t StrReplaceEditorTool) observe(ctx context.Context, path string) {
 	if version, err := t.t.f.Fingerprint(ctx, path); err == nil {
-		t.t.observed[t.t.key(path)] = version
+		t.t.observed[t.t.key(ctx, path)] = version
 	}
 }
 
 func (t StrReplaceEditorTool) ensureObserved(ctx context.Context, path string) error {
-	key := t.t.key(path)
+	key := t.t.key(ctx, path)
 	if _, ok := t.t.observed[key]; ok {
 		return t.t.requireObserved(ctx, path)
 	}

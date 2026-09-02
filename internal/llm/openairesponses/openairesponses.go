@@ -24,6 +24,8 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/jabing/shutu-agent/internal/llm"
 )
@@ -33,6 +35,10 @@ const (
 	defaultBaseURL = "https://api.openai.com/v1"
 	// defaultModel is the default model when Config.Model is empty.
 	defaultModel = "gpt-4o-mini"
+	// defaultMaxOutputTokens is the route-level request default used by the
+	// reference pi-ai adapter. A model's MaxTokens is capacity metadata and is
+	// not promoted into a request budget unless DefaultMaxTokens is explicit.
+	defaultMaxOutputTokens = 32768
 	// providerID is the stable provider id.
 	providerID = "openai-responses"
 	// maxErrorBody bounds the non-2xx error body read (1 MiB).
@@ -51,10 +57,16 @@ type Config struct {
 	// ID is the provider's registry id; empty defaults to "openai-responses".
 	// A non-empty ID lets the composition root register OpenAI Responses
 	// endpoints (openai / xai) under their own route.
-	ID      string
-	BaseURL string // default https://api.openai.com/v1 ("/responses" appended)
-	APIKey  string // OPENAI_API_KEY value; empty means absent
-	Model   string // default gpt-4o-mini
+	ID                      string
+	BaseURL                 string // default https://api.openai.com/v1 ("/responses" appended)
+	APIKey                  string // OPENAI_API_KEY value; empty means absent
+	CredentialProvider      llm.CredentialProvider
+	CredentialLeaseProvider llm.CredentialLeaseProvider
+	Model                   string // default gpt-4o-mini
+	ModelCatalog            []llm.ModelInfo
+	// MaxOutputTokens is the route-level response token budget; <= 0 uses the
+	// reference default 32768.
+	MaxOutputTokens int
 	// HTTPClient is optional; defaults to http.DefaultClient. The provider
 	// copies it with a no-redirect CheckRedirect, never mutating the caller's
 	// shared client.
@@ -69,13 +81,18 @@ type Config struct {
 
 // openaiResponsesProvider is the llm.Provider implementing the Responses API.
 type openaiResponsesProvider struct {
-	id                   string
-	baseURL              string
-	apiKey               string
-	model                string
-	client               *http.Client
-	supportsImages       bool
-	maxRequestImageBytes int
+	id                      string
+	baseURL                 string
+	apiKey                  string
+	apiKeyMu                sync.RWMutex
+	credentialProvider      llm.CredentialProvider
+	credentialLeaseProvider llm.CredentialLeaseProvider
+	model                   string
+	client                  *http.Client
+	supportsImages          bool
+	maxRequestImageBytes    int
+	modelCatalog            []llm.ModelInfo
+	maxOutputTokens         int
 }
 
 // New returns an openaiResponsesProvider with defaults applied.
@@ -89,6 +106,9 @@ func New(cfg Config) *openaiResponsesProvider {
 	if cfg.Model == "" {
 		cfg.Model = defaultModel
 	}
+	if cfg.MaxOutputTokens <= 0 {
+		cfg.MaxOutputTokens = defaultMaxOutputTokens
+	}
 	if cfg.HTTPClient == nil {
 		cfg.HTTPClient = http.DefaultClient
 	}
@@ -96,23 +116,94 @@ func New(cfg Config) *openaiResponsesProvider {
 		cfg.MaxRequestImageBytes = defaultMaxRequestImageBytes
 	}
 	return &openaiResponsesProvider{
-		id:                   cfg.ID,
-		baseURL:              strings.TrimRight(cfg.BaseURL, "/"),
-		apiKey:               cfg.APIKey,
-		model:                cfg.Model,
-		client:               cfg.HTTPClient,
-		supportsImages:       cfg.SupportsImages,
-		maxRequestImageBytes: cfg.MaxRequestImageBytes,
+		id:                      cfg.ID,
+		baseURL:                 strings.TrimRight(cfg.BaseURL, "/"),
+		apiKey:                  cfg.APIKey,
+		credentialProvider:      cfg.CredentialProvider,
+		credentialLeaseProvider: cfg.CredentialLeaseProvider,
+		model:                   cfg.Model,
+		client:                  cfg.HTTPClient,
+		supportsImages:          cfg.SupportsImages,
+		maxRequestImageBytes:    cfg.MaxRequestImageBytes,
+		modelCatalog:            llm.CopyModelCatalog(cfg.ModelCatalog),
+		maxOutputTokens:         cfg.MaxOutputTokens,
 	}
 }
 
 // ID returns the stable provider id.
 func (p *openaiResponsesProvider) ID() string { return p.id }
 
+func (p *openaiResponsesProvider) SupportsImages() bool { return p.supportsImages }
+
+func (p *openaiResponsesProvider) ListModels(context.Context) ([]llm.ModelInfo, error) {
+	return llm.CopyModelCatalog(p.modelCatalog), nil
+}
+
+func (p *openaiResponsesProvider) ResolveModelInfo(_ context.Context, model string) (llm.ModelInfo, error) {
+	info, err := llm.ResolveModelFromCatalog(p.id, p.modelCatalog, model)
+	if err != nil {
+		return llm.ModelInfo{}, err
+	}
+	info.DefaultMaxTokens = llm.ModelDefaultMaxTokens(p.modelCatalog, model)
+	return info, nil
+}
+
+func (p *openaiResponsesProvider) Close() error {
+	if p == nil {
+		return nil
+	}
+	p.apiKeyMu.Lock()
+	p.apiKey = ""
+	p.credentialProvider = nil
+	p.credentialLeaseProvider = nil
+	p.apiKeyMu.Unlock()
+	return nil
+}
+
+func (p *openaiResponsesProvider) keySnapshot(ctx context.Context) (string, error) {
+	p.apiKeyMu.RLock()
+	provider := p.credentialProvider
+	key := p.apiKey
+	p.apiKeyMu.RUnlock()
+	if provider != nil {
+		return provider(ctx)
+	}
+	return key, nil
+}
+
+func (p *openaiResponsesProvider) keyLease(ctx context.Context) (string, llm.CredentialLease, error) {
+	p.apiKeyMu.RLock()
+	leaseProvider := p.credentialLeaseProvider
+	provider := p.credentialProvider
+	key := p.apiKey
+	p.apiKeyMu.RUnlock()
+	if leaseProvider != nil {
+		lease, err := leaseProvider(ctx)
+		if err != nil {
+			return "", nil, err
+		}
+		if lease == nil {
+			return "", nil, nil
+		}
+		value := lease.Value()
+		if value == "" {
+			lease.Release()
+			return "", nil, nil
+		}
+		return value, lease, nil
+	}
+	if provider != nil {
+		value, err := provider(ctx)
+		return value, nil, err
+	}
+	return key, nil, nil
+}
+
 // Available reports whether the provider can be used: a cheap local check that
 // never performs a network call — apiKey present and base URL parseable.
 func (p *openaiResponsesProvider) Available() bool {
-	if p.apiKey == "" {
+	key, err := p.keySnapshot(context.Background())
+	if err != nil || key == "" {
 		return false
 	}
 	u, err := url.Parse(p.baseURL)
@@ -128,7 +219,35 @@ func (p *openaiResponsesProvider) Available() bool {
 // into llm.StreamEvents. ctx cancellation runs through the HTTP request and
 // the body reads.
 func (p *openaiResponsesProvider) Stream(ctx context.Context, req llm.ChatRequest) (llm.StreamReader, error) {
-	if !p.supportsImages {
+	if err := llm.ValidateRequestBlocks(p.ID(), req.Messages); err != nil {
+		return nil, err
+	}
+	apiKey, credentialLease, err := p.keyLease(ctx)
+	if err != nil {
+		return nil, llm.NewFailureError("openairesponses: credential resolution failed", "CREDENTIAL_UNAVAILABLE", err)
+	}
+	leaseTransferred := false
+	defer func() {
+		if !leaseTransferred && credentialLease != nil {
+			credentialLease.Release()
+		}
+	}()
+	if apiKey == "" {
+		return nil, llm.NewFailureError("openairesponses: credential unavailable", "CREDENTIAL_UNAVAILABLE", nil)
+	}
+	model := strings.TrimSpace(req.Model)
+	if model == "" {
+		model = p.model
+	}
+	effort := strings.TrimSpace(req.ReasoningEffort)
+	if effort == "" {
+		effort = llm.ModelDefaultReasoningEffort(p.modelCatalog, model)
+	}
+	wireEffort, err := llm.ResolveReasoningEffortWire(p.ID(), p.modelCatalog, model, effort)
+	if err != nil {
+		return nil, err
+	}
+	if !llm.ModelSupportsImages(p.supportsImages, p.modelCatalog, model) {
 		for _, m := range req.Messages {
 			if m.HasImage() {
 				return nil, fmt.Errorf("%s: model does not support image input (model_input_modalities=text)", p.ID())
@@ -137,11 +256,30 @@ func (p *openaiResponsesProvider) Stream(ctx context.Context, req llm.ChatReques
 	}
 	msgs := llm.OffloadRequestImages(req.Messages, p.maxRequestImageBytes)
 
+	maxOutputTokens := p.maxOutputTokens
+	if catalogDefault := llm.ModelDefaultMaxTokens(p.modelCatalog, model); catalogDefault > 0 {
+		maxOutputTokens = catalogDefault
+	}
+	if req.MaxTokens > 0 {
+		maxOutputTokens = req.MaxTokens
+	}
 	body := requestBody{
-		Model:  p.model,
-		Input:  toInput(msgs, p.maxRequestImageBytes),
-		Tools:  toTools(req.Tools),
-		Stream: true,
+		Model:           model,
+		Input:           toInput(msgs, p.maxRequestImageBytes),
+		Tools:           toTools(req.Tools),
+		Stream:          true,
+		MaxOutputTokens: maxOutputTokens,
+		Temperature:     req.Temperature,
+		Stop:            append([]string(nil), req.Stop...),
+	}
+	reasoningSupported, reasoningKnown := llm.ModelReasoningCapability(p.modelCatalog, model)
+	reasoningEffort := wireEffort
+	if strings.EqualFold(effort, "off") && reasoningEffort == "" {
+		reasoningEffort = "off"
+	}
+	if reasoning := reasoningForEffort(reasoningEffort, reasoningKnown && reasoningSupported); reasoning != nil {
+		body.Reasoning = reasoning
+		body.Include = []string{"reasoning.encrypted_content"}
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -152,23 +290,28 @@ func (p *openaiResponsesProvider) Stream(ctx context.Context, req llm.ChatReques
 	if err != nil {
 		return nil, fmt.Errorf("openairesponses: build request: %w", err)
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
+	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "text/event-stream")
+	llm.ApplyAttributionHeaders(httpReq.Header)
 
 	resp, err := p.doNoRedirect(httpReq)
 	if err != nil {
 		return nil, err
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return newStreamReader(resp), nil
+		reader := newStreamReader(resp)
+		reader.credentialLease = credentialLease
+		leaseTransferred = credentialLease != nil
+		return reader, nil
 	}
 	defer resp.Body.Close()
 	detail := errorDetail(resp)
 	if detail == "" {
 		detail = resp.Status
 	}
-	return nil, fmt.Errorf("openairesponses: provider error: %s", detail)
+	return nil, llm.ClassifyHTTPFailureWithMetadata("openairesponses", resp.StatusCode, resp.Status, detail,
+		llm.RetryAfterMilliseconds(resp.Header.Get("Retry-After"), time.Now()), resp.Header.Get("x-request-id"))
 }
 
 // doNoRedirect issues httpReq with a no-follow redirect policy.
@@ -184,12 +327,12 @@ func (p *openaiResponsesProvider) doNoRedirect(req *http.Request) (*http.Respons
 	resp, err := client.Do(req)
 	if err != nil {
 		if err == errRedirectDetected {
-			return nil, fmt.Errorf("openairesponses: redirect blocked (3xx not followed)")
+			return nil, llm.NewFailureError("openairesponses: redirect blocked (3xx not followed)", "TRANSPORT", err)
 		}
 		if req.Context().Err() != nil {
-			return nil, fmt.Errorf("openairesponses: cancelled: %w", req.Context().Err())
+			return nil, llm.NewFailureError("openairesponses: cancelled: "+req.Context().Err().Error(), "ABORTED", req.Context().Err())
 		}
-		return nil, fmt.Errorf("openairesponses: request failed: %w", err)
+		return nil, llm.NewFailureError("openairesponses: request failed: "+err.Error(), "TRANSPORT", err)
 	}
 	return resp, nil
 }
@@ -219,10 +362,34 @@ func errorDetail(resp *http.Response) string {
 // —— wire shapes for the Responses request body ——
 
 type requestBody struct {
-	Model  string           `json:"model"`
-	Input  []map[string]any `json:"input"`
-	Tools  []wireTool       `json:"tools,omitempty"`
-	Stream bool             `json:"stream"`
+	Model           string           `json:"model"`
+	Input           []map[string]any `json:"input"`
+	Tools           []wireTool       `json:"tools,omitempty"`
+	Stream          bool             `json:"stream"`
+	MaxOutputTokens int              `json:"max_output_tokens,omitempty"`
+	Temperature     *float64         `json:"temperature,omitempty"`
+	Stop            []string         `json:"stop,omitempty"`
+	Reasoning       *reasoningConfig `json:"reasoning,omitempty"`
+	Include         []string         `json:"include,omitempty"`
+}
+
+type reasoningConfig struct {
+	Effort  string `json:"effort"`
+	Summary string `json:"summary,omitempty"`
+}
+
+func reasoningForEffort(effort string, reasoningKnownTrue bool) *reasoningConfig {
+	switch strings.TrimSpace(effort) {
+	case "off":
+		if !reasoningKnownTrue {
+			return nil
+		}
+		return &reasoningConfig{Effort: "none"}
+	case "low", "high", "max":
+		return &reasoningConfig{Effort: effort, Summary: "auto"}
+	default:
+		return nil
+	}
 }
 
 type wireTool struct {

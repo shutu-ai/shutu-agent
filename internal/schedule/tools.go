@@ -28,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 	"github.com/jabing/shutu-agent/internal/session"
 )
 
@@ -66,6 +67,14 @@ func (t *ScheduleTools) emit(typ string, data any) {
 	if t.onEvent != nil {
 		t.onEvent(typ, data)
 	}
+}
+
+func (t *ScheduleTools) emitContext(ctx context.Context, typ string, data any) error {
+	if runtime, ok := runtimectx.Get(ctx); ok && runtime.Emit != nil {
+		return runtime.Emit(typ, data)
+	}
+	t.emit(typ, data)
+	return nil
 }
 
 // ScheduleCreateTool stores one recurring trigger (interval or cron) and
@@ -123,7 +132,14 @@ func (t ScheduleCreateTool) Execute(ctx context.Context, args any) (string, erro
 	}
 	// schedule/create is a log-only fact (D3); the created schedule id/kind/spec
 	// are logged, and the returned text is what the loop logs as tool/result.
-	t.t.emit(session.EventScheduleCreate, session.NewScheduleCreate(s.ID, string(s.Kind), s.Spec))
+	if err := t.t.emitContext(ctx, session.EventScheduleCreate, session.NewScheduleCreate(s.ID, string(s.Kind), s.Spec)); err != nil {
+		// The model must not receive a successful create when its durable fact
+		// failed. Remove the provider row as a best-effort transaction rollback;
+		// the Engine has no append hook, so this is the only way to avoid an
+		// unlogged schedule surviving a retried tool call.
+		_ = t.t.e.Remove(context.Background(), s.ID)
+		return "", fmt.Errorf("schedule_create: persist event: %w", err)
+	}
 	return fmt.Sprintf("created schedule %s (kind=%s, spec=%q, next fire %s)",
 		s.ID, s.Kind, s.Spec, s.NextFire.UTC().Format(time.RFC3339)), nil
 }
@@ -153,7 +169,9 @@ func (t ScheduleListTool) Execute(ctx context.Context, args any) (string, error)
 		return "", fmt.Errorf("schedule_list: %w", err)
 	}
 	// schedule/list is a log-only fact (D3) carrying the returned table size.
-	t.t.emit(session.EventScheduleList, session.NewScheduleList(len(all)))
+	if err := t.t.emitContext(ctx, session.EventScheduleList, session.NewScheduleList(len(all))); err != nil {
+		return "", fmt.Errorf("schedule_list: persist event: %w", err)
+	}
 	return formatScheduleList(all), nil
 }
 
@@ -194,7 +212,9 @@ func (t ScheduleDeleteTool) Execute(ctx context.Context, args any) (string, erro
 		return "", fmt.Errorf("schedule_delete: %w", err)
 	}
 	// schedule/delete is a log-only fact (D3).
-	t.t.emit(session.EventScheduleDelete, session.NewScheduleDelete(a.ID))
+	if err := t.t.emitContext(ctx, session.EventScheduleDelete, session.NewScheduleDelete(a.ID)); err != nil {
+		return "", fmt.Errorf("schedule_delete: persist event: %w", err)
+	}
 	return "deleted schedule " + a.ID, nil
 }
 

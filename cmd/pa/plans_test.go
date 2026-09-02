@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/jabing/shutu-agent/internal/config"
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 	"github.com/jabing/shutu-agent/internal/session"
 	"github.com/jabing/shutu-agent/internal/store"
 	"github.com/jabing/shutu-agent/internal/tools"
@@ -181,5 +182,50 @@ func TestPlanGoalProjectionRebuildsAcrossAppRestart(t *testing.T) {
 	goals, err := second.plans.List(ctx)
 	if err != nil || len(goals) != 1 || goals[0].ID != "goal-1" {
 		t.Fatalf("restored goals = %+v, err=%v", goals, err)
+	}
+}
+
+func TestPlanProjectionIsSessionScopedForAgentContexts(t *testing.T) {
+	a := makePlanApp(true)
+	a.reg.SetPolicy(planPolicy())
+	if err := a.registerPlans(); err != nil {
+		t.Fatal(err)
+	}
+	defer a.closePlanEngines()
+	one := session.New()
+	if _, err := one.Append(session.EventPlanCreate, session.NewPlanCreate("goal", "goal-1", "first", nil)); err != nil {
+		t.Fatal(err)
+	}
+	two := session.New()
+	a.currentID = "legacy"
+	a.log = one
+	a.runtimeMu.Lock()
+	a.runtimeLogs = map[string]*session.Log{"s-one": one, "s-two": two}
+	a.runtimeMu.Unlock()
+	ctxOne := runtimectx.With(context.Background(), runtimectx.Runtime{SessionID: "s-one"})
+	ctxTwo := runtimectx.With(context.Background(), runtimectx.Runtime{SessionID: "s-two"})
+	first, err := a.reg.Execute(ctxOne, "get_goal", json.RawMessage(`{}`))
+	if err != nil || !strings.Contains(first.Output, "goal-1") {
+		t.Fatalf("session one goal = %#v, err=%v", first, err)
+	}
+	second, err := a.reg.Execute(ctxTwo, "create_goal", json.RawMessage(`{"objective":"second"}`))
+	if err != nil || !strings.Contains(second.Output, "goal-1") {
+		t.Fatalf("session two goal = %#v, err=%v", second, err)
+	}
+	if strings.Contains(second.Output, "first") {
+		t.Fatalf("session two reused session one's plan projection: %q", second.Output)
+	}
+	engineOne, err := a.planEngineFor(ctxOne)
+	if err != nil {
+		t.Fatal(err)
+	}
+	engineTwo, err := a.planEngineFor(ctxTwo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goalsOne, _ := engineOne.List(ctxOne)
+	goalsTwo, _ := engineTwo.List(ctxTwo)
+	if len(goalsOne) != 1 || len(goalsTwo) != 1 || goalsOne[0].Title == goalsTwo[0].Title {
+		t.Fatalf("session plan projections leaked: one=%+v two=%+v", goalsOne, goalsTwo)
 	}
 }

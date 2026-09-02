@@ -3,10 +3,15 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jabing/shutu-agent/internal/attachment"
+	"github.com/jabing/shutu-agent/internal/llm"
+	"github.com/jabing/shutu-agent/internal/tools"
 )
 
 // helperFactory is a Factory whose New returns a stdioClient pointed at this
@@ -23,6 +28,40 @@ func (f helperFactory) New(ctx context.Context, cmd string, args []string) (Clie
 	}
 	c.timeout = 5 * time.Second
 	return c, nil
+}
+
+type reconnectTestClient struct {
+	startCalls int
+	listCalls  int
+	callCalls  int
+	err        error
+	tools      []Tool
+}
+
+func (c *reconnectTestClient) Start(context.Context) error {
+	c.startCalls++
+	return nil
+}
+
+func (c *reconnectTestClient) ListTools(context.Context) ([]Tool, error) {
+	c.listCalls++
+	return c.tools, nil
+}
+
+func (c *reconnectTestClient) Call(context.Context, string, map[string]any) (CallResult, error) {
+	c.callCalls++
+	if c.callCalls == 1 {
+		return CallResult{}, c.err
+	}
+	return CallResult{Content: []any{map[string]any{"type": "text", "text": "reconnected"}}}, nil
+}
+
+func (c *reconnectTestClient) Close() error { return nil }
+
+type reconnectTestFactory struct{ client *reconnectTestClient }
+
+func (f reconnectTestFactory) New(context.Context, string, []string) (Client, error) {
+	return f.client, nil
 }
 
 // eventRec is one event emitted through the McpTools onEvent sink.
@@ -191,6 +230,85 @@ func TestMcpCallToolCallsAndEmits(t *testing.T) {
 	}
 }
 
+func TestMcpCallToolResultPreservesCanonicalContent(t *testing.T) {
+	mt, _ := newMcpToolsWithEvents(t, "echo")
+	result, err := mt.Call().ExecuteResult(context.Background(), json.RawMessage(`{"server":"fake","tool":"echo","args":{"text":"rich"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Content) != 1 || result.Content[0].Kind != llm.BlockText || result.Content[0].Text != "echo:rich" {
+		t.Fatalf("MCP rich content = %+v", result.Content)
+	}
+	value, ok := result.Value.(map[string]any)
+	if !ok || value["content"] == nil {
+		t.Fatalf("MCP canonical value = %#v", result.Value)
+	}
+}
+
+func TestMcpDynamicCallDoesNotReplayUnknownCommit(t *testing.T) {
+	for _, failure := range []error{ErrConnection, ErrTimeout} {
+		t.Run(failure.Error(), func(t *testing.T) {
+			client := &reconnectTestClient{err: failure}
+			mt := NewMcpTools(reconnectTestFactory{client: client}, []McpServer{{Name: "fake", Cmd: "fixture"}}, nil)
+			_, err := mt.Call().ExecuteResult(context.Background(), json.RawMessage(`{"server":"fake","tool":"echo"}`))
+			if err == nil || !errors.Is(err, failure) {
+				t.Fatalf("dynamic call error = %v, want %v", err, failure)
+			}
+			if client.startCalls != 1 || client.callCalls != 1 {
+				t.Fatalf("calls = start:%d call:%d, want start:1 call:1", client.startCalls, client.callCalls)
+			}
+		})
+	}
+}
+
+func TestMcpDynamicCallRejectsRequiredTaskBeforeCall(t *testing.T) {
+	client := &reconnectTestClient{tools: []Tool{{Name: "async", TaskSupport: "required"}}}
+	mt := NewMcpTools(reconnectTestFactory{client: client}, []McpServer{{Name: "fake", Cmd: "fixture"}}, nil)
+	_, err := mt.Call().ExecuteResult(context.Background(), json.RawMessage(`{"server":"fake","tool":"async"}`))
+	if err == nil || !strings.Contains(err.Error(), "task-based execution is not supported") {
+		t.Fatalf("required task dynamic call error = %v", err)
+	}
+	if client.startCalls != 1 || client.listCalls != 1 || client.callCalls != 0 {
+		t.Fatalf("calls = start:%d list:%d call:%d, want start:1 list:1 call:0", client.startCalls, client.listCalls, client.callCalls)
+	}
+}
+
+func TestMcpCallToolRegistryAcceptsCanonicalRichValue(t *testing.T) {
+	mt, _ := newMcpToolsWithEvents(t, "echo")
+	registry := tools.New()
+	if err := registry.Register(mt.Call()); err != nil {
+		t.Fatal(err)
+	}
+	registry.Allow(ToolCallName)
+	result, err := registry.Execute(context.Background(), ToolCallName, json.RawMessage(`{"server":"fake","tool":"echo","args":{"text":"registry"}}`))
+	if err != nil {
+		t.Fatalf("registry mcp_call: %v", err)
+	}
+	value, ok := result.Value.(map[string]any)
+	if !ok || value["content"] == nil || result.IsError {
+		t.Fatalf("registry result = %#v, want canonical non-error value", result)
+	}
+}
+
+func TestMcpCallToolRegistryClassifiesToolLevelError(t *testing.T) {
+	mt, recs := newMcpToolsWithEvents(t, "echo")
+	registry := tools.New()
+	registry.Allow(ToolCallName)
+	if err := registry.Register(mt.Call()); err != nil {
+		t.Fatal(err)
+	}
+	result, err := registry.Execute(context.Background(), ToolCallName, json.RawMessage(`{"server":"fake","tool":"erris"}`))
+	if err != nil {
+		t.Fatalf("registry mcp_call error: %v", err)
+	}
+	if !result.IsError || result.Error == nil || result.Error.Code != "MCP_TOOL_ERROR" {
+		t.Fatalf("tool-level error = %+v, want structured MCP_TOOL_ERROR", result)
+	}
+	if got := eventTypes(*recs); len(got) != 1 || got[0] != "mcp/call" {
+		t.Fatalf("events = %v, want completed mcp/call fact", got)
+	}
+}
+
 // TestMcpCallToolIsError verifies a tool-level failure inside a successful
 // result: the output carries the [isError] marker and the mcp/call event's
 // isError flag is set (the call itself completed, so the fact is logged).
@@ -210,6 +328,32 @@ func TestMcpCallToolIsError(t *testing.T) {
 	}](t, (*recs)[0])
 	if d.Name != "erris" || !d.IsError {
 		t.Fatalf("mcp/call payload = %+v, want erris / isError", d)
+	}
+}
+
+func TestMcpCallToolIsErrorDoesNotPersistRichImages(t *testing.T) {
+	mt, _ := newMcpToolsWithEvents(t, "echo")
+	root := t.TempDir()
+	store, err := attachment.NewStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mt.SetAttachmentStore(store, 1024)
+	registry := tools.New()
+	registry.Allow(ToolCallName)
+	if err := registry.Register(mt.Call()); err != nil {
+		t.Fatal(err)
+	}
+	result, err := registry.Execute(context.Background(), ToolCallName, json.RawMessage(`{"server":"fake","tool":"errimage"}`))
+	if err != nil || !result.IsError {
+		t.Fatalf("isError image result = %+v err=%v", result, err)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("isError projection wrote %d attachment files", len(entries))
 	}
 }
 

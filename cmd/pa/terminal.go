@@ -20,6 +20,7 @@ import (
 
 	"github.com/jabing/shutu-agent/internal/config"
 	"github.com/jabing/shutu-agent/internal/jobs"
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 	"github.com/jabing/shutu-agent/internal/terminal"
 	"github.com/jabing/shutu-agent/internal/tools"
 )
@@ -41,6 +42,17 @@ func (a *app) registerTerminal() error {
 		bash := tools.NewRunCommandForWorkdirAndJobs(a.sessionCWD, func() jobs.Registry {
 			return a.jobs
 		}, func() string { return a.currentID }, a.jobs != nil)
+		bash.WorkdirContextFunc = func(ctx context.Context) string { return a.sessionCWDFor(runtimectx.SessionID(ctx)) }
+		bash.WorkdirRootContextFunc = func(ctx context.Context) string { return a.sessionCWDFor(runtimectx.SessionID(ctx)) }
+		bash.JobsContextFunc = func(context.Context) jobs.Registry { return a.jobs }
+		bash.OwnerContextFunc = func(ctx context.Context) string {
+			return a.runtimeSessionID(ctx)
+		}
+		bash.DshEnvContextFunc = func(ctx context.Context) map[string]string {
+			return tools.NewManagedDshEnv(a.cfg.DataDir, func() string {
+				return runtimectx.SessionID(ctx)
+			})()
+		}
 		if err := a.reg.Register(bash); err != nil {
 			return fmt.Errorf("pa: register %s: %w", bash.Name(), err)
 		}
@@ -54,11 +66,28 @@ func (a *app) registerTerminal() error {
 			}
 			return a.cfg.Terminal.Workdir
 		},
+		WorkdirContextFunc: func(ctx context.Context) string {
+			if a.cfg.Terminal.Workdir != "" {
+				return a.cfg.Terminal.Workdir
+			}
+			return a.sessionCWDFor(runtimectx.SessionID(ctx))
+		},
+		WorkdirRootContextFunc: func(ctx context.Context) string {
+			return a.sessionCWDFor(runtimectx.SessionID(ctx))
+		},
 		Jobs:  a.jobs, // nil when jobs disabled → no run_in_background
 		Owner: func() string { return a.currentID },
+		OwnerContextFunc: func(ctx context.Context) string {
+			return a.runtimeSessionID(ctx)
+		},
 		DshEnvFunc: tools.NewManagedDshEnv(a.cfg.DataDir, func() string {
 			return a.currentID
 		}),
+		DshEnvContextFunc: func(ctx context.Context) map[string]string {
+			return tools.NewManagedDshEnv(a.cfg.DataDir, func() string {
+				return runtimectx.SessionID(ctx)
+			})()
+		},
 	})
 	if err := a.reg.Register(pwsh); err != nil {
 		return fmt.Errorf("pa: register %s: %w", pwsh.Name(), err)

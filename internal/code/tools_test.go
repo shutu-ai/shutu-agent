@@ -24,6 +24,10 @@ func newCodeToolsWithEvents(t *testing.T) (*engine, *CodeTools, *[]eventRec) {
 	ct := NewCodeTools(e, func(typ string, data any) {
 		*recs = append(*recs, eventRec{typ: typ, data: data})
 	})
+	// These seam tests exercise command execution itself. Full access is
+	// explicit because the production default is workspace-write and must
+	// fail closed when no enforcing backend is installed on the host.
+	ct.DefaultMode = SandboxFullAccess
 	return e, ct, recs
 }
 
@@ -80,6 +84,17 @@ func TestCodeRunToolSchema(t *testing.T) {
 	}
 	if _, ok := props["cwd"]; !ok {
 		t.Fatal("cwd property missing")
+	}
+}
+
+// TestCodeRunCancellationClassification prevents the catalog from silently
+// claiming cancellation unless the tool retains its explicit opt-in.
+func TestCodeRunCancellationClassification(t *testing.T) {
+	_, ct, _ := newCodeToolsWithEvents(t)
+	tool := ct.Run()
+	classified, ok := any(tool).(interface{ CancellationAware() bool })
+	if !ok || !classified.CancellationAware() {
+		t.Fatal("run_code must explicitly classify cooperative cancellation")
 	}
 }
 

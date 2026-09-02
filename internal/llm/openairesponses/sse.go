@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -91,17 +90,19 @@ type wireEventItem struct {
 // accumulating function-call argument deltas per item id and the reasoning text
 // by a parallel builder.
 type streamReader struct {
-	dec  *sseDecoder
-	resp *http.Response
-	done bool
+	dec             *sseDecoder
+	resp            *http.Response
+	done            bool
+	credentialLease llm.CredentialLease
 
 	finishReason string
 	reasoning    strings.Builder
 	// function call accumulation, keyed by the wire function_call item id; the
 	// llm.ToolCall.id is the Responses call_id (echoed by function_call_output).
-	funcCalls map[string]*funcAccum
-	order     []string
-	usage     llm.TokenUsage
+	funcCalls  map[string]*funcAccum
+	order      []string
+	usage      llm.TokenUsage
+	sawContent bool
 }
 
 type funcAccum struct {
@@ -118,34 +119,38 @@ func (r *streamReader) Next() (llm.StreamEvent, error) {
 		payload, err := r.dec.Next()
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				if len(r.order) > 0 {
-					return r.finish("tool_calls"), nil
-				}
-				return llm.StreamEvent{}, fmt.Errorf("openairesponses: SSE stream ended without response.completed")
+				r.close()
+				return llm.StreamEvent{}, llm.NewFailureError("openairesponses: SSE stream ended without response.completed", "STREAM_CLOSED", err)
 			}
-			return llm.StreamEvent{}, err
+			r.close()
+			return llm.StreamEvent{}, llm.NewFailureError("openairesponses: stream read failed: "+err.Error(), "STREAM_CLOSED", err)
 		}
 		if strings.TrimSpace(payload) == "" {
 			continue
 		}
 		var ev wireEvent
 		if err := json.Unmarshal([]byte(payload), &ev); err != nil {
-			return llm.StreamEvent{}, fmt.Errorf("openairesponses: malformed SSE payload: %w", err)
+			r.close()
+			return llm.StreamEvent{}, llm.NewFailureError("openairesponses: malformed SSE payload: "+err.Error(), "MALFORMED_RESPONSE", err)
 		}
 		switch ev.Type {
 		case "response.output_text.delta":
 			if ev.Delta != "" {
+				r.sawContent = true
 				return llm.StreamEvent{Kind: llm.StreamTextDelta, Text: ev.Delta}, nil
 			}
 		case "response.reasoning_text.delta", "response.reasoning_summary_text.delta":
 			if ev.Delta != "" {
+				r.sawContent = true
 				r.reasoning.WriteString(ev.Delta)
 				return llm.StreamEvent{Kind: llm.StreamReasoningDelta, Text: ev.Delta}, nil
 			}
 		case "response.function_call_arguments.delta":
+			r.sawContent = true
 			r.accumDelta(ev.Item, ev.Delta)
 		case "response.output_item.done":
 			if ev.Item != nil && ev.Item.Type == "function_call" {
+				r.sawContent = true
 				r.closeCall(*ev.Item)
 			}
 		case "response.completed":
@@ -157,7 +162,12 @@ func (r *streamReader) Next() (llm.StreamEvent, error) {
 						TotalTokens:  ev.Response.Usage.TotalTokens,
 					}
 					if ev.Response.Usage.InputDetails != nil {
-						r.usage.CachedInputTokens = ev.Response.Usage.InputDetails.CachedTokens
+						cached := ev.Response.Usage.InputDetails.CachedTokens
+						r.usage.InputTokens -= cached
+						if r.usage.InputTokens < 0 {
+							r.usage.InputTokens = 0
+						}
+						r.usage.CacheReadTokens = cached
 					}
 					if ev.Response.Usage.OutputDetails != nil {
 						r.usage.ReasoningTokens = ev.Response.Usage.OutputDetails.ReasoningTokens
@@ -174,7 +184,9 @@ func (r *streamReader) Next() (llm.StreamEvent, error) {
 			}
 			return r.finish("stop"), nil
 		case "response.failed":
-			return r.finish("error"), nil
+			result := r.finish("error")
+			result.Failure = &llm.Failure{Message: "openairesponses: provider reported response.failed", Code: "SERVER"}
+			return result, nil
 		}
 		// Other events (response.created, response.output_item.added,
 		// response.content_part.added, ...) carry no streamable delta.
@@ -227,6 +239,7 @@ func (r *streamReader) closeCall(item wireEventItem) {
 // in first-seen wire order.
 func (r *streamReader) finish(fallback string) llm.StreamEvent {
 	r.done = true
+	r.close()
 	reason := r.finishReason
 	if reason == "" {
 		reason = fallback
@@ -239,12 +252,26 @@ func (r *streamReader) finish(fallback string) llm.StreamEvent {
 		}
 		calls = append(calls, llm.ToolCall{ID: acc.callID, Name: acc.name, Arguments: acc.arguments.String()})
 	}
-	return llm.StreamEvent{
+	result := llm.StreamEvent{
 		Kind:         llm.StreamFinish,
 		FinishReason: reason,
 		ToolCalls:    calls,
 		Reasoning:    r.reasoning.String(),
 		Usage:        r.usage,
+	}
+	if !r.sawContent && reason == "stop" {
+		result.Failure = &llm.Failure{Message: "openairesponses: completed response contained no content", Code: "EMPTY_RESPONSE"}
+	}
+	return result
+}
+
+func (r *streamReader) close() {
+	if r.resp != nil && r.resp.Body != nil {
+		_ = r.resp.Body.Close()
+	}
+	if r.credentialLease != nil {
+		r.credentialLease.Release()
+		r.credentialLease = nil
 	}
 }
 

@@ -9,7 +9,7 @@ Explicitly excluded from this migration:
 
 ## Tasks
 
-- [x] P-NC-1: Align agent-control names and boundaries: `subagent`, `spawn_teammate`, `list_agents`, `wait_agent`, `interrupt_agent`, `send_message`, `followup_task`, and child-scoped `report`.
+- [x] P-NC-1: Align agent-control names and boundaries: `subagent`, `subagent_fork`, `spawn_teammate`, `list_agents`, `wait_agent`, `interrupt_agent`, `send_message`, `followup_task`, and child-scoped `report`.
 - [x] P-NC-2: Align canonical job observers: `job_output`, `job_kill`, and `job_list`; keep job creation internal.
 - [x] P-NC-3: Remove legacy model-facing Plan/Eval/Spill tools; retain only goal/todo model tools and internal services.
 - [x] P-NC-4: Align `ask_user_question`, including question/answer schema and cancellation behavior.
@@ -26,6 +26,6 @@ Explicitly excluded from this migration:
 
 ## Reference catalog (excluding the explicit exclusions)
 
-`ask_user_question`, platform Shell (`pwsh` on Windows), `create_goal`, `edit`, `exit_plan_mode`, `followup_task`, `get_goal`, `glob`, `grep`, `interrupt_agent`, `job_kill`, `job_list`, `job_output`, `list_agents`, `lsp`, `ralph`, `read`, `read_image`, `report`, `run_code`, `schedule_create`, `schedule_delete`, `schedule_list`, `send_message`, `session_event_read`, `session_event_search`, `session_event_trace`, `session_search`, `session_trace`, `skill`, `spawn_teammate`, `str_replace_editor`, `subagent`, `todo_write`, `update_goal`, `wait_agent`, `web_fetch`, `web_search`, `workflow`, `write`, and `terminal_*`.
+`ask_user_question`, platform Shell (`pwsh` on Windows), `create_goal`, `edit`, `exit_plan_mode`, `followup_task`, `get_goal`, `glob`, `grep`, `interrupt_agent`, `job_kill`, `job_list`, `job_output`, `list_agents`, `lsp`, `ralph`, `read`, `read_image`, `report`, `run_code`, `schedule_create`, `schedule_delete`, `schedule_list`, `send_message`, `session_event_read`, `session_event_search`, `session_event_trace`, `session_search`, `session_trace`, `skill`, `spawn_teammate`, `str_replace_editor`, `subagent`, `subagent_fork`, `todo_write`, `update_goal`, `wait_agent`, `web_fetch`, `web_search`, `workflow`, `write`, and `terminal_*`.
 
 `get_time` remains as an existing Shutu-local tool by prior agreement.

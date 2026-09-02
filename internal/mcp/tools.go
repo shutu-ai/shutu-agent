@@ -25,23 +25,28 @@
 // protocol error, cancelled context — returns an error and logs nothing; the
 // loop surfaces it as tool/error.
 //
-// Each mcp_* invocation builds a fresh stdio client through the injected
-// Factory, uses it for the one round trip (D5, foreground and serial) and
-// closes it in a defer, so a tool call can never leak a subprocess or a
-// goroutine. The composition root's static server bridging (M6f-2 §4) holds
-// long-lived clients separately; these tools are the dynamic, name-addressed
-// path.
+// Each mcp_* invocation builds a fresh client through the injected Factory,
+// performs discovery plus (for mcp_call) one side-effecting call on the same
+// foreground connection, and closes it in a defer, so a tool call can never
+// leak a subprocess or a goroutine. The composition root's static server
+// bridging (M6f-2 §4) holds long-lived clients separately; these tools are the
+// dynamic, name-addressed path.
 package mcp
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	agenttools "github.com/jabing/shutu-agent/internal/tools"
 	"sort"
 	"strings"
+	"time"
 
+	"github.com/jabing/shutu-agent/internal/attachment"
+	"github.com/jabing/shutu-agent/internal/llm"
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 	"github.com/jabing/shutu-agent/internal/session"
+	agenttools "github.com/jabing/shutu-agent/internal/tools"
 )
 
 // McpServer is one configured MCP server: a unique Name (used as the
@@ -50,9 +55,18 @@ import (
 // config.McpServer field-for-field; the composition root maps between the two
 // so this seam never imports config (D2).
 type McpServer struct {
-	Name string
-	Cmd  string
-	Args []string
+	Name      string
+	Transport string
+	Cmd       string
+	Args      []string
+	URL       string
+	Headers   map[string]string
+	// Env and Cwd apply to stdio child processes. Explicit Env entries are
+	// added after the scrubbed ambient environment.
+	Env map[string]string
+	Cwd string
+	// ToolCallTimeout bounds tools/call only.
+	ToolCallTimeout time.Duration
 }
 
 // ToolListName and ToolCallName are the MCP consumer tools (whitelisted when
@@ -66,9 +80,13 @@ const (
 // builds a client per configured server, the configured servers, and the D3
 // event sink.
 type McpTools struct {
-	f       Factory
-	servers []McpServer
-	onEvent func(typ string, data any)
+	f              Factory
+	servers        []McpServer
+	onEvent        func(typ string, data any)
+	onEventErr     func(typ string, data any) error
+	attachments    *attachment.Store
+	maxImageBytes  int
+	imageAdmission func(context.Context) error
 }
 
 // NewMcpTools returns the mcp_* tool bundle bound to a Factory. onEvent, when
@@ -76,6 +94,29 @@ type McpTools struct {
 // the session log (D3).
 func NewMcpTools(f Factory, servers []McpServer, onEvent func(typ string, data any)) *McpTools {
 	return &McpTools{f: f, servers: servers, onEvent: onEvent}
+}
+
+// SetErrorSink lets a composition root fail a tool call when its durable
+// lifecycle event cannot be appended. The legacy callback remains supported.
+func (t *McpTools) SetErrorSink(sink func(typ string, data any) error) { t.onEventErr = sink }
+
+// SetAttachmentStore enables canonical image references for dynamic mcp_call
+// results. Without a store, image blocks are represented by bounded diagnostic
+// text rather than leaking base64 into the model transcript.
+func (t *McpTools) SetAttachmentStore(store *attachment.Store, maxBytes int) {
+	if t != nil {
+		t.attachments = store
+		t.maxImageBytes = maxBytes
+	}
+}
+
+// SetImageAdmission installs the host's exact session/model capability gate
+// for image-bearing MCP results. A nil gate preserves the standalone package
+// behavior for embedders that intentionally own admission themselves.
+func (t *McpTools) SetImageAdmission(admission func(context.Context) error) {
+	if t != nil {
+		t.imageAdmission = admission
+	}
 }
 
 // List returns the mcp_list tool.
@@ -89,6 +130,17 @@ func (t *McpTools) emit(typ string, data any) {
 	if t.onEvent != nil {
 		t.onEvent(typ, data)
 	}
+}
+
+func (t *McpTools) emitContext(ctx context.Context, typ string, data any) error {
+	if runtime, ok := runtimectx.Get(ctx); ok && runtime.Emit != nil {
+		return runtime.Emit(typ, data)
+	}
+	if t.onEventErr != nil {
+		return t.onEventErr(typ, data)
+	}
+	t.emit(typ, data)
+	return nil
 }
 
 // findServer returns the configured server with the given name.
@@ -125,6 +177,10 @@ type McpListTool struct {
 
 func (McpListTool) Name() string { return ToolListName }
 
+// CancellationAware is explicit because client creation, process start,
+// tools/list, and event emission all receive the registry-supplied context.
+func (McpListTool) CancellationAware() bool { return true }
+
 func (McpListTool) Description() string {
 	return "list the tools a configured MCP server advertises (tools/list): returns the sorted tool names with their descriptions, logging mcp/list"
 }
@@ -154,7 +210,7 @@ func (t McpListTool) Execute(ctx context.Context, args any) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("mcp_list: unknown server %q (configured: %s)", a.Server, t.t.serverNames())
 	}
-	client, err := t.t.f.New(ctx, srv.Cmd, srv.Args)
+	client, err := NewClientForServer(ctx, t.t.f, srv)
 	if err != nil {
 		return "", fmt.Errorf("mcp_list: create client for %s: %w", srv.Name, err)
 	}
@@ -166,7 +222,9 @@ func (t McpListTool) Execute(ctx context.Context, args any) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("mcp_list: list tools of %q: %w", srv.Name, err)
 	}
-	t.t.emit(session.EventMcpList, session.NewMcpList(len(tools)))
+	if err := t.t.emitContext(ctx, session.EventMcpList, session.NewMcpList(len(tools))); err != nil {
+		return "", fmt.Errorf("mcp_list: persist event: %w", err)
+	}
 	return formatToolList(tools), nil
 }
 
@@ -180,6 +238,10 @@ type McpCallTool struct {
 }
 
 func (McpCallTool) Name() string { return ToolCallName }
+
+// CancellationAware is explicit because process start and tools/call receive
+// the registry-supplied context; caller cancellation is never retried.
+func (McpCallTool) CancellationAware() bool { return true }
 
 func (McpCallTool) Description() string {
 	return "call a named tool on a configured MCP server (tools/call): passes the free-form args object through and returns the server's content, logging mcp/call"
@@ -208,38 +270,215 @@ func (McpCallTool) Schema() map[string]any {
 }
 
 func (t McpCallTool) Execute(ctx context.Context, args any) (string, error) {
+	result, err := t.ExecuteResult(ctx, args)
+	return result.Output, err
+}
+
+func (t McpCallTool) ExecuteResult(ctx context.Context, args any) (agenttools.ToolResult, error) {
 	var a struct {
 		Server string         `json:"server"`
 		Tool   string         `json:"tool"`
 		Args   map[string]any `json:"args"`
 	}
 	if err := agenttools.DecodeArgs(args, &a); err != nil {
-		return "", fmt.Errorf("mcp_call: %w", err)
+		return agenttools.ToolResult{}, fmt.Errorf("mcp_call: %w", err)
 	}
 	srv, ok := t.t.findServer(a.Server)
 	if !ok {
-		return "", fmt.Errorf("mcp_call: unknown server %q (configured: %s)", a.Server, t.t.serverNames())
+		return agenttools.ToolResult{}, fmt.Errorf("mcp_call: unknown server %q (configured: %s)", a.Server, t.t.serverNames())
 	}
 	if strings.TrimSpace(a.Tool) == "" {
-		return "", fmt.Errorf("mcp_call: empty tool name")
+		return agenttools.ToolResult{}, fmt.Errorf("mcp_call: empty tool name")
 	}
-	client, err := t.t.f.New(ctx, srv.Cmd, srv.Args)
+	client, err := NewClientForServer(ctx, t.t.f, srv)
 	if err != nil {
-		return "", fmt.Errorf("mcp_call: create client for %s: %w", srv.Name, err)
+		return agenttools.ToolResult{}, fmt.Errorf("mcp_call: create client for %s: %w", srv.Name, err)
 	}
 	defer client.Close()
 	if err := client.Start(ctx); err != nil {
-		return "", fmt.Errorf("mcp_call: start server %q: %w", srv.Name, err)
+		return agenttools.ToolResult{}, fmt.Errorf("mcp_call: start server %q: %w", srv.Name, err)
 	}
+	// Dynamic calls do not have a generation-bound Tool definition carrying
+	// execution.taskSupport, so discover the advertised metadata before
+	// crossing the side-effecting tools/call boundary. This is the same
+	// fail-closed rule as the static bridge: task-only execution is not silently
+	// downgraded to a foreground call. A missing name is left to tools/call so
+	// the server retains ownership of its normal unknown-tool diagnostic.
+	advertised, err := client.ListTools(ctx)
+	if err != nil {
+		return agenttools.ToolResult{}, fmt.Errorf("mcp_call: discover tool %q on %s: %w", a.Tool, srv.Name, err)
+	}
+	for _, tool := range advertised {
+		if tool.Name == a.Tool && strings.EqualFold(strings.TrimSpace(tool.TaskSupport), "required") {
+			return agenttools.ToolResult{}, fmt.Errorf("mcp_call: %s: MCP task-based execution is not supported", a.Tool)
+		}
+	}
+	// A tools/call request is at-most-once. A connection error or timeout can
+	// arrive after the server committed the side effect, so retrying here would
+	// duplicate an unknown-commit request. The supervisor may recover a
+	// long-lived bridge separately; a later model-level retry is explicit.
 	res, err := client.Call(ctx, a.Tool, a.Args)
 	if err != nil {
-		return "", fmt.Errorf("mcp_call: %s.%s: %w", srv.Name, a.Tool, err)
+		return agenttools.ToolResult{}, fmt.Errorf("mcp_call: %s.%s: %w", srv.Name, a.Tool, err)
 	}
 	// mcp/call is a log-only fact (D3) carrying the tool name and whether the
-	// server reported a tool-level failure; the full content lives in the
-	// tool/result the loop logs.
-	t.t.emit(session.EventMcpCall, session.NewMcpCall(a.Tool, res.IsError))
-	return FormatCallResult(res), nil
+	// server reported a tool-level failure. The completed call is logged before
+	// projecting the result, including the failure case.
+	if err := t.t.emitContext(ctx, session.EventMcpCall, session.NewMcpCall(a.Tool, res.IsError)); err != nil {
+		return agenttools.ToolResult{}, fmt.Errorf("mcp_call: persist event: %w", err)
+	}
+	value := map[string]any{"content": res.Content}
+	if res.StructuredContentSet {
+		value["structuredContent"] = res.StructuredContent
+	}
+	// A tool-level MCP error is still a completed call, but its untrusted rich
+	// blocks must not be admitted into the durable attachment store. Keep the
+	// raw protocol value below for programmatic callers and render the error
+	// content without persistence.
+	contentTools := t.t
+	if res.IsError {
+		copyTools := *t.t
+		copyTools.attachments = nil
+		copyTools.imageAdmission = nil
+		contentTools = &copyTools
+	}
+	content := projectCallContentContext(contentTools, ctx, res.Content)
+	if res.IsError {
+		// The reference MCP bridge throws for a successful JSON-RPC response
+		// whose result carries isError=true. Preserve that distinction from a
+		// transport/protocol failure: the call fact is durable, while the tool
+		// result is a structured model-visible error.
+		return agenttools.ToolResult{
+			Output:  FormatCallResult(res),
+			Content: content,
+			IsError: true,
+			Error:   &agenttools.ErrorInfo{Name: "MCPToolError", Code: "MCP_TOOL_ERROR"},
+		}, nil
+	}
+	return agenttools.ToolResult{Value: value, Output: FormatCallResult(res), Content: content}, nil
+}
+
+func projectCallContent(t *McpTools, items []any) []llm.ContentBlock {
+	return projectCallContentContext(t, context.Background(), items)
+}
+
+func projectCallContentContext(t *McpTools, ctx context.Context, items []any) []llm.ContentBlock {
+	imageInputs := make([]attachment.ImageInput, 0)
+	imageIndexes := make([]int, 0)
+	imageReasons := make(map[int]string)
+	for index, item := range items {
+		obj, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		typ, _ := obj["type"].(string)
+		if typ != "image" {
+			continue
+		}
+		mediaType, _ := obj["mimeType"].(string)
+		encoded, _ := obj["data"].(string)
+		if attachment.MediaTypeForExtension("."+strings.TrimPrefix(mediaType, "image/")) == "" {
+			imageReasons[index] = "declared media type is unsupported"
+			continue
+		}
+		data, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil || encoded == "" || base64.StdEncoding.EncodeToString(data) != encoded {
+			imageReasons[index] = "image data is not canonical base64"
+			continue
+		}
+		imageIndexes = append(imageIndexes, index)
+		imageInputs = append(imageInputs, attachment.ImageInput{MediaType: mediaType, Data: data})
+	}
+	imageRefs := make(map[int]llm.ImageRef)
+	if len(imageReasons) == 0 && len(imageInputs) > 0 {
+		reason := ""
+		if t == nil || t.attachments == nil {
+			reason = "no durable attachment store is mounted"
+		} else if t.imageAdmission != nil {
+			if err := t.imageAdmission(ctx); err != nil {
+				reason = err.Error()
+			}
+		}
+		if reason == "" {
+			refs, err := t.attachments.SaveImages(imageInputs, t.maxImageBytes)
+			if err != nil {
+				reason = fmt.Sprintf("image admission rejected the result: %v", err)
+			} else {
+				for i, index := range imageIndexes {
+					imageRefs[index] = refs[i]
+				}
+			}
+		}
+		if reason != "" {
+			for _, index := range imageIndexes {
+				imageReasons[index] = reason
+			}
+		}
+	}
+	blocks := make([]llm.ContentBlock, 0, len(items))
+	textRun := make([]string, 0)
+	flushText := func() {
+		if len(textRun) == 0 {
+			return
+		}
+		blocks = append(blocks, llm.Text(strings.Join(textRun, "\n")))
+		textRun = nil
+	}
+	for index, item := range items {
+		obj, ok := item.(map[string]any)
+		if !ok {
+			textRun = append(textRun, "[unsupported MCP content block: expected an object]")
+			continue
+		}
+		typ, _ := obj["type"].(string)
+		switch typ {
+		case "text":
+			if text, exists := obj["text"]; exists {
+				if value, ok := text.(string); ok {
+					textRun = append(textRun, value)
+				}
+			}
+		case "image":
+			flushText()
+			if ref, ok := imageRefs[index]; ok {
+				blocks = append(blocks, llm.ContentBlock{Kind: llm.BlockImage, Image: ref})
+				continue
+			}
+			reason := imageReasons[index]
+			if reason == "" {
+				reason = "another image in the same result was invalid or was not admitted"
+			}
+			mediaType, _ := obj["mimeType"].(string)
+			blocks = append(blocks, llm.Text(fmt.Sprintf("[image unavailable: %s; %s; raw image data remains available to programmatic callers]", fallbackMcpString(mediaType, "unknown media type"), reason)))
+		case "resource_link":
+			name, _ := obj["name"].(string)
+			uri, _ := obj["uri"].(string)
+			if name == "" || uri == "" {
+				textRun = append(textRun, "[resource link unavailable: the MCP block is missing its name or URI]")
+			} else {
+				textRun = append(textRun, fmt.Sprintf("Resource link: %s (%s)", name, uri))
+			}
+		case "audio":
+			mediaType, _ := obj["mimeType"].(string)
+			textRun = append(textRun, fmt.Sprintf("[audio result unsupported: %s; raw audio data remains available to programmatic callers]", fallbackMcpString(mediaType, "unknown media type")))
+		case "resource":
+			textRun = append(textRun, "[embedded resource unsupported; raw resource data remains available to programmatic callers]")
+		default:
+			textRun = append(textRun, fmt.Sprintf("[unsupported MCP content type: %s]", typ))
+		}
+	}
+	flushText()
+	if len(blocks) == 0 {
+		return []llm.ContentBlock{llm.Text("(MCP returned no model-visible content)")}
+	}
+	return blocks
+}
+
+func fallbackMcpString(value, fallback string) string {
+	if value == "" {
+		return fallback
+	}
+	return value
 }
 
 // formatToolList renders a tools/list result as model-facing text: the sorted

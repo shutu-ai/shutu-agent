@@ -25,18 +25,16 @@
 package fs
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sync"
+
+	"github.com/jabing/shutu-agent/internal/attachment"
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 	agenttools "github.com/jabing/shutu-agent/internal/tools"
-	"image"
-	_ "image/gif"
-	_ "image/jpeg"
-	_ "image/png"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,23 +58,52 @@ const (
 // and the event sink. Keeping the bundle as fields keeps the constructor's
 // signature the seam contract and the tool package decoupled from config (D2).
 type FsTools struct {
-	f        FileService
-	onEvent  func(typ string, data any)
-	observed map[string]string
+	f             FileService
+	onEvent       func(typ string, data any)
+	onEventErr    func(typ string, data any) error
+	imageLimits   attachment.Limits
+	imageMaxBytes int
+	observedMu    sync.Mutex
+	observed      map[string]string
 }
 
 // NewFsTools returns the file tool bundle bound to a FileService. onEvent,
 // when non-nil, receives the fs/* event payloads; the composition root wires
 // it to the session log (D3).
 func NewFsTools(f FileService, onEvent func(typ string, data any)) *FsTools {
-	return &FsTools{f: f, onEvent: onEvent, observed: make(map[string]string)}
+	return &FsTools{f: f, onEvent: onEvent, imageLimits: attachment.DefaultLimits(), imageMaxBytes: 20 * 1024 * 1024, observed: make(map[string]string)}
 }
+
+// SetImageLimits applies the same image admission policy used by attachment
+// storage to workspace read_image. The byte cap is separate because the
+// store's Limits describe batch and decoded-image bounds.
+func (t *FsTools) SetImageLimits(limits attachment.Limits, maxBytes int) {
+	t.imageLimits = attachment.NormalizeLimits(limits)
+	if maxBytes > 0 {
+		t.imageMaxBytes = maxBytes
+	}
+}
+
+// SetErrorSink is the durable composition-root variant of the legacy void
+// event callback.
+func (t *FsTools) SetErrorSink(sink func(typ string, data any) error) { t.onEventErr = sink }
 
 // emit forwards one fs/* event payload to the injected sink (D3).
 func (t *FsTools) emit(typ string, data any) {
 	if t.onEvent != nil {
 		t.onEvent(typ, data)
 	}
+}
+
+func (t *FsTools) emitContext(ctx context.Context, typ string, data any) error {
+	if runtime, ok := runtimectx.Get(ctx); ok && runtime.Emit != nil {
+		return runtime.Emit(typ, data)
+	}
+	if t.onEventErr != nil {
+		return t.onEventErr(typ, data)
+	}
+	t.emit(typ, data)
+	return nil
 }
 
 // Write returns the write tool.
@@ -144,8 +171,12 @@ func (t FsReadTool) Execute(ctx context.Context, args any) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read: fingerprint: %w", err)
 	}
-	t.t.observed[t.t.key(a.FilePath)] = version
-	t.t.emit(session.EventFsRead, session.NewFsRead(a.FilePath, len(content)))
+	t.t.observedMu.Lock()
+	t.t.observed[t.t.key(ctx, a.FilePath)] = version
+	t.t.observedMu.Unlock()
+	if err := t.t.emitContext(ctx, session.EventFsRead, session.NewFsRead(a.FilePath, len(content))); err != nil {
+		return "", fmt.Errorf("read: persist event: %w", err)
+	}
 	return formatReadWindow(content, a.Offset, a.Limit), nil
 }
 
@@ -190,11 +221,18 @@ func formatReadWindow(content string, offset, limit int) string {
 	return strings.TrimSuffix(out.String(), "\n")
 }
 
-func (t *FsTools) key(path string) string {
+func (t *FsTools) key(ctx context.Context, path string) string {
 	if filepath.IsAbs(path) {
 		return filepath.Clean(path)
 	}
-	return filepath.Join(t.f.Root(), filepath.Clean(path))
+	return filepath.Join(t.root(ctx), filepath.Clean(path))
+}
+
+func (t *FsTools) root(ctx context.Context) string {
+	if scoped, ok := t.f.(interface{ RootForContext(context.Context) string }); ok {
+		return scoped.RootForContext(ctx)
+	}
+	return t.f.Root()
 }
 
 func (t *FsTools) requireObserved(ctx context.Context, path string) error {
@@ -202,7 +240,9 @@ func (t *FsTools) requireObserved(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
-	observed, ok := t.observed[t.key(path)]
+	t.observedMu.Lock()
+	observed, ok := t.observed[t.key(ctx, path)]
+	t.observedMu.Unlock()
 	if !ok {
 		return fmt.Errorf("file must be read before write/edit")
 	}
@@ -262,13 +302,13 @@ func (t FsReadImageTool) ExecuteResult(ctx context.Context, args any) (agenttool
 	if mediaType == "" {
 		return agenttools.ToolResult{}, fmt.Errorf("read_image: unsupported image type")
 	}
-	data, err := t.t.f.ReadBytes(ctx, a.FilePath, 20*1024*1024)
+	data, err := t.t.f.ReadBytes(ctx, a.FilePath, t.t.imageMaxBytes)
 	if err != nil {
 		return agenttools.ToolResult{}, fmt.Errorf("read_image: %w", err)
 	}
 	full := a.FilePath
 	if !filepath.IsAbs(full) {
-		full = filepath.Join(t.t.f.Root(), full)
+		full = filepath.Join(t.t.root(ctx), full)
 	}
 	ref := llm.ImageRef{
 		ID:        imageAttachmentID(data),
@@ -276,12 +316,14 @@ func (t FsReadImageTool) ExecuteResult(ctx context.Context, args any) (agenttool
 		Bytes:     int64(len(data)),
 		Path:      filepath.Clean(full),
 	}
-	config, decodeErr := decodeImageConfig(data, mediaType)
+	width, height, decodeErr := attachment.ValidateImage(data, mediaType, t.t.imageLimits)
 	if decodeErr != nil {
 		return agenttools.ToolResult{}, fmt.Errorf("read_image: invalid image data: %w", decodeErr)
 	}
-	ref.Width, ref.Height = config.Width, config.Height
-	t.t.emit(session.EventFsRead, session.NewFsRead(a.FilePath, len(data)))
+	ref.Width, ref.Height = width, height
+	if err := t.t.emitContext(ctx, session.EventFsRead, session.NewFsRead(a.FilePath, len(data))); err != nil {
+		return agenttools.ToolResult{}, fmt.Errorf("read_image: persist event: %w", err)
+	}
 	value := map[string]any{
 		"path": a.FilePath,
 		"image": map[string]any{
@@ -298,61 +340,6 @@ func imageAttachmentID(data []byte) string {
 	return "image-" + hex.EncodeToString(digest[:])
 }
 
-func decodeImageConfig(data []byte, mediaType string) (image.Config, error) {
-	if mediaType != "image/webp" {
-		config, _, err := image.DecodeConfig(bytes.NewReader(data))
-		return config, err
-	}
-	return decodeWebPConfig(data)
-}
-
-// decodeWebPConfig reads the canvas dimensions from the three WebP container
-// variants without adding a decoder dependency. The image bytes themselves
-// remain opaque and are still passed to the provider unchanged.
-func decodeWebPConfig(data []byte) (image.Config, error) {
-	if len(data) < 16 || string(data[:4]) != "RIFF" || string(data[8:12]) != "WEBP" {
-		return image.Config{}, errors.New("invalid WebP container")
-	}
-	for offset := 12; offset+8 <= len(data); {
-		fourCC := string(data[offset : offset+4])
-		size := int(binary.LittleEndian.Uint32(data[offset+4 : offset+8]))
-		start, end := offset+8, offset+8+size
-		if end > len(data) {
-			return image.Config{}, errors.New("truncated WebP chunk")
-		}
-		chunk := data[start:end]
-		switch fourCC {
-		case "VP8X":
-			if len(chunk) < 10 {
-				return image.Config{}, errors.New("truncated WebP VP8X chunk")
-			}
-			width := 1 + (int(chunk[4]) | int(chunk[5])<<8 | int(chunk[6])<<16)
-			height := 1 + (int(chunk[7]) | int(chunk[8])<<8 | int(chunk[9])<<16)
-			return image.Config{Width: width, Height: height}, nil
-		case "VP8L":
-			if len(chunk) < 5 || chunk[0] != 0x2f {
-				return image.Config{}, errors.New("invalid WebP VP8L chunk")
-			}
-			bits := uint32(chunk[1]) | uint32(chunk[2])<<8 | uint32(chunk[3])<<16 | uint32(chunk[4])<<24
-			width := 1 + int(bits&0x3fff)
-			height := 1 + int((bits>>14)&0x3fff)
-			return image.Config{Width: width, Height: height}, nil
-		case "VP8 ":
-			if len(chunk) < 10 || chunk[3] != 0x9d || chunk[4] != 0x01 || chunk[5] != 0x2a {
-				return image.Config{}, errors.New("invalid WebP VP8 chunk")
-			}
-			width := int(binary.LittleEndian.Uint16(chunk[6:8]) & 0x3fff)
-			height := int(binary.LittleEndian.Uint16(chunk[8:10]) & 0x3fff)
-			return image.Config{Width: width, Height: height}, nil
-		}
-		offset = end
-		if size%2 != 0 {
-			offset++
-		}
-	}
-	return image.Config{}, errors.New("WebP dimensions not found")
-}
-
 func (t *FsTools) checkWriteObservation(ctx context.Context, path string) error {
 	version, err := t.f.Fingerprint(ctx, path)
 	if err != nil {
@@ -361,7 +348,7 @@ func (t *FsTools) checkWriteObservation(ctx context.Context, path string) error 
 		}
 		return err
 	}
-	observed, ok := t.observed[t.key(path)]
+	observed, ok := t.observed[t.key(ctx, path)]
 	if !ok {
 		return fmt.Errorf("file must be read before overwriting")
 	}
@@ -426,8 +413,12 @@ func (t FsWriteTool) Execute(ctx context.Context, args any) (string, error) {
 	if err := t.t.f.Write(ctx, a.FilePath, *a.Content); err != nil {
 		return "", fmt.Errorf("write: %w", err)
 	}
-	delete(t.t.observed, t.t.key(a.FilePath))
-	t.t.emit(session.EventFsWrite, session.NewFsWrite(a.FilePath))
+	t.t.observedMu.Lock()
+	delete(t.t.observed, t.t.key(ctx, a.FilePath))
+	t.t.observedMu.Unlock()
+	if err := t.t.emitContext(ctx, session.EventFsWrite, session.NewFsWrite(a.FilePath)); err != nil {
+		return "", fmt.Errorf("write: persist event: %w", err)
+	}
 	return fmt.Sprintf("wrote %s (%d bytes)", a.FilePath, len(*a.Content)), nil
 }
 
@@ -473,7 +464,9 @@ func (t FsListTool) Execute(ctx context.Context, args any) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("list: %w", err)
 	}
-	t.t.emit(session.EventFsList, session.NewFsList(a.Dir, len(entries)))
+	if err := t.t.emitContext(ctx, session.EventFsList, session.NewFsList(a.Dir, len(entries))); err != nil {
+		return "", fmt.Errorf("list: persist event: %w", err)
+	}
 	return formatEntries(a.Dir, entries), nil
 }
 
@@ -562,8 +555,12 @@ func (t FsEditTool) Execute(ctx context.Context, args any) (string, error) {
 	if err := t.t.f.Write(ctx, a.FilePath, updated); err != nil {
 		return "", fmt.Errorf("edit: %w", err)
 	}
-	delete(t.t.observed, t.t.key(a.FilePath))
-	t.t.emit(session.EventFsWrite, session.NewFsWrite(a.FilePath))
+	t.t.observedMu.Lock()
+	delete(t.t.observed, t.t.key(ctx, a.FilePath))
+	t.t.observedMu.Unlock()
+	if err := t.t.emitContext(ctx, session.EventFsWrite, session.NewFsWrite(a.FilePath)); err != nil {
+		return "", fmt.Errorf("edit: persist event: %w", err)
+	}
 	return fmt.Sprintf("edited %s", a.FilePath), nil
 }
 

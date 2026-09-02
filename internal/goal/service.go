@@ -97,9 +97,9 @@ func (d *Driver) Run(ctx context.Context, goalID string) (Result, error) {
 	for started < remaining {
 		if err := ctx.Err(); err != nil {
 			d.disarm(goal)
-			_ = d.setStatus(context.Background(), goal.ID, plan.StatusPaused)
-			d.appendEnd(goal.ID, goal.RoundsStarted, "cancelled", err.Error())
-			return Result{GoalID: goal.ID, Rounds: started, Status: plan.StatusPaused, StopReason: "cancelled"}, err
+			statusErr := d.setStatus(context.Background(), goal.ID, plan.StatusPaused)
+			endErr := d.appendEnd(goal.ID, goal.RoundsStarted, "cancelled", err.Error())
+			return Result{GoalID: goal.ID, Rounds: started, Status: plan.StatusPaused, StopReason: "cancelled"}, errors.Join(err, statusErr, endErr)
 		}
 		goal, err = findGoal(ctx, d.Plans, goalID)
 		if err != nil {
@@ -127,27 +127,32 @@ func (d *Driver) Run(ctx context.Context, goalID string) (Result, error) {
 			admitted = goal.RoundsStarted
 		}
 		prompt := renderPrompt(goal, admitted, max, d.Observe, ctx)
-		d.appendStart(goal.ID, admitted, prompt)
+		if err := d.appendStart(goal.ID, admitted, prompt); err != nil {
+			d.disarm(goal)
+			return Result{GoalID: goal.ID, Rounds: started, Status: goal.Status, StopReason: "error"}, err
+		}
 		started++
 		runErr := d.Runner(plan.WithGoalRound(ctx), prompt)
 		if runErr != nil {
 			d.disarm(goal)
 			if ctx.Err() != nil {
-				_ = d.setStatus(context.Background(), goal.ID, plan.StatusPaused)
-				d.appendEnd(goal.ID, admitted, "cancelled", ctx.Err().Error())
-				return Result{GoalID: goal.ID, Rounds: started, Status: plan.StatusPaused, StopReason: "cancelled"}, ctx.Err()
+				statusErr := d.setStatus(context.Background(), goal.ID, plan.StatusPaused)
+				endErr := d.appendEnd(goal.ID, admitted, "cancelled", ctx.Err().Error())
+				return Result{GoalID: goal.ID, Rounds: started, Status: plan.StatusPaused, StopReason: "cancelled"}, errors.Join(ctx.Err(), statusErr, endErr)
 			}
 			// Provider and persistence failures are not prompt-level blockers. The
 			// objective stays active and requires an explicit resume.
-			d.appendEnd(goal.ID, admitted, "error", runErr.Error())
-			return Result{GoalID: goal.ID, Rounds: started, Status: plan.StatusInProgress, StopReason: "error"}, runErr
+			endErr := d.appendEnd(goal.ID, admitted, "error", runErr.Error())
+			return Result{GoalID: goal.ID, Rounds: started, Status: plan.StatusInProgress, StopReason: "error"}, errors.Join(runErr, endErr)
 		}
 
 		goal, err = findGoal(ctx, d.Plans, goalID)
 		if err != nil {
 			return Result{}, err
 		}
-		d.appendEnd(goal.ID, admitted, string(goal.Status), "")
+		if err := d.appendEnd(goal.ID, admitted, string(goal.Status), ""); err != nil {
+			return Result{GoalID: goal.ID, Rounds: started, Status: goal.Status, StopReason: "error"}, err
+		}
 		if goal.Status == plan.StatusDone {
 			return Result{GoalID: goal.ID, Rounds: started, Status: goal.Status, StopReason: "completed"}, nil
 		}
@@ -156,7 +161,9 @@ func (d *Driver) Run(ctx context.Context, goalID string) (Result, error) {
 		}
 	}
 	d.disarm(goal)
-	d.appendEnd(goal.ID, goal.RoundsStarted, "round-limit", "")
+	if err := d.appendEnd(goal.ID, goal.RoundsStarted, "round-limit", ""); err != nil {
+		return Result{GoalID: goal.ID, Rounds: started, Status: goal.Status, StopReason: "error"}, err
+	}
 	return Result{GoalID: goal.ID, Rounds: started, Status: goal.Status, StopReason: "round-limit"}, nil
 }
 
@@ -171,7 +178,9 @@ func (d *Driver) setStatus(ctx context.Context, id string, status plan.Status) e
 		return err
 	}
 	if d.Log != nil {
-		_, _ = d.Log.Append(session.EventPlanStatus, session.NewPlanStatus(string(plan.ScopeGoal), id, string(status)))
+		if _, err := d.Log.Append(session.EventPlanStatus, session.NewPlanStatus(string(plan.ScopeGoal), id, string(status))); err != nil {
+			return fmt.Errorf("goal: persist status event: %w", err)
+		}
 	}
 	return nil
 }
@@ -204,14 +213,20 @@ func renderPrompt(goal plan.Goal, round, max int, observer Observer, ctx context
 	return prompt + "</goal_round>"
 }
 
-func (d *Driver) appendStart(id string, round int, prompt string) {
+func (d *Driver) appendStart(id string, round int, prompt string) error {
 	if d.Log != nil {
-		_, _ = d.Log.Append(session.EventGoalRoundStart, session.NewGoalRoundStart(id, round, prompt))
+		if _, err := d.Log.Append(session.EventGoalRoundStart, session.NewGoalRoundStart(id, round, prompt)); err != nil {
+			return fmt.Errorf("goal: persist round start event: %w", err)
+		}
 	}
+	return nil
 }
 
-func (d *Driver) appendEnd(id string, round int, status, errText string) {
+func (d *Driver) appendEnd(id string, round int, status, errText string) error {
 	if d.Log != nil {
-		_, _ = d.Log.Append(session.EventGoalRoundEnd, session.NewGoalRoundEnd(id, round, status, errText))
+		if _, err := d.Log.Append(session.EventGoalRoundEnd, session.NewGoalRoundEnd(id, round, status, errText)); err != nil {
+			return fmt.Errorf("goal: persist round end event: %w", err)
+		}
 	}
+	return nil
 }

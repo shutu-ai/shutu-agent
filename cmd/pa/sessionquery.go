@@ -4,9 +4,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"time"
 
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 	"github.com/jabing/shutu-agent/internal/sessionquery"
 	"github.com/jabing/shutu-agent/internal/tools"
 )
@@ -15,7 +17,9 @@ func (a *app) registerSessionQuery() error {
 	if !a.cfg.SessionQuery.Enabled {
 		return nil
 	}
-	query := sessionquery.NewToolsWithConfig(a.store, func() string { return a.currentID }, a.cfg.SessionQuery.MaxResults, time.Duration(a.cfg.SessionQuery.SearchTimeoutMS)*time.Millisecond)
+	query := sessionquery.NewToolsWithConfigContext(a.store, func(ctx context.Context) string {
+		return runtimectx.SessionID(ctx)
+	}, a.cfg.SessionQuery.MaxResults, time.Duration(a.cfg.SessionQuery.SearchTimeoutMS)*time.Millisecond)
 	for _, tool := range []tools.Tool{query.Search(), query.EventSearch(), query.Trace(), query.EventTrace(), query.Read()} {
 		if err := a.reg.Register(tool); err != nil {
 			return fmt.Errorf("pa: register session-query tool: %w", err)

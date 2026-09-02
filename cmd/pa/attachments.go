@@ -30,7 +30,10 @@ import (
 // 2026-08-20 拍板「图片附件默认打开」, *bool 区分未设置与显式关); nil here means a
 // caller bypassed ApplyDefaults, so we fail closed to false rather than panic.
 func (a *app) multimodalEnabled() bool {
-	return a.cfg.LLM.Multimodal.Enabled != nil && *a.cfg.LLM.Multimodal.Enabled
+	a.providerMu.RLock()
+	enabled := a.cfg.LLM.Multimodal.Enabled
+	a.providerMu.RUnlock()
+	return enabled != nil && *enabled
 }
 
 // registerAttachments wires the image-attachment store when multimodal is
@@ -43,12 +46,35 @@ func (a *app) registerAttachments() error {
 	if !a.multimodalEnabled() {
 		return nil // 默认关（D10）：不创建 store，/attach 不可用
 	}
-	st, err := attachment.NewStore(filepath.Join(a.cfg.DataDir, "attachments"))
+	cfg := a.providerConfigSnapshot()
+	st, err := attachment.NewStoreWithLimits(filepath.Join(cfg.DataDir, "attachments"), attachment.Limits{
+		MaxImagesPerMessage:  cfg.LLM.Multimodal.MaxImagesPerMessage,
+		MaxMessageImageBytes: cfg.LLM.Multimodal.MaxMessageImageBytes,
+		MaxImagePixels:       cfg.LLM.Multimodal.MaxImagePixels,
+		MaxImageDimension:    cfg.LLM.Multimodal.MaxImageDimension,
+	})
 	if err != nil {
 		return fmt.Errorf("pa: register attachments: %w", err)
 	}
 	a.attachStore = st
 	return nil
+}
+
+func (a *app) configureImageResolver(log *session.Log) {
+	if log == nil || a == nil || a.attachStore == nil {
+		return
+	}
+	log.SetImageResolver(func(ref llm.ImageRef) llm.ImageRef {
+		if ref.Path != "" || ref.ID == "" {
+			return ref
+		}
+		resolved, err := a.attachStore.GetByID(ref.ID)
+		if err != nil {
+			return ref
+		}
+		resolved.Width, resolved.Height = ref.Width, ref.Height
+		return resolved
+	})
 }
 
 // attachCommand implements /attach <path> (dispatch-m8-3 §4): validate the
@@ -76,7 +102,8 @@ func (a *app) attachCommand(ctx context.Context, args []string) error {
 	if !ok {
 		return fmt.Errorf("attach: unsupported image type %q (png/jpg/jpeg/webp/gif)", ext)
 	}
-	maxBytes := a.cfg.LLM.Multimodal.MaxImageBytes
+	cfg := a.providerConfigSnapshot()
+	maxBytes := cfg.LLM.Multimodal.MaxImageBytes
 	if maxBytes <= 0 {
 		maxBytes = config.DefaultMultimodalMaxImageBytes
 	}

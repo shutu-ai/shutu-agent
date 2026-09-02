@@ -18,6 +18,7 @@ import (
 	"os"
 
 	"github.com/jabing/shutu-agent/internal/config"
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 	"github.com/jabing/shutu-agent/internal/subagent"
 	"github.com/jabing/shutu-agent/internal/workflow"
 	nodeworkflow "github.com/jabing/shutu-agent/internal/workflow/node"
@@ -35,12 +36,13 @@ func (a *app) registerWorkflow() error {
 		return nil
 	}
 	spawn := func(ctx context.Context, prompt string) (string, error) {
-		run, err := a.subagents.Start(ctx, "spawn", subagent.StartRequest{Prompt: prompt, ParentSessionID: a.currentID})
+		run, err := a.subagents.Start(ctx, "spawn", subagent.StartRequest{Prompt: prompt, ParentSessionID: a.runtimeSessionID(ctx)})
 		if err != nil {
 			return "", err
 		}
 		res, err := run.Result(ctx)
 		if err != nil {
+			_ = run.Cancel("workflow parent cancelled")
 			return "", err
 		}
 		return res.Output, nil
@@ -64,13 +66,17 @@ func (a *app) registerWorkflow() error {
 			OutputSchema: req.Schema,
 			// Read the parent at spawn time. A workflow can outlive a /new or
 			// /resume command, and dsh attributes each child to the live owner.
-			ParentSessionID: a.currentID,
+			ParentSessionID: a.runtimeSessionID(ctx),
 		})
 		if err != nil {
 			return workflow.AgentResult{}, err
 		}
 		res, err := run.Result(ctx)
 		if err != nil {
+			// The workflow host cancels its callback context when the script
+			// reaches its terminal boundary. Treat that cancellation as the
+			// disposal signal for a fire-and-forget child.
+			_ = run.Cancel("workflow run ended")
 			return workflow.AgentResult{}, err
 		}
 		return workflow.AgentResult{ID: run.ID, Output: res.Output, StopReason: res.StopReason, Structured: res.Structured}, nil
@@ -86,7 +92,21 @@ func (a *app) registerWorkflow() error {
 			fmt.Fprintln(os.Stderr, "pa: "+typ+" event:", err)
 		}
 	}
-	if err := a.reg.Register(workflow.NewWorkflowRunToolWithScript(eng, scriptRunner, startAgent, func() string { return a.currentID }, onEvent)); err != nil {
+	tool := workflow.NewWorkflowRunToolWithScriptContext(eng, scriptRunner, startAgent, func(ctx context.Context) string {
+		return a.runtimeSessionID(ctx)
+	}, onEvent)
+	tool.SetEmitContext(func(ctx context.Context, typ string, data any) error {
+		if runtime, ok := runtimectx.Get(ctx); ok && runtime.Emit != nil {
+			return runtime.Emit(typ, data)
+		}
+		log := a.runtimeLog(ctx)
+		if log == nil {
+			return fmt.Errorf("workflow: durable runtime sink is unavailable for %s", typ)
+		}
+		_, err := log.Append(typ, data)
+		return err
+	})
+	if err := a.reg.Register(tool); err != nil {
 		return fmt.Errorf("pa: register %s: %w", workflow.WorkflowRunToolName, err)
 	}
 	return nil

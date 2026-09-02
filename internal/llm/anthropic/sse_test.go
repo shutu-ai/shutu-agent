@@ -187,6 +187,23 @@ func TestStreamErrorEvent(t *testing.T) {
 	}
 }
 
+func TestStreamMalformedPayloadIsTypedFailure(t *testing.T) {
+	p := newTestProvider(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte(sseEvents(
+			sseEventLine("content_block_delta", `{"type":"content_block_delta"`),
+		)))
+	})
+	reader, err := p.Stream(context.Background(), llm.ChatRequest{})
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	_, err = reader.Next()
+	if failure, ok := llm.FailureFacts(err); !ok || failure.Code != "MALFORMED_RESPONSE" {
+		t.Fatalf("malformed stream error = %v (typed=%v), want MALFORMED_RESPONSE", err, ok)
+	}
+}
+
 // TestMapStopReason pins the stop_reason vocabulary mapping (dispatch-m8-2b
 // §2.2): end_turn→stop, tool_use→tool_calls, max_tokens→max-tokens, others
 // verbatim.

@@ -41,6 +41,17 @@ func newFakeTool(cwd string, fn SearchFunc) (*GrepTool, *fakeSearcher) {
 	return &GrepTool{cwd: cwd, searchFn: f.call}, f
 }
 
+// TestSearchCancellationClassification pins explicit cooperative-cancellation
+// metadata for the bounded filesystem scans.
+func TestSearchCancellationClassification(t *testing.T) {
+	for _, tool := range []any{NewGrepTool("."), NewGlobTool(".")} {
+		classified, ok := tool.(interface{ CancellationAware() bool })
+		if !ok || !classified.CancellationAware() {
+			t.Fatalf("%T must explicitly classify cooperative cancellation", tool)
+		}
+	}
+}
+
 // TestGrepExecuteFormatsHits asserts the dsh result shape: a "Found N matches"
 // header, per-file "path\nLine N: text" sections (paths relative to cwd,
 // slash-normalized), and the defaulted root mapping.
@@ -310,5 +321,55 @@ func TestGlobRejectsEmptyPattern(t *testing.T) {
 		if _, err := tool.Execute(context.Background(), json.RawMessage(args)); err == nil {
 			t.Errorf("glob with args %s must error", args)
 		}
+	}
+}
+
+func TestSearchToolsRespectInjectedWorkspaceRoot(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "inside.txt"), []byte("needle\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "outside.txt"), []byte("needle\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	grep := NewGrepTool(root)
+	grep.RootContextFunc = func(context.Context) string { return root }
+	if _, err := grep.Execute(context.Background(), json.RawMessage(fmt.Sprintf(`{"pattern":"needle","path":%q}`, outside))); err == nil || !strings.Contains(err.Error(), "escapes workspace root") {
+		t.Fatalf("grep outside error = %v, want workspace rejection", err)
+	}
+	if output, err := grep.Execute(context.Background(), json.RawMessage(`{"pattern":"needle","path":"."}`)); err != nil || !strings.Contains(output, "inside.txt") {
+		t.Fatalf("grep inside = %q, %v", output, err)
+	}
+
+	glob := NewGlobTool(root)
+	glob.RootContextFunc = func(context.Context) string { return root }
+	if _, err := glob.Execute(context.Background(), json.RawMessage(fmt.Sprintf(`{"pattern":"*","path":%q}`, outside))); err == nil || !strings.Contains(err.Error(), "escapes workspace root") {
+		t.Fatalf("glob outside error = %v, want workspace rejection", err)
+	}
+	if output, err := glob.Execute(context.Background(), json.RawMessage(`{"pattern":"*.txt"}`)); err != nil || !strings.Contains(output, "inside.txt") {
+		t.Fatalf("glob inside = %q, %v", output, err)
+	}
+}
+
+func TestSearchToolsRejectSymlinkOutsideInjectedRoot(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "linked")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlink unavailable in this environment: %v", err)
+	}
+	grep := NewGrepTool(root)
+	grep.RootContextFunc = func(context.Context) string { return root }
+	if _, err := grep.Execute(context.Background(), json.RawMessage(`{"pattern":"secret","path":"linked"}`)); err == nil || !strings.Contains(err.Error(), "escapes workspace root") {
+		t.Fatalf("grep symlink error = %v, want workspace rejection", err)
+	}
+	glob := NewGlobTool(root)
+	glob.RootContextFunc = func(context.Context) string { return root }
+	if _, err := glob.Execute(context.Background(), json.RawMessage(`{"pattern":"*","path":"linked"}`)); err == nil || !strings.Contains(err.Error(), "escapes workspace root") {
+		t.Fatalf("glob symlink error = %v, want workspace rejection", err)
 	}
 }

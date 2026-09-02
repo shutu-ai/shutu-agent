@@ -20,6 +20,10 @@ import (
 // depends on a session.
 var ErrNoActive = errors.New("no active terminal session")
 
+// ErrCloseTimeout reports that a terminal process did not become quiescent
+// within the bounded cleanup window. Callers may retry Close after this error.
+var ErrCloseTimeout = errors.New("terminal: close timed out")
+
 // WaitReason 描述一次 Write 在哪个条件下就绪返回。
 type WaitReason string
 
@@ -31,6 +35,9 @@ const (
 	WaitTimeout WaitReason = "timeout"
 	// WaitSessionExit 表示 shell 会话已退出。
 	WaitSessionExit WaitReason = "session_exit"
+	// WaitCancelled reports that the caller's context ended while waiting. The
+	// foreground terminal command is interrupted and the session is reset.
+	WaitCancelled WaitReason = "cancelled"
 )
 
 // SessionStatus 描述会话当前状态。
@@ -69,6 +76,7 @@ type Session struct {
 	idleMS    int
 	timeoutMS int
 	cmd       *exec.Cmd
+	owned     *ownedProcess
 	stdin     io.WriteCloser
 	cancel    context.CancelFunc
 	waitDone  chan struct{}
@@ -78,7 +86,10 @@ type Session struct {
 	lastAppend time.Time
 	exited     bool
 
-	closeOnce sync.Once
+	closeMu   sync.Mutex
+	closeDone chan struct{}
+	closing   bool
+	closed    bool
 }
 
 // NewSession 创建并启动一个持久 shell 会话。Shell 为空时由平台
@@ -111,6 +122,7 @@ func NewSession(opts SessionOpts) (*Session, error) {
 
 	cmd := shellCommand(opts)
 	cmd.Dir = opts.Workdir
+	prepareOwnedProcess(cmd)
 	if len(opts.Env) > 0 {
 		cmd.Env = opts.Env
 	} else {
@@ -140,6 +152,7 @@ func NewSession(opts SessionOpts) (*Session, error) {
 		stdin:     stdin,
 		cancel:    cancel,
 		waitDone:  make(chan struct{}),
+		closeDone: make(chan struct{}),
 	}
 
 	if err := cmd.Start(); err != nil {
@@ -149,6 +162,18 @@ func NewSession(opts SessionOpts) (*Session, error) {
 		opw.Close()
 		return nil, fmt.Errorf("session: start shell: %w", err)
 	}
+	owned, err := attachOwnedProcess(cmd)
+	if err != nil {
+		_ = opr.Close()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		cancel()
+		stdin.Close()
+		opr.Close()
+		opw.Close()
+		return nil, fmt.Errorf("session: attach process tree: %w", err)
+	}
+	s.owned = owned
 
 	// 泵 goroutine：把子进程输出读进缓冲，并刷新 lastAppend。
 	go func() {
@@ -210,6 +235,16 @@ func (s *Session) Status() SessionStatus {
 // Write 向会话 stdin 写入 text（submit 为 true 时追加 CRLF），并轮询等待就绪：
 // 静默（WaitStdinRead）、超时（WaitTimeout）或退出（WaitSessionExit）。
 func (s *Session) Write(text string, submit bool) (WriteResult, error) {
+	return s.WriteContext(context.Background(), text, submit)
+}
+
+// WriteContext is Write with caller cancellation. If cancellation wins while a
+// foreground command is active, interrupt and close the terminal instead of
+// orphaning command progress behind a successful-looking return.
+func (s *Session) WriteContext(ctx context.Context, text string, submit bool) (WriteResult, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	s.mu.Lock()
 	if s.exited {
 		s.mu.Unlock()
@@ -229,8 +264,21 @@ func (s *Session) Write(text string, submit bool) (WriteResult, error) {
 	if submit {
 		payload += "\r\n"
 	}
-	if _, err := s.stdin.Write([]byte(payload)); err != nil {
-		return WriteResult{}, fmt.Errorf("session: write stdin: %w", err)
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := s.stdin.Write([]byte(payload))
+		writeDone <- err
+	}()
+	select {
+	case <-ctx.Done():
+		// The payload may or may not have reached the shell. Reset rather than
+		// treating an unknown foreground state as success.
+		_ = s.Close()
+		return WriteResult{Wait: WaitCancelled, Status: s.Status()}, ctx.Err()
+	case err := <-writeDone:
+		if err != nil {
+			return WriteResult{}, fmt.Errorf("session: write stdin: %w", err)
+		}
 	}
 
 	start := time.Now()
@@ -280,8 +328,40 @@ func (s *Session) Write(text string, submit bool) (WriteResult, error) {
 			}, nil
 		}
 
-		time.Sleep(20 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			result := WriteResult{
+				Viewport:  sb.String(),
+				Wait:      WaitCancelled,
+				Truncated: truncated,
+				Status:    s.Status(),
+			}
+			// Interrupt first for a cooperative shell, then close the owned
+			// process tree. Closing is the bounded fail-safe for commands that
+			// ignore SIGINT/CTRL_BREAK and prevents orphan progress.
+			s.interruptForeground()
+			closeErr := s.Close()
+			part, trunc := s.buf.Consume()
+			result.Viewport += part
+			result.Truncated = result.Truncated || trunc
+			result.Status = s.Status()
+			if closeErr != nil {
+				return result, errors.Join(ctx.Err(), closeErr)
+			}
+			return result, ctx.Err()
+		case <-time.After(20 * time.Millisecond):
+		}
 	}
+}
+
+func (s *Session) interruptForeground() {
+	if s == nil {
+		return
+	}
+	if s.owned != nil && s.owned.interrupt() == nil {
+		return
+	}
+	interruptInput(s)
 }
 
 // Read 从滚动缓冲读取一个窗口：从尾部倒数 offset 行起，取 count 行。
@@ -340,15 +420,46 @@ func (s *Session) Signal(kind string) error {
 
 // Close 终止会话：杀进程树、等待退出（最多 2s）、取消上下文关闭输出管道。
 func (s *Session) Close() error {
-	s.closeOnce.Do(func() {
-		killProcessTree(s.cmd)
-		select {
-		case <-s.waitDone:
-		case <-time.After(2 * time.Second):
-		}
-		s.cancel()
-	})
-	return nil
+	s.closeMu.Lock()
+	if s.closed {
+		s.closeMu.Unlock()
+		return nil
+	}
+	if s.closing {
+		done := s.closeDone
+		s.closeMu.Unlock()
+		<-done
+		// The prior attempt may have timed out. Re-enter so this caller can
+		// perform the next bounded cleanup attempt instead of reporting a
+		// false success.
+		return s.Close()
+	}
+	s.closing = true
+	done := s.closeDone
+	s.closeMu.Unlock()
+
+	terminateOwnedProcess(s.owned, s.cmd)
+	var err error
+	select {
+	case <-s.waitDone:
+	case <-time.After(2 * time.Second):
+		err = ErrCloseTimeout
+	}
+	s.cancel()
+
+	s.closeMu.Lock()
+	s.closing = false
+	if err == nil {
+		s.closed = true
+	}
+	close(done)
+	if err != nil {
+		// A failed attempt does not permanently fence the session; a later
+		// Close gets a fresh completion channel and may finish the reap.
+		s.closeDone = make(chan struct{})
+	}
+	s.closeMu.Unlock()
+	return err
 }
 
 // bufWriter 是泵的适配器：把从输出管道读到的块 Append 进缓冲并刷新 lastAppend。

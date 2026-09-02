@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -38,6 +39,32 @@ func shellEnv(managed ManagedEnvFunc) []string {
 
 func bashEnv(managed ManagedEnvFunc) []string {
 	return overrideEnv(shellEnv(managed), bashEnvOverrides)
+}
+
+func shellEnvContext(ctx context.Context, legacy ManagedEnvFunc, scoped func(context.Context) map[string]string) []string {
+	if scoped == nil {
+		return shellEnv(legacy)
+	}
+	return shellEnvValues(scoped(ctx))
+}
+
+func bashEnvContext(ctx context.Context, legacy ManagedEnvFunc, scoped func(context.Context) map[string]string) []string {
+	return overrideEnv(shellEnvContext(ctx, legacy, scoped), bashEnvOverrides)
+}
+
+func shellEnvValues(values map[string]string) []string {
+	env := scrubbedEnv()
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		if strings.TrimSpace(key) != "" {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		env = append(env, key+"="+values[key])
+	}
+	return env
 }
 
 func overrideEnv(env, overrides []string) []string {

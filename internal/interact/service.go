@@ -8,11 +8,10 @@
 // seam's interfaces (D2), so swapping or persisting the backend never touches
 // consumer code.
 //
-// The default Provider is the in-memory memProvider (mem.go): every request
-// lives in memory only — nothing is persisted and no files are touched — so a
-// process restart clears the approval table by construction. Persisting
-// requests to the store layer is deliberately deferred to M6d-2 or later: the
-// seam already isolates that change behind the Provider interface.
+// The default standalone Provider is the in-memory memProvider (mem.go). The
+// application selects the optional SQLiteProvider when its store exposes the
+// durable approval projection; the Provider seam keeps both implementations
+// behind the same lifecycle and ownership contract.
 //
 // Await is a pure poll loop (design.md §10 D5, ADR 决策 D5): it repeatedly
 // lists the request until it leaves pending, a context cancellation or an
@@ -26,17 +25,31 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/jabing/shutu-agent/internal/session"
 )
 
 // ApprovalStatus is the lifecycle of one approval request.
 type ApprovalStatus string
 
+type ApprovalPolicy string
+
 const (
-	StatusPending  ApprovalStatus = "pending"   // created, waiting for the user
-	StatusApproved ApprovalStatus = "approved"  // the user said yes
-	StatusRejected ApprovalStatus = "rejected"  // the user said no
-	StatusExpired  ApprovalStatus = "expired"   // abandoned (reserved for later expiry)
-	StatusCanceled ApprovalStatus = "cancelled" // the question UI was dismissed
+	PolicyAsk   ApprovalPolicy = "ask"
+	PolicyNever ApprovalPolicy = "never"
+)
+
+const (
+	StatusPending  ApprovalStatus = "pending"  // created, waiting for the user
+	StatusApproved ApprovalStatus = "approved" // the user said yes
+	// StatusAllowedOnce is the canonical one-shot approval outcome used by the
+	// DSH approval seam. StatusApproved remains for compatibility with the
+	// existing interaction API and is treated equivalently by consumers.
+	StatusAllowedOnce ApprovalStatus = "allowed-once"
+	StatusRejected    ApprovalStatus = "rejected"    // the user said no
+	StatusExpired     ApprovalStatus = "expired"     // abandoned (reserved for later expiry)
+	StatusCanceled    ApprovalStatus = "cancelled"   // the question UI was dismissed
+	StatusUnavailable ApprovalStatus = "unavailable" // no answerer/capability
 )
 
 // QuestionOption is one selectable answer offered by a structured user
@@ -62,6 +75,8 @@ type Question struct {
 // value copies, never live provider state.
 type Request struct {
 	ID         string         // provider-issued id ("req-N" under the memory provider)
+	SessionID  string         `json:"session_id,omitempty"`
+	CallID     string         `json:"call_id,omitempty"` // originating tool-call correlation id
 	Prompt     string         // user-facing explanation of the sensitive action
 	ToolName   string         // tool whose execution triggered the approval
 	Args       string         // tool args JSON at trigger time (bounded, ≤ maxArgsLen runes)
@@ -70,6 +85,7 @@ type Request struct {
 	Status     ApprovalStatus // pending by default
 	CreatedAt  time.Time
 	ResolvedAt *time.Time // set once the request leaves pending; nil otherwise
+	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
 }
 
 // Provider is one approval backend (design.md §10 D2: Service / Provider /
@@ -125,6 +141,105 @@ type StructuredRequester interface {
 	RequestWithQuestions(ctx context.Context, prompt, toolName, args string, questions []Question) (Request, error)
 }
 
+type StructuredSessionRequester interface {
+	RequestForSessionWithQuestions(ctx context.Context, sessionID, prompt, toolName, args string, questions []Question) (Request, error)
+}
+
+// SessionRequester is the session-aware approval extension. A session policy
+// of never returns a deterministic rejected terminal result without creating
+// a pending request, matching the reference approval policy.
+type SessionRequester interface {
+	RequestForSession(ctx context.Context, sessionID, prompt, toolName, args string) (Request, error)
+}
+
+// SessionAwaiter keeps a session-owned waiter from observing another
+// session's request when ids are supplied by an external transport.
+type SessionAwaiter interface {
+	AwaitForSession(ctx context.Context, sessionID, id string) (Request, error)
+}
+
+// SessionCanceler closes every still-pending request owned by one disposed
+// session. It is intentionally optional so older embedders can keep their
+// Engine implementation while application-owned Agents get a bounded
+// disposal boundary.
+type SessionCanceler interface {
+	CancelForSession(ctx context.Context, sessionID string) ([]Request, error)
+}
+
+// SessionLister is the ownership-preserving read boundary for answerers and
+// status surfaces. A transport may still apply presentation filters, but it
+// must not have to fetch the process-wide approval queue and then remember to
+// redact other sessions itself.
+type SessionLister interface {
+	ListForSession(ctx context.Context, sessionID string) ([]Request, error)
+}
+
+// ProviderSessionLister is the provider-side least-privilege read seam. The
+// Engine falls back to Provider.List for compatibility providers, but durable
+// backends should implement this so an answerer never loads another session's
+// approval rows into the process merely to discard them.
+type ProviderSessionLister interface {
+	ListForSession(ctx context.Context, sessionID string) ([]Request, error)
+}
+
+// SessionCallRequester preserves the model/tool call correlation at the
+// approval service boundary. Older providers may implement only
+// SessionRequester; callers must then use the compatibility path.
+type SessionCallRequester interface {
+	RequestForSessionWithCallID(ctx context.Context, sessionID, callID, prompt, toolName, args string) (Request, error)
+}
+
+// AtomicSessionCallRequester is the creation-side counterpart of
+// AtomicEventResolver. The callback is evaluated after the provider has
+// allocated the stable request id, but before the approval row and asked event
+// are committed, so the event can carry the exact correlation fields.
+type AtomicSessionCallRequester interface {
+	RequestForSessionWithCallIDAndEvent(ctx context.Context, sessionID, callID, prompt, toolName, args string, event func(Request) session.Event) (Request, bool, error)
+}
+
+// AtomicStructuredSessionRequester is the structured-question variant of the
+// creation seam. It lets ask_user_question use the same durable asked-event
+// transaction as an approval-only request.
+type AtomicStructuredSessionRequester interface {
+	RequestForSessionWithQuestionsAndEvent(ctx context.Context, sessionID, prompt, toolName, args string, questions []Question, event func(Request) session.Event) (Request, bool, error)
+}
+
+// SessionResolver enforces ownership in the approval service itself. Transport
+// filters remain useful for presentation, but must not be the security boundary.
+type SessionResolver interface {
+	ResolveForSession(ctx context.Context, sessionID, id string, status ApprovalStatus) (Request, error)
+	ResolveForSessionWithAnswer(ctx context.Context, sessionID, id string, status ApprovalStatus, answer string) (Request, error)
+}
+
+// AtomicEventResolver is an optional extension for consumers that need the
+// approval terminal state and its canonical session audit event committed as a
+// single backend transaction. The bool reports whether the provider performed
+// that atomic commit; false preserves compatibility with older providers and
+// tells the caller to append the event through the normal log sink.
+type AtomicEventResolver interface {
+	ResolveForSessionWithAnswerAndEvent(ctx context.Context, sessionID, id string, status ApprovalStatus, answer string, event session.Event) (Request, bool, error)
+}
+
+// PolicyController exposes the service-level approval policy.
+type PolicyController interface {
+	SetDefaultPolicy(policy ApprovalPolicy) error
+	SetSessionPolicy(sessionID string, policy ApprovalPolicy) error
+	ClearSessionPolicy(sessionID string)
+	SessionPolicy(sessionID string) ApprovalPolicy
+}
+
+type ExpiryController interface {
+	SetRequestTTL(ttl time.Duration)
+}
+
+// ExpiryAuditor receives the transition after the provider has atomically
+// moved a request out of pending. Implementations should append an idempotent
+// canonical approval/decided fact. It is optional for standalone embedders;
+// the application wires it for durable session-owned requests.
+type ExpiryAuditor interface {
+	SetExpiryAuditor(func(context.Context, Request) error)
+}
+
 // AnswerResolver is an optional extension used by the Web transport to retain
 // the structured answer while preserving the normal approved/rejected status.
 type AnswerResolver interface {
@@ -146,6 +261,13 @@ type RequestRestorer interface {
 	Restore(ctx context.Context, requests []Request) error
 }
 
+// RequestReplacer lets a durable provider rebuild its entire projection from
+// the authoritative session event log. It is intentionally optional: the
+// memory provider only needs the additive Restore compatibility hook.
+type RequestReplacer interface {
+	Replace(ctx context.Context, requests []Request) error
+}
+
 // closer is the optional extension a Provider implements to release its
 // resources when the Engine is closed (mirrors the schedule and plan seams'
 // closer).
@@ -162,6 +284,8 @@ var (
 	ErrUnknownRequest  = errors.New("interact: unknown request")
 	ErrAlreadyResolved = errors.New("interact: request already resolved")
 	ErrPendingLimit    = errors.New("interact: pending limit reached")
+	ErrInvalidPolicy   = errors.New("interact: invalid approval policy")
+	ErrWrongSession    = errors.New("interact: request belongs to another session")
 	ErrEngineClosed    = errors.New("interact: engine closed")
 	ErrProviderClosed  = errors.New("interact: provider closed")
 )

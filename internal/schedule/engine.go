@@ -19,9 +19,10 @@ import (
 type engine struct {
 	prov Provider
 
-	mu     sync.Mutex
-	exprs  map[string]*cronExpr // parsed cron expressions by schedule id (interval needs no cache)
-	closed bool
+	mu        sync.Mutex
+	exprs     map[string]*cronExpr // parsed cron expressions by schedule id (interval needs no cache)
+	closed    bool
+	closeDone chan struct{}
 }
 
 // NewEngine returns an engine backed by prov; a nil prov selects the default
@@ -32,8 +33,9 @@ func NewEngine(prov Provider) *engine {
 		prov = newMemProvider()
 	}
 	return &engine{
-		prov:  prov,
-		exprs: map[string]*cronExpr{},
+		prov:      prov,
+		exprs:     map[string]*cronExpr{},
+		closeDone: make(chan struct{}),
 	}
 }
 
@@ -216,14 +218,21 @@ func (e *engine) checkOpen() error {
 func (e *engine) Close() error {
 	e.mu.Lock()
 	if e.closed {
+		done := e.closeDone
 		e.mu.Unlock()
+		if done != nil {
+			<-done
+		}
 		return nil
 	}
 	e.closed = true
 	prov := e.prov
 	e.mu.Unlock()
 	if c, ok := prov.(closer); ok {
-		return c.Close()
+		err := c.Close()
+		close(e.closeDone)
+		return err
 	}
+	close(e.closeDone)
 	return nil
 }

@@ -141,3 +141,35 @@ func TestLlmTitleNoModelOutputIsError(t *testing.T) {
 		t.Fatal("llmTitle(empty output) = nil error, want error")
 	}
 }
+
+func TestNativeRenameSessionAppendsCanonicalTitleEvent(t *testing.T) {
+	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "rename.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	if err := st.CreateSession(ctx, "rename-app", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	a := makeTurnApp()
+	a.store = st
+	seq, err := a.nativeRenameSession(ctx, "rename-app", "A canonical title")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seq != 1 {
+		t.Fatalf("rename seq = %d, want 1", seq)
+	}
+	events, err := st.LoadSession(ctx, "rename-app")
+	if err != nil || len(events) != 1 || events[0].Type != session.EventSessionTitle {
+		t.Fatalf("rename events = %+v, err=%v", events, err)
+	}
+	meta, err := st.GetSessionMeta(ctx, "rename-app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.Title != "A canonical title" || meta.TitleSource != session.TitleSourceUser {
+		t.Fatalf("rename metadata = %+v", meta)
+	}
+}

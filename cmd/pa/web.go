@@ -3,7 +3,7 @@
 // web Engine + the DeepSeek search provider (env key only, absent ⇒ provider
 // unavailable so Search returns ErrCredential) + the HTTP fetch provider + the
 // two web_* tools when web.enabled (D10), and wires the D3 web/search-request
-// log via the provider's OnRequest. The wiring sits entirely in the tool
+// log via the provider's session-aware request callback. The wiring sits entirely in the tool
 // registration layer — the loop's turn/step structure is untouched (D4) — and
 // every web_* tool executes on the serial tool path (D5, no background
 // goroutine). It must run before registerInteracts so the sensitive-tool gate
@@ -11,10 +11,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 
 	"github.com/jabing/shutu-agent/internal/config"
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 	"github.com/jabing/shutu-agent/internal/tools"
 	"github.com/jabing/shutu-agent/internal/web"
 )
@@ -33,24 +35,35 @@ func (a *app) registerWeb() error {
 	// Search 返回 ErrCredential。Available 是廉价本地检查，绝不做网络调用。
 	if key := os.Getenv("DEEPSEEK_API_KEY"); key != "" {
 		// D3 event sink: web/search-request is appended to the active session
-		// log by the provider's OnRequest before dispatch (M7-1). The callback
+		// log by the provider's session-aware request callback before dispatch (M7-1). The callback
 		// only ever runs inside a web_search Execute — the serial main-loop
 		// path (D5). a.log is read at call time, so a session switch (/new,
-		// /resume) is honored the same way as the other register* wiring.
-		onReq := func(ev web.SearchRequestEvent) error {
-			if _, err := a.log.Append("web/search-request", ev); err != nil {
+		// /resume) is honored through the runtime context, with the global log as
+		// a compatibility fallback for legacy direct calls.
+		onReq := func(ctx context.Context, ev web.SearchRequestEvent) error {
+			log := a.runtimeLog(ctx)
+			if log == nil {
+				if _, runtimeOwned := runtimectx.Get(ctx); runtimeOwned {
+					return fmt.Errorf("pa: no Agent-owned session log for web search request")
+				}
+				log = a.log
+			}
+			if log == nil {
+				return fmt.Errorf("pa: no session log for web search request")
+			}
+			if _, err := log.Append("web/search-request", ev); err != nil {
 				return err
 			}
 			return nil
 		}
 		sp := web.NewDeepSeekProvider(web.Config{
-			APIKey:     key,
-			BaseURL:    a.cfg.Web.DeepSeek.BaseURL,
-			Model:      a.cfg.Web.DeepSeek.Model,
-			APIVersion: a.cfg.Web.DeepSeek.APIVersion,
-			MaxTokens:  a.cfg.Web.DeepSeek.MaxTokens,
-			MaxUses:    a.cfg.Web.DeepSeek.MaxUses,
-			OnRequest:  onReq,
+			APIKey:           key,
+			BaseURL:          a.cfg.Web.DeepSeek.BaseURL,
+			Model:            a.cfg.Web.DeepSeek.Model,
+			APIVersion:       a.cfg.Web.DeepSeek.APIVersion,
+			MaxTokens:        a.cfg.Web.DeepSeek.MaxTokens,
+			MaxUses:          a.cfg.Web.DeepSeek.MaxUses,
+			OnRequestContext: onReq,
 		})
 		if err := engine.RegisterSearchProvider(sp); err != nil {
 			return fmt.Errorf("pa: register DeepSeek search provider: %w", err)

@@ -9,6 +9,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -18,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -26,6 +28,7 @@ import (
 	"github.com/jabing/shutu-agent/internal/attachment"
 	"github.com/jabing/shutu-agent/internal/interact"
 	"github.com/jabing/shutu-agent/internal/llm"
+	"github.com/jabing/shutu-agent/internal/projection"
 	"github.com/jabing/shutu-agent/internal/session"
 	"github.com/jabing/shutu-agent/internal/store"
 )
@@ -46,6 +49,58 @@ func newTestServer(t *testing.T, token string) (*Server, *store.SQLiteStore) {
 	// ~/shudu fallback through cmd/pa.
 	srv.SetDefaultWorkdir(t.TempDir())
 	return srv, st
+}
+
+func TestEstimateContextTokensUsesSharedProjectionForLiveOpenTail(t *testing.T) {
+	encode := func(value any) json.RawMessage {
+		raw, err := json.Marshal(value)
+		if err != nil {
+			t.Fatalf("marshal event data: %v", err)
+		}
+		return raw
+	}
+	events := []session.Event{
+		{Seq: 1, Type: session.EventTurnStart, At: time.UnixMilli(1), Version: session.EventVersion, Data: encode(session.NewTurnStart())},
+		{Seq: 2, Type: session.EventUserMessage, At: time.UnixMilli(2), Version: session.EventVersion, Data: encode(session.NewUserMessage("hello"))},
+	}
+	snapshot, err := projection.Build(events)
+	if err != nil {
+		t.Fatalf("projection.Build: %v", err)
+	}
+	if got, want := estimateContextTokens(events), len(snapshot.History[0].Text())/4; got != want {
+		t.Fatalf("estimated tokens = %d, want shared projection estimate %d", got, want)
+	}
+}
+
+func TestSettingsHideAndRejectUnavailableCodePreset(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	srv.SetConfigProvider(func() map[string]any {
+		return map[string]any{"mode": "standard", "code_enabled": true, "code_available": false}
+	})
+	get := doReq(t, srv.Handler(), http.MethodGet, "/api/settings", "tok")
+	if get.Code != http.StatusOK {
+		t.Fatalf("settings GET = %d: %s", get.Code, get.Body.String())
+	}
+	var view struct {
+		ModeOptions []string `json:"mode_options"`
+	}
+	if err := json.Unmarshal(get.Body.Bytes(), &view); err != nil {
+		t.Fatal(err)
+	}
+	if reflect.DeepEqual(view.ModeOptions, []string{"minimal", "standard", "code"}) || !reflect.DeepEqual(view.ModeOptions, []string{"minimal", "standard"}) {
+		t.Fatalf("mode_options = %#v, want code omitted", view.ModeOptions)
+	}
+	patch := doReqBody(t, srv.Handler(), http.MethodPatch, "/api/settings", "tok", `{"agent_preset":"code"}`)
+	if patch.Code != http.StatusBadRequest || !strings.Contains(patch.Body.String(), "unavailable") {
+		t.Fatalf("unavailable code PATCH = %d/%s, want stable bad-request", patch.Code, patch.Body.String())
+	}
+	settings, err := st.GetSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings["agent_preset"] != "" {
+		t.Fatalf("unavailable code preset was persisted: %#v", settings)
+	}
 }
 
 func doReq(t *testing.T, h http.Handler, method, path, token string) *httptest.ResponseRecorder {
@@ -174,7 +229,10 @@ func TestSessionExportIncludesDeduplicatedMedia(t *testing.T) {
 		t.Fatalf("NewStore: %v", err)
 	}
 	srv.SetAttachmentStore(attachments)
-	data := []byte("image-bytes")
+	data, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+	if err != nil {
+		t.Fatal(err)
+	}
 	ref, err := attachments.SaveImage("image/png", data, 1024)
 	if err != nil {
 		t.Fatalf("SaveImage: %v", err)
@@ -264,6 +322,26 @@ func TestAuthRequired(t *testing.T) {
 	// holds no data; only the API routes are gated.
 	if rec := doReq(t, h, "GET", "/", ""); rec.Code != http.StatusOK {
 		t.Fatalf("static / without token → %d, want 200 (login shell must load)", rec.Code)
+	}
+}
+
+func TestMutationsRejectCrossOriginBrowserHeaders(t *testing.T) {
+	srv, _ := newTestServer(t, "")
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(`{}`))
+	req.Host = "127.0.0.1:8080"
+	req.Header.Set("Origin", "https://attacker.example")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin mutation status = %d, want 403", rec.Code)
+	}
+	local := httptest.NewRequest(http.MethodPost, "/api/sessions", strings.NewReader(`{}`))
+	local.Host = req.Host
+	local.Header.Set("Origin", "http://"+req.Host)
+	localRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(localRec, local)
+	if localRec.Code == http.StatusForbidden {
+		t.Fatalf("same-origin mutation was rejected: %d", localRec.Code)
 	}
 }
 
@@ -1194,6 +1272,63 @@ func TestEventsStreamResumesAfterLastEventID(t *testing.T) {
 	}
 }
 
+func TestEventsStreamDeduplicatesSnapshotSubscriptionRace(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	seedSession(t, st, "s-race", []session.Event{
+		{Seq: 1, Type: session.EventUserMessage, At: time.Now(), Version: 1, Data: mustData(t, map[string]any{"Text": "one"})},
+		{Seq: 2, Type: session.EventAssistantMessage, At: time.Now(), Version: 1, Data: mustData(t, map[string]any{"Text": "two"})},
+	})
+	donePush := make(chan struct{})
+	srv.SetEventSource(func(_ string, sink func(session.Event)) func() {
+		// This is the event-source ordering that occurs when persistence races
+		// the initial snapshot: seq 2 is already in the snapshot and also in
+		// the subscription queue.
+		sink(session.Event{Seq: 2, Type: session.EventAssistantMessage, At: time.Now(), Version: 1, Data: mustData(t, map[string]any{"Text": "two"})})
+		close(donePush)
+		return func() {}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := httptest.NewRequest("GET", "/api/sessions/s-race/events/stream", nil).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() { srv.Handler().ServeHTTP(rec, req); close(done) }()
+	select {
+	case <-donePush:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for the fake event source push")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for the stream handler")
+	}
+	if got := strings.Count(rec.Body.String(), `"seq":2`); got != 1 {
+		t.Fatalf("snapshot race emitted seq 2 %d times, want once: %q", got, rec.Body.String())
+	}
+}
+
+func TestRepairEventStreamFillsDurableGapInOrder(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	events := make([]session.Event, 4)
+	for i := range events {
+		events[i] = session.Event{Seq: uint64(i + 1), Type: session.EventAssistantChunk, At: time.Now(), Version: 1, Data: mustData(t, map[string]any{"Text": string(rune('a' + i))})}
+	}
+	seedSession(t, st, "s-gap", events)
+	var emitted []uint64
+	last, err := srv.repairEventStream(context.Background(), "s-gap", 1, map[string]string{}, func(ev session.Event) {
+		emitted = append(emitted, ev.Seq)
+	})
+	if err != nil {
+		t.Fatalf("repairEventStream: %v", err)
+	}
+	if last != 4 || !reflect.DeepEqual(emitted, []uint64{2, 3, 4}) {
+		t.Fatalf("repair cursor/events = %d/%v, want 4/[2 3 4]", last, emitted)
+	}
+}
+
 // TestConfigAPI verifies GET /api/config (M10 W2, ADR D-WEB2-D): the route sits
 // behind auth, invokes the injected config provider and serves its sanitized
 // map verbatim (the redaction itself is cmd/pa's webConfig — the token key is
@@ -1464,8 +1599,8 @@ func TestSessionTitleDelete(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
 		t.Fatalf("decode list: %v", err)
 	}
-	if len(list) != 1 || list[0].Title != "帮我写首诗" {
-		t.Fatalf("inferred title = %q, want 帮我写首诗", list[0].Title)
+	if len(list) != 1 || list[0].Title != "帮我写首诗" || !list[0].Blank {
+		t.Fatalf("inferred title/blank = %q/%v, want 帮我写首诗/true", list[0].Title, list[0].Blank)
 	}
 
 	// Rename overrides the inferred title.
@@ -1519,6 +1654,85 @@ func TestSessionTitleDelete(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("DELETE unknown → %d, want 404", rec.Code)
+	}
+}
+
+func TestSessionListUsesLatestHumanPromptForUpdatedAt(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	now := time.Now().UTC()
+	promptAt := now.Add(2 * time.Second)
+	seedSession(t, st, "prompt-activity", []session.Event{
+		{Seq: 1, Type: session.EventTurnStart, At: now.Add(-time.Second), Version: session.EventVersion, Data: json.RawMessage(`{"turn":1}`)},
+		{Seq: 2, Type: session.EventUserMessage, At: promptAt, Version: session.EventVersion, Data: json.RawMessage(`{"text":"latest human prompt","source":{"kind":"user"}}`)},
+		{Seq: 3, Type: session.EventTurnEnd, At: now.Add(-time.Second), Version: session.EventVersion, Data: json.RawMessage(`{"turn":1,"reason":{"kind":"completed"}}`)},
+	})
+
+	rec := doReq(t, srv.Handler(), http.MethodGet, "/api/sessions", "tok")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET sessions = %d: %s", rec.Code, rec.Body.String())
+	}
+	var list []sessionView
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("session list length = %d, want 1", len(list))
+	}
+	if list[0].UpdatedAt.UnixMilli() != promptAt.UnixMilli() {
+		t.Fatalf("updated_at = %s, want latest human prompt %s", list[0].UpdatedAt, promptAt)
+	}
+}
+
+func TestSessionTitlePatchUsesCanonicalRenameCallback(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	seedSession(t, st, "title-event", []session.Event{{
+		Seq: 1, Type: session.EventUserMessage, At: time.Now(), Version: session.EventVersion,
+		Data: mustData(t, map[string]any{"text": "initial prompt"}),
+	}})
+	var calls int
+	srv.SetNativeSessionRenamer(func(ctx context.Context, sessionID, title string) (int64, error) {
+		calls++
+		events, err := st.LoadSession(ctx, sessionID)
+		if err != nil {
+			return 0, err
+		}
+		seq := uint64(1)
+		if len(events) > 0 {
+			seq = events[len(events)-1].Seq + 1
+		}
+		if err := st.AppendEvents(ctx, sessionID, []session.Event{{
+			Seq: seq, Type: session.EventSessionTitle, At: time.Now(), Version: session.EventVersion,
+			Data: mustData(t, map[string]any{
+				"title": title, "messageSeqs": []uint64{}, "source": map[string]any{"kind": "user"},
+			}),
+		}}); err != nil {
+			return 0, err
+		}
+		return int64(seq), nil
+	})
+
+	rec := doReqBody(t, srv.Handler(), http.MethodPatch, "/api/sessions/title-event/title", "tok", `{"title":"Canonical title"}`)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"seq":2`) {
+		t.Fatalf("PATCH title = %d %q, want canonical seq 2", rec.Code, rec.Body.String())
+	}
+	if calls != 1 {
+		t.Fatalf("rename callback calls = %d, want 1", calls)
+	}
+	events, err := st.LoadSession(context.Background(), "title-event")
+	if err != nil || len(events) != 2 || events[1].Type != session.EventSessionTitle {
+		t.Fatalf("session events = %#v, err=%v, want session/title event", events, err)
+	}
+	meta, err := st.GetSessionMeta(context.Background(), "title-event")
+	if err != nil || meta.Title != "Canonical title" || meta.TitleSource != session.TitleSourceUser {
+		t.Fatalf("projected title = %#v, err=%v", meta, err)
+	}
+
+	rec = doReqBody(t, srv.Handler(), http.MethodPatch, "/api/sessions/title-event/title", "tok", `{"title":"\u001b"}`)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "title-invalid") {
+		t.Fatalf("empty normalized PATCH = %d %q, want title-invalid", rec.Code, rec.Body.String())
+	}
+	if calls != 1 {
+		t.Fatalf("invalid rename callback calls = %d, want unchanged", calls)
 	}
 }
 

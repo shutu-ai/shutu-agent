@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -36,8 +37,13 @@ const (
 type request struct {
 	JSONRPC string `json:"jsonrpc"`
 	ID      *int64 `json:"id,omitempty"`
-	Method  string `json:"method"`
+	Method  string `json:"method,omitempty"`
 	Params  any    `json:"params,omitempty"`
+	// Result and Error are used only when Streamable HTTP replies to a
+	// server-initiated request through a separate POST. Keeping them on the
+	// shared wire envelope avoids a second JSON-RPC representation.
+	Result any `json:"result,omitempty"`
+	Error  any `json:"error,omitempty"`
 }
 
 // message is one inbound JSON-RPC frame: a response to our request (ID set,
@@ -47,6 +53,7 @@ type message struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      *int64          `json:"id"`
 	Method  string          `json:"method"`
+	Params  json.RawMessage `json:"params"`
 	Result  json.RawMessage `json:"result"`
 	Error   *rpcError       `json:"error"`
 }
@@ -64,11 +71,13 @@ type rpcError struct {
 // newline scanner that runs inside a short-lived per-request reader goroutine
 // (see readResponseLocked); that goroutine never outlives the client.
 type stdioClient struct {
-	mu      sync.Mutex
-	cmd     string
-	args    []string
-	timeout time.Duration // per-request timeout; 0 → DefaultTimeout
-	env     []string      // extra environment entries (test helper mode)
+	mu          sync.Mutex
+	cmd         string
+	args        []string
+	timeout     time.Duration // per-request timeout; 0 → DefaultTimeout
+	env         []string      // extra environment entries (test helper mode)
+	cwd         string
+	callTimeout time.Duration
 
 	proc    *exec.Cmd
 	stdin   io.WriteCloser
@@ -78,21 +87,71 @@ type stdioClient struct {
 	started bool
 	closed  bool
 	nextID  int64
+
+	notifyMu          sync.Mutex
+	notifyHandler     func()
+	notifyCh          chan struct{}
+	notifyStop        chan struct{}
+	connectionHandler func(error)
+	callbackWG        sync.WaitGroup
+	closeDone         chan struct{}
+	closeSignal       chan struct{}
+	closeOnce         sync.Once
 }
 
 // newStdioClient returns an idle stdioClient for the given command.
 func newStdioClient(cmd string, args []string) *stdioClient {
 	return &stdioClient{
-		cmd:     cmd,
-		args:    args,
-		timeout: DefaultTimeout,
-		nextID:  idStart,
+		cmd:         cmd,
+		args:        args,
+		timeout:     DefaultTimeout,
+		nextID:      idStart,
+		closeDone:   make(chan struct{}),
+		closeSignal: make(chan struct{}),
 	}
 }
 
+func newConfiguredStdioClient(server McpServer) *stdioClient {
+	c := newStdioClient(server.Cmd, server.Args)
+	c.cwd = server.Cwd
+	c.callTimeout = server.ToolCallTimeout
+	if c.callTimeout <= 0 {
+		c.callTimeout = 60 * time.Second
+	}
+	if c.callTimeout > c.timeout {
+		c.timeout = c.callTimeout
+	}
+	keys := make([]string, 0, len(server.Env))
+	for key := range server.Env {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		c.env = append(c.env, key+"="+server.Env[key])
+	}
+	return c
+}
+
+// SetToolListChangedHandler installs the best-effort callback used for the
+// MCP notifications/tools/list_changed notification. The callback is never
+// run by the JSON-RPC reader while the client mutex is held; it is dispatched
+// after the current response is consumed so a callback may safely call
+// ListTools to refresh the advertised generation.
+func (c *stdioClient) SetToolListChangedHandler(handler func()) {
+	c.notifyMu.Lock()
+	c.notifyHandler = handler
+	c.notifyMu.Unlock()
+}
+
+func (c *stdioClient) SetConnectionLostHandler(handler func(error)) {
+	c.notifyMu.Lock()
+	c.connectionHandler = handler
+	c.notifyMu.Unlock()
+}
+
 // Start launches the child process and performs the MCP initialize handshake.
-// It is idempotent. On any failure the pipes are released and the client is
-// marked closed so it cannot be half-used.
+// It is idempotent. A failed or lost connection is recoverable by calling Start
+// again; only an explicit Close permanently retires the client.
 func (c *stdioClient) Start(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -123,13 +182,17 @@ func (c *stdioClient) Start(ctx context.Context) error {
 	}
 
 	proc := exec.Command(c.cmd, c.args...)
+	proc.Dir = c.cwd
 	proc.Stdin = stdinR
 	proc.Stdout = stdoutW
 	proc.Stderr = &c.stderr
 	prepareProcessGroup(proc)
-	if len(c.env) > 0 {
-		proc.Env = append(os.Environ(), c.env...)
-	}
+	// MCP servers are untrusted external processes.  Match the reference
+	// transport boundary: remove credential-shaped ambient variables first,
+	// then add only the explicit test/embedding environment requested by the
+	// caller.  This prevents a server from inheriting the host's provider keys
+	// merely because it was configured in the same process.
+	proc.Env = append(scrubbedEnv(), c.env...)
 
 	if err := proc.Start(); err != nil {
 		_ = stdinR.Close()
@@ -147,6 +210,7 @@ func (c *stdioClient) Start(ctx context.Context) error {
 	c.stdout = stdoutR
 	c.reader = bufio.NewReader(stdoutR)
 	c.started = true
+	c.startNotificationDispatcherLocked()
 
 	// MCP initialize handshake.
 	params := map[string]any{
@@ -156,14 +220,14 @@ func (c *stdioClient) Start(ctx context.Context) error {
 	}
 	res, err := c.doRequestLocked(ctx, "initialize", params)
 	if err != nil {
-		c.cleanupLocked()
+		c.disconnectLocked()
 		return fmt.Errorf("%w: %v", ErrHandshake, err)
 	}
 	var initRes struct {
 		ProtocolVersion string `json:"protocolVersion"`
 	}
 	if err := json.Unmarshal(res, &initRes); err != nil {
-		c.cleanupLocked()
+		c.disconnectLocked()
 		return fmt.Errorf("%w: initialize result is not a JSON object: %v", ErrHandshake, err)
 	}
 	// Best-effort initialized notification (JSON-RPC notifications receive no
@@ -243,7 +307,13 @@ func (c *stdioClient) Call(ctx context.Context, name string, args map[string]any
 	if args == nil {
 		args = map[string]any{}
 	}
-	res, err := c.doRequestLocked(ctx, "tools/call", map[string]any{
+	callCtx := ctx
+	cancel := func() {}
+	if c.callTimeout > 0 {
+		callCtx, cancel = context.WithTimeout(ctx, c.callTimeout)
+	}
+	defer cancel()
+	res, err := c.doRequestLocked(callCtx, "tools/call", map[string]any{
 		"name":      name,
 		"arguments": args,
 	})
@@ -272,12 +342,32 @@ func (c *stdioClient) Call(ctx context.Context, name string, args map[string]any
 // the first call terminates and reaps the process, later calls return nil.
 // After Close, Start/ListTools/Call are rejected with ErrClosed.
 func (c *stdioClient) Close() error {
+	// Signal cancellation before taking mu. Requests intentionally hold mu while
+	// reading a serial stdio response; waiting for mu first would leave Close
+	// unable to interrupt a server that never answers.
+	c.closeOnce.Do(func() { close(c.closeSignal) })
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.closed {
+		done := c.closeDone
+		c.mu.Unlock()
+		if done != nil {
+			<-done
+		}
 		return nil
 	}
 	c.cleanupLocked()
+	done := c.closeDone
+	c.mu.Unlock()
+	// Notification and connection callbacks are deliberately dispatched outside
+	// c.mu. Drain them before reporting Close complete: a list-changed callback
+	// may still be refreshing a bridged tool generation, while a connection
+	// callback may still be notifying the reconnect supervisor. Without this
+	// barrier a composition root can close its registries while one of those
+	// callbacks is still using them.
+	c.callbackWG.Wait()
+	if done != nil {
+		close(done)
+	}
 	return nil
 }
 
@@ -287,14 +377,88 @@ func (c *stdioClient) Close() error {
 // or exec-internal goroutine is left behind.
 func (c *stdioClient) cleanupLocked() {
 	c.closed = true
+	c.stopNotificationDispatcherLocked()
 	c.teardownProcess()
 	c.stdin = nil
 	c.stdout = nil
 	c.reader = nil
-	// c.proc is deliberately kept so callers can inspect ProcessState after a
-	// close (e.g. tests asserting the child was reaped); the exec.Cmd is inert
-	// once Wait has run.
 	c.started = false
+}
+
+func (c *stdioClient) startNotificationDispatcherLocked() {
+	c.notifyMu.Lock()
+	defer c.notifyMu.Unlock()
+	if c.notifyCh != nil {
+		return
+	}
+	c.notifyCh = make(chan struct{}, 1)
+	c.notifyStop = make(chan struct{})
+	ch, stop := c.notifyCh, c.notifyStop
+	c.callbackWG.Add(1)
+	go func() {
+		defer c.callbackWG.Done()
+		for {
+			select {
+			case <-ch:
+				c.notifyMu.Lock()
+				handler := c.notifyHandler
+				c.notifyMu.Unlock()
+				if handler != nil {
+					handler()
+				}
+			case <-stop:
+				return
+			}
+		}
+	}()
+}
+
+func (c *stdioClient) stopNotificationDispatcherLocked() {
+	c.notifyMu.Lock()
+	if c.notifyStop != nil {
+		close(c.notifyStop)
+	}
+	c.notifyStop = nil
+	c.notifyCh = nil
+	c.notifyMu.Unlock()
+}
+
+func (c *stdioClient) signalToolListChanged() {
+	c.notifyMu.Lock()
+	ch := c.notifyCh
+	if ch != nil {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+	c.notifyMu.Unlock()
+}
+
+// disconnectLocked tears down a failed connection but leaves the client
+// restartable. It is distinct from cleanupLocked: the latter is the explicit
+// lifecycle terminal state exposed by Close.
+func (c *stdioClient) disconnectLocked() {
+	wasStarted := c.started
+	c.teardownProcess()
+	c.stdin = nil
+	c.stdout = nil
+	c.reader = nil
+	c.started = false
+	if wasStarted {
+		c.notifyMu.Lock()
+		handler := c.connectionHandler
+		c.notifyMu.Unlock()
+		if handler != nil {
+			// The request path owns c.mu here. Dispatch outside the client lock
+			// so a supervisor can call Start without deadlocking the failed call.
+			c.callbackWG.Add(1)
+			go func() {
+				defer c.callbackWG.Done()
+				handler(ErrConnection)
+			}()
+		}
+	}
 }
 
 // teardownProcess kills the server process and closes the pipes without taking
@@ -319,7 +483,8 @@ func (c *stdioClient) teardownProcess() {
 // client's per-request timeout (DefaultTimeout when the caller gives none) and
 // readResponseLocked returns as soon as the context expires, so a request never
 // blocks past its deadline. When the connection is gone (timeout, cancellation,
-// closed pipe) the client is cleaned up so further calls fail with ErrClosed.
+// closed pipe) the client is disconnected so a later Start can establish a
+// fresh session; only an explicit Close makes further calls fail with ErrClosed.
 func (c *stdioClient) doRequestLocked(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
@@ -335,13 +500,13 @@ func (c *stdioClient) doRequestLocked(ctx context.Context, method string, params
 	}
 	payload = append(payload, '\n')
 	if _, err := c.stdin.Write(payload); err != nil {
-		c.cleanupLocked()
+		c.disconnectLocked()
 		return nil, fmt.Errorf("%w: write request: %v", ErrConnection, err)
 	}
 
 	res, err := c.readResponseLocked(ctx, id)
 	if err != nil && connectionDead(err) {
-		c.cleanupLocked()
+		c.disconnectLocked()
 	}
 	return res, err
 }
@@ -389,6 +554,9 @@ func (c *stdioClient) readResponseLocked(ctx context.Context, id int64) (json.Ra
 			return nil, ErrTimeout
 		}
 		return nil, ctx.Err()
+	case <-c.closeSignal:
+		c.teardownProcess()
+		return nil, ErrClosed
 	}
 }
 
@@ -417,8 +585,15 @@ func (c *stdioClient) scanResponse(id int64) (json.RawMessage, error) {
 		}
 		if msg.Method != "" {
 			// A server→client request or notification.
+			if msg.Method == "notifications/tools/list_changed" {
+				c.signalToolListChanged()
+			}
 			if msg.ID != nil {
-				c.replyErrorLocked(*msg.ID, jsonRPCErrMethodNotFound, "method not found")
+				if msg.Method == "ping" {
+					c.replyResultLocked(*msg.ID, map[string]any{})
+				} else {
+					c.replyErrorLocked(*msg.ID, jsonRPCErrMethodNotFound, "method not found")
+				}
 			}
 			continue
 		}
@@ -484,6 +659,21 @@ func (c *stdioClient) replyErrorLocked(id int64, code int, message string) {
 	_, _ = c.stdin.Write(payload)
 }
 
+// replyResultLocked answers a supported server-to-client request. The caller
+// must hold c.mu so the response cannot interleave with a foreground request.
+func (c *stdioClient) replyResultLocked(id int64, result any) {
+	payload, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"result":  result,
+	})
+	if err != nil {
+		return
+	}
+	payload = append(payload, '\n')
+	_, _ = c.stdin.Write(payload)
+}
+
 // stdioFactory is the default Factory implementation.
 type stdioFactory struct{}
 
@@ -492,4 +682,23 @@ type stdioFactory struct{}
 // synchronous and cannot fail for a well-formed command line.
 func (stdioFactory) New(ctx context.Context, cmd string, args []string) (Client, error) {
 	return newStdioClient(cmd, args), nil
+}
+
+// NewHTTP implements the optional HTTPFactory seam. StdioFactory is the
+// default factory for both transports so production wiring does not need a
+// second composition-root implementation.
+func (stdioFactory) NewHTTP(ctx context.Context, endpoint string, headers map[string]string) (Client, error) {
+	return NewStreamableHTTPClient(endpoint, headers)
+}
+
+// NewConfigured is the default factory's complete transport-aware constructor.
+func (stdioFactory) NewConfigured(ctx context.Context, server McpServer) (Client, error) {
+	switch strings.ToLower(strings.TrimSpace(server.Transport)) {
+	case "", "stdio":
+		return newConfiguredStdioClient(server), nil
+	case "streamable-http", "http", "https":
+		return newConfiguredStreamableHTTPClient(server)
+	default:
+		return nil, fmt.Errorf("mcp: unsupported transport %q", server.Transport)
+	}
 }

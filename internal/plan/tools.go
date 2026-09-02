@@ -28,6 +28,7 @@ import (
 	agenttools "github.com/jabing/shutu-agent/internal/tools"
 	"strings"
 
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 	"github.com/jabing/shutu-agent/internal/session"
 )
 
@@ -78,6 +79,14 @@ func (t *PlanTools) emit(typ string, data any) {
 	if t.onEvent != nil {
 		t.onEvent(typ, data)
 	}
+}
+
+func (t *PlanTools) emitContext(ctx context.Context, typ string, data any) error {
+	if runtime, ok := runtimectx.Get(ctx); ok && runtime.Emit != nil {
+		return runtime.Emit(typ, data)
+	}
+	t.emit(typ, data)
+	return nil
 }
 
 // readPlan fetches one plan for the plan_list tree renderer. The shipped
@@ -201,14 +210,16 @@ func (t PlanGoalTool) Execute(ctx context.Context, args any) (string, error) {
 	// plan/create is a log-only fact (D3); the created goal id/title are logged
 	// with the goal scope, and the returned text is what the loop logs as
 	// tool/result.
-	t.t.emit(session.EventPlanCreate, session.NewPlanCreate(string(ScopeGoal), g.ID, g.Title, nil, map[string]any{
+	if err := t.t.emitContext(ctx, session.EventPlanCreate, session.NewPlanCreate(string(ScopeGoal), g.ID, g.Title, nil, map[string]any{
 		"objective":     g.Objective,
 		"status":        g.Status,
 		"revision":      g.Revision,
 		"maxRounds":     g.MaxRounds,
 		"roundsStarted": g.RoundsStarted,
 		"createdAt":     g.CreatedAt,
-	}))
+	})); err != nil {
+		return "", fmt.Errorf("plan_goal: persist event: %w", err)
+	}
 	return fmt.Sprintf("created goal %s: %s", g.ID, g.Title), nil
 }
 
@@ -268,12 +279,14 @@ func (t PlanPlanTool) Execute(ctx context.Context, args any) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("plan_plan: %w", err)
 	}
-	t.t.emit(session.EventPlanCreate, session.NewPlanCreate(string(ScopePlan), p.ID, p.Title, nil, map[string]any{
+	if err := t.t.emitContext(ctx, session.EventPlanCreate, session.NewPlanCreate(string(ScopePlan), p.ID, p.Title, nil, map[string]any{
 		"goalId":    p.GoalID,
 		"status":    p.Status,
 		"createdAt": p.CreatedAt,
 		"steps":     p.Steps,
-	}))
+	})); err != nil {
+		return "", fmt.Errorf("plan_plan: persist event: %w", err)
+	}
 	return fmt.Sprintf("created plan %s under goal %s: %s (%d steps)", p.ID, p.GoalID, p.Title, len(p.Steps)), nil
 }
 
@@ -329,11 +342,13 @@ func (t PlanTodoTool) Execute(ctx context.Context, args any) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("plan_todo: %w", err)
 	}
-	t.t.emit(session.EventPlanCreate, session.NewPlanCreate(string(ScopeTodo), todo.ID, todo.Title, todo.Acceptance, map[string]any{
+	if err := t.t.emitContext(ctx, session.EventPlanCreate, session.NewPlanCreate(string(ScopeTodo), todo.ID, todo.Title, todo.Acceptance, map[string]any{
 		"planId":    a.PlanID,
 		"status":    todo.Status,
 		"createdAt": todo.CreatedAt,
-	}))
+	})); err != nil {
+		return "", fmt.Errorf("plan_todo: persist event: %w", err)
+	}
 	return fmt.Sprintf("added todo %s to plan %s: %s", todo.ID, a.PlanID, todo.Title), nil
 }
 
@@ -426,7 +441,9 @@ func (t PlanStatusTool) Execute(ctx context.Context, args any) (string, error) {
 			}
 		}
 	}
-	t.t.emit(session.EventPlanStatus, session.NewPlanStatus(a.Scope, a.ID, string(st), strings.TrimSpace(a.Reason)))
+	if err := t.t.emitContext(ctx, session.EventPlanStatus, session.NewPlanStatus(a.Scope, a.ID, string(st), strings.TrimSpace(a.Reason))); err != nil {
+		return "", fmt.Errorf("plan_status: persist event: %w", err)
+	}
 	return fmt.Sprintf("set %s %s status to %s", a.Scope, a.ID, st), nil
 }
 
@@ -456,7 +473,9 @@ func (t PlanListTool) Execute(ctx context.Context, args any) (string, error) {
 	}
 	// plan/list is a log-only fact (D3) carrying the number of goals in the
 	// returned tree.
-	t.t.emit(session.EventPlanList, session.NewPlanList(len(goals)))
+	if err := t.t.emitContext(ctx, session.EventPlanList, session.NewPlanList(len(goals))); err != nil {
+		return "", fmt.Errorf("plan_list: persist event: %w", err)
+	}
 	return t.t.renderTree(ctx, goals), nil
 }
 
@@ -506,6 +525,8 @@ func (t PlanRemoveTool) Execute(ctx context.Context, args any) (string, error) {
 	if err := t.t.e.Remove(ctx, a.Scope, a.ID); err != nil {
 		return "", fmt.Errorf("plan_remove: %w", err)
 	}
-	t.t.emit(session.EventPlanDelete, session.NewPlanDelete(a.Scope, a.ID))
+	if err := t.t.emitContext(ctx, session.EventPlanDelete, session.NewPlanDelete(a.Scope, a.ID)); err != nil {
+		return "", fmt.Errorf("plan_remove: persist event: %w", err)
+	}
 	return fmt.Sprintf("removed %s %s", a.Scope, a.ID), nil
 }

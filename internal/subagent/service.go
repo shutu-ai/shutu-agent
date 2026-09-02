@@ -42,6 +42,9 @@ type StartRequest struct {
 	// Model optionally overrides the provider's configured model. Providers
 	// that do not expose model routing may ignore this field explicitly.
 	Model string
+	// MaxTokens optionally overrides the inherited/provider output-token cap.
+	// Zero means inherit the parent cap (or use the provider default).
+	MaxTokens int
 	// OutputSchema requests a dsh-style structured result. Providers that
 	// support it expose a scoped structured_output tool to the child.
 	OutputSchema map[string]any
@@ -185,7 +188,7 @@ var (
 
 // NewRuntime returns an empty Runtime registry.
 func NewRuntime() Runtime {
-	return &runtime{providers: map[string]Provider{}}
+	return &runtime{providers: map[string]Provider{}, closeDone: make(chan struct{})}
 }
 
 // runtime is the default Runtime implementation: an in-memory, name-keyed
@@ -194,6 +197,7 @@ type runtime struct {
 	mu        sync.Mutex
 	providers map[string]Provider
 	closed    bool
+	closeDone chan struct{}
 }
 
 func (r *runtime) RegisterProvider(p Provider) error {
@@ -318,7 +322,11 @@ func (r *runtime) ListChildren(ctx context.Context, parentSessionID string) ([]C
 func (r *runtime) Close() error {
 	r.mu.Lock()
 	if r.closed {
+		done := r.closeDone
 		r.mu.Unlock()
+		if done != nil {
+			<-done
+		}
 		return nil
 	}
 	r.closed = true
@@ -328,12 +336,14 @@ func (r *runtime) Close() error {
 	}
 	r.mu.Unlock()
 
+	var first error
 	for _, p := range ps {
 		if c, ok := p.(closer); ok {
-			if err := c.Close(); err != nil {
-				return err
+			if err := c.Close(); err != nil && first == nil {
+				first = err
 			}
 		}
 	}
-	return nil
+	close(r.closeDone)
+	return first
 }

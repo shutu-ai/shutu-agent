@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/jabing/shutu-agent/internal/tools"
@@ -13,6 +14,7 @@ import (
 // stubSearchProvider 是内存 SearchProvider：按查询返回固定结果、记录收到的
 // 查询、可注入统一错误。
 type stubSearchProvider struct {
+	mu      sync.Mutex
 	results map[string]WebSearchResult
 	queries []string
 	err     error // 非 nil 时所有查询都返回该错误
@@ -21,6 +23,8 @@ type stubSearchProvider struct {
 func (f *stubSearchProvider) ID() string      { return "fake-search" }
 func (f *stubSearchProvider) Available() bool { return true }
 func (f *stubSearchProvider) Search(ctx context.Context, req WebSearchRequest) (WebSearchResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.queries = append(f.queries, req.Query)
 	if f.err != nil {
 		return WebSearchResult{}, f.err
@@ -59,6 +63,18 @@ func TestWebToolsDefaults(t *testing.T) {
 		wt.opts.SearchTimeoutMs != defaultSearchTimeoutMs || wt.opts.FetchTimeoutMs != defaultFetchTimeoutMs ||
 		wt.opts.FetchMaxOutputChars != defaultFetchMaxOutputChars {
 		t.Errorf("defaults not applied: %+v", wt.opts)
+	}
+}
+
+// TestWebCancellationClassification pins the explicit cancellation opt-in for
+// both network tools; their timeout contexts are derived from the registry ctx.
+func TestWebCancellationClassification(t *testing.T) {
+	wt := NewWebTools(NewEngine(), Options{}, nil)
+	for _, tool := range []any{wt.Search(), wt.Fetch()} {
+		classified, ok := tool.(interface{ CancellationAware() bool })
+		if !ok || !classified.CancellationAware() {
+			t.Fatalf("%T must explicitly classify cooperative cancellation", tool)
+		}
 	}
 }
 

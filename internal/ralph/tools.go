@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 	"github.com/jabing/shutu-agent/internal/session"
 )
 
@@ -40,6 +41,14 @@ func (t *RalphTool) emit(typ string, data any) {
 	if t.onEvent != nil {
 		t.onEvent(typ, data)
 	}
+}
+
+func (t *RalphTool) emitContext(ctx context.Context, typ string, data any) error {
+	if runtime, ok := runtimectx.Get(ctx); ok && runtime.Emit != nil {
+		return runtime.Emit(typ, data)
+	}
+	t.emit(typ, data)
+	return nil
 }
 
 func (RalphTool) Name() string { return RalphToolName }
@@ -104,7 +113,9 @@ func (t *RalphTool) execute(ctx context.Context, a struct {
 	if err != nil {
 		return agenttools.ToolResult{}, fmt.Errorf("ralph: %w", err)
 	}
-	t.emit(session.EventRalphRun, session.NewRalphRun(rep.Objective, rep.Rounds, rep.Done, rep.Blocked))
+	if err := t.emitContext(ctx, session.EventRalphRun, session.NewRalphRun(rep.Objective, rep.Rounds, rep.Done, rep.Blocked)); err != nil {
+		return agenttools.ToolResult{}, fmt.Errorf("ralph: persist event: %w", err)
+	}
 	value := canonicalResult(rep)
 	encoded, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {

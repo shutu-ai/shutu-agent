@@ -35,6 +35,32 @@ func TestAppendAssignsSeqAndType(t *testing.T) {
 	}
 }
 
+func TestAppendAtomicCommitsMultipleLogsAndRollsBackOnFailure(t *testing.T) {
+	left, right := New(), New()
+	var committed []Event
+	if err := AppendAtomic([]AtomicAppend{
+		{Log: left, Type: EventUserMessage, Data: NewUserMessage("left")},
+		{Log: right, Type: EventUserMessage, Data: NewUserMessage("right")},
+	}, func(events []Event) error {
+		committed = append(committed, events...)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(committed) != 2 || left.NextSeq() != 2 || right.NextSeq() != 2 {
+		t.Fatalf("atomic commit = events=%d leftNext=%d rightNext=%d", len(committed), left.NextSeq(), right.NextSeq())
+	}
+	if err := AppendAtomic([]AtomicAppend{
+		{Log: left, Type: EventUserMessage, Data: NewUserMessage("rejected-left")},
+		{Log: right, Type: EventUserMessage, Data: NewUserMessage("rejected-right")},
+	}, func([]Event) error { return errors.New("transaction unavailable") }); err == nil {
+		t.Fatal("failed atomic commit unexpectedly succeeded")
+	}
+	if left.NextSeq() != 2 || right.NextSeq() != 2 {
+		t.Fatalf("failed atomic commit mutated logs: leftNext=%d rightNext=%d", left.NextSeq(), right.NextSeq())
+	}
+}
+
 func TestLLMRequestStartDetailPreservesInspectorProjection(t *testing.T) {
 	payload := NewLLMRequestStartDetail("turn:1:step:1", llm.ChatRequest{
 		Provider: "deepseek", Model: "reasoner", ReasoningEffort: "high",
@@ -187,6 +213,19 @@ func TestRestoreRejectsNonMonotonicSeq(t *testing.T) {
 	}
 }
 
+func TestRestoreRejectsSequenceGap(t *testing.T) {
+	l := New()
+	if err := l.Restore([]Event{
+		{Seq: 1, Type: EventUserMessage},
+		{Seq: 3, Type: EventUserMessage},
+	}); err == nil {
+		t.Fatal("expected sequence gap error")
+	}
+	if len(l.Events()) != 0 {
+		t.Fatal("failed replay must not leave a partial log")
+	}
+}
+
 // TestAppendSinkPersistsEvent verifies the durable sink receives every
 // committed event (dispatch-m2: 事件追加写入).
 func TestAppendSinkPersistsEvent(t *testing.T) {
@@ -208,12 +247,59 @@ func TestAppendSinkPersistsEvent(t *testing.T) {
 // out of the log and fails the Append, so memory never drifts from disk.
 func TestAppendSinkErrorRollsBack(t *testing.T) {
 	l := New()
+	var observed int
+	l.SetObserver(func(Event) { observed++ })
 	l.SetSink(func(Event) error { return errors.New("disk full") })
 	if _, err := l.Append(EventUserMessage, NewUserMessage("hi")); err == nil {
 		t.Fatal("expected sink error")
 	}
 	if len(l.Events()) != 0 {
 		t.Fatalf("log has %d events after failed persist, want 0", len(l.Events()))
+	}
+	if observed != 0 {
+		t.Fatalf("observer received %d events after failed persist, want 0", observed)
+	}
+}
+
+func TestAppendPersistedNotifiesLiveObserverAfterAtomicCommit(t *testing.T) {
+	l := New()
+	var observed []Event
+	l.SetObserver(func(ev Event) { observed = append(observed, ev) })
+	ev := Event{Seq: 1, Type: EventUserMessage, Version: EventVersion, At: time.Now().UTC(), Data: json.RawMessage(`{"text":"atomic"}`)}
+	if err := l.AppendPersisted(ev); err != nil {
+		t.Fatalf("append persisted: %v", err)
+	}
+	if len(observed) != 1 || !reflect.DeepEqual(observed[0], ev) {
+		t.Fatalf("observed = %+v, want atomic event", observed)
+	}
+}
+
+func TestAppendPersistedAcceptsHistoricalZeroBasedFirstEvent(t *testing.T) {
+	l := New()
+	first := Event{Seq: 0, Type: EventTurnStart, Version: EventVersion, At: time.Now().UTC(), Data: json.RawMessage(`{"turn":1}`)}
+	if err := l.AppendPersisted(first); err != nil {
+		t.Fatalf("zero-based first event: %v", err)
+	}
+	second := Event{Seq: 1, Type: EventUserMessage, Version: EventVersion, At: time.Now().UTC(), Data: json.RawMessage(`{"text":"legacy"}`)}
+	if err := l.AppendPersisted(second); err != nil {
+		t.Fatalf("event after zero-based first: %v", err)
+	}
+	if got := l.NextSeq(); got != 2 {
+		t.Fatalf("next sequence = %d, want 2", got)
+	}
+}
+
+func TestObserverPanicCannotBreakDurableAppend(t *testing.T) {
+	l := New()
+	l.SetObserver(func(Event) { panic("telemetry consumer failed") })
+	if _, err := l.Append(EventUserMessage, NewUserMessage("still committed")); err != nil {
+		t.Fatalf("append returned observer panic: %v", err)
+	}
+	if events := l.Events(); len(events) != 1 || events[0].Type != EventUserMessage {
+		t.Fatalf("events after observer panic = %+v", events)
+	}
+	if err := l.AppendPersisted(Event{Seq: 2, Type: EventUserMessage, Version: EventVersion, At: time.Now().UTC(), Data: json.RawMessage(`{"text":"atomic"}`)}); err != nil {
+		t.Fatalf("append persisted returned observer panic: %v", err)
 	}
 }
 
@@ -310,9 +396,68 @@ func TestToolResultSpillRecordsLocator(t *testing.T) {
 	if d.Spill == nil || d.Spill.Locator != `D:\data\spill\s-x-7.txt` || d.Spill.Bytes != 100000 {
 		t.Fatalf("spill record = %+v", d.Spill)
 	}
+	if d.Message == nil || len(d.Message.Content) != 1 || d.Message.Content[0].Type != "tool-result" || d.Message.Content[0].ToolCallID != "call_9" {
+		t.Fatalf("tool result message = %+v, want one canonical tool-result block", d.Message)
+	}
+	if len(d.Message.Content[0].Content) != 1 || d.Message.Content[0].Content[0].Text != "head...[truncated; see spill]" {
+		t.Fatalf("nested tool result content = %+v", d.Message.Content[0].Content)
+	}
 	msgs := l.DeriveHistory()
 	if msgs[2].Text() != "head...[truncated; see spill]" {
 		t.Fatalf("derived tool content = %q", msgs[2].Text())
+	}
+}
+
+func TestToolResultRichImageUsesCanonicalAttachment(t *testing.T) {
+	ref := llm.ImageRef{ID: "att-1", MediaType: "image/png", Bytes: 12, Width: 2, Height: 3, Path: "private/path.png"}
+	payload := NewToolResultWithContentAt(1, 1, "call-image", "read_image", "image", []llm.ContentBlock{{Kind: llm.BlockImage, Image: ref}})
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	encoded := string(raw)
+	if !strings.Contains(encoded, `"attachmentId":"att-1"`) || strings.Contains(encoded, "private/path.png") || strings.Contains(encoded, `"Kind"`) {
+		t.Fatalf("non-canonical image result: %s", encoded)
+	}
+	l := New()
+	if _, err := l.Append(EventToolResult, payload); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	msgs := l.DeriveHistory()
+	if len(msgs) != 1 || len(msgs[0].Content) != 1 || msgs[0].Content[0].Kind != llm.BlockImage || msgs[0].Content[0].Image.ID != ref.ID {
+		t.Fatalf("derived rich tool result = %+v", msgs)
+	}
+}
+
+func TestDeriveHistoryAssistantPreservesRichContentBlocks(t *testing.T) {
+	l := New()
+	_, err := l.Append(EventAssistantMessage, map[string]any{
+		"message": map[string]any{
+			"role": "assistant",
+			"content": []any{
+				map[string]any{"type": "text", "text": "before"},
+				map[string]any{"type": "image", "attachment": map[string]any{
+					"attachmentId": "att-assistant", "mediaType": "image/png", "bytes": 12,
+				}},
+				map[string]any{"type": "vendor-card", "value": map[string]any{"ok": true}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("append: %v", err)
+	}
+	msgs := l.DeriveHistory()
+	if len(msgs) != 1 || len(msgs[0].Content) != 3 {
+		t.Fatalf("derived assistant content = %+v", msgs)
+	}
+	if msgs[0].Content[0].Kind != llm.BlockText || msgs[0].Content[0].Text != "before" {
+		t.Fatalf("derived assistant text = %+v", msgs[0].Content[0])
+	}
+	if msgs[0].Content[1].Kind != llm.BlockImage || msgs[0].Content[1].Image.ID != "att-assistant" {
+		t.Fatalf("derived assistant image = %+v", msgs[0].Content[1])
+	}
+	if msgs[0].Content[2].Kind != llm.ContentBlockKind("vendor-card") || string(msgs[0].Content[2].Raw) == "" {
+		t.Fatalf("derived assistant extension = %+v", msgs[0].Content[2])
 	}
 }
 
@@ -900,6 +1045,32 @@ func TestNextTurnUsesRestoredAndAppendedLifecycleAnchors(t *testing.T) {
 	}
 }
 
+func TestValidateLifecycleEnforcesTurnStepGrammar(t *testing.T) {
+	log := New()
+	for _, item := range []struct {
+		typ  string
+		data any
+	}{
+		{EventTurnStart, NewTurnStart()},
+		{EventStepStart, NewStepStart(1)},
+		{EventUserMessage, NewUserMessage("hello")},
+		{EventStepEnd, NewStepEnd(1, "completed", "")},
+		{EventTurnEnd, NewTurnEnd("completed", "")},
+	} {
+		if _, err := log.Append(item.typ, item.data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := ValidateLifecycle(log.Events()); err != nil {
+		t.Fatalf("valid lifecycle: %v", err)
+	}
+	bad := append([]Event(nil), log.Events()...)
+	bad[1], bad[2] = bad[2], bad[1]
+	if err := ValidateLifecycle(bad); err == nil {
+		t.Fatal("invalid step/user order was accepted")
+	}
+}
+
 func TestDeriveHistoryReplaceShadowingMixedEvents(t *testing.T) {
 	l := New()
 	// Shadowed range spans user, assistant (with a tool call) and tool/result.
@@ -1004,6 +1175,56 @@ func TestNewUserMessageReplaceJSONRoundTrip(t *testing.T) {
 	msgs := fresh.DeriveHistory()
 	if len(msgs) != 1 || msgs[0].Role != llm.RoleUser || msgs[0].Text() != "s" {
 		t.Fatalf("round-trip derived = %+v, want [user s]", msgs)
+	}
+}
+
+func TestAppendValidatesSurfaceProvenance(t *testing.T) {
+	duplicate := New()
+	chunk, err := duplicate.Append(EventAssistantChunk, NewAssistantChunkAt(1, 1, "x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := duplicate.Append(EventAssistantMessage, NewAssistantMessageAtWithUsageAndSources(
+		1, 1, "x", nil, "stop", "", llm.TokenUsage{}, []uint64{chunk.Seq, chunk.Seq},
+	)); err == nil || !strings.Contains(err.Error(), "repeats source seq") {
+		t.Fatalf("duplicate assistant provenance error = %v", err)
+	}
+
+	wrongType := New()
+	user, err := wrongType.Append(EventUserMessage, NewUserMessage("x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wrongType.Append(EventAssistantMessage, NewAssistantMessageAtWithUsageAndSources(
+		1, 1, "x", nil, "stop", "", llm.TokenUsage{}, []uint64{user.Seq},
+	)); err == nil || !strings.Contains(err.Error(), "cites user/message") {
+		t.Fatalf("wrong assistant provenance error = %v", err)
+	}
+
+	replacement := New()
+	shadowed, err := replacement.Append(EventUserMessage, NewUserMessage("old"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := replacement.Append(EventUserMessage, NewUserMessageReplaceWithSources("summary", int64(shadowed.Seq), int64(shadowed.Seq), []uint64{})); err == nil || !strings.Contains(err.Error(), "does not cite shadowed surface") {
+		t.Fatalf("missing replacement provenance error = %v", err)
+	}
+	for _, tc := range []struct {
+		name       string
+		start, end int64
+	}{
+		{name: "negative start", start: -1, end: 1},
+		{name: "reversed", start: 2, end: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			malformed := New()
+			if _, err := malformed.Append(EventUserMessage, NewUserMessage("old")); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := malformed.Append(EventUserMessage, NewUserMessageReplaceWithSources("summary", tc.start, tc.end, []uint64{1})); err == nil || !strings.Contains(err.Error(), "invalid range") {
+				t.Fatalf("invalid replacement range error = %v", err)
+			}
+		})
 	}
 }
 
@@ -1750,6 +1971,28 @@ func TestDeriveHistoryUserContentBlocksReserved(t *testing.T) {
 	}
 }
 
+func TestUserMessageContentBlockExtensionSurvivesWireReplay(t *testing.T) {
+	rawExtension := json.RawMessage(`{"type":"x-plugin/block","payload":{"opaque":true}}`)
+	log := New()
+	if _, err := log.Append(EventUserMessage, NewUserMessageWithBlocks("extension", []llm.ContentBlock{
+		{Kind: "x-plugin/block", Raw: rawExtension},
+	})); err != nil {
+		t.Fatal(err)
+	}
+	restored := New()
+	if err := restored.Restore(log.Events()); err != nil {
+		t.Fatal(err)
+	}
+	history := restored.DeriveHistory()
+	if len(history) != 1 || len(history[0].Content) != 1 {
+		t.Fatalf("history = %#v", history)
+	}
+	block := history[0].Content[0]
+	if block.Kind != "x-plugin/block" || string(block.Raw) != string(rawExtension) {
+		t.Fatalf("extension block = %#v", block)
+	}
+}
+
 // TestDeriveHistoryOldFormatReplayNoRegression verifies the D8 old-format
 // replay contract: legacy logs whose user/message and assistant/message rows
 // carry only plain text (no content/reasoning fields) fold into single text
@@ -1820,8 +2063,8 @@ func TestNewUserMessageWithBlocksImageRefOnly(t *testing.T) {
 	if len(d.Content) != 1 || d.Content[0].Kind != llm.BlockImage {
 		t.Fatalf("content = %+v, want one image block", d.Content)
 	}
-	if d.Content[0].Image != ref {
-		t.Fatalf("image = %+v, want ref %+v", d.Content[0].Image, ref)
+	if d.Content[0].Image.ID != ref.ID || d.Content[0].Image.MediaType != ref.MediaType || d.Content[0].Image.Path != "" {
+		t.Fatalf("image = %+v, want canonical ref without path %+v", d.Content[0].Image, ref)
 	}
 
 	// Append + derive: the block folds back into a user message with the image
@@ -1841,8 +2084,8 @@ func TestNewUserMessageWithBlocksImageRefOnly(t *testing.T) {
 	if !m.HasImage() {
 		t.Fatal("derived message must have an image block")
 	}
-	if len(m.Content) != 1 || m.Content[0].Kind != llm.BlockImage || m.Content[0].Image != ref {
-		t.Fatalf("derived content = %+v, want the image ref block", m.Content)
+	if len(m.Content) != 1 || m.Content[0].Kind != llm.BlockImage || m.Content[0].Image.ID != ref.ID || m.Content[0].Image.Path != "" {
+		t.Fatalf("derived content = %+v, want the canonical image ref block", m.Content)
 	}
 }
 

@@ -29,6 +29,10 @@ const (
 // run_command policy. It lives entirely in the tools package — the loop never
 // sees it (D4).
 type Policy struct {
+	// Profile is the model-facing capability profile represented by this
+	// policy snapshot (minimal, standard, or code). Execute does not use it
+	// for admission; it makes the catalog's projected profile auditable.
+	Profile string
 	// Enabled is the whitelist: only these tool names may execute. A name not
 	// listed is rejected at the Execute gate (未启用 ⇒ 拒绝执行).
 	Enabled []string
@@ -78,6 +82,7 @@ type CodeRunPolicy struct {
 // whitelisted, a 30s deadline, a 64KB output cap, and spill to DefaultSpillDir.
 func DefaultPolicy() Policy {
 	return Policy{
+		Profile:     config.ModeStandard,
 		Enabled:     []string{"get_time", "read"},
 		Timeout:     DefaultTimeout,
 		OutputLimit: DefaultOutputLimit,

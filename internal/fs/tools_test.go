@@ -1,13 +1,19 @@
 package fs
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"image"
+	"image/color"
+	"image/png"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/jabing/shutu-agent/internal/attachment"
 	"github.com/jabing/shutu-agent/internal/session"
 )
 
@@ -22,12 +28,31 @@ func TestDecodeWebPConfigReadsVP8XCanvas(t *testing.T) {
 	data[24], data[25], data[26] = 0x3f, 0x01, 0x00 // 320px
 	data[27], data[28], data[29] = 0xef, 0x00, 0x00 // 240px
 
-	config, err := decodeWebPConfig(data)
+	width, height, err := attachment.ProbeImage(data, "image/webp")
 	if err != nil {
 		t.Fatalf("decode WebP config: %v", err)
 	}
-	if config.Width != 320 || config.Height != 240 {
-		t.Fatalf("WebP config = %dx%d, want 320x240", config.Width, config.Height)
+	if width != 320 || height != 240 {
+		t.Fatalf("WebP config = %dx%d, want 320x240", width, height)
+	}
+}
+
+func TestReadImageUsesSharedAdmissionLimits(t *testing.T) {
+	svc, ft, _ := newToolsWithEvents(t)
+	ft.SetImageLimits(attachment.Limits{MaxImageDimension: 1}, 1<<20)
+	img := image.NewRGBA(image.Rect(0, 0, 2, 1))
+	img.Set(0, 0, color.White)
+	var data bytes.Buffer
+	if err := png.Encode(&data, img); err != nil {
+		t.Fatalf("encode fixture: %v", err)
+	}
+	path := filepath.Join(svc.Root(), "oversized.png")
+	if err := os.WriteFile(path, data.Bytes(), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	_, err := ft.ReadImage().ExecuteResult(context.Background(), map[string]any{"file_path": "oversized.png"})
+	if err == nil || !strings.Contains(err.Error(), "dimension") {
+		t.Fatalf("read_image error = %v, want shared dimension limit", err)
 	}
 }
 

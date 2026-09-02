@@ -3,6 +3,7 @@ package loop
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -11,6 +12,35 @@ import (
 	"github.com/jabing/shutu-agent/internal/prompt"
 	"github.com/jabing/shutu-agent/internal/session"
 )
+
+func TestRunPreStepInjectorWithErrorStopsBeforeProvider(t *testing.T) {
+	wantErr := errors.New("durable preparation failed")
+	model := &scriptedLLM{steps: [][]llm.StreamEvent{{
+		{Kind: llm.StreamTextDelta, Text: "must not run"},
+		{Kind: llm.StreamFinish, FinishReason: "stop"},
+	}}}
+	agentLoop := New(Config{
+		LLM:    model,
+		Log:    session.New(),
+		Tools:  newTestRegistry(t),
+		Prompt: prompt.New("You are helpful."),
+		Model:  "deepseek-chat",
+		PreStep: []PreStepInjector{{
+			Name: "durable-preparation",
+			InjectWithError: func(context.Context, string) ([]llm.Message, error) {
+				return nil, wantErr
+			},
+		}},
+	})
+
+	err := agentLoop.Run(context.Background(), "hello")
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("run error = %v, want %v", err, wantErr)
+	}
+	if len(model.calls) != 0 {
+		t.Fatalf("provider calls = %d, want 0 after durable pre-step failure", len(model.calls))
+	}
+}
 
 // TestRunPreStepInjectorsInOrder verifies that multiple PreStep injectors run
 // in registration order and their context messages are persisted after the
@@ -112,6 +142,43 @@ func TestRunPreStepIsRebuiltForEveryStep(t *testing.T) {
 	}
 }
 
+func TestRunPreStepWaterfallRunsForToolContinuationSteps(t *testing.T) {
+	model := &scriptedLLM{steps: [][]llm.StreamEvent{
+		{{Kind: llm.StreamFinish, FinishReason: "tool_calls", ToolCalls: []llm.ToolCall{{ID: "call_1", Name: "get_time", Arguments: "{}"}}}},
+		{{Kind: llm.StreamTextDelta, Text: "done"}, {Kind: llm.StreamFinish, FinishReason: "stop"}},
+	}}
+	log := session.New()
+	seen := make([]int, 0, 2)
+	agentLoop := New(Config{
+		LLM:    model,
+		Log:    log,
+		Tools:  newTestRegistry(t),
+		Prompt: prompt.New("You are helpful."),
+		Model:  "deepseek-chat",
+		PreStepHooks: []PreStepHook{func(ctx context.Context, payload PreStepPayload, next PreStepNext) (PreStepDecision, error) {
+			seen = append(seen, payload.Step)
+			decision, err := next(ctx, payload)
+			if err != nil {
+				return PreStepDecision{}, err
+			}
+			if payload.Step == 2 {
+				decision.Messages = append(decision.Messages, llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("continuation-context")}})
+			}
+			return decision, nil
+		}},
+	})
+
+	if err := agentLoop.Run(context.Background(), "what time is it"); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(seen) != 2 || seen[0] != 1 || seen[1] != 2 {
+		t.Fatalf("pre-step hook steps = %v, want [1 2]", seen)
+	}
+	if len(model.calls) != 2 || !strings.Contains(model.calls[1].Messages[len(model.calls[1].Messages)-1].Text(), "continuation-context") {
+		t.Fatalf("continuation request = %+v", model.calls)
+	}
+}
+
 // TestRunPreStepOrdering verifies that registered injectors retain their order.
 func TestRunPreStepOrdering(t *testing.T) {
 	model := &scriptedLLM{steps: [][]llm.StreamEvent{{
@@ -176,10 +243,10 @@ func TestRuntimeContextUsesDshOrderAndSource(t *testing.T) {
 			Plugin string `json:"plugin"`
 		} `json:"source"`
 	}
-	if err := json.Unmarshal(log.Events()[2].Data, &runtimeSource); err != nil {
+	if err := json.Unmarshal(log.Events()[3].Data, &runtimeSource); err != nil {
 		t.Fatalf("runtime event: %v", err)
 	}
-	if err := json.Unmarshal(log.Events()[3].Data, &catalogSource); err != nil {
+	if err := json.Unmarshal(log.Events()[4].Data, &catalogSource); err != nil {
 		t.Fatalf("catalog event: %v", err)
 	}
 	if runtimeSource.Source == nil || runtimeSource.Source.Kind != "plugin" || runtimeSource.Source.Plugin != "@shutu-ai/dsh-system-prompt" {

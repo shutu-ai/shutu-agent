@@ -60,7 +60,7 @@ func (s *Store) Read(ref llm.ImageRef) ([]byte, error)
 type MultimodalConfig struct {
     // Enabled 门：false 时 /attach 不可用、图片 block 不序列化（D10）。
     Enabled bool `yaml:"enabled"`
-    // MaxImageBytes 单图原始字节上限（默认 10MiB）。
+    // MaxImageBytes 单图原始字节上限（默认 3.5MiB）。
     MaxImageBytes int `yaml:"max_image_bytes"`
 }
 // LLMConfig 增加：
@@ -68,7 +68,7 @@ type MultimodalConfig struct {
 //   Multimodal MultimodalConfig `yaml:"multimodal"`
 ```
 
-- 默认：`multimodal.enabled=false`；`model_input_modalities` 缺省 `text`；`multimodal.max_image_bytes` 缺省 10MiB。
+- 默认：`multimodal.enabled=false`；`model_input_modalities` 缺省 `text`；`multimodal.max_image_bytes` 缺省 3.5MiB；批量上限为 20 张/100MiB，解码像素上限 40M、单边上限 2000px。
 - config.yaml `llm:` 段补 `model_input_modalities` 与 `multimodal:` 子段注释（含"默认关 D10 / 图片只存引用"说明）。
 
 ## 4. cmd/pa 接线契约

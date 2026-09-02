@@ -9,6 +9,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/jabing/shutu-agent/internal/config"
@@ -25,10 +26,26 @@ func (a *app) registerFsSearch() error {
 	if !config.Enabled(a.cfg.FsSearch.Enabled) {
 		return nil
 	}
-	if err := a.reg.Register(fssearch.NewGrepToolForCWD(a.sessionCWD)); err != nil {
+	grep := fssearch.NewGrepToolForCWD(a.sessionCWD)
+	grep.CwdContextFunc = func(ctx context.Context) string { return a.sessionCWDFor(a.runtimeSessionID(ctx)) }
+	grep.RootContextFunc = func(ctx context.Context) string {
+		if a.runtimeSessionID(ctx) == "" {
+			return "" // preserve standalone embedders without an addressed session
+		}
+		return a.sessionCWDFor(a.runtimeSessionID(ctx))
+	}
+	if err := a.reg.Register(grep); err != nil {
 		return fmt.Errorf("pa: register %s: %w", fssearch.GrepToolName, err)
 	}
-	if err := a.reg.Register(fssearch.NewGlobToolForCWD(a.sessionCWD)); err != nil {
+	glob := fssearch.NewGlobToolForCWD(a.sessionCWD)
+	glob.CwdContextFunc = func(ctx context.Context) string { return a.sessionCWDFor(a.runtimeSessionID(ctx)) }
+	glob.RootContextFunc = func(ctx context.Context) string {
+		if a.runtimeSessionID(ctx) == "" {
+			return ""
+		}
+		return a.sessionCWDFor(a.runtimeSessionID(ctx))
+	}
+	if err := a.reg.Register(glob); err != nil {
 		return fmt.Errorf("pa: register %s: %w", fssearch.GlobToolName, err)
 	}
 	return nil

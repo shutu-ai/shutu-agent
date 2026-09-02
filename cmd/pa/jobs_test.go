@@ -3,12 +3,19 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/jabing/shutu-agent/internal/agent"
 	"github.com/jabing/shutu-agent/internal/config"
 	"github.com/jabing/shutu-agent/internal/jobs"
+	"github.com/jabing/shutu-agent/internal/observability"
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/jabing/shutu-agent/internal/store"
 	"github.com/jabing/shutu-agent/internal/tools"
 )
 
@@ -20,6 +27,38 @@ func makeJobsApp(enabled bool) *app {
 		reg:       tools.New(),
 		log:       session.New(),
 		currentID: "s-test",
+	}
+}
+
+func TestAppBackgroundJobSpanRetainsInitiatingCorrelation(t *testing.T) {
+	a := &app{tracer: observability.NewTracer(8), jobTraceSpans: make(map[string]*observability.Span)}
+	settled := make(chan struct{})
+	l := jobs.NewLocal(jobs.LocalOpts{
+		OnStarted: a.onJobStarted,
+		OnSettled: func(snap jobs.JobSnapshot, _ string) {
+			a.finishJobSpan(snap)
+			close(settled)
+		},
+	})
+	defer l.Close()
+	want := runtimectx.Correlation{AgentID: "agent-job", SessionID: "session-job", TurnID: "turn:1", StepID: "step:1", RequestID: "req-job", CallID: "call-job", GenerationID: "generation-job"}
+	ctx := runtimectx.WithCorrelation(context.Background(), want)
+	id, err := l.Start(ctx, jobs.JobStart{Kind: "bash", Label: "background", OwnerSession: want.SessionID,
+		Run: func(context.Context) (jobs.JobOutcome, error) {
+			return jobs.JobOutcome{Status: jobs.StatusCompleted}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	select {
+	case <-settled:
+	case <-time.After(time.Second):
+		t.Fatal("job settlement telemetry timed out")
+	}
+	spans := a.tracer.Spans()
+	if len(spans) != 1 || spans[0].Name != "job.bash" || spans[0].Correlation != want || spans[0].EndedAt.IsZero() {
+		t.Fatalf("job spans = %+v, want one completed correlated span for %s", spans, id)
 	}
 }
 
@@ -122,5 +161,140 @@ func TestRegisterJobsEnabledRegistersAndValidates(t *testing.T) {
 	}
 	if _, err := app.reg.Execute(context.Background(), "job_output", json.RawMessage(`{"job_id":"`+jobID+`","wait":true}`)); err != nil {
 		t.Fatalf("job_output via registry: %v", err)
+	}
+}
+
+func TestEnsureJobDoneIsIdempotentAcrossConcurrentObservers(t *testing.T) {
+	app := makeJobsApp(true)
+	snap := jobs.JobSnapshot{ID: "bash-1", Kind: jobs.Kind("bash"), Status: jobs.StatusCompleted, Detail: "exit 0"}
+	const observers = 32
+	var wg sync.WaitGroup
+	for i := 0; i < observers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := app.ensureJobDone(app.log, snap, "output"); err != nil {
+				t.Errorf("ensureJobDone: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := countEvent(app.log, session.EventJobDone); got != 1 {
+		t.Fatalf("job/done events = %d, want exactly one", got)
+	}
+}
+
+func TestJobSettlementPersistsBeforeShutdownSkipsLiveWake(t *testing.T) {
+	app := makeJobsApp(true)
+	app.agentRegistry = agent.NewRegistry()
+	app.runtimeLogs = map[string]*session.Log{"owner": app.log}
+	app.currentID = "other"
+	app.beginShutdown()
+	snap := jobs.JobSnapshot{ID: "bash-shutdown-1", Kind: jobs.Kind("bash"), OwnerSession: "owner", Status: jobs.StatusCompleted}
+	app.onJobSettled(snap, "done")
+	if got := countEvent(app.log, session.EventJobDone); got != 1 {
+		t.Fatalf("shutdown settlement job/done count = %d, want one", got)
+	}
+	if err := app.agentRegistry.CloseAll(); err != nil {
+		t.Fatalf("CloseAll: %v", err)
+	}
+}
+
+// TestJobCompletionMaterializesAcrossSQLiteApps closes the persisted-owner
+// boundary left by the in-memory receipt tests. The first app commits only the
+// durable job/done fact. A second app reconstructs the owner from SQLite and
+// materializes its quiet inbox receipt through the live durable sink. A third
+// store reader then proves exactly one job receipt and exactly one owner wake
+// were persisted.
+func TestJobCompletionMaterializesAcrossSQLiteApps(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "job-owner-cold.db")
+
+	firstStore, err := store.OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := firstStore.CreateSession(ctx, "cold-owner", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	first := &app{store: firstStore, baseCtx: ctx}
+	firstLog, err := first.sessionLogForAgent(ctx, "cold-owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap := jobs.JobSnapshot{
+		ID: "bash-cold", Kind: jobs.Kind("bash"), OwnerSession: "cold-owner",
+		Status: jobs.StatusCompleted, Detail: "exit 0",
+	}
+	if err := first.ensureJobDone(firstLog, snap, "cold output"); err != nil {
+		t.Fatal(err)
+	}
+	if err := firstStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	secondStore, err := store.OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := &app{
+		store:   secondStore,
+		baseCtx: ctx,
+		cfg: config.Config{Jobs: config.JobsConfig{
+			CompletionDelivery:        "quiet",
+			MaxConcurrentJobsPerOwner: 2,
+		}},
+		agentRegistry: agent.NewRegistry(),
+	}
+	handle, err := second.sessionAgent("cold-owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := handle.Agent().Inbox().PendingMessages()
+	if len(pending) != 1 || pending[0].Kind != agent.MessageInjection ||
+		pending[0].Metadata["dedupe_key"] != "job:bash-cold" {
+		t.Fatalf("cold owner inbox = %+v, want one quiet job:bash-cold injection", pending)
+	}
+	if err := handle.WhenIdle(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.agentRegistry.CloseAll(); err != nil {
+		t.Fatal(err)
+	}
+	if err := secondStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	thirdStore, err := store.OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = thirdStore.Close() }()
+	events, err := thirdStore.LoadSession(ctx, "cold-owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobDone, inboxSpliced := 0, 0
+	for _, event := range events {
+		switch event.Type {
+		case session.EventJobDone:
+			jobDone++
+		case session.EventAgentInboxSpliced:
+			inboxSpliced++
+		}
+	}
+	if jobDone != 1 || inboxSpliced != 1 {
+		t.Fatalf("durable counts job/done=%d inbox/spliced=%d, want 1/1", jobDone, inboxSpliced)
+	}
+	inboxEvents, err := replaySessionInbox(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inserted := 0
+	for _, event := range inboxEvents {
+		inserted += len(event.Inserted)
+	}
+	if inserted != 1 {
+		t.Fatalf("durable inserted owner receipts = %d, want 1", inserted)
 	}
 }

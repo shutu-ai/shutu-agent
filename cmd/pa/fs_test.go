@@ -103,7 +103,7 @@ func TestRegisterFsEnabledRegistersAndValidates(t *testing.T) {
 		t.Fatalf("write via registry: %v", err)
 	}
 	if !hasEvent(a.log, session.EventFsWrite) {
-		t.Fatal("fs/write event missing from the session log after write")
+		t.Fatalf("fs/write event missing from the session log after write; events=%+v", a.log.Events())
 	}
 	if _, err := a.reg.Execute(context.Background(), "read", json.RawMessage(`{"file_path":"notes.txt"}`)); err != nil {
 		t.Fatalf("read via registry: %v", err)

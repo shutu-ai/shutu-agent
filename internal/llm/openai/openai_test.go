@@ -133,6 +133,26 @@ func TestAvailable(t *testing.T) {
 	}
 }
 
+func TestHTTPFailureUsesOpenAIProviderLabel(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":{"message":"bad key"}}`, http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	p := New(Config{BaseURL: srv.URL, APIKey: "k", DisableRetry: true})
+	_, err := p.Stream(context.Background(), llm.ChatRequest{Messages: []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("hi")}}}})
+	if err == nil {
+		t.Fatal("expected HTTP failure")
+	}
+	facts, ok := llm.FailureFacts(err)
+	if !ok || facts.Code != "AUTH" {
+		t.Fatalf("failure facts = %+v, ok=%v", facts, ok)
+	}
+	if !strings.HasPrefix(facts.Message, "openai:") {
+		t.Fatalf("failure message = %q, want openai label", facts.Message)
+	}
+}
+
 // TestStreamImageRequestThroughOpenAI verifies the M8-3b image path goes
 // through the openai provider end to end (dispatch-m8-3b §7: openai 委托
 // deepseek 后由 deepseek 测试覆盖，openai 补一个带图走通): with SupportsImages=true an
@@ -184,5 +204,32 @@ func TestStreamImageRequestThroughOpenAI(t *testing.T) {
 	iu, _ := img["image_url"].(map[string]any)
 	if url, _ := iu["url"].(string); !strings.HasPrefix(url, "data:image/png;base64,") {
 		t.Fatalf("data URL = %q, want the data:image/png;base64, prefix", url)
+	}
+}
+
+func TestStreamUsesExplicitModelDefaultMaxTokens(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.Header().Set("content-type", "text/event-stream")
+		_, _ = w.Write([]byte(sse(`{"choices":[{"delta":{},"finish_reason":"stop"}]}`, "[DONE]")))
+	}))
+	defer srv.Close()
+	p := New(Config{BaseURL: srv.URL, APIKey: "k", ModelCatalog: []llm.ModelInfo{{ID: "model", DefaultMaxTokens: 777}}})
+	reader, err := p.Stream(context.Background(), llm.ChatRequest{Model: "model", Messages: []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("hi")}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		_, nextErr := reader.Next()
+		if errors.Is(nextErr, io.EOF) {
+			break
+		}
+		if nextErr != nil {
+			t.Fatal(nextErr)
+		}
+	}
+	if got["max_tokens"] != float64(777) {
+		t.Fatalf("max_tokens = %#v, want 777", got["max_tokens"])
 	}
 }

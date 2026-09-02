@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/jabing/shutu-agent/internal/pathsecure"
 )
 
 // localFS is the default FileService backend (ADR 决策 M6f / dispatch-m6f-3
@@ -17,10 +19,11 @@ import (
 // closed flag (idempotent) and operations after Close are rejected with
 // ErrClosed.
 type localFS struct {
-	root   string // absolute, cleaned allowed root
-	rootFn func() string
-	mu     sync.Mutex
-	closed bool
+	root          string // absolute, cleaned allowed root
+	rootFn        func() string
+	rootContextFn func(context.Context) string
+	mu            sync.Mutex
+	closed        bool
 }
 
 // NewLocalFS returns a local FileService constrained to root. An empty root
@@ -47,10 +50,22 @@ func NewLocalFSForRoot(root func() string) *localFS {
 	return &localFS{rootFn: root}
 }
 
+func NewLocalFSForRootContext(root func(context.Context) string) *localFS {
+	return &localFS{rootContextFn: root}
+}
+
 // Root returns the absolute, cleaned allowed root.
 func (l *localFS) Root() string {
+	return l.rootFor(nil)
+}
+
+func (l *localFS) RootForContext(ctx context.Context) string { return l.rootFor(ctx) }
+
+func (l *localFS) rootFor(ctx context.Context) string {
 	root := l.root
-	if l.rootFn != nil {
+	if ctx != nil && l.rootContextFn != nil {
+		root = l.rootContextFn(ctx)
+	} else if l.rootFn != nil {
 		root = l.rootFn()
 	}
 	if root == "" {
@@ -74,7 +89,7 @@ func (l *localFS) Read(ctx context.Context, path string, maxSize int) (string, e
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	full, err := l.resolve(path)
+	full, err := l.resolve(ctx, path)
 	if err != nil {
 		return "", err
 	}
@@ -111,7 +126,7 @@ func (l *localFS) ReadBytes(ctx context.Context, path string, maxSize int) ([]by
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	full, err := l.resolve(path)
+	full, err := l.resolve(ctx, path)
 	if err != nil {
 		return nil, err
 	}
@@ -149,7 +164,7 @@ func (l *localFS) Fingerprint(ctx context.Context, path string) (string, error) 
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	full, err := l.resolve(path)
+	full, err := l.resolve(ctx, path)
 	if err != nil {
 		return "", err
 	}
@@ -181,12 +196,12 @@ func (l *localFS) Write(ctx context.Context, path, content string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	full, err := l.resolve(path)
+	full, err := l.resolve(ctx, path)
 	if err != nil {
 		return err
 	}
 	dir := filepath.Dir(full)
-	root := l.Root()
+	root := l.rootFor(ctx)
 	if dir != root && dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
@@ -205,7 +220,7 @@ func (l *localFS) List(ctx context.Context, dir string) ([]Entry, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	full, err := l.resolve(dir)
+	full, err := l.resolve(ctx, dir)
 	if err != nil {
 		return nil, err
 	}
@@ -214,6 +229,10 @@ func (l *localFS) List(ctx context.Context, dir string) ([]Entry, error) {
 		return nil, err
 	}
 	out := make([]Entry, 0, len(entries))
+	root := l.rootFor(ctx)
+	if resolved, resolveErr := pathsecure.ResolveExisting(root); resolveErr == nil {
+		root = filepath.Clean(resolved)
+	}
 	for _, de := range entries {
 		info, err := de.Info()
 		if err != nil {
@@ -221,7 +240,6 @@ func (l *localFS) List(ctx context.Context, dir string) ([]Entry, error) {
 			// rather than failing the whole listing.
 			continue
 		}
-		root := l.Root()
 		rel, rerr := filepath.Rel(root, filepath.Join(full, de.Name()))
 		if rerr != nil {
 			continue
@@ -238,23 +256,77 @@ func (l *localFS) List(ctx context.Context, dir string) ([]Entry, error) {
 }
 
 // resolve maps a caller path to an absolute path inside the root, or rejects
-// it with ErrPathOutsideRoot. A relative path is joined under the root (Join
-// cleans, so ".." collapses) and must still land inside it; an absolute path
-// is cleaned and accepted only when it is already inside the root.
-func (l *localFS) resolve(path string) (string, error) {
-	root := l.Root()
+// it with ErrPathOutsideRoot. It checks both the lexical path and the real
+// path of every existing component. A missing final path is allowed for
+// Write, but its nearest existing ancestor must still resolve inside root and
+// a dangling final symlink is rejected so a later write cannot escape.
+func (l *localFS) resolve(ctx context.Context, path string) (string, error) {
+	root := l.rootFor(ctx)
+	rootReal := root
+	if resolved, err := pathsecure.ResolveExisting(root); err == nil {
+		rootReal = filepath.Clean(resolved)
+	}
+	if abs, err := filepath.Abs(rootReal); err == nil {
+		rootReal = filepath.Clean(abs)
+	}
 	if filepath.IsAbs(path) {
 		full := filepath.Clean(path)
 		if !within(root, full) {
 			return "", ErrPathOutsideRoot
 		}
-		return full, nil
+		return l.resolveRealPath(full, rootReal)
 	}
 	full := filepath.Join(root, path)
 	if !within(root, full) {
 		return "", ErrPathOutsideRoot
 	}
-	return full, nil
+	return l.resolveRealPath(full, rootReal)
+}
+
+func (l *localFS) resolveRealPath(full, root string) (string, error) {
+	if resolved, err := pathsecure.ResolveExisting(full); err == nil {
+		resolved = filepath.Clean(resolved)
+		if !within(root, resolved) {
+			return "", ErrPathOutsideRoot
+		}
+		return resolved, nil
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+
+	// A new file may have missing parents. Find the nearest existing ancestor
+	// and check its real path; reject a dangling symlink at the final name.
+	if info, err := os.Lstat(full); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return "", ErrPathOutsideRoot
+	}
+	ancestor := filepath.Dir(full)
+	for {
+		info, err := os.Lstat(ancestor)
+		if err == nil {
+			if !info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+				return "", os.ErrNotExist
+			}
+			resolved, resolveErr := pathsecure.ResolveExisting(ancestor)
+			if resolveErr != nil {
+				return "", resolveErr
+			}
+			if targetInfo, statErr := os.Stat(resolved); statErr != nil || !targetInfo.IsDir() {
+				return "", os.ErrNotExist
+			}
+			if !within(root, filepath.Clean(resolved)) {
+				return "", ErrPathOutsideRoot
+			}
+			return full, nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		next := filepath.Dir(ancestor)
+		if next == ancestor {
+			return "", os.ErrNotExist
+		}
+		ancestor = next
+	}
 }
 
 // within reports whether p is root itself or lexically inside it (a cleaned

@@ -383,3 +383,30 @@ func TestDeepSeekSearchOnRequestBlocksDispatch(t *testing.T) {
 		t.Fatal("HTTP request dispatched despite OnRequest error")
 	}
 }
+
+func TestDeepSeekSearchOnRequestContextPreservesCallerContext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(successJSON))
+	}))
+	defer srv.Close()
+
+	type contextKey string
+	const key contextKey = "session"
+	var got any
+	p := NewDeepSeekProvider(Config{
+		APIKey:  "k",
+		BaseURL: srv.URL,
+		OnRequestContext: func(ctx context.Context, _ SearchRequestEvent) error {
+			got = ctx.Value(key)
+			return nil
+		},
+	})
+	ctx := context.WithValue(context.Background(), key, "session-42")
+	if _, err := p.Search(ctx, WebSearchRequest{Query: "q"}); err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if got != "session-42" {
+		t.Fatalf("callback context value = %#v, want session-42", got)
+	}
+}

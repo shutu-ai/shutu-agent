@@ -156,3 +156,14 @@ func TestCWDAndToolRelations(t *testing.T) {
 		t.Fatalf("cwd isolation err = %v", err)
 	}
 }
+
+func TestContextCurrentResolverDoesNotFallBackToGlobalSelection(t *testing.T) {
+	backend := fakeBackend{metas: []store.SessionMeta{{ID: "legacy", WorkspaceID: "w"}}}
+	ts := NewToolsWithConfigContext(backend, func(context.Context) string { return "" }, 10, time.Second)
+	if got := ts.currentID(context.Background()); got != "" {
+		t.Fatalf("context-bound current id = %q, want empty", got)
+	}
+	if _, err := ts.Search().Execute(context.Background(), json.RawMessage(`{"query":"anything"}`)); err == nil || !strings.Contains(err.Error(), "current session is unavailable") {
+		t.Fatalf("context-bound search error = %v", err)
+	}
+}

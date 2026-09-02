@@ -3,12 +3,16 @@ package subagent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/jabing/shutu-agent/internal/llm"
 	"github.com/jabing/shutu-agent/internal/prompt"
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 	"github.com/jabing/shutu-agent/internal/tools"
 )
 
@@ -64,6 +68,89 @@ func TestDSHAgentControlSurface(t *testing.T) {
 	}
 }
 
+// TestSubagentCancellationClassification makes the lifecycle distinction
+// explicit: wait observes the caller context, while foreground spawn returns
+// from a child that intentionally has an independent lifecycle.
+func TestSubagentCancellationClassification(t *testing.T) {
+	model := &scriptedLLM{steps: [][]llm.StreamEvent{{{Kind: llm.StreamFinish, FinishReason: "stop"}}}}
+	st := testBundle(t, model, 8, nil)
+	for _, tool := range []any{st.WaitAgent()} {
+		classified, ok := tool.(interface{ CancellationAware() bool })
+		if !ok || !classified.CancellationAware() {
+			t.Fatalf("%T must classify its bounded wait as cancellable", tool)
+		}
+	}
+	for _, tool := range []any{st.Spawn(), st.Fork()} {
+		if _, ok := tool.(interface{ CancellationAware() bool }); ok {
+			t.Fatalf("%T must not claim caller-context cancellation for an independently owned child", tool)
+		}
+	}
+}
+
+type restoredTeammateDirectory struct {
+	sent, quiet, followed, cancelled bool
+}
+
+func (d *restoredTeammateDirectory) List(context.Context, string) ([]Teammate, error) {
+	return []Teammate{{ID: "team:parent:researcher", Label: "researcher", Running: true, Continuable: true}}, nil
+}
+
+func (d *restoredTeammateDirectory) Direct(_ context.Context, parent, target string) (Teammate, error) {
+	_ = parent
+	if target != "team:parent:researcher" && target != "researcher" {
+		return Teammate{}, errors.New("unknown teammate")
+	}
+	return Teammate{
+		ID: "team:parent:researcher", Label: "researcher", Running: true, Continuable: true,
+		Send:      func(context.Context, string) error { d.sent = true; return nil },
+		SendQuiet: func(context.Context, string) error { d.quiet = true; return nil },
+		Followup:  func(context.Context, string) error { d.followed = true; return nil },
+		Cancel:    func(string) error { d.cancelled = true; return nil },
+	}, nil
+}
+
+func (*restoredTeammateDirectory) Parent(_ context.Context, id string) (string, bool, error) {
+	if id == "team:parent:researcher" {
+		return "sess-1", true, nil
+	}
+	return "", false, nil
+}
+
+func TestRestoredTeammateDirectoryFeedsControlPlane(t *testing.T) {
+	model := &scriptedLLM{steps: [][]llm.StreamEvent{{{Kind: llm.StreamFinish, FinishReason: "stop"}}}}
+	st := testBundle(t, model, 8, nil)
+	directory := &restoredTeammateDirectory{}
+	st.SetTeammateDirectory(directory)
+	ctx := context.Background()
+
+	list, err := st.ListAgents().ExecuteResult(ctx, json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("list_agents restored: %v", err)
+	}
+	entries := list.Value.([]any)
+	if len(entries) != 1 || entries[0].(map[string]any)["id"] != "team:parent:researcher" {
+		t.Fatalf("restored list = %#v", list.Value)
+	}
+	if _, err := st.DshSend().ExecuteResult(ctx, json.RawMessage(`{"target":"researcher","message":"quiet update"}`)); err != nil {
+		t.Fatalf("send_message restored: %v", err)
+	}
+	if !directory.quiet {
+		t.Fatal("send_message did not use the quiet restored-member callback")
+	}
+	if _, err := st.FollowupTask().ExecuteResult(ctx, json.RawMessage(`{"target":"researcher","message":"wake"}`)); err != nil {
+		t.Fatalf("followup_task restored: %v", err)
+	}
+	if !directory.followed {
+		t.Fatal("followup_task did not use the restored-member callback")
+	}
+	if _, err := st.Interrupt().ExecuteResult(ctx, json.RawMessage(`{"agent_id":"team:parent:researcher"}`)); err != nil {
+		t.Fatalf("interrupt_agent restored: %v", err)
+	}
+	if !directory.cancelled {
+		t.Fatal("interrupt_agent did not use the restored-member callback")
+	}
+}
+
 func TestChildReportToolUsesCanonicalChildScopedContract(t *testing.T) {
 	var got struct{ child, parent, output string }
 	tool := newChildReportTool("child-1", "parent-1", func(child, parent, output string) (string, error) {
@@ -92,21 +179,32 @@ func TestChildReportToolUsesCanonicalChildScopedContract(t *testing.T) {
 // eventLog records emitted subagent/* event types (and payloads) for tool
 // tests.
 type eventLog struct {
+	mu   sync.Mutex
 	evts []string
 	data []any
 }
 
 func (e *eventLog) record(typ string, data any) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	e.evts = append(e.evts, typ)
 	e.data = append(e.data, data)
 }
 
 func (e *eventLog) counts() map[string]int {
+	e.mu.Lock()
 	m := map[string]int{}
 	for _, t := range e.evts {
 		m[t]++
 	}
+	e.mu.Unlock()
 	return m
+}
+
+func (e *eventLog) payload(i int) any {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.data[i]
 }
 
 // decodeEventPayload unmarshals the i-th recorded event payload into a plain
@@ -114,7 +212,7 @@ func (e *eventLog) counts() map[string]int {
 func decodeEventPayload[T any](t *testing.T, e *eventLog, i int) T {
 	t.Helper()
 	var d T
-	raw, err := json.Marshal(e.data[i])
+	raw, err := json.Marshal(e.payload(i))
 	if err != nil {
 		t.Fatalf("marshal event %d payload: %v", i, err)
 	}
@@ -197,6 +295,124 @@ func TestSubagentSpawnReturnsChildID(t *testing.T) {
 		t.Fatalf("subagent/start payload = %+v", start)
 	}
 	// The spawn event records the injected owner as the parent.
+}
+
+func TestSubagentSpawnForwardsAgentOptions(t *testing.T) {
+	model := &captureMaxTokensLLM{}
+	st := testBundle(t, model, 8, nil)
+	result, err := st.Spawn().ExecuteResult(context.Background(), json.RawMessage(`{"description":"specialist","prompt":"inspect","run_in_background":false,"agentOptions":{"model":"child-model","maxTokens":222}}`))
+	if err != nil {
+		t.Fatalf("subagent with agentOptions: %v", err)
+	}
+	value, ok := result.Value.(map[string]any)
+	if !ok {
+		t.Fatalf("spawn value = %#v", result.Value)
+	}
+	id, _ := value["runId"].(string)
+	if id == "" {
+		t.Fatalf("spawn value has no runId: %#v", result.Value)
+	}
+	waitSettled(t, st, id, 5*time.Second)
+	model.mu.Lock()
+	defer model.mu.Unlock()
+	if len(model.requests) != 1 || model.requests[0].Model != "child-model" || model.requests[0].MaxTokens != 222 {
+		t.Fatalf("child request = %+v, want model child-model/maxTokens 222", model.requests)
+	}
+}
+
+func TestSubagentAsyncSettlementUsesParentSessionEventSink(t *testing.T) {
+	model := &scriptedLLM{steps: [][]llm.StreamEvent{{
+		{Kind: llm.StreamTextDelta, Text: "child result"},
+		{Kind: llm.StreamFinish, FinishReason: "stop"},
+	}}}
+	st := testBundle(t, model, 8, nil)
+	type event struct {
+		session string
+		typ     string
+	}
+	events := make(chan event, 4)
+	st.SetSessionEventSink(func(sessionID, typ string, _ any) error {
+		events <- event{session: sessionID, typ: typ}
+		return nil
+	})
+
+	result, err := st.Spawn().Execute(context.Background(), json.RawMessage(`{"description":"worker","prompt":"finish"}`))
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	if _, err := st.Cancel().Execute(context.Background(), json.RawMessage(`{"id":"spawn-1","reason":"test"}`)); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	waitSettled(t, st, "spawn-1", time.Second)
+	select {
+	case got := <-events:
+		if got.session != "sess-1" || got.typ != "subagent/end" {
+			t.Fatalf("async event = %+v, want parent-scoped subagent/end", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for parent-scoped settlement event")
+	}
+	if !strings.Contains(result, "started subagent spawn-1") {
+		t.Fatalf("spawn result = %q", result)
+	}
+}
+
+func TestSubagentAsyncSettlementInvokesParentCompletionWake(t *testing.T) {
+	model := &scriptedLLM{steps: [][]llm.StreamEvent{{
+		{Kind: llm.StreamTextDelta, Text: "child result"},
+		{Kind: llm.StreamFinish, FinishReason: "stop"},
+	}}}
+	st := testBundle(t, model, 8, nil)
+	type wake struct {
+		session string
+		child   string
+		result  Result
+	}
+	wakes := make(chan wake, 1)
+	st.SetCompletionWake(func(_ context.Context, sessionID, childID string, result Result) error {
+		wakes <- wake{session: sessionID, child: childID, result: result}
+		return nil
+	})
+
+	if _, err := st.Spawn().Execute(context.Background(), json.RawMessage(`{"description":"worker","prompt":"finish","run_in_background":false}`)); err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	waitSettled(t, st, "spawn-1", 5*time.Second)
+	select {
+	case got := <-wakes:
+		if got.session != "sess-1" || got.child != "spawn-1" {
+			t.Fatalf("completion wake = %+v, want parent session and child id", got)
+		}
+		if got.result.StopReason != StopCompleted || got.result.Output != "child result" {
+			t.Fatalf("completion result = %+v, want completed child result", got.result)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for parent completion wake")
+	}
+}
+
+func TestSubagentCompletionWakeWaitsForDurableEvent(t *testing.T) {
+	model := &scriptedLLM{steps: [][]llm.StreamEvent{{
+		{Kind: llm.StreamFinish, FinishReason: "stop"},
+	}}}
+	st := testBundle(t, model, 8, nil)
+	st.SetSessionEventSink(func(string, string, any) error {
+		return errors.New("durable sink unavailable")
+	})
+	wakes := make(chan struct{}, 1)
+	st.SetCompletionWake(func(context.Context, string, string, Result) error {
+		wakes <- struct{}{}
+		return nil
+	})
+	if _, err := st.Spawn().Execute(context.Background(), json.RawMessage(`{"description":"worker","prompt":"finish","run_in_background":false}`)); err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	waitSettled(t, st, "spawn-1", 5*time.Second)
+	select {
+	case <-wakes:
+		t.Fatal("completion wake was sent after durable event failure")
+	default:
+	}
 }
 
 // TestSubagentSpawnAcceptanceCriteria verifies subagent_spawn's schema exposes
@@ -347,7 +563,7 @@ func TestSubagentCancelRequestsCancellation(t *testing.T) {
 
 // TestSubagentListProjectsChildren verifies subagent_list projects the
 // children spawned under a parent session (defaulted to the owner, or given
-// explicitly), and reports none under a different parent.
+// explicitly within the caller's scope).
 func TestSubagentListProjectsChildren(t *testing.T) {
 	model := &scriptedLLM{steps: [][]llm.StreamEvent{
 		{{Kind: llm.StreamFinish, FinishReason: "stop"}},
@@ -378,13 +594,10 @@ func TestSubagentListProjectsChildren(t *testing.T) {
 	if !strings.Contains(out2, "spawn-1") {
 		t.Fatalf("subagent_list (explicit parent) output = %q, want spawn-1", out2)
 	}
-	// A different parent yields none.
-	out3, err := st.List().Execute(ctx, json.RawMessage(`{"parent_session":"other"}`))
-	if err != nil {
-		t.Fatalf("subagent_list (other parent): %v", err)
-	}
-	if !strings.Contains(out3, "no subagents") {
-		t.Fatalf("subagent_list (other parent) output = %q, want no subagents", out3)
+	// An unrelated parent is not an observable empty result; it is an
+	// authorization failure so callers cannot probe another Agent's children.
+	if _, err := st.List().Execute(ctx, json.RawMessage(`{"parent_session":"other"}`)); err == nil || !strings.Contains(err.Error(), "outside the calling agent scope") {
+		t.Fatalf("subagent_list (other parent) error = %v, want parent-scope rejection", err)
 	}
 }
 
@@ -482,6 +695,112 @@ func TestSubagentUnknownChild(t *testing.T) {
 	}
 	if _, err := st.Cancel().Execute(ctx, json.RawMessage(`{"id":"nope-1"}`)); err == nil {
 		t.Fatal("subagent_cancel on an unknown id must fail")
+	}
+}
+
+func TestSubagentResumeEnforcesCallingAgentLineage(t *testing.T) {
+	st := testBundle(t, &scriptedLLM{}, 8, nil)
+	st.mu.Lock()
+	st.children["child-1"] = &childInfo{run: &Run{}, provider: defaultProviderName, parent: "sess-1"}
+	st.mu.Unlock()
+
+	ctx := runtimectx.With(context.Background(), runtimectx.Runtime{SessionID: "other-session"})
+	if _, err := st.Resume().Execute(ctx, json.RawMessage(`{"id":"child-1","message":"resume"}`)); err == nil || !strings.Contains(err.Error(), "not a descendant") {
+		t.Fatalf("cross-agent resume error = %v, want lineage rejection", err)
+	}
+	if _, err := st.Status().Execute(ctx, json.RawMessage(`{"id":"child-1"}`)); err == nil || !strings.Contains(err.Error(), "not a descendant") {
+		t.Fatalf("cross-agent status error = %v, want lineage rejection", err)
+	}
+	if _, err := st.Cancel().Execute(ctx, json.RawMessage(`{"id":"child-1"}`)); err == nil || !strings.Contains(err.Error(), "not a descendant") {
+		t.Fatalf("cross-agent cancel error = %v, want lineage rejection", err)
+	}
+	if _, err := st.List().Execute(ctx, json.RawMessage(`{"parent_session":"sess-1"}`)); err == nil || !strings.Contains(err.Error(), "outside the calling agent scope") {
+		t.Fatalf("cross-agent list error = %v, want parent-scope rejection", err)
+	}
+}
+
+// TestSubagentControlPlaneOwnershipMatrix consolidates the A5.1 authority
+// boundary across the caller-addressed control actions. A child registered to
+// one parent must be invisible to another caller, and none of its callbacks may
+// run for status, resume, send, followup, interrupt, cancel, list or wait.
+func TestSubagentControlPlaneOwnershipMatrix(t *testing.T) {
+	st := testBundle(t, &scriptedLLM{}, 8, nil)
+	var callbackRuns atomic.Int32
+	callback := func() { callbackRuns.Add(1) }
+	st.mu.Lock()
+	st.children["owned-child"] = &childInfo{
+		run: &Run{
+			ID:   "owned-child",
+			Send: func(context.Context, string) error { callback(); return nil },
+			SendQuiet: func(context.Context, string) error {
+				callback()
+				return nil
+			},
+			Cancel: func(string) error { callback(); return nil },
+		},
+		provider: defaultProviderName, label: "owned", parent: "sess-1",
+	}
+	st.mu.Unlock()
+
+	other := runtimectx.With(context.Background(), runtimectx.Runtime{SessionID: "other-session"})
+	rejections := []struct {
+		name string
+		call func() error
+	}{
+		{"status", func() error {
+			_, err := st.Status().Execute(other, json.RawMessage(`{"id":"owned-child"}`))
+			return err
+		}},
+		{"resume", func() error {
+			_, err := st.Resume().Execute(other, json.RawMessage(`{"id":"owned-child","message":"no"}`))
+			return err
+		}},
+		{"send_message", func() error {
+			_, err := st.DshSend().ExecuteResult(other, json.RawMessage(`{"target":"owned-child","message":"no"}`))
+			return err
+		}},
+		{"followup_task", func() error {
+			_, err := st.FollowupTask().ExecuteResult(other, json.RawMessage(`{"target":"owned-child","message":"no"}`))
+			return err
+		}},
+		{"interrupt_agent", func() error {
+			_, err := st.Interrupt().Execute(other, json.RawMessage(`{"agent_id":"owned-child"}`))
+			return err
+		}},
+		{"subagent_cancel", func() error {
+			_, err := st.Cancel().Execute(other, json.RawMessage(`{"id":"owned-child"}`))
+			return err
+		}},
+		{"subagent_list", func() error {
+			_, err := st.List().Execute(other, json.RawMessage(`{"parent_session":"sess-1"}`))
+			return err
+		}},
+	}
+	for _, rejection := range rejections {
+		if err := rejection.call(); err == nil {
+			t.Fatalf("%s crossed the ownership boundary", rejection.name)
+		}
+	}
+
+	// Discovery/wait are caller-scoped rather than target-addressed. They may
+	// return an empty result, but they must not project or invoke the foreign
+	// child.
+	wait, err := st.WaitAgent().ExecuteResult(other, json.RawMessage(`{"timeout_ms":10000}`))
+	if err != nil {
+		t.Fatalf("wait_agent cross-owner: %v", err)
+	}
+	if strings.Contains(wait.Output, "owned-child") {
+		t.Fatalf("wait_agent leaked foreign child: %q", wait.Output)
+	}
+	list, err := st.ListAgents().ExecuteResult(other, json.RawMessage(`{"scope":"descendants"}`))
+	if err != nil {
+		t.Fatalf("list_agents cross-owner: %v", err)
+	}
+	if entries, ok := list.Value.([]any); !ok || len(entries) != 0 {
+		t.Fatalf("list_agents leaked foreign children: %#v", list.Value)
+	}
+	if got := callbackRuns.Load(); got != 0 {
+		t.Fatalf("foreign control callbacks ran %d times; want 0", got)
 	}
 }
 

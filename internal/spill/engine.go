@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jabing/shutu-agent/internal/llm"
 	"github.com/jabing/shutu-agent/internal/session"
 )
 
@@ -22,9 +23,10 @@ const defaultRecallLimit = 5
 // type keeps the Engine interface the only public shape; NewEngine returns it
 // as a concrete *engine that satisfies Engine.
 type engine struct {
-	prov   Provider
-	mu     sync.Mutex
-	closed bool
+	prov      Provider
+	mu        sync.Mutex
+	closed    bool
+	closeDone chan struct{}
 }
 
 // NewEngine returns an engine backed by prov; a nil prov selects the default
@@ -34,7 +36,7 @@ func NewEngine(prov Provider) *engine {
 	if prov == nil {
 		prov = newMemProvider()
 	}
-	return &engine{prov: prov}
+	return &engine{prov: prov, closeDone: make(chan struct{})}
 }
 
 // memoID derives the idempotent memo id for content: a SHA-256 digest of the
@@ -65,6 +67,10 @@ func (e *engine) spill(ctx context.Context, content, source string) (Memo, bool,
 		return Memo{}, false, err
 	}
 	content = strings.TrimSpace(content)
+	// Memory is a durable spill surface. Redact credential-shaped diagnostics
+	// at the single engine boundary so manual writes and AutoSpill cannot turn
+	// a leaked provider/tool diagnostic into a persistent memory file.
+	content = llm.RedactDiagnostic(content)
 	if content == "" {
 		return Memo{}, false, errors.New("spill: empty content")
 	}
@@ -162,14 +168,21 @@ func (e *engine) checkOpen() error {
 func (e *engine) Close() error {
 	e.mu.Lock()
 	if e.closed {
+		done := e.closeDone
 		e.mu.Unlock()
+		if done != nil {
+			<-done
+		}
 		return nil
 	}
 	e.closed = true
 	prov := e.prov
 	e.mu.Unlock()
 	if c, ok := prov.(closer); ok {
-		return c.Close()
+		err := c.Close()
+		close(e.closeDone)
+		return err
 	}
+	close(e.closeDone)
 	return nil
 }

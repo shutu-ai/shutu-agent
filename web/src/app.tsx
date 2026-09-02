@@ -1762,7 +1762,8 @@ function SessionControls({ store, sessionId, onError }: { store: WebStore; sessi
 function isConversationEvent(event: EventView): boolean {
   return event.type.startsWith('user/') || event.type.startsWith('assistant/') ||
     event.type.startsWith('tool/') || event.type.startsWith('interact/') ||
-    event.type.startsWith('turn/') || event.type.startsWith('step/')
+    event.type.startsWith('turn/') || event.type.startsWith('step/') ||
+    event.type === 'web/command-result'
 }
 
 export function App({ store }: { store: WebStore }) {

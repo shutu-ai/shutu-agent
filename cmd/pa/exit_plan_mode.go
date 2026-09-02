@@ -59,10 +59,18 @@ func (t exitPlanModeTool) Execute(ctx context.Context, args any) (string, error)
 	if err := tools.DecodeArgs(args, &input); err != nil {
 		return "", fmt.Errorf("exit_plan_mode: %w", err)
 	}
-	if t.app == nil || t.app.log == nil {
+	if t.app == nil {
 		return "", errors.New("exit_plan_mode requires an active session")
 	}
-	if !session.FoldPlanMode(t.app.log.Events()) {
+	log := t.app.runtimeLog(ctx)
+	if log == nil {
+		return "", errors.New("exit_plan_mode requires an active session")
+	}
+	active, err := currentPlanModeActive(log)
+	if err != nil {
+		return "", fmt.Errorf("exit_plan_mode: %w", err)
+	}
+	if !active {
 		return "", errors.New("exit_plan_mode is only available in plan mode")
 	}
 	planText := strings.TrimSpace(input.Plan)
@@ -89,11 +97,15 @@ func (t exitPlanModeTool) Execute(ctx context.Context, args any) (string, error)
 	if err != nil {
 		return "", fmt.Errorf("exit_plan_mode: %w", err)
 	}
-	t.app.recordPlanQuestion(req)
+	if err := t.app.recordPlanQuestion(ctx, req); err != nil {
+		return "", fmt.Errorf("exit_plan_mode: persist approval request: %w", err)
+	}
 	resolved, err := t.app.interacts.Await(ctx, req.ID)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			t.app.cancelPlanQuestion(req.ID)
+			if cancelErr := t.app.cancelPlanQuestion(ctx, req.ID); cancelErr != nil {
+				return "", errors.Join(errors.New("ask_user_question was aborted before the user answered"), cancelErr)
+			}
 			return "", errors.New("ask_user_question was aborted before the user answered")
 		}
 		return "", fmt.Errorf("exit_plan_mode: %w", err)
@@ -114,7 +126,7 @@ func (t exitPlanModeTool) Execute(ctx context.Context, args any) (string, error)
 		}
 		return "", fmt.Errorf("The user chose to keep planning; their feedback: %s", feedback)
 	}
-	if _, err := t.app.log.Append(session.EventPlanMode, session.NewPlanMode(false)); err != nil {
+	if _, err := log.Append(session.EventPlanMode, session.NewPlanMode(false)); err != nil {
 		return "", fmt.Errorf("exit_plan_mode: leave plan mode: %w", err)
 	}
 	return `{"approved":true}`, nil
@@ -169,31 +181,44 @@ func planReviewDecision(raw string) (approved bool, feedback string, err error) 
 	return false, "", nil
 }
 
-func (a *app) recordPlanQuestion(req interact.Request) {
+func (a *app) recordPlanQuestion(ctx context.Context, req interact.Request) error {
 	if req.ID != "" {
 		a.interactionMu.Lock()
 		if a.interactionSessions == nil {
 			a.interactionSessions = make(map[string]string)
 		}
-		a.interactionSessions[req.ID] = a.currentID
+		a.interactionSessions[req.ID] = a.runtimeSessionID(ctx)
 		a.interactionMu.Unlock()
 	}
-	if a.log != nil {
-		if _, err := a.log.Append(session.EventInteractRequest, session.NewInteractRequestDetail(req.ID, req.ToolName, req.Prompt, req.Args, req.Questions)); err != nil {
-			fmt.Println("pa: interact/request event:", err)
+	if log := a.runtimeLog(ctx); log != nil {
+		payload := session.NewInteractRequestDetail(req.ID, req.ToolName, req.Prompt, req.Args, req.Questions)
+		if canonical, value, projected := session.CanonicalApprovalEvent(session.EventInteractRequest, payload); projected {
+			if _, err := log.Append(canonical, value); err != nil {
+				return err
+			}
+		} else if _, err := log.Append(session.EventInteractRequest, payload); err != nil {
+			return err
 		}
 	}
+	return nil
 }
 
-func (a *app) cancelPlanQuestion(id string) {
+func (a *app) cancelPlanQuestion(ctx context.Context, id string) error {
 	canceler, ok := a.interacts.(interact.Canceler)
 	if !ok {
-		return
+		return nil
 	}
 	if _, err := canceler.Cancel(context.Background(), id); err != nil {
-		return
+		return err
 	}
-	if a.log != nil {
-		_, _ = a.log.Append(session.EventInteractCancel, session.NewInteractCancel(id))
+	if log := a.runtimeLog(ctx); log != nil {
+		if canonical, value, projected := session.CanonicalApprovalEvent(session.EventInteractCancel, session.NewInteractCancel(id)); projected {
+			_, err := log.Append(canonical, value)
+			return err
+		} else {
+			_, err := log.Append(session.EventInteractCancel, session.NewInteractCancel(id))
+			return err
+		}
 	}
+	return nil
 }

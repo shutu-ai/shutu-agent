@@ -2,6 +2,7 @@ package openairesponses
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -58,9 +59,14 @@ func TestAvailable(t *testing.T) {
 func TestStreamTextAndReasoning(t *testing.T) {
 	var gotPath string
 	var gotAuth string
+	var gotModel string
+	var gotBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		gotAuth = r.Header.Get("Authorization")
+		if raw, err := io.ReadAll(r.Body); err == nil && json.Unmarshal(raw, &gotBody) == nil {
+			gotModel, _ = gotBody["model"].(string)
+		}
 		w.Header().Set("content-type", "text/event-stream")
 		w.Write([]byte(sseResponseEvent("response.reasoning_text.delta", `{"type":"response.reasoning_text.delta","delta":"think step 1"}`) + "\n\n"))
 		w.Write([]byte(sseResponseEvent("response.output_text.delta", `{"type":"response.output_text.delta","delta":"Hello "}`) + "\n\n"))
@@ -71,6 +77,8 @@ func TestStreamTextAndReasoning(t *testing.T) {
 	p := New(Config{BaseURL: srv.URL, APIKey: "k"})
 
 	reader, err := p.Stream(context.Background(), llm.ChatRequest{
+		Model: "request-selected-model", MaxTokens: 123,
+		Temperature: func() *float64 { v := 0.2; return &v }(), Stop: []string{"END"},
 		Messages: []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("hi")}}},
 	})
 	if err != nil {
@@ -108,6 +116,16 @@ func TestStreamTextAndReasoning(t *testing.T) {
 	}
 	if gotAuth != "Bearer k" {
 		t.Errorf("auth = %q, want Bearer k", gotAuth)
+	}
+	if gotModel != "request-selected-model" {
+		t.Errorf("model = %q, want request-selected-model", gotModel)
+	}
+	if gotBody["max_output_tokens"] != float64(123) || gotBody["temperature"] != float64(0.2) {
+		t.Errorf("generation controls = max_output_tokens:%v temperature:%v", gotBody["max_output_tokens"], gotBody["temperature"])
+	}
+	stops, _ := gotBody["stop"].([]any)
+	if len(stops) != 1 || stops[0] != "END" {
+		t.Errorf("stop = %v", gotBody["stop"])
 	}
 }
 
@@ -216,5 +234,59 @@ func TestStreamImageFailClosed(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected image fail-closed error")
+	}
+}
+
+func TestStreamUsesExplicitModelDefaultMaxOutputTokens(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.Header().Set("content-type", "text/event-stream")
+		_, _ = w.Write([]byte(sseResponseEvent("response.completed", `{"type":"response.completed","response":{"status":"completed"}}`) + "\n\n"))
+	}))
+	defer srv.Close()
+	p := New(Config{BaseURL: srv.URL, APIKey: "test-key", ModelCatalog: []llm.ModelInfo{{ID: "model", DefaultMaxTokens: 777}}})
+	reader, err := p.Stream(context.Background(), llm.ChatRequest{Model: "model", Messages: []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("hi")}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		_, nextErr := reader.Next()
+		if errors.Is(nextErr, io.EOF) {
+			break
+		}
+		if nextErr != nil {
+			t.Fatal(nextErr)
+		}
+	}
+	if got["max_output_tokens"] != float64(777) {
+		t.Fatalf("max_output_tokens = %#v, want 777", got["max_output_tokens"])
+	}
+}
+
+func TestStreamUsesReferenceRouteDefaultMaxOutputTokens(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.Header().Set("content-type", "text/event-stream")
+		_, _ = w.Write([]byte(sseResponseEvent("response.completed", `{"type":"response.completed","response":{"status":"completed"}}`) + "\n\n"))
+	}))
+	defer srv.Close()
+	p := New(Config{BaseURL: srv.URL, APIKey: "test-key"})
+	reader, err := p.Stream(context.Background(), llm.ChatRequest{Model: "unlisted", Messages: []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("hi")}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		_, nextErr := reader.Next()
+		if errors.Is(nextErr, io.EOF) {
+			break
+		}
+		if nextErr != nil {
+			t.Fatal(nextErr)
+		}
+	}
+	if got["max_output_tokens"] != float64(32768) {
+		t.Fatalf("max_output_tokens = %#v, want reference route default 32768", got["max_output_tokens"])
 	}
 }

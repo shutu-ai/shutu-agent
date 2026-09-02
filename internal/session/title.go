@@ -7,6 +7,7 @@
 package session
 
 import (
+	"encoding/json"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -135,4 +136,44 @@ func FallbackTitle(input string, maxWords, maxBytes int) string {
 		words = words[:maxWords]
 	}
 	return strings.TrimRight(TruncateUTF8(strings.Join(words, " "), maxBytes), " ")
+}
+
+// FirstEligibleUserText returns the first non-empty text projection from a
+// human user/message event. It deliberately goes through DeriveEventMessage so
+// legacy text payloads and rich content blocks have the same interpretation at
+// every title consumer (Web, native, ACP/SDK composition roots). Messages with
+// explicit non-user provenance (for example Team/plugin input) are not title
+// candidates, matching dsh's session-title service.
+func FirstEligibleUserText(events []Event) string {
+	for _, event := range events {
+		if event.Type != EventUserMessage {
+			continue
+		}
+		var raw struct {
+			Source *struct {
+				Kind string `json:"kind"`
+			} `json:"source"`
+		}
+		if err := json.Unmarshal(event.Data, &raw); err != nil {
+			continue
+		}
+		if raw.Source != nil && raw.Source.Kind != "" && raw.Source.Kind != "user" {
+			continue
+		}
+		message, ok := DeriveEventMessage(event)
+		if !ok {
+			continue
+		}
+		textParts := make([]string, 0, len(message.Content))
+		for _, block := range message.Content {
+			if block.Kind == "text" {
+				textParts = append(textParts, block.Text)
+			}
+		}
+		text := strings.Join(textParts, "\n")
+		if strings.TrimSpace(text) != "" {
+			return text
+		}
+	}
+	return ""
 }

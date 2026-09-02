@@ -14,6 +14,7 @@ import (
 	"github.com/jabing/shutu-agent/internal/config"
 	"github.com/jabing/shutu-agent/internal/llm"
 	"github.com/jabing/shutu-agent/internal/prompt"
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 	"github.com/jabing/shutu-agent/internal/session"
 	"github.com/jabing/shutu-agent/internal/tools"
 )
@@ -29,6 +30,27 @@ func byteTokens(log *session.Log) int {
 		}
 	}
 	return total
+}
+
+func TestCompactAndLogStopsBeforeCompactionWhenStartEventCannotPersist(t *testing.T) {
+	wantErr := errors.New("durable sink unavailable")
+	log := session.New()
+	log.SetSink(func(session.Event) error { return wantErr })
+	var runCalls int
+	app := &app{}
+	_, err := app.compactAndLogOn(context.Background(), log, "test", "pressure", func() (*compaction.Result, error) {
+		runCalls++
+		return &compaction.Result{CompactionID: "c1"}, nil
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("error = %v, want %v", err, wantErr)
+	}
+	if runCalls != 0 {
+		t.Fatalf("compaction run calls = %d, want 0 after start persistence failure", runCalls)
+	}
+	if got := len(log.Events()); got != 0 {
+		t.Fatalf("in-memory events = %d, want 0 after rolled-back start", got)
+	}
 }
 
 // byteTokensStr is the matching 1-token-per-byte estimator for BasicEngine's
@@ -208,6 +230,23 @@ func TestRegisterCompactionEnabledCreatesEngine(t *testing.T) {
 	inj := app.preStepInjectors()
 	if len(inj) != 1 || inj[0].Name != "compaction" {
 		t.Fatalf("pre-step injectors = %+v, want one named \"compaction\"", inj)
+	}
+}
+
+func TestCompactionEngineIsSessionScoped(t *testing.T) {
+	app := makeCompactApp(true)
+	app.currentID = "root"
+	app.llm = &compactStubLLM{text: "S"}
+	if err := app.registerCompaction(); err != nil {
+		t.Fatalf("registerCompaction: %v", err)
+	}
+	childCtx := runtimectx.With(context.Background(), runtimectx.Runtime{SessionID: "child"})
+	child := app.compactionEngineFor(childCtx, "child")
+	if child == nil || child == app.compaction {
+		t.Fatalf("child compaction engine = %T/%p, want a distinct session projection", child, child)
+	}
+	if again := app.compactionEngineFor(childCtx, "child"); again != child {
+		t.Fatal("child compaction projection was not reused within its session")
 	}
 }
 

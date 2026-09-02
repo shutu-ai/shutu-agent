@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 	"github.com/jabing/shutu-agent/internal/session"
 	agenttools "github.com/jabing/shutu-agent/internal/tools"
 )
@@ -16,10 +17,14 @@ import (
 // canonical tool names.
 type DSHTools struct {
 	e                  Engine
+	resolve            func(context.Context) (Engine, error)
 	onEvent            func(string, any)
 	owner              func() string
+	ownerContext       func(context.Context) string
 	activation         func() bool
 	setActivation      func(bool)
+	activationContext  func(context.Context) bool
+	setActivationCtx   func(context.Context, bool)
 	allowParallelTodo  bool
 	blockedAfterRounds int
 }
@@ -45,7 +50,56 @@ func NewDSHToolsWithOwnerAndActivation(e Engine, onEvent func(string, any), owne
 	return &DSHTools{e: e, onEvent: onEvent, owner: owner, activation: activation, setActivation: setActivation, allowParallelTodo: allowParallel, blockedAfterRounds: blockedAfterRounds}
 }
 
-func (t *DSHTools) requireOwner(tool string) error {
+// NewDSHToolsWithResolver binds the model-facing tools to a session-aware
+// engine resolver. The resolver is evaluated for every Execute, which keeps
+// concurrent Agent sessions from sharing the disposable plan projection.
+func NewDSHToolsWithResolver(resolve func(context.Context) (Engine, error), onEvent func(string, any), owner func() string, activation func() bool, setActivation func(bool), allowParallel bool, blockedAfterRounds int) *DSHTools {
+	if blockedAfterRounds < 1 {
+		blockedAfterRounds = 3
+	}
+	return &DSHTools{resolve: resolve, onEvent: onEvent, owner: owner, activation: activation, setActivation: setActivation, allowParallelTodo: allowParallel, blockedAfterRounds: blockedAfterRounds}
+}
+
+// NewDSHToolsWithResolverContext is the Agent-owned constructor. The owner
+// resolver is evaluated with the addressed runtime context for each execute;
+// the legacy resolver remains available to direct embedders.
+func NewDSHToolsWithResolverContext(resolve func(context.Context) (Engine, error), onEvent func(string, any), owner func(context.Context) string, activation func() bool, setActivation func(bool), allowParallel bool, blockedAfterRounds int) *DSHTools {
+	if blockedAfterRounds < 1 {
+		blockedAfterRounds = 3
+	}
+	return &DSHTools{resolve: resolve, onEvent: onEvent, ownerContext: owner, activation: activation, setActivation: setActivation, allowParallelTodo: allowParallel, blockedAfterRounds: blockedAfterRounds}
+}
+
+// SetContextActivation supplies the session-aware activation callbacks used
+// by Agent runtimes. The legacy callbacks remain the fallback for direct CLI
+// callers that have no runtime context.
+func (t *DSHTools) SetContextActivation(activation func(context.Context) bool, setActivation func(context.Context, bool)) {
+	t.activationContext = activation
+	t.setActivationCtx = setActivation
+}
+
+func (t *DSHTools) engine(ctx context.Context) (Engine, error) {
+	if t.resolve != nil {
+		return t.resolve(ctx)
+	}
+	if t.e == nil {
+		return nil, errors.New("plan engine is unavailable")
+	}
+	return t.e, nil
+}
+
+func (t *DSHTools) requireOwner(tool string, ctx ...context.Context) error {
+	if len(ctx) > 0 {
+		if sessionID := runtimectx.SessionID(ctx[0]); sessionID != "" {
+			return nil
+		}
+		if t.ownerContext != nil {
+			if strings.TrimSpace(t.ownerContext(ctx[0])) == "" {
+				return fmt.Errorf("%s requires an owning agent session", tool)
+			}
+			return nil
+		}
+	}
 	if t.owner != nil && strings.TrimSpace(t.owner()) == "" {
 		return fmt.Errorf("%s requires an owning agent session", tool)
 	}
@@ -58,6 +112,14 @@ func (t *DSHTools) setArmed(armed bool) {
 	}
 }
 
+func (t *DSHTools) setArmedContext(ctx context.Context, armed bool) {
+	if t.setActivationCtx != nil {
+		t.setActivationCtx(ctx, armed)
+		return
+	}
+	t.setArmed(armed)
+}
+
 func (t *DSHTools) GetGoal() GetGoalTool       { return GetGoalTool{t: t} }
 func (t *DSHTools) CreateGoal() CreateGoalTool { return CreateGoalTool{t: t} }
 func (t *DSHTools) UpdateGoal() UpdateGoalTool { return UpdateGoalTool{t: t} }
@@ -67,6 +129,14 @@ func (t *DSHTools) emit(typ string, data any) {
 	if t.onEvent != nil {
 		t.onEvent(typ, data)
 	}
+}
+
+func (t *DSHTools) emitContext(ctx context.Context, typ string, data any) error {
+	if runtime, ok := runtimectx.Get(ctx); ok && runtime.Emit != nil {
+		return runtime.Emit(typ, data)
+	}
+	t.emit(typ, data)
+	return nil
 }
 
 type GetGoalTool struct{ t *DSHTools }
@@ -83,7 +153,7 @@ func (t GetGoalTool) Execute(ctx context.Context, args any) (string, error) {
 	if _, err := decodeEmpty(args); err != nil {
 		return "", fmt.Errorf("get_goal: %w", err)
 	}
-	if err := t.t.requireOwner("get_goal"); err != nil {
+	if err := t.t.requireOwner("get_goal", ctx); err != nil {
 		return "", err
 	}
 	g, ok, err := t.t.currentGoal(ctx)
@@ -93,7 +163,7 @@ func (t GetGoalTool) Execute(ctx context.Context, args any) (string, error) {
 	if !ok {
 		return marshalGoalValue(map[string]any{"goal": nil}), nil
 	}
-	return marshalGoalValue(t.t.goalValue(g)), nil
+	return marshalGoalValue(t.t.goalValue(ctx, g)), nil
 }
 
 func (t GetGoalTool) ExecuteResult(ctx context.Context, args any) (agenttools.ToolResult, error) {
@@ -108,7 +178,7 @@ func (t GetGoalTool) value(ctx context.Context, args any) (map[string]any, error
 	if _, err := decodeEmpty(args); err != nil {
 		return nil, fmt.Errorf("get_goal: %w", err)
 	}
-	if err := t.t.requireOwner("get_goal"); err != nil {
+	if err := t.t.requireOwner("get_goal", ctx); err != nil {
 		return nil, err
 	}
 	g, ok, err := t.t.currentGoal(ctx)
@@ -118,7 +188,7 @@ func (t GetGoalTool) value(ctx context.Context, args any) (map[string]any, error
 	if !ok {
 		return map[string]any{"goal": nil}, nil
 	}
-	return t.t.goalValue(g), nil
+	return t.t.goalValue(ctx, g), nil
 }
 
 type CreateGoalTool struct{ t *DSHTools }
@@ -155,7 +225,7 @@ func (t CreateGoalTool) ExecuteResult(ctx context.Context, args any) (agenttools
 }
 
 func (t CreateGoalTool) value(ctx context.Context, args any) (map[string]any, error) {
-	if err := t.t.requireOwner("create_goal"); err != nil {
+	if err := t.t.requireOwner("create_goal", ctx); err != nil {
 		return nil, err
 	}
 	var in struct {
@@ -174,23 +244,28 @@ func (t CreateGoalTool) value(ctx context.Context, args any) (map[string]any, er
 	} else if ok {
 		return nil, errors.New("create_goal: an active goal already exists")
 	}
+	e, err := t.t.engine(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("create_goal: %w", err)
+	}
 	var g Goal
-	var err error
-	if creator, ok := t.t.e.(interface {
+	if creator, ok := e.(interface {
 		CreateGoalWithMaxRounds(context.Context, string, string, int) (Goal, error)
 	}); ok {
 		g, err = creator.CreateGoalWithMaxRounds(ctx, firstGoalTitle(in.Objective), in.Objective, in.MaxGoalRounds)
 	} else {
-		g, err = t.t.e.CreateGoal(ctx, firstGoalTitle(in.Objective), in.Objective)
+		g, err = e.CreateGoal(ctx, firstGoalTitle(in.Objective), in.Objective)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("create_goal: %w", err)
 	}
-	t.t.emit(session.EventPlanCreate, session.NewPlanCreate(string(ScopeGoal), g.ID, g.Title, nil, map[string]any{
+	if err := t.t.emitContext(ctx, session.EventPlanCreate, session.NewPlanCreate(string(ScopeGoal), g.ID, g.Title, nil, map[string]any{
 		"objective": g.Objective, "status": g.Status, "revision": g.Revision,
 		"maxRounds": g.MaxRounds, "roundsStarted": g.RoundsStarted, "createdAt": g.CreatedAt,
-	}))
-	return t.t.goalValue(g), nil
+	})); err != nil {
+		return nil, fmt.Errorf("create_goal: persist event: %w", err)
+	}
+	return t.t.goalValue(ctx, g), nil
 }
 
 type UpdateGoalTool struct{ t *DSHTools }
@@ -231,7 +306,7 @@ func (t UpdateGoalTool) ExecuteResult(ctx context.Context, args any) (agenttools
 }
 
 func (t UpdateGoalTool) value(ctx context.Context, args any) (map[string]any, error) {
-	if err := t.t.requireOwner("update_goal"); err != nil {
+	if err := t.t.requireOwner("update_goal", ctx); err != nil {
 		return nil, err
 	}
 	var in struct {
@@ -248,7 +323,11 @@ func (t UpdateGoalTool) value(ctx context.Context, args any) (map[string]any, er
 	if in.GoalID == "" || in.GoalID != strings.TrimSpace(in.GoalID) || in.Revision < 1 {
 		return nil, errors.New("update_goal: goal_id must be non-empty and revision must be a positive integer")
 	}
-	g, err := t.t.goalByID(ctx, in.GoalID, in.Revision)
+	e, err := t.t.engine(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("update_goal: %w", err)
+	}
+	g, err := t.t.goalByIDWithEngine(ctx, e, in.GoalID, in.Revision)
 	if err != nil {
 		return nil, fmt.Errorf("update_goal: %w", err)
 	}
@@ -263,7 +342,7 @@ func (t UpdateGoalTool) value(ctx context.Context, args any) (map[string]any, er
 		if hasBlockedReason {
 			return nil, errors.New("update_goal: blocked_reason is valid only with action blocked")
 		}
-		updater, ok := t.t.e.(interface {
+		updater, ok := e.(interface {
 			UpdateGoalIfRevision(context.Context, string, int, *string, *int) (Goal, error)
 		})
 		if !ok {
@@ -279,7 +358,9 @@ func (t UpdateGoalTool) value(ctx context.Context, args any) (map[string]any, er
 		}
 		g, err = updater.UpdateGoalIfRevision(ctx, g.ID, in.Revision, objective, maxRounds)
 		if err == nil {
-			t.t.emit(session.EventPlanUpdate, session.NewPlanUpdate(string(ScopeGoal), g.ID, map[string]any{"title": g.Title, "objective": g.Objective, "maxRounds": g.MaxRounds}))
+			if emitErr := t.t.emitContext(ctx, session.EventPlanUpdate, session.NewPlanUpdate(string(ScopeGoal), g.ID, map[string]any{"title": g.Title, "objective": g.Objective, "maxRounds": g.MaxRounds})); emitErr != nil {
+				return nil, fmt.Errorf("update_goal: persist event: %w", emitErr)
+			}
 		}
 	case "pause", "resume", "complete", "blocked":
 		if (in.Action == "pause" || in.Action == "resume") && (hasObjective || hasRounds || hasBlockedReason) {
@@ -298,7 +379,7 @@ func (t UpdateGoalTool) value(ctx context.Context, args any) (map[string]any, er
 			return nil, fmt.Errorf("blocked requires at least %d consecutive goal rounds; current round is %d", t.t.blockedAfterRounds, g.RoundsStarted)
 		}
 		status := map[string]Status{"pause": StatusPaused, "resume": StatusInProgress, "complete": StatusDone, "blocked": StatusBlocked}[in.Action]
-		setter, ok := t.t.e.(interface {
+		setter, ok := e.(interface {
 			SetGoalStatusIfRevision(context.Context, string, int, Status) error
 		})
 		if !ok {
@@ -306,7 +387,7 @@ func (t UpdateGoalTool) value(ctx context.Context, args any) (map[string]any, er
 		}
 		err = setter.SetGoalStatusIfRevision(ctx, g.ID, in.Revision, status)
 		if err == nil && in.Action == "blocked" {
-			if reasoner, ok := t.t.e.(interface {
+			if reasoner, ok := e.(interface {
 				SetGoalBlockedReason(context.Context, string, string) error
 			}); ok {
 				err = reasoner.SetGoalBlockedReason(ctx, g.ID, strings.TrimSpace(*in.BlockedReason))
@@ -317,7 +398,9 @@ func (t UpdateGoalTool) value(ctx context.Context, args any) (map[string]any, er
 			if in.Action == "blocked" {
 				reason = strings.TrimSpace(*in.BlockedReason)
 			}
-			t.t.emit(session.EventPlanStatus, session.NewPlanStatus(string(ScopeGoal), g.ID, string(status), reason))
+			if emitErr := t.t.emitContext(ctx, session.EventPlanStatus, session.NewPlanStatus(string(ScopeGoal), g.ID, string(status), reason)); emitErr != nil {
+				return nil, fmt.Errorf("update_goal: persist event: %w", emitErr)
+			}
 		}
 	default:
 		return nil, fmt.Errorf("update_goal: unknown action %q", in.Action)
@@ -325,17 +408,17 @@ func (t UpdateGoalTool) value(ctx context.Context, args any) (map[string]any, er
 	if err != nil {
 		return nil, fmt.Errorf("update_goal: %w", err)
 	}
-	g, err = t.t.goalByID(ctx, g.ID, 0)
+	g, err = t.t.goalByIDWithEngine(ctx, e, g.ID, 0)
 	if err != nil {
 		return nil, fmt.Errorf("update_goal: %w", err)
 	}
 	if in.Action == "resume" {
-		t.t.setArmed(true)
+		t.t.setArmedContext(ctx, true)
 	}
 	if in.Action == "complete" || in.Action == "blocked" {
-		t.t.setArmed(false)
+		t.t.setArmedContext(ctx, false)
 	}
-	return t.t.goalValue(g), nil
+	return t.t.goalValue(ctx, g), nil
 }
 
 type TodoWriteTool struct{ t *DSHTools }
@@ -421,8 +504,8 @@ func (t TodoWriteTool) write(ctx context.Context, args any) (map[string]any, err
 	if err := agenttools.DecodeArgs(args, &in); err != nil {
 		return nil, fmt.Errorf("todo_write: %w", err)
 	}
-	if t.t.owner != nil && strings.TrimSpace(t.t.owner()) == "" {
-		return nil, errors.New("todo_write requires an owning agent session")
+	if err := t.t.requireOwner("todo_write", ctx); err != nil {
+		return nil, err
 	}
 	items := make([]any, len(in.Todos))
 	seen := make(map[string]struct{}, len(in.Todos))
@@ -453,12 +536,18 @@ func (t TodoWriteTool) write(ctx context.Context, args any) (map[string]any, err
 		return nil, fmt.Errorf("invalid todos: at most one task may be in_progress (got %d)", counts["inProgress"])
 	}
 	payload := map[string]any{"todos": items}
-	t.t.emit("todo/write", payload)
+	if err := t.t.emitContext(ctx, session.EventTodoWrite, session.NewTodoWrite(payload["todos"])); err != nil {
+		return nil, fmt.Errorf("todo_write: persist event: %w", err)
+	}
 	return map[string]any{"todos": items, "counts": counts}, nil
 }
 
 func (t *DSHTools) currentGoal(ctx context.Context) (Goal, bool, error) {
-	goals, err := t.e.List(ctx)
+	e, err := t.engine(ctx)
+	if err != nil {
+		return Goal{}, false, err
+	}
+	goals, err := e.List(ctx)
 	if err != nil {
 		return Goal{}, false, err
 	}
@@ -471,10 +560,18 @@ func (t *DSHTools) currentGoal(ctx context.Context) (Goal, bool, error) {
 }
 
 func (t *DSHTools) goalByID(ctx context.Context, id string, revision int) (Goal, error) {
+	e, err := t.engine(ctx)
+	if err != nil {
+		return Goal{}, err
+	}
+	return t.goalByIDWithEngine(ctx, e, id, revision)
+}
+
+func (t *DSHTools) goalByIDWithEngine(ctx context.Context, e Engine, id string, revision int) (Goal, error) {
 	if id == "" || id != strings.TrimSpace(id) {
 		return Goal{}, errors.New("goal_id must be non-empty and trimmed")
 	}
-	goals, err := t.e.List(ctx)
+	goals, err := e.List(ctx)
 	if err != nil {
 		return Goal{}, err
 	}
@@ -489,7 +586,7 @@ func (t *DSHTools) goalByID(ctx context.Context, id string, revision int) (Goal,
 	return Goal{}, fmt.Errorf("goal %q was not found", id)
 }
 
-func (t *DSHTools) goalValue(g Goal) map[string]any {
+func (t *DSHTools) goalValue(ctx context.Context, g Goal) map[string]any {
 	phase := "active"
 	switch g.Status {
 	case StatusPaused:
@@ -508,7 +605,11 @@ func (t *DSHTools) goalValue(g Goal) map[string]any {
 		goal["blockedReason"] = map[string]any{"code": "model-reported", "message": g.BlockedReason}
 	}
 	activation := "armed"
-	if t.activation != nil && !t.activation() {
+	armed := t.activation != nil && t.activation()
+	if t.activationContext != nil {
+		armed = t.activationContext(ctx)
+	}
+	if (t.activation != nil || t.activationContext != nil) && !armed {
 		activation = "disarmed"
 	}
 	return map[string]any{"goal": goal, "activation": activation}

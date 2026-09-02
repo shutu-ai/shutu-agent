@@ -1,0 +1,38 @@
+{
+  "contract": "dsh-core-turn-v1",
+  "purpose": "Replay fixture for comparing the Go Agent with DeepSeek Harness semantics.",
+  "eventOrder": [
+    "turn/start",
+    "step/start",
+    "user/message",
+    "request/header",
+    "assistant/chunk",
+    "assistant/message",
+    "tool/call",
+    "tool/result",
+    "step/end",
+    "turn/end"
+  ],
+  "invariants": {
+    "sequenceContiguous": true,
+    "modelVisibleInputsLogged": true,
+    "assistantChunksDurable": true,
+    "unknownRequiredEventsFailClosed": true,
+    "toolResultsFollowCalls": true
+  },
+  "inboxCases": [
+    "next-step-message",
+    "next-turn-message",
+    "followup",
+    "steer",
+    "quiet-injection"
+  ],
+  "stopReasons": [
+    "completed",
+    "cancelled",
+    "error",
+    "max-tokens",
+    "refusal",
+    "interrupted"
+  ]
+}

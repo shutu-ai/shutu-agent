@@ -1,4 +1,5 @@
 import type { EventView, ImageView } from './api'
+import { dshEventDetails, dshEventString, normalizeDshEvent } from './dsh-event-model'
 
 /** DSH ConversationSnapshot-compatible surface used by the shutu web client. */
 export type DshConversationNode =
@@ -122,34 +123,7 @@ interface CallState {
 }
 
 function objectDetails(event: EventView): Record<string, unknown> {
-  return event.details && typeof event.details === 'object' ? event.details : {}
-}
-
-function textOf(event: EventView): string {
-  return event.tool_output || event.reasoning || event.summary || event.compaction_summary || ''
-}
-
-function numberOf(event: EventView, key: string): number | undefined {
-  const value = objectDetails(event)[key]
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
-}
-
-function stringOf(event: EventView, ...keys: string[]): string | undefined {
-  const details = objectDetails(event)
-  for (const key of keys) {
-    const value = details[key]
-    if (typeof value === 'string' && value !== '') return value
-  }
-  return undefined
-}
-
-function timeOf(event: EventView): number {
-  const value = Date.parse(event.time)
-  return Number.isFinite(value) ? value : 0
-}
-
-function eventId(event: EventView): string {
-  return `event:${event.seq}:v${event.version}`
+  return dshEventDetails(event)
 }
 
 function nodeKey(node: DshConversationNode): string {
@@ -191,33 +165,37 @@ export function projectDshConversation(events: readonly EventView[], sessionId =
   }
 
   for (const event of events) {
-    const time = timeOf(event)
+    const facts = normalizeDshEvent(event, currentRequestId, currentTurn)
+    const time = facts.time
     if (event.type === 'turn/start') {
-      currentTurn = numberOf(event, 'turn') ?? currentTurn + 1
+      currentTurn = facts.turn ?? currentTurn + 1
       turns.set(currentTurn, { turn: currentTurn, startTime: time })
       continue
     }
     if (event.type === 'turn/end') {
-      const turn = numberOf(event, 'turn') ?? currentTurn
+      const turn = facts.turn ?? currentTurn
       const previous = turns.get(turn) ?? { turn, startTime: null }
       turns.set(turn, { ...previous, endTime: time })
       turnEnds.set(turn, event.seq)
       continue
     }
-    if (event.type === 'llm/request_start') {
-      const request = stringOf(event, 'request_id', 'requestId', 'requestID', 'id')
-      currentRequestId = request === undefined ? `request:${event.seq}` : `request:${request}`
+    if (event.type === 'llm/request_start' || event.type === 'request/header') {
+      currentRequestId = facts.requestId ?? `request:${event.seq}`
       continue
     }
     if (event.type === 'llm/request_end') {
       currentRequestId = null
       continue
     }
+    // Route capacity is a request fact consumed by the timeline/meter, not a
+    // user-visible chat node. The shared model still classifies it as a
+    // request so other projections can retain the durable record.
+    if (event.type === 'request/context') continue
     if (event.type === 'user/message') {
       if (event.context_message) {
-        add({ id: eventId(event), kind: 'context', seq: event.seq, time, text: textOf(event), source: event.context_source || stringOf(event, 'source') || 'context' })
+        add({ id: facts.id, kind: 'context', seq: event.seq, time, text: facts.text, source: event.context_source || dshEventString(event, 'source') || 'context' })
       } else {
-        add({ id: eventId(event), kind: 'user', seq: event.seq, time, text: textOf(event) })
+        add({ id: facts.id, kind: 'user', seq: event.seq, time, text: facts.text })
       }
       continue
     }
@@ -228,13 +206,13 @@ export function projectDshConversation(events: readonly EventView[], sessionId =
       if (event.summary) blocks.push({ kind: 'text', text: event.summary })
       const provider = typeof details.provider === 'string' ? details.provider : undefined
       const model = typeof details.model === 'string' ? details.model : undefined
-      const assistantId = eventId(event)
+      const assistantId = facts.id
       currentAssistantId = assistantId
       add({
-        id: assistantId, kind: 'assistant', seq: event.seq, time, turn: numberOf(event, 'turn') ?? currentTurn,
-        step: numberOf(event, 'step') ?? 0, blocks,
+        id: assistantId, kind: 'assistant', seq: event.seq, time, turn: facts.turn ?? currentTurn,
+        step: facts.step ?? 0, blocks,
         ...(event.images && event.images.length > 0 ? { images: event.images } : {}),
-        ...(currentRequestId !== null ? { requestId: currentRequestId } : {}),
+        ...(facts.requestId !== null ? { requestId: facts.requestId } : {}),
         ...(details.usage === undefined ? {} : { usage: details.usage }),
         ...(provider !== undefined && model !== undefined ? { provenance: { provider, model } } : {}),
         timing: { stepStartTime: null, firstTokenTime: null, completedTime: time },
@@ -242,35 +220,35 @@ export function projectDshConversation(events: readonly EventView[], sessionId =
       continue
     }
     if (event.type === 'tool/call' || event.type === 'tool/start') {
-      const callId = event.call_id || `call:${event.seq}`
+      const callId = facts.callId || `call:${event.seq}`
       const assistantId = currentAssistantId
-      const call = { id: callId, name: event.tool_name || event.summary, argsRaw: event.tool_args || '' }
+      const call = { id: callId, name: facts.toolName, argsRaw: facts.toolArgs }
       attachToolCall(assistantId, call)
-      calls.set(callId, { ...call, callId, seq: event.seq, time, requestId: currentRequestId, assistantId })
+      calls.set(callId, { ...call, callId, seq: event.seq, time, requestId: facts.requestId, assistantId })
       continue
     }
     if (event.type === 'tool/result' || event.type === 'tool/error') {
-      const callId = event.call_id || `call:${event.seq}`
+      const callId = facts.callId || `call:${event.seq}`
       const call = calls.get(callId)
       calls.delete(callId)
       add({
-        id: eventId(event), kind: 'tool-result', seq: event.seq, time, callId,
+        id: facts.id, kind: 'tool-result', seq: event.seq, time, callId,
         call: call === undefined ? null : { name: call.name, argsRaw: call.argsRaw },
-        content: textOf(event), isError: event.type === 'tool/error', requestId: call?.requestId ?? currentRequestId,
+        content: facts.text, isError: facts.isError, requestId: call?.requestId ?? facts.requestId,
         ...(call?.assistantId ? { assistantId: call.assistantId } : {}),
       })
       continue
     }
     if (event.type === 'compaction/summary') {
       add({
-        id: eventId(event), kind: 'compaction', seq: event.seq, time, summary: event.compaction_summary || event.summary,
-        shadowedTokenCount: event.compaction_tokens ?? numberOf(event, 'shadowedTokens') ?? null,
+        id: facts.id, kind: 'compaction', seq: event.seq, time, summary: event.compaction_summary || event.summary,
+        shadowedTokenCount: event.compaction_tokens ?? (typeof facts.details.shadowedTokens === 'number' ? facts.details.shadowedTokens : null),
       })
       continue
     }
     if (event.type === 'assistant/chunk' || event.type === 'assistant/reasoning' || event.type.startsWith('llm/')) continue
     if (event.type === 'step/start' || event.type === 'step/end') continue
-    add({ id: eventId(event), kind: 'unknown', seq: event.seq, time, type: event.type, text: textOf(event) })
+    add({ id: facts.id, kind: 'unknown', seq: event.seq, time, type: event.type, text: facts.text })
   }
 
   for (const call of calls.values()) {

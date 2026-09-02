@@ -20,6 +20,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path"
@@ -33,8 +34,12 @@ import (
 	"time"
 
 	"github.com/jabing/shutu-agent/internal/attachment"
+	"github.com/jabing/shutu-agent/internal/crashboundary"
 	"github.com/jabing/shutu-agent/internal/interact"
 	"github.com/jabing/shutu-agent/internal/llm"
+	"github.com/jabing/shutu-agent/internal/meter"
+	"github.com/jabing/shutu-agent/internal/profile"
+	"github.com/jabing/shutu-agent/internal/projection"
 	"github.com/jabing/shutu-agent/internal/session"
 	"github.com/jabing/shutu-agent/internal/store"
 )
@@ -64,14 +69,18 @@ type Server struct {
 	// value falls back to the server process cwd.
 	defaultWorkdir string
 	srv            *http.Server
+	closeMu        sync.Mutex
+	closeDone      chan struct{}
+	closed         bool
 
 	// nativeSettings is the small settings document owned by the DSH native
 	// adapter. It carries the onboarding acknowledgement and the agent-preset
 	// default; the latter is mirrored into the persistent settings table by the
 	// native settings bridge without coupling the native API to the legacy REST
 	// settings surface.
-	nativeSettingsMu sync.Mutex
-	nativeSettings   map[string]nativeSettingsDocument
+	nativeSettingsMu     sync.Mutex
+	nativeSettings       map[string]nativeSettingsDocument
+	nativeSettingsLoaded map[string]bool
 
 	// M10 W1 interactive wiring (ADR D-WEB2-A/B/C): the optional handlers the
 	// composition root injects after New. All three are nil until a Setter is
@@ -89,6 +98,12 @@ type Server struct {
 	nativeMuxSubscribers  map[string]map[uint64]func()
 	nativeMuxSessionAdded map[uint64]func(string)
 	nativeMuxSubscriberID uint64
+	// Hijacked native WebSocket connections are outside net/http's Shutdown
+	// accounting. Track them explicitly so Close cannot leave a poller holding
+	// the SQLite store (or a goroutine) after the HTTP listener is gone.
+	nativeConnMu  sync.Mutex
+	nativeConns   map[io.Closer]struct{}
+	nativeClosing bool
 	// nativeQueueUpdateFn accepts the DSH action vocabulary. The legacy queue
 	// callback above intentionally remains text/action-only for the REST API;
 	// this seam carries the native edit payload without weakening that API.
@@ -101,6 +116,8 @@ type Server struct {
 	nativeSettingsOpenDocumentFn func(ctx context.Context) error
 	nativeAgentPresetManager     NativeAgentPresetManager
 	nativeCommandManager         NativeCommandManager
+	profileRegistry              *profile.Registry
+	crashContracts               *crashboundary.Registry
 
 	// statusFn is the dsh-session-status alignment: it computes the live state
 	// (warning/ongoing/done/idle + labels + running-subagent count) for one
@@ -121,6 +138,10 @@ type Server struct {
 	// id (for the per-session model override) and returns a token budget; 0
 	// means the server falls back to its default.
 	contextWindowFn func(sessionID string) int
+	// contextMeterFn is the same replay-aware meter used by compaction and
+	// runtime telemetry. Keeping it injectable avoids a second Web-only token
+	// heuristic that can disagree with replacement folding and provider usage.
+	contextMeterFn func(sessionID string, events []session.Event) (meter.Measurement, error)
 
 	// stateFn returns the durable per-session state projection (plan mode,
 	// goals/plans and memory summary). The webserver only transports the
@@ -142,16 +163,26 @@ type Server struct {
 	// P5 (ADR D-WEB2-I): the image-attachment store wired by the composition
 	// root when multimodal is enabled. nil (the default) makes the attachment
 	// APIs answer 501 and message bodies with images answer 400.
-	att *attachment.Store
+	att                     *attachment.Store
+	nativeImageCapabilityFn func(context.Context, string) bool
 
 	// P5.1 (模型选择实时生效, 用户 2026-08-20 拍板): the live model-switch
 	// dispatcher for POST /api/config/model. It validates the provider/model/
 	// reasoning-effort, rebuilds the selected LLM provider and answers the new
 	// config state. nil (the default) makes the API answer 501.
 	setModelFn func(ctx context.Context, provider, model, effort string) error
+	// sessionModelValidateFn applies the same provider/route admission used by
+	// native, ACP, SDK and CLI turn assembly before a durable session override
+	// is accepted.
+	sessionModelValidateFn func(ctx context.Context, sessionID, provider, model, effort string) error
 	// nativeDefaultModelFn receives accepted native DSH model selections so the
 	// composition root can persist the shared Agent default for later sessions.
 	nativeDefaultModelFn func(ctx context.Context, provider, model, effort string)
+	// nativeSessionRenameFn commits an accepted title through the composition
+	// root's live session log and returns the durable event sequence. A nil
+	// handler keeps the storage-only compatibility path for embedders that do
+	// not own a live Agent runtime.
+	nativeSessionRenameFn func(ctx context.Context, sessionID, title string) (int64, error)
 
 	// M11 (增加提供方 / 增加自定义提供方, dsh-synced): the provider-management
 	// dispatcher. setProviderFn handles POST /api/config/provider (save a
@@ -177,8 +208,9 @@ type Server struct {
 	// interactionFn/resolverFn expose the live DSH-style approval surface. The
 	// engine remains owned by cmd/pa; this server only transports request views
 	// and a resolve command.
-	interactionFn        func(ctx context.Context, sessionID string) ([]interact.Request, error)
-	resolveInteractionFn func(ctx context.Context, sessionID, id string, status interact.ApprovalStatus, answer string) error
+	interactionFn               func(ctx context.Context, sessionID string) ([]interact.Request, error)
+	resolveInteractionFn        func(ctx context.Context, sessionID, id string, status interact.ApprovalStatus, answer string) error
+	resolveInteractionSessionFn func(ctx context.Context, id string) (string, error)
 	// DSH question cancellation responses intentionally carry no sessionId.
 	// The native mux records the owning session when it publishes a pending
 	// interaction so /api/respond can resolve a later cancellation.
@@ -208,20 +240,40 @@ type ProviderEdit struct {
 // ProviderModel is one custom-provider model row (id + optional name /
 // capacities), mirroring customModel on the composition side.
 type ProviderModel struct {
-	ID            string `json:"id"`
-	Name          string `json:"name,omitempty"`
-	ContextWindow int    `json:"context_window,omitempty"`
-	MaxTokens     int    `json:"max_tokens,omitempty"`
+	ID                     string             `json:"id"`
+	Name                   string             `json:"name,omitempty"`
+	Input                  []string           `json:"input,omitempty"`
+	ReasoningEfforts       map[string]*string `json:"reasoning_efforts,omitempty"`
+	DefaultReasoningEffort string             `json:"default_reasoning_effort,omitempty"`
+	DefaultMaxTokens       int                `json:"default_max_tokens,omitempty"`
+	ContextWindow          int                `json:"context_window,omitempty"`
+	MaxTokens              int                `json:"max_tokens,omitempty"`
+	Reasoning              *bool              `json:"reasoning,omitempty"`
+	Tools                  *bool              `json:"tools,omitempty"`
+	Vision                 *bool              `json:"vision,omitempty"`
+	Audio                  *bool              `json:"audio,omitempty"`
 }
 
-// MCPServerEdit is the sanitized Web settings payload for one stdio MCP
-// server. Configuration changes are persisted by the composition root and
-// take effect after restart; refresh remains available for live diagnostics.
+// MCPServerEdit is the sanitized Web settings payload for one stdio or
+// Streamable HTTP MCP server. Configuration changes are persisted by the
+// composition root and take effect after restart; refresh remains available
+// for live diagnostics.
 type MCPServerEdit struct {
-	OriginalName string   `json:"original_name"`
-	Name         string   `json:"name"`
-	Cmd          string   `json:"cmd"`
-	Args         []string `json:"args"`
+	OriginalName string            `json:"original_name"`
+	Name         string            `json:"name"`
+	Transport    string            `json:"transport"`
+	Cmd          string            `json:"cmd"`
+	Args         []string          `json:"args"`
+	URL          string            `json:"url"`
+	Headers      map[string]string `json:"headers"`
+	Env          map[string]string `json:"env"`
+	// Pointer distinguishes an omitted legacy Web field from an explicit empty
+	// string, so updating a server does not accidentally erase its working dir.
+	Cwd               *string `json:"cwd"`
+	ToolCallTimeoutMS *int    `json:"tool_call_timeout_ms"`
+	// Pointer distinguishes an omitted legacy Web field from an explicit false
+	// so updating a server does not accidentally erase its startup policy.
+	FailOnStartupError *bool `json:"fail_on_startup_error"`
 }
 
 // QueueItem is one user message waiting behind the active turn. Placement is
@@ -307,11 +359,26 @@ func (s *Server) SetInteractionManager(
 	s.resolveInteractionFn = resolve
 }
 
+// SetInteractionSessionResolver wires the durable owner lookup used when a
+// native client cancels a question without echoing sessionId. The lookup is
+// intentionally separate from the list/resolve callbacks so a reconnecting
+// process can recover correlation without exposing the approval payload.
+func (s *Server) SetInteractionSessionResolver(fn func(context.Context, string) (string, error)) {
+	s.resolveInteractionSessionFn = fn
+}
+
 // SetAttachmentStore wires the image-attachment store (P5): POST/GET
 // /api/sessions/{id}/attachments and the images field of POST /api/sessions/
 // {id}/message. Called by the composition root; nil (default) keeps the
 // attachment APIs at 501.
 func (s *Server) SetAttachmentStore(st *attachment.Store) { s.att = st }
+
+// SetNativeImageCapabilityResolver wires the session-specific image route
+// check used by native rich prompts. The generic server only owns attachment
+// storage; the composition root owns provider/model capability resolution.
+func (s *Server) SetNativeImageCapabilityResolver(fn func(context.Context, string) bool) {
+	s.nativeImageCapabilityFn = fn
+}
 
 // SetModelSwitcher wires the live model switch (POST /api/config/model, P5.1):
 // the handler validates the provider/model/reasoning-effort and rebuilds the
@@ -321,12 +388,26 @@ func (s *Server) SetModelSwitcher(fn func(ctx context.Context, provider, model, 
 	s.setModelFn = fn
 }
 
+// SetSessionModelValidator wires the shared runtime route-admission check for
+// native session.selectModel. The composition root owns provider availability,
+// effort policy and model-catalog semantics.
+func (s *Server) SetSessionModelValidator(fn func(ctx context.Context, sessionID, provider, model, effort string) error) {
+	s.sessionModelValidateFn = fn
+}
+
 // SetNativeDefaultModelSaver wires DSH's shared Agent-default model behavior
 // for the native session.selectModel RPC. The current session remains owned by
 // its session config; this callback only updates the default used by sessions
 // created afterwards.
 func (s *Server) SetNativeDefaultModelSaver(fn func(ctx context.Context, provider, model, effort string)) {
 	s.nativeDefaultModelFn = fn
+}
+
+// SetNativeSessionRenamer wires the canonical session/title event boundary for
+// native session.rename. The composition root owns live-session materialization
+// and persistence; the webserver only transports the accepted title and seq.
+func (s *Server) SetNativeSessionRenamer(fn func(ctx context.Context, sessionID, title string) (int64, error)) {
+	s.nativeSessionRenameFn = fn
 }
 
 // SetProviderManager wires the M11 provider-management API (POST /api/config/
@@ -384,6 +465,8 @@ func New(st store.Store, token, addr string) (*Server, error) {
 		authOn:                    token != "",
 		addr:                      addr,
 		nativeInteractionSessions: make(map[string]string),
+		nativeConns:               make(map[io.Closer]struct{}),
+		closeDone:                 make(chan struct{}),
 		nativeSettings: map[string]nativeSettingsDocument{
 			// Shutu is not the DSH developer-preview distribution. Mark the
 			// DSH product welcome notice as acknowledged so the native UI opens
@@ -392,6 +475,9 @@ func New(st store.Store, token, addr string) (*Server, error) {
 				"welcomeNoticeVersion": nativeWelcomeNoticeVersion,
 			}},
 		},
+		nativeSettingsLoaded: make(map[string]bool),
+		profileRegistry:      profile.Local(),
+		crashContracts:       crashboundary.Required(),
 	}
 	// The React shell (login view + frontend assets) is public so a fresh
 	// browser can load the page and present the token form (D-WEB-2): it holds
@@ -532,9 +618,62 @@ func (s *Server) Close() error {
 	if s.srv == nil {
 		return nil
 	}
+	s.closeMu.Lock()
+	if s.closed {
+		done := s.closeDone
+		s.closeMu.Unlock()
+		if done != nil {
+			<-done
+		}
+		return nil
+	}
+	s.closed = true
+	done := s.closeDone
+	s.closeMu.Unlock()
+	s.nativeConnMu.Lock()
+	s.nativeClosing = true
+	connections := make([]io.Closer, 0, len(s.nativeConns))
+	for conn := range s.nativeConns {
+		connections = append(connections, conn)
+	}
+	s.nativeConnMu.Unlock()
+	for _, conn := range connections {
+		_ = conn.Close()
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return s.srv.Shutdown(ctx)
+	err := s.srv.Shutdown(ctx)
+	if done != nil {
+		close(done)
+	}
+	return err
+}
+
+func (s *Server) trackNativeConnection(conn io.Closer) bool {
+	if s == nil || conn == nil {
+		return false
+	}
+	s.nativeConnMu.Lock()
+	if s.nativeClosing {
+		s.nativeConnMu.Unlock()
+		_ = conn.Close()
+		return false
+	}
+	if s.nativeConns == nil {
+		s.nativeConns = make(map[io.Closer]struct{})
+	}
+	s.nativeConns[conn] = struct{}{}
+	s.nativeConnMu.Unlock()
+	return true
+}
+
+func (s *Server) untrackNativeConnection(conn io.Closer) {
+	if s == nil || conn == nil {
+		return
+	}
+	s.nativeConnMu.Lock()
+	delete(s.nativeConns, conn)
+	s.nativeConnMu.Unlock()
 }
 
 // SetMessageHandler wires the message dispatch API (POST
@@ -756,6 +895,25 @@ func (s *Server) SetNativeCommandManager(manager NativeCommandManager) {
 	s.nativeCommandManager = manager
 }
 
+// SetProfileRegistry wires the fail-closed runtime deployment-profile authority.
+// Local() is the production default, but embedders may replace the inventory
+// without changing transport handlers.
+func (s *Server) SetProfileRegistry(registry *profile.Registry) {
+	if registry == nil {
+		return
+	}
+	s.profileRegistry = registry
+}
+
+// SetCrashBoundaryRegistry replaces the machine-readable external side-effect
+// crash contracts. Required() is the production authority.
+func (s *Server) SetCrashBoundaryRegistry(registry *crashboundary.Registry) {
+	if registry == nil {
+		return
+	}
+	s.crashContracts = registry
+}
+
 // SetNativeGoalManager wires DSH's goal.create/edit/pause/resume/complete/clear
 // RPCs to the composition root's durable goal engine. A nil manager leaves the
 // native routes explicitly unsupported.
@@ -815,6 +973,13 @@ func (s *Server) SetConfigProvider(fn func() map[string]any) {
 // composition root; nil keeps the default budget.
 func (s *Server) SetContextWindow(fn func(sessionID string) int) {
 	s.contextWindowFn = fn
+}
+
+// SetContextMeter wires the replay-aware token measurement used by
+// GET /api/sessions/{id}/context. A nil function retains the standalone
+// compatibility estimator for embedders that do not own a meter.
+func (s *Server) SetContextMeter(fn func(sessionID string, events []session.Event) (meter.Measurement, error)) {
+	s.contextMeterFn = fn
 }
 
 // contextWindowForSession resolves the same effective capacity used by the
@@ -932,7 +1097,15 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 			}
 		}()
 		if !s.authOn {
+			if !sameOriginMutation(r) {
+				writeJSON(sw, http.StatusForbidden, map[string]any{"error": "cross-origin mutation rejected"})
+				return
+			}
 			next.ServeHTTP(sw, r)
+			return
+		}
+		if !sameOriginMutation(r) {
+			writeJSON(sw, http.StatusForbidden, map[string]any{"error": "cross-origin mutation rejected"})
 			return
 		}
 		auth := r.Header.Get("Authorization")
@@ -948,6 +1121,32 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(sw, r)
 	})
+}
+
+// sameOriginMutation adds a browser-origin boundary for mutating API calls.
+// Bearer auth is still the primary credential when configured; this check also
+// protects the intentionally open localhost mode from cross-origin form/fetch
+// writes. Requests without Origin/Referer remain valid for CLI/ACP/native
+// clients, which do not carry browser provenance headers.
+func sameOriginMutation(r *http.Request) bool {
+	if r == nil || r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
+		return true
+	}
+	raw := strings.TrimSpace(r.Header.Get("Origin"))
+	if raw == "" {
+		raw = strings.TrimSpace(r.Header.Get("Referer"))
+	}
+	if raw == "" {
+		return true
+	}
+	if strings.EqualFold(raw, "null") {
+		return false
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	return strings.EqualFold(parsed.Host, r.Host)
 }
 
 // writeJSON encodes v as a JSON response with the given status.
@@ -1067,12 +1266,16 @@ func (s *Server) handleSettingsGet(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	modeOptions := []string{"minimal", "standard"}
+	if s.nativeCodeAvailable() {
+		modeOptions = append(modeOptions, "code")
+	}
 	resp := map[string]any{
 		"agent_preset":       stored["agent_preset"],
 		"permission_preset":  stored["permission_preset"],
 		"terminal_shell":     stored["terminal_shell"],
 		"language":           stored["language"],
-		"mode_options":       []string{"minimal", "standard", "code"},
+		"mode_options":       modeOptions,
 		"permission_options": []string{"readonly", "standard", "full"},
 		"terminal_options":   []string{"off", "powershell", "gitbash", "wsl"},
 		"restart_required":   true,
@@ -1105,6 +1308,10 @@ func (s *Server) handleSettingsPatch(w http.ResponseWriter, r *http.Request) {
 	if body.AgentPreset != "" {
 		if body.AgentPreset != "minimal" && body.AgentPreset != "standard" && body.AgentPreset != "code" {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid agent_preset"})
+			return
+		}
+		if body.AgentPreset == "code" && !s.nativeCodeAvailable() {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "agent_preset code is unavailable"})
 			return
 		}
 		if err := s.store.SetSetting(r.Context(), "agent_preset", body.AgentPreset); err != nil {
@@ -1194,26 +1401,45 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		v := sessionView{ID: m.ID, CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt, EventCount: m.EventCount, Blank: m.EventCount == 0, WorkspaceID: m.WorkspaceID, Sort: m.Sort, FlatSort: m.FlatSort}
+		canonicalTitle := ""
 		if s.statusFn != nil {
 			v.Status = s.statusFn(r.Context(), m)
+		}
+		var events []session.Event
+		if m.EventCount > 0 {
+			if loaded, loadErr := s.store.LoadSession(r.Context(), m.ID); loadErr == nil {
+				events = loaded
+				canonical, projectionErr := projection.Build(events)
+				if projectionErr != nil {
+					writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "session projection failed: " + projectionErr.Error()})
+					return
+				}
+				metadata := canonical.SessionList
+				canonicalTitle = canonical.Title
+				v.Blank = metadata.Blank
+				// Keep Web's sidebar ordering/activity authority identical to the
+				// native projection. SQLite's session row timestamp describes the
+				// latest physical append, which can be a lifecycle/transport event;
+				// dsh uses the latest eligible human prompt for this projection.
+				if metadata.LastPromptAt != nil {
+					promptAt := time.UnixMilli(*metadata.LastPromptAt).UTC()
+					if promptAt.After(v.UpdatedAt) {
+						v.UpdatedAt = promptAt
+					}
+				}
+			}
 		}
 		if m.Title != "" {
 			// Accepted title (fallback / LLM / user rename), normalized at
 			// write; re-normalize defensively for legacy rows.
 			v.Title = session.NormalizeTitle(m.Title, session.TitleMaxBytes)
-		} else if m.EventCount > 0 {
+		} else if canonicalTitle != "" {
+			v.Title = canonicalTitle
+		} else if len(events) > 0 {
 			// The deterministic first-prompt fallback (dsh session-title):
 			// first eligible words of the first user message, byte-bounded.
-			if evs, err := s.store.LoadSession(r.Context(), m.ID); err == nil {
-				for _, ev := range evs {
-					if ev.Type == "user/message" {
-						var d struct{ Text string }
-						if json.Unmarshal(ev.Data, &d) == nil && strings.TrimSpace(d.Text) != "" {
-							v.Title = session.FallbackTitle(d.Text, session.TitleFallbackMaxWords, session.TitleFallbackMaxBytes)
-							break
-						}
-					}
-				}
+			if text := session.FirstEligibleUserText(events); text != "" {
+				v.Title = session.FallbackTitle(text, session.TitleFallbackMaxWords, session.TitleFallbackMaxBytes)
 			}
 		}
 		out = append(out, v)
@@ -1223,9 +1449,9 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 
 // handleSessionTitle implements PATCH /api/sessions/{id}/title (P2 sidebar
 // rename). The request body is {"title":"..."} (UTF-8, normalized and bounded
-// to session.TitleMaxBytes); an empty title clears the override back to
-// inference. A non-empty title is recorded with the user source, which pins it
-// against future automatic revisions (dsh session-title rename semantics).
+// to session.TitleMaxBytes). A title that normalizes to empty is rejected, and
+// an accepted title is recorded with the user source, which pins it against
+// future automatic revisions (dsh session-title rename semantics).
 func (s *Server) handleSessionTitle(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var body struct{ Title string }
@@ -1234,6 +1460,26 @@ func (s *Server) handleSessionTitle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	title := session.NormalizeTitle(body.Title, session.TitleMaxBytes)
+	if title == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "title-invalid"})
+		return
+	}
+	if s.nativeSessionRenameFn != nil {
+		seq, err := s.nativeSessionRenameFn(r.Context(), id, title)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
+				return
+			}
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "title": title, "seq": seq})
+		return
+	}
+	// Compatibility embedders without a live runtime cannot mint a log event.
+	// Production cmd/pa wires nativeSessionRenameFn, so this path is deliberately
+	// storage-only and must not be treated as the canonical runtime contract.
 	if err := s.store.SetSessionTitle(r.Context(), id, title, session.TitleSourceUser); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writeJSON(w, http.StatusNotFound, map[string]any{"error": "session not found"})
@@ -1386,7 +1632,10 @@ func isInternalContextMessage(ev session.Event) bool {
 		return false
 	}
 	var d struct {
-		Text   string         `json:"text"`
+		Text    string `json:"text"`
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
 		Source *messageSource `json:"source"`
 	}
 	if json.Unmarshal(ev.Data, &d) != nil {
@@ -1396,9 +1645,15 @@ func isInternalContextMessage(ev session.Event) bool {
 		(d.Source.Kind == "plugin" && d.Source.Plugin == "@shutu-ai/dsh-system-prompt")) {
 		return true
 	}
-	return strings.HasPrefix(d.Text, "<system-reminder>\n") ||
-		strings.HasPrefix(d.Text, "Current runtime context.") ||
-		strings.HasPrefix(d.Text, "<skill_content name=\"")
+	text := d.Text
+	if text == "" {
+		for _, block := range d.Content {
+			text += block.Text
+		}
+	}
+	return strings.HasPrefix(text, "<system-reminder>\n") ||
+		strings.HasPrefix(text, "Current runtime context.") ||
+		strings.HasPrefix(text, "<skill_content name=\"")
 }
 
 type messageSource struct {
@@ -1411,7 +1666,10 @@ func internalContextSource(ev session.Event) string {
 		return ""
 	}
 	var d struct {
-		Text   string         `json:"text"`
+		Text    string `json:"text"`
+		Content []struct {
+			Text string `json:"text"`
+		} `json:"content"`
 		Source *messageSource `json:"source"`
 	}
 	if json.Unmarshal(ev.Data, &d) == nil && d.Source != nil {
@@ -1424,12 +1682,18 @@ func internalContextSource(ev session.Event) string {
 	}
 	// Backwards-compatible source attribution for logs written before source
 	// metadata was added.
+	text := d.Text
+	if text == "" {
+		for _, block := range d.Content {
+			text += block.Text
+		}
+	}
 	switch {
-	case strings.HasPrefix(d.Text, "Current runtime context."):
+	case strings.HasPrefix(text, "Current runtime context."):
 		return "@shutu-ai/dsh-system-prompt"
-	case strings.HasPrefix(d.Text, "<system-reminder>\n"):
+	case strings.HasPrefix(text, "<system-reminder>\n"):
 		return "skill-catalog"
-	case strings.HasPrefix(d.Text, "<skill_content name=\""):
+	case strings.HasPrefix(text, "<skill_content name=\""):
 		return "skill-invocation"
 	default:
 		return ""
@@ -1478,14 +1742,18 @@ func compactionFields(ev session.Event) (id, summary string, items, tokens int, 
 }
 
 func commandOf(ev session.Event) string {
-	if ev.Type != session.EventWebCommandResult {
+	if ev.Type != session.EventWebCommandResult && ev.Type != session.EventCommandRun {
 		return ""
 	}
 	var data struct {
 		Command string `json:"command"`
+		Name    string `json:"name"`
 	}
 	if json.Unmarshal(ev.Data, &data) != nil {
 		return ""
+	}
+	if ev.Type == session.EventCommandRun {
+		return data.Name
 	}
 	return data.Command
 }
@@ -1493,24 +1761,58 @@ func commandOf(ev session.Event) string {
 // extractImages pulls the image refs out of a user/assistant message's content
 // blocks (only ref metadata — the bytes live in the attachment store). Unknown
 // payloads yield nil; the frontend hides history images when absent.
+type imageRefWire struct {
+	ID           string `json:"ID"`
+	AttachmentID string `json:"attachmentId"`
+	MediaType    string `json:"mediaType"`
+	LegacyType   string `json:"MediaType"`
+	Bytes        int64  `json:"bytes"`
+	LegacyBytes  int64  `json:"Bytes"`
+	Width        int    `json:"width"`
+	Height       int    `json:"height"`
+	Path         string `json:"Path"`
+}
+
 func extractImages(ev session.Event) []imageView {
 	if ev.Type != "user/message" && ev.Type != "assistant/message" {
 		return nil
 	}
 	var d struct {
-		Content []llm.ContentBlock `json:"content"`
+		Content []struct {
+			Type       string        `json:"type"`
+			Kind       string        `json:"Kind"`
+			Attachment *imageRefWire `json:"attachment"`
+			Image      *imageRefWire `json:"Image"`
+		} `json:"content"`
 	}
 	if json.Unmarshal(ev.Data, &d) != nil {
 		return nil
 	}
 	var out []imageView
 	for _, b := range d.Content {
-		if b.Kind != llm.BlockImage {
+		if b.Type != "image" && b.Kind != string(llm.BlockImage) {
 			continue
 		}
+		ref := b.Attachment
+		if ref == nil {
+			ref = b.Image
+		}
+		if ref == nil {
+			continue
+		}
+		id := ref.ID
+		if id == "" {
+			id = ref.AttachmentID
+		}
+		if ref.MediaType == "" {
+			ref.MediaType = ref.LegacyType
+		}
+		if ref.Bytes == 0 {
+			ref.Bytes = ref.LegacyBytes
+		}
 		out = append(out, imageView{
-			ID: b.Image.ID, MediaType: b.Image.MediaType,
-			Width: b.Image.Width, Height: b.Image.Height,
+			ID: id, MediaType: ref.MediaType,
+			Width: ref.Width, Height: ref.Height,
 		})
 		if len(out) >= maxEventImages {
 			break
@@ -2363,6 +2665,31 @@ func (s *Server) handleSessionFork(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
+	// Production SQLite exposes a transaction that reads the parent revision,
+	// closed seed and all inherited metadata before publishing the child. Keep
+	// the older sequence below only for lightweight Store implementations that
+	// do not provide this capability; otherwise Create→Append→SetMetadata would
+	// expose a partially forked session after a crash.
+	if atomic, ok := s.store.(store.SessionForkStore); ok {
+		boundary := uint64(0)
+		if len(events) > 0 {
+			boundary = events[len(events)-1].Seq
+		}
+		forkID, err := store.GenerateReservedID(r.Context(), s.store, "session", newSessionID)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		if err := atomic.ForkSessionWithOptions(r.Context(), id, forkID, boundary, store.SessionForkOptions{
+			InheritParentMetadata: true,
+		}); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+			return
+		}
+		s.notifyNativeMuxSessionAdded(forkID)
+		writeJSON(w, http.StatusOK, map[string]any{"id": forkID})
+		return
+	}
 	// Carry the source title and workspace membership over to the clone.
 	srcTitle, srcTitleSource, srcWorkspace, srcCWD := "", "", "", ""
 	if all, err := s.store.ListSessions(r.Context()); err == nil {
@@ -2373,7 +2700,7 @@ func (s *Server) handleSessionFork(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	forkID, err := newSessionID()
+	forkID, err := store.GenerateReservedID(r.Context(), s.store, "session", newSessionID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
@@ -2421,9 +2748,10 @@ func (s *Server) handleSessionFork(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"id": forkID})
 }
 
-// newSessionID returns a short random session id (e.g. "s-1a2b3c4d").
+// newSessionID returns an opaque collision-resistant session id. The durable
+// SQLite primary key remains the authoritative uniqueness check.
 func newSessionID() (string, error) {
-	var b [4]byte
+	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", err
 	}
@@ -3494,16 +3822,55 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 		}
 	})
 	defer unsub()
+	lastSeq := resumeSeq
 	for _, ev := range events {
+		if ev.Seq <= lastSeq {
+			continue
+		}
 		writeSSEEvent(w, ev, argsByCall)
+		lastSeq = ev.Seq
 	}
 	fl.Flush()
+	// The live hub is deliberately non-blocking. If a slow client overflows
+	// its in-memory queue, the next observed event (or this reconciliation
+	// tick) repairs the durable gap before anything is written out of order.
+	reconcile := time.NewTicker(2 * time.Second)
+	defer reconcile.Stop()
 	for {
 		select {
 		case ev := <-pending:
+			if ev.Seq <= lastSeq {
+				continue // subscription raced the snapshot; do not duplicate it
+			}
+			if ev.Seq > lastSeq+1 {
+				var catchErr error
+				lastSeq, catchErr = s.repairEventStream(r.Context(), id, lastSeq, argsByCall, func(missing session.Event) {
+					writeSSEEvent(w, missing, argsByCall)
+					fl.Flush()
+				})
+				if catchErr != nil {
+					return // the client retries from the last durable SSE id
+				}
+			}
+			if ev.Seq <= lastSeq {
+				continue // repair may have included the queued event
+			}
+			if ev.Seq != lastSeq+1 {
+				return // never publish an unverifiable sequence gap
+			}
 			collectToolArgsInto(argsByCall, ev)
 			writeSSEEvent(w, ev, argsByCall)
+			lastSeq = ev.Seq
 			fl.Flush()
+		case <-reconcile.C:
+			var catchErr error
+			lastSeq, catchErr = s.repairEventStream(r.Context(), id, lastSeq, argsByCall, func(missing session.Event) {
+				writeSSEEvent(w, missing, argsByCall)
+				fl.Flush()
+			})
+			if catchErr != nil {
+				return
+			}
 		case <-r.Context().Done():
 			// A publisher can enqueue an event immediately before the client
 			// disconnects. Drain already-buffered events once so cancellation
@@ -3511,13 +3878,48 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 			for {
 				select {
 				case ev := <-pending:
+					if ev.Seq <= lastSeq {
+						continue
+					}
 					collectToolArgsInto(argsByCall, ev)
 					writeSSEEvent(w, ev, argsByCall)
+					lastSeq = ev.Seq
 				default:
 					fl.Flush()
 					return
 				}
 			}
+		}
+	}
+}
+
+const streamRepairPageSize = 256
+
+// repairEventStream fills the suffix after lastSeq from durable storage. The
+// hub is an optimization for latency, not the source of truth: this method is
+// what makes reconnects and slow subscribers lossless even when the hub drops
+// an in-memory notification. It writes only contiguous events and returns the
+// new cursor, so callers can safely deduplicate a notification that was also
+// present in the repaired page.
+func (s *Server) repairEventStream(ctx context.Context, sessionID string, lastSeq uint64, argsByCall map[string]string, emit func(session.Event)) (uint64, error) {
+	for {
+		events, more, err := s.store.LoadSessionPage(ctx, sessionID, 0, lastSeq, streamRepairPageSize)
+		if err != nil {
+			return lastSeq, err
+		}
+		for _, ev := range events {
+			if ev.Seq <= lastSeq {
+				continue
+			}
+			if ev.Seq != lastSeq+1 {
+				return lastSeq, fmt.Errorf("web: durable event gap for %s at seq %d (got %d)", sessionID, lastSeq+1, ev.Seq)
+			}
+			collectToolArgsInto(argsByCall, ev)
+			emit(ev)
+			lastSeq = ev.Seq
+		}
+		if !more {
+			return lastSeq, nil
 		}
 	}
 }
@@ -3553,16 +3955,31 @@ func (s *Server) handleSessionContext(w http.ResponseWriter, r *http.Request) {
 	// model-visible surface after replaying surfaceOp.replace markers. The
 	// append-only log deliberately retains shadowed events for audit/replay, so
 	// summing every raw event here would make /compact appear to do nothing.
-	used := estimateContextTokens(events)
+	measurement := meter.Measurement{}
+	var measureErr error
+	if s.contextMeterFn != nil {
+		measurement, measureErr = s.contextMeterFn(id, events)
+	}
+	used := measurement.TotalTokens
+	if s.contextMeterFn == nil || measureErr != nil {
+		used = estimateContextTokens(events)
+	}
 	window := s.contextWindowForSession(id)
 	percent := 0.0
 	if window > 0 {
 		percent = float64(used) / float64(window)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"used_tokens":    used,
-		"context_window": window,
-		"percent":        percent,
+		"used_tokens":               used,
+		"context_window":            window,
+		"percent":                   percent,
+		"baseline":                  measurement.Baseline,
+		"baseline_estimated_tokens": measurement.BaselineEstimatedTokens,
+		"baseline_usage_tokens":     measurement.BaselineUsageTokens,
+		"surface_delta_tokens":      measurement.SurfaceDeltaTokens,
+		"surface_tokens":            measurement.SurfaceTokens,
+		"completion_ledger":         measurement.Completion,
+		"log_revision":              measurement.LogRevision,
 	})
 }
 
@@ -3587,12 +4004,13 @@ func (s *Server) handleSessionState(w http.ResponseWriter, r *http.Request) {
 }
 
 // estimateContextTokens mirrors compaction.defaultTokenEstimate over the
-// derived model history. Raw-event fallback is intentionally fail-open for an
-// old or damaged log: the meter should still provide a useful conservative
-// value instead of making the whole context endpoint fail.
+// shared projection's model-visible history. Raw-event fallback is
+// intentionally fail-open for an old or damaged log: the meter should still
+// provide a useful conservative value instead of making the whole context
+// endpoint fail.
 func estimateContextTokens(events []session.Event) int {
-	var log session.Log
-	if err := log.Restore(events); err != nil {
+	snapshot, err := projection.Build(events)
+	if err != nil {
 		used := 0
 		for _, ev := range events {
 			used += len(ev.Data) / 4
@@ -3600,7 +4018,7 @@ func estimateContextTokens(events []session.Event) int {
 		return used
 	}
 	used := 0
-	for _, message := range log.DeriveHistory() {
+	for _, message := range snapshot.History {
 		used += len(message.Text()) / 4
 		for _, call := range message.ToolCalls {
 			used += (len(call.Name) + len(call.Arguments)) / 4
@@ -3746,47 +4164,55 @@ func (s *Server) handleInteractionResolve(w http.ResponseWriter, r *http.Request
 // cards. Raw event payloads never cross this boundary: tool arguments, model
 // context and other opaque data remain private.
 func eventDetails(ev session.Event) map[string]any {
-	if ev.Type == session.EventLLMRequestStart || ev.Type == session.EventLLMRequestEnd || ev.Type == session.EventLLMRetry {
+	if ev.Type == session.EventLLMRequestStart || ev.Type == session.EventLLMRequestEnd || ev.Type == session.EventLLMRetry || ev.Type == session.EventLLMRetryStarted {
 		return llmRequestDetails(ev)
 	}
 	allowed := map[string][]string{
-		session.EventPlanCreate:         {"scope", "id", "title", "goalId", "status"},
-		session.EventPlanUpdate:         {"scope", "id", "title", "objective"},
-		session.EventPlanDelete:         {"scope", "id"},
-		session.EventPlanStatus:         {"scope", "id", "status", "reason"},
-		session.EventPlanMode:           {"active"},
-		session.EventGoalRoundStart:     {"goalId", "round"},
-		session.EventGoalRoundEnd:       {"goalId", "round", "status", "error"},
-		session.EventInteractRequest:    {"id", "toolName"},
-		session.EventInteractResolve:    {"id", "approved"},
-		session.EventInteractCancel:     {"id"},
-		session.EventInteractDeny:       {"id"},
-		session.EventInteractStatus:     {"id", "status"},
-		session.EventWorkflowRun:        {"total", "completed", "failed"},
-		session.EventWorkflowStart:      {"runId", "label"},
-		session.EventWorkflowPhase:      {"title", "phase"},
-		session.EventWorkflowLog:        {"message"},
-		session.EventWorkflowAgentStart: {"seq", "label", "phase"},
-		session.EventWorkflowAgentEnd:   {"seq", "label", "outcome", "child_id"},
-		session.EventWorkflowEnd:        {"stop_reason", "agents_started", "error"},
-		session.EventRalphRun:           {"objective", "rounds", "done", "blocked"},
-		session.EventEvalRun:            {"id", "taskId", "verdict", "reason", "evaluatorKind", "criteriaCount"},
-		session.EventCodeRun:            {"lang", "exitCode", "timedOut", "truncated"},
-		session.EventCodeDispatchStart:  {"rootCallId", "parentCallId", "subCallId", "name", "arguments"},
-		session.EventCodeDispatch:       {"rootCallId", "parentCallId", "subCallId", "name", "arguments", "isError", "content"},
-		session.EventFsRead:             {"path", "size"},
-		session.EventFsWrite:            {"path"},
-		session.EventFsList:             {"dir", "count"},
-		session.EventTerminalStart:      {"id", "owner"},
-		session.EventTerminalStop:       {"id", "reason"},
-		session.EventScheduleCreate:     {"id", "kind", "spec"},
-		session.EventScheduleList:       {"count"},
-		session.EventScheduleDelete:     {"id"},
-		session.EventScheduleFire:       {"id", "action"},
-		session.EventSpillWrite:         {"id", "content"},
-		session.EventSpillRecall:        {"query", "count"},
-		session.EventSpillList:          {"count"},
-		session.EventSpillDelete:        {"id"},
+		session.EventCommandRun:             {"commandId", "name", "args", "source"},
+		session.EventCommandDone:            {"commandId", "kind", "text", "sourceEventSeq"},
+		session.EventPlanCreate:             {"scope", "id", "title", "goalId", "status"},
+		session.EventPlanUpdate:             {"scope", "id", "title", "objective"},
+		session.EventPlanDelete:             {"scope", "id"},
+		session.EventPlanStatus:             {"scope", "id", "status", "reason"},
+		session.EventPlanMode:               {"active"},
+		session.EventGoalRoundStart:         {"goalId", "round"},
+		session.EventGoalRoundEnd:           {"goalId", "round", "status", "error"},
+		session.EventInteractRequest:        {"id", "toolName"},
+		session.EventInteractResolve:        {"id", "approved"},
+		session.EventInteractCancel:         {"id"},
+		session.EventInteractDeny:           {"id"},
+		session.EventInteractStatus:         {"id", "status"},
+		session.EventApprovalAsked:          {"id", "toolName", "reason", "questions"},
+		session.EventApprovalDecided:        {"id", "outcome", "answer"},
+		session.EventWorkflowRun:            {"total", "completed", "failed"},
+		session.EventWorkflowStart:          {"runId", "label"},
+		session.EventWorkflowPhase:          {"title", "phase"},
+		session.EventWorkflowLog:            {"message"},
+		session.EventWorkflowAgentStart:     {"seq", "label", "phase"},
+		session.EventWorkflowAgentEnd:       {"seq", "label", "outcome", "child_id"},
+		session.EventWorkflowEnd:            {"stop_reason", "agents_started", "error"},
+		session.EventToolWorkflowRunStart:   {"runId", "name"},
+		session.EventToolWorkflowAgentStart: {"runId", "seq", "label", "phase", "childId"},
+		session.EventToolWorkflowAgentEnd:   {"runId", "seq", "outcome"},
+		session.EventToolWorkflowRunEnd:     {"runId", "stopReason"},
+		session.EventRalphRun:               {"objective", "rounds", "done", "blocked"},
+		session.EventEvalRun:                {"id", "taskId", "verdict", "reason", "evaluatorKind", "criteriaCount"},
+		session.EventCodeRun:                {"lang", "exitCode", "timedOut", "truncated"},
+		session.EventCodeDispatchStart:      {"rootCallId", "parentCallId", "subCallId", "name", "arguments"},
+		session.EventCodeDispatch:           {"rootCallId", "parentCallId", "subCallId", "name", "arguments", "isError", "content"},
+		session.EventFsRead:                 {"path", "size"},
+		session.EventFsWrite:                {"path"},
+		session.EventFsList:                 {"dir", "count"},
+		session.EventTerminalStart:          {"id", "owner"},
+		session.EventTerminalStop:           {"id", "reason"},
+		session.EventScheduleCreate:         {"id", "kind", "spec"},
+		session.EventScheduleList:           {"count"},
+		session.EventScheduleDelete:         {"id"},
+		session.EventScheduleFire:           {"id", "action"},
+		session.EventSpillWrite:             {"id", "content"},
+		session.EventSpillRecall:            {"query", "count"},
+		session.EventSpillList:              {"count"},
+		session.EventSpillDelete:            {"id"},
 	}
 	keys, ok := allowed[ev.Type]
 	if !ok {
@@ -3821,12 +4247,16 @@ func eventDetails(ev session.Event) map[string]any {
 func llmRequestDetails(ev session.Event) map[string]any {
 	var raw struct {
 		RequestID  string          `json:"requestId"`
+		RetryID    string          `json:"retryId"`
+		Turn       int             `json:"turn"`
+		Step       int             `json:"step"`
 		Provider   string          `json:"provider"`
 		Model      string          `json:"model"`
 		Effort     string          `json:"reasoningEffort"`
 		Status     string          `json:"status"`
 		Error      string          `json:"error"`
 		Attempt    int             `json:"attempt"`
+		Retry      int             `json:"retry"`
 		MaxRetries int             `json:"maxRetries"`
 		DelayMS    int64           `json:"delayMs"`
 		Attempts   int             `json:"attempts"`
@@ -3856,6 +4286,15 @@ func llmRequestDetails(ev session.Event) map[string]any {
 	if raw.RequestID != "" {
 		out["request_id"] = raw.RequestID
 	}
+	if raw.RetryID != "" {
+		out["retry_id"] = raw.RetryID
+	}
+	if raw.Turn != 0 {
+		out["turn"] = raw.Turn
+	}
+	if raw.Step != 0 {
+		out["step"] = raw.Step
+	}
 	if raw.Provider != "" {
 		out["provider"] = raw.Provider
 	}
@@ -3873,6 +4312,9 @@ func llmRequestDetails(ev session.Event) map[string]any {
 	}
 	if raw.Attempt != 0 {
 		out["attempt"] = raw.Attempt
+	}
+	if raw.Retry != 0 {
+		out["retry"] = raw.Retry
 	}
 	if raw.MaxRetries != 0 {
 		out["max_retries"] = raw.MaxRetries
@@ -3958,6 +4400,20 @@ func llmRequestDetails(ev session.Event) map[string]any {
 // the frontend displays it whole (dsh behavior).
 func summarize(ev session.Event) string {
 	switch ev.Type {
+	case session.EventCommandRun:
+		var d struct {
+			Name string `json:"name"`
+		}
+		if json.Unmarshal(ev.Data, &d) == nil {
+			return "/" + d.Name
+		}
+	case session.EventCommandDone:
+		var d struct {
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(ev.Data, &d) == nil {
+			return boundRunes(d.Text, maxSummary)
+		}
 	case session.EventWebCommandResult:
 		var d struct {
 			Text string `json:"text"`
@@ -3966,14 +4422,43 @@ func summarize(ev session.Event) string {
 			return d.Text
 		}
 	case "user/message":
-		var d struct{ Text string }
+		var d struct {
+			Text    string `json:"text"`
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		}
 		if json.Unmarshal(ev.Data, &d) == nil {
-			return d.Text
+			if d.Text != "" {
+				return d.Text
+			}
+			var text string
+			for _, block := range d.Content {
+				text += block.Text
+			}
+			return text
 		}
 	case "assistant/message":
-		var d struct{ Text string }
+		var d struct {
+			Text    string `json:"text"`
+			Message struct {
+				Content []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"message"`
+		}
 		if json.Unmarshal(ev.Data, &d) == nil {
-			return d.Text
+			if d.Text != "" {
+				return d.Text
+			}
+			var text string
+			for _, block := range d.Message.Content {
+				if block.Type == "text" {
+					text += block.Text
+				}
+			}
+			return text
 		}
 	case "tool/result":
 		var d struct {

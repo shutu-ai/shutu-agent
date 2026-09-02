@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // discoverApp builds an app with no registry dependency — discovery never needs
@@ -52,8 +53,14 @@ func TestDiscoverCatalogRoute(t *testing.T) {
 	if len(models) == 0 {
 		t.Fatal("catalog route should answer its candidates without a network call")
 	}
-	if models[0].ID == "" {
-		t.Fatal("candidate must carry an id")
+	if len(models) != 7 ||
+		models[0].ID != "llama-3.1-8b-instant" || models[0].ContextWindow != 131072 || models[0].MaxTokens != 131072 ||
+		models[1].ID != "llama-3.3-70b-versatile" || models[1].ContextWindow != 131072 || models[1].MaxTokens != 32768 ||
+		models[6].ID != "qwen/qwen3-32b" || models[6].ContextWindow != 131072 || models[6].MaxTokens != 40960 {
+		t.Fatalf("catalog candidates = %#v, want owned facts with unknown facts left absent", models)
+	}
+	if models[0].Reasoning == nil || *models[0].Reasoning {
+		t.Fatalf("catalog reasoning fact = %#v, want explicit false", models[0].Reasoning)
 	}
 	// Unknown provider + no base URL is a user error.
 	if _, err := a.webDiscoverModels(context.Background(), discoverRequest{Provider: "nope"}); err == nil {
@@ -190,4 +197,103 @@ func TestDiscoverWirePayload(t *testing.T) {
 	if req.Provider != "x" || req.BaseURL != "http://e" || req.Protocol != "openai-completions" || req.APIKey != "k" {
 		t.Fatalf("wire decode = %#v", req)
 	}
+}
+
+// TestDiscoverRemoteFaultMatrix pins the fail-closed behavior for remote model
+// catalog probes: slow endpoints, caller cancellation, and protocol faults are
+// stable errors rather than an empty catalog or a retry storm.
+func TestDiscoverRemoteFaultMatrix(t *testing.T) {
+	a := discoverApp(t)
+
+	t.Run("probe timeout", func(t *testing.T) {
+		original := discoverProbeTimeout
+		discoverProbeTimeout = 50 * time.Millisecond
+		t.Cleanup(func() { discoverProbeTimeout = original })
+
+		started := make(chan struct{})
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			close(started)
+			select {
+			case <-r.Context().Done():
+			case <-time.After(2 * time.Second):
+			}
+		}))
+		t.Cleanup(srv.Close)
+
+		start := time.Now()
+		if _, err := a.webDiscoverModels(context.Background(), discoverRequest{BaseURL: srv.URL}); err == nil {
+			t.Fatal("slow catalog probe unexpectedly succeeded")
+		}
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Fatalf("slow catalog probe returned after %v", elapsed)
+		}
+	})
+
+	t.Run("caller cancellation", func(t *testing.T) {
+		started := make(chan struct{})
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			close(started)
+			<-r.Context().Done()
+		}))
+		t.Cleanup(srv.Close)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			select {
+			case <-started:
+			case <-time.After(time.Second):
+			}
+			cancel()
+		}()
+		if _, err := a.webDiscoverModels(ctx, discoverRequest{BaseURL: srv.URL}); err == nil {
+			t.Fatal("cancelled catalog probe unexpectedly succeeded")
+		}
+	})
+
+	t.Run("HTTP 429 is not retried", func(t *testing.T) {
+		var calls int
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/models" {
+				calls++
+				w.Header().Set("Retry-After", "30")
+				w.WriteHeader(http.StatusTooManyRequests)
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		}))
+		t.Cleanup(srv.Close)
+
+		if _, err := a.webDiscoverModels(context.Background(), discoverRequest{BaseURL: srv.URL}); err == nil ||
+			!strings.Contains(err.Error(), "429") {
+			t.Fatalf("catalog 429 error = %v, want a 429 failure", err)
+		}
+		if calls != 1 {
+			t.Fatalf("catalog probe calls = %d, want 1", calls)
+		}
+	})
+
+	t.Run("non-object listing", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[{"id":"not-a-listing-object"}]`))
+		}))
+		t.Cleanup(srv.Close)
+
+		if _, err := a.webDiscoverModels(context.Background(), discoverRequest{BaseURL: srv.URL}); err == nil {
+			t.Fatal("non-object catalog reply unexpectedly succeeded")
+		}
+	})
+
+	t.Run("empty listing", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[]}`))
+		}))
+		t.Cleanup(srv.Close)
+
+		models, err := a.webDiscoverModels(context.Background(), discoverRequest{BaseURL: srv.URL})
+		if err != nil || len(models) != 0 {
+			t.Fatalf("empty listing = %#v, %v; want an empty successful catalog", models, err)
+		}
+	})
 }

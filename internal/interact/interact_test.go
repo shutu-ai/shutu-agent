@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -107,7 +108,178 @@ func TestEngineResolveInvalidStatus(t *testing.T) {
 	}
 }
 
+func TestAllowedOnceIsAValidApprovalOutcome(t *testing.T) {
+	e := newTestEngine(t)
+	request, err := e.Request(context.Background(), "allow", "bash", "{}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := e.Resolve(context.Background(), request.ID, StatusAllowedOnce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Status != StatusAllowedOnce {
+		t.Fatalf("status = %q, want %q", resolved.Status, StatusAllowedOnce)
+	}
+}
+
+func TestPendingApprovalExpiresAndCannotBeResolved(t *testing.T) {
+	e := newTestEngine(t)
+	expiry := interface{}(e).(ExpiryController)
+	expiry.SetRequestTTL(time.Nanosecond)
+	r, err := e.Request(context.Background(), "expire me", "write", "{}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(time.Millisecond)
+	items, err := e.List(context.Background())
+	if err != nil || len(items) != 1 || items[0].Status != StatusExpired {
+		t.Fatalf("expired list = %+v, err=%v", items, err)
+	}
+	if _, err := e.Resolve(context.Background(), r.ID, StatusApproved); !errors.Is(err, ErrAlreadyResolved) {
+		t.Fatalf("resolve after expiry = %v, want ErrAlreadyResolved", err)
+	}
+}
+
+func TestPendingApprovalExpiryInvokesCanonicalAuditSeam(t *testing.T) {
+	e := newTestEngine(t)
+	controller := interface{}(e).(ExpiryController)
+	auditor := interface{}(e).(ExpiryAuditor)
+	controller.SetRequestTTL(time.Nanosecond)
+	var audited Request
+	var calls int
+	auditor.SetExpiryAuditor(func(_ context.Context, request Request) error {
+		audited = request
+		calls++
+		return nil
+	})
+	requester := interface{}(e).(SessionRequester)
+	request, err := requester.RequestForSession(context.Background(), "session-expiry", "expire", "write", "{}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(time.Millisecond)
+	items, err := interface{}(e).(SessionLister).ListForSession(context.Background(), "session-expiry")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Status != StatusExpired || audited.ID != request.ID || audited.SessionID != "session-expiry" || calls != 1 {
+		t.Fatalf("expired approval = %+v, audited=%+v calls=%d", items, audited, calls)
+	}
+}
+
 // --- Unknown id / duplicate resolution ---------------------------------------
+
+func TestSessionApprovalPolicyNeverRejectsWithoutPendingRequest(t *testing.T) {
+	engine := NewEngine(nil)
+	defer engine.Close()
+	controller, ok := interface{}(engine).(PolicyController)
+	if !ok {
+		t.Fatal("engine does not expose PolicyController")
+	}
+	if err := controller.SetSessionPolicy("session-never", PolicyNever); err != nil {
+		t.Fatal(err)
+	}
+	requester := interface{}(engine).(SessionRequester)
+	request, err := requester.RequestForSession(context.Background(), "session-never", "approve", "write", "{}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.Status != StatusRejected || request.ID != "" {
+		t.Fatalf("never policy request = %+v, want rejected without id", request)
+	}
+	if pending, err := engine.List(context.Background()); err != nil || len(pending) != 0 {
+		t.Fatalf("pending after never policy = %+v, err=%v", pending, err)
+	}
+}
+
+func TestSessionApprovalPolicyNeverAppliesToCallAndQuestionRequests(t *testing.T) {
+	engine := NewEngine(nil)
+	defer engine.Close()
+	controller := interface{}(engine).(PolicyController)
+	if err := controller.SetSessionPolicy("session-never", PolicyNever); err != nil {
+		t.Fatal(err)
+	}
+	requester := interface{}(engine).(SessionCallRequester)
+	call, err := requester.RequestForSessionWithCallID(context.Background(), "session-never", "call-1", "approve", "write", "{}")
+	if err != nil || call.Status != StatusRejected || call.ID != "" || call.CallID != "call-1" {
+		t.Fatalf("never call request = %+v, err=%v", call, err)
+	}
+	structured := interface{}(engine).(StructuredSessionRequester)
+	question, err := structured.RequestForSessionWithQuestions(context.Background(), "session-never", "choose", "ask_user_question", "{}", []Question{{ID: "q", Question: "Proceed?"}})
+	if err != nil || question.Status != StatusRejected || question.ID != "" || len(question.Questions) != 1 {
+		t.Fatalf("never question request = %+v, err=%v", question, err)
+	}
+}
+
+func TestSessionApprovalOwnershipIsEnforcedByService(t *testing.T) {
+	e := newTestEngine(t)
+	requester := interface{}(e).(SessionRequester)
+	resolver := interface{}(e).(SessionResolver)
+	r, err := requester.RequestForSession(context.Background(), "owner", "approve", "write", "{}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.SessionID != "owner" {
+		t.Fatalf("request session id = %q, want owner", r.SessionID)
+	}
+	if _, err := resolver.ResolveForSession(context.Background(), "other", r.ID, StatusApproved); !errors.Is(err, ErrWrongSession) {
+		t.Fatalf("cross-session resolve = %v, want ErrWrongSession", err)
+	}
+	resolved, err := resolver.ResolveForSession(context.Background(), "owner", r.ID, StatusAllowedOnce)
+	if err != nil || resolved.Status != StatusAllowedOnce {
+		t.Fatalf("owner resolve = %+v, err=%v", resolved, err)
+	}
+}
+
+func TestSessionApprovalListIsOwnershipScoped(t *testing.T) {
+	e := newTestEngine(t)
+	requester := interface{}(e).(SessionRequester)
+	first, err := requester.RequestForSession(context.Background(), "owner-a", "a", "write", "{}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := requester.RequestForSession(context.Background(), "owner-b", "b", "write", "{}"); err != nil {
+		t.Fatal(err)
+	}
+	lister := interface{}(e).(SessionLister)
+	items, err := lister.ListForSession(context.Background(), "owner-a")
+	if err != nil || len(items) != 1 || items[0].ID != first.ID {
+		t.Fatalf("owner-a approvals = %+v, err=%v", items, err)
+	}
+	if _, err := lister.ListForSession(context.Background(), ""); !errors.Is(err, ErrWrongSession) {
+		t.Fatalf("empty session list = %v, want ErrWrongSession", err)
+	}
+}
+
+func TestSessionApprovalCancellationOnlyClosesDisposedOwner(t *testing.T) {
+	e := newTestEngine(t)
+	requester := interface{}(e).(SessionRequester)
+	first, err := requester.RequestForSession(context.Background(), "owner-a", "a", "write", "{}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := requester.RequestForSession(context.Background(), "owner-b", "b", "write", "{}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	canceler := interface{}(e).(SessionCanceler)
+	cancelled, err := canceler.CancelForSession(context.Background(), "owner-a")
+	if err != nil || len(cancelled) != 1 || cancelled[0].ID != first.ID || cancelled[0].Status != StatusCanceled {
+		t.Fatalf("owner-a cancellation = %+v, err=%v", cancelled, err)
+	}
+	items, err := e.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	statuses := map[string]ApprovalStatus{}
+	for _, item := range items {
+		statuses[item.ID] = item.Status
+	}
+	if statuses[first.ID] != StatusCanceled || statuses[second.ID] != StatusPending {
+		t.Fatalf("approval statuses = %#v, want owner-a cancelled and owner-b pending", statuses)
+	}
+}
 
 func TestEngineResolveUnknownID(t *testing.T) {
 	e := newTestEngine(t)
@@ -151,6 +323,36 @@ func TestEnginePendingLimit(t *testing.T) {
 	}
 	if _, err := e.Request(context.Background(), "after a resolve", "tool", "{}"); err != nil {
 		t.Errorf("Request after a resolve freed the cap: %v", err)
+	}
+}
+
+func TestEnginePendingLimitIsAtomicAcrossConcurrentRequests(t *testing.T) {
+	e := newTestEngine(t)
+	e.pendingLimit = 1
+	const callers = 32
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	succeeded := 0
+	limitErrors := 0
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, err := e.Request(context.Background(), fmt.Sprintf("concurrent %d", i), "write", "{}")
+			mu.Lock()
+			defer mu.Unlock()
+			if err == nil {
+				succeeded++
+			} else if errors.Is(err, ErrPendingLimit) {
+				limitErrors++
+			} else {
+				t.Errorf("concurrent Request: %v", err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	if succeeded != 1 || limitErrors != callers-1 {
+		t.Fatalf("concurrent admission succeeded=%d limitErrors=%d, want 1/%d", succeeded, limitErrors, callers-1)
 	}
 }
 
@@ -203,6 +405,24 @@ func TestEngineRestorePreservesIDsAndLifecycle(t *testing.T) {
 	}
 	if createdAfter.ID != "req-9" {
 		t.Fatalf("new id after Restore = %q, want req-9", createdAfter.ID)
+	}
+}
+
+func TestSessionAwareRequestsHaveDistinctProviderIDs(t *testing.T) {
+	requester := interface{}(NewEngine(NewMemProvider())).(SessionRequester)
+	first, err := requester.RequestForSession(context.Background(), "session-a", "approve", "write", "{}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := requester.RequestForSession(context.Background(), "session-b", "approve", "write", "{}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ID == second.ID {
+		t.Fatalf("session-aware provider IDs collided: %q", first.ID)
+	}
+	if first.SessionID != "session-a" || second.SessionID != "session-b" {
+		t.Fatalf("session ownership = %q/%q", first.SessionID, second.SessionID)
 	}
 }
 

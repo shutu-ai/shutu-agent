@@ -59,7 +59,7 @@ func TestStreamTextAndThinking(t *testing.T) {
 	var gotBody string
 	var gotKey string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/models/gemini-2.5-flash:streamGenerateContent" || r.URL.Query().Get("alt") != "sse" {
+		if r.URL.Path != "/models/request-selected-model:streamGenerateContent" || r.URL.Query().Get("alt") != "sse" {
 			t.Errorf("unexpected URL %s", r.URL.String())
 		}
 		gotKey = r.Header.Get("x-goog-api-key")
@@ -75,6 +75,10 @@ func TestStreamTextAndThinking(t *testing.T) {
 	p := New(Config{BaseURL: srv.URL, APIKey: "k", Model: "gemini-2.5-flash"})
 
 	reader, err := p.Stream(context.Background(), llm.ChatRequest{
+		Model:       "request-selected-model",
+		MaxTokens:   123,
+		Temperature: func() *float64 { v := 0.2; return &v }(),
+		Stop:        []string{"END"},
 		Messages: []llm.Message{
 			{Role: llm.RoleSystem, Content: []llm.ContentBlock{llm.Text("deepseek style system")}},
 			{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("hi")}},
@@ -115,6 +119,11 @@ func TestStreamTextAndThinking(t *testing.T) {
 	}
 	if !strings.Contains(gotBody, `"systemInstruction"`) || !strings.Contains(gotBody, `"deepseek style system"`) {
 		t.Errorf("request body missing systemInstruction: %s", gotBody)
+	}
+	for _, field := range []string{`"maxOutputTokens":123`, `"temperature":0.2`, `"stopSequences":["END"]`} {
+		if !strings.Contains(gotBody, field) {
+			t.Errorf("request body missing %s: %s", field, gotBody)
+		}
 	}
 }
 
@@ -160,6 +169,30 @@ func TestStreamFunctionCall(t *testing.T) {
 	}
 }
 
+func TestStreamTruncatedBeforeFinishReasonFailsClosed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		_, _ = w.Write([]byte(sseData(`{"candidates":[{"content":{"parts":[{"text":"partial"}]}}]}`) + "\n\n"))
+	}))
+	defer srv.Close()
+	p := New(Config{BaseURL: srv.URL, APIKey: "k"})
+	reader, err := p.Stream(context.Background(), llm.ChatRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.Next(); err != nil {
+		t.Fatalf("first delta: %v", err)
+	}
+	_, err = reader.Next()
+	if err == nil {
+		t.Fatal("truncated stream unexpectedly completed")
+	}
+	failure, ok := llm.FailureFacts(err)
+	if !ok || failure.Code != "STREAM_CLOSED" {
+		t.Fatalf("truncated stream error = %v facts=%+v ok=%v", err, failure, ok)
+	}
+}
+
 // TestStreamProviderError verifies a non-2xx error is surfaced (message parsed
 // from the {"error":{"message":...}} envelope).
 func TestStreamProviderError(t *testing.T) {
@@ -187,5 +220,61 @@ func TestStreamImageFailClosed(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected image fail-closed error")
+	}
+}
+
+func TestStreamUsesExplicitModelDefaultMaxOutputTokens(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.Header().Set("content-type", "text/event-stream")
+		_, _ = w.Write([]byte(sseData(`{"candidates":[{"finishReason":"STOP"}]}`) + "\n\n"))
+	}))
+	defer srv.Close()
+	p := New(Config{BaseURL: srv.URL, APIKey: "k", ModelCatalog: []llm.ModelInfo{{ID: "model", DefaultMaxTokens: 777}}})
+	reader, err := p.Stream(context.Background(), llm.ChatRequest{Model: "model", Messages: []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("hi")}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		_, nextErr := reader.Next()
+		if errors.Is(nextErr, io.EOF) {
+			break
+		}
+		if nextErr != nil {
+			t.Fatal(nextErr)
+		}
+	}
+	config, ok := got["generationConfig"].(map[string]any)
+	if !ok || config["maxOutputTokens"] != float64(777) {
+		t.Fatalf("generationConfig = %#v, want maxOutputTokens 777", got["generationConfig"])
+	}
+}
+
+func TestStreamUsesReferenceRouteDefaultMaxOutputTokens(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.Header().Set("content-type", "text/event-stream")
+		_, _ = w.Write([]byte(sseData(`{"candidates":[{"finishReason":"STOP"}]}`) + "\n\n"))
+	}))
+	defer srv.Close()
+	p := New(Config{BaseURL: srv.URL, APIKey: "k"})
+	reader, err := p.Stream(context.Background(), llm.ChatRequest{Model: "unlisted", Messages: []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("hi")}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		_, nextErr := reader.Next()
+		if errors.Is(nextErr, io.EOF) {
+			break
+		}
+		if nextErr != nil {
+			t.Fatal(nextErr)
+		}
+	}
+	config, ok := got["generationConfig"].(map[string]any)
+	if !ok || config["maxOutputTokens"] != float64(32768) {
+		t.Fatalf("generationConfig = %#v, want maxOutputTokens 32768", got["generationConfig"])
 	}
 }

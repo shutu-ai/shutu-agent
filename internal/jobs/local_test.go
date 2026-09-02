@@ -6,10 +6,66 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 )
 
 // Compile-time assertion: Local implements the Registry Service.
 var _ Registry = (*Local)(nil)
+
+func TestLocalCapturesCorrelationBeforeBackgroundRun(t *testing.T) {
+	started := make(chan JobSnapshot, 1)
+	runSawCorrelation := make(chan runtimectx.Correlation, 1)
+	l := NewLocal(LocalOpts{OnStarted: func(snap JobSnapshot) { started <- snap }})
+	defer l.Close()
+	want := runtimectx.Correlation{AgentID: "agent-1", SessionID: "session-1", TurnID: "turn:2", StepID: "step:3", RequestID: "req-4", CallID: "call-5", GenerationID: "gen-6"}
+	id, err := l.Start(context.Background(), JobStart{
+		Kind: "test", Label: "correlated", OwnerSession: want.SessionID, Correlation: want,
+		Run: func(ctx context.Context) (JobOutcome, error) {
+			got, ok := runtimectx.CorrelationOf(ctx)
+			if !ok {
+				t.Errorf("job context has no correlation")
+			} else {
+				runSawCorrelation <- got
+			}
+			return JobOutcome{Status: StatusCompleted}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	startedSnap := <-started
+	if startedSnap.ID != id || startedSnap.Correlation != want {
+		t.Fatalf("started snapshot = %+v, want id=%s correlation=%+v", startedSnap, id, want)
+	}
+	if got := (<-runSawCorrelation); got != want {
+		t.Fatalf("run correlation = %+v, want %+v", got, want)
+	}
+	snap := waitForTerminal(t, l, id, want.SessionID, time.Second)
+	if snap.Correlation != want {
+		t.Fatalf("terminal correlation = %+v, want %+v", snap.Correlation, want)
+	}
+}
+
+func TestLocalUsesDurableReservationForGeneratedIDs(t *testing.T) {
+	calls := 0
+	l := NewLocal(LocalOpts{ReserveID: func(context.Context, string, string) (bool, error) {
+		calls++
+		return calls > 1, nil
+	}})
+	defer l.Close()
+	id, err := l.Start(context.Background(), JobStart{
+		Kind: "bash", Label: "reserved", Run: func(context.Context) (JobOutcome, error) {
+			return JobOutcome{Status: StatusCompleted}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "bash-2" || calls != 2 {
+		t.Fatalf("id=%q reservation calls=%d, want bash-2 and 2 calls", id, calls)
+	}
+}
 
 // gateRun is a Run body that settles as completed when its gate closes or
 // killed when its context is cancelled. The ctx branch guarantees every
@@ -104,6 +160,91 @@ func TestLocalStartListGet(t *testing.T) {
 	}
 	if len(list) != 1 || list[0].ID != id {
 		t.Fatalf("List = %+v, want exactly [%s]", list, id)
+	}
+}
+
+func TestLocalCompletionObserverReceivesFirstSettledSnapshot(t *testing.T) {
+	notices := make(chan struct {
+		snapshot JobSnapshot
+		output   string
+	}, 2)
+	l := NewLocal(LocalOpts{OnSettled: func(snapshot JobSnapshot, output string) {
+		notices <- struct {
+			snapshot JobSnapshot
+			output   string
+		}{snapshot: snapshot, output: output}
+	}})
+	defer l.Close()
+
+	id, err := l.Start(context.Background(), JobStart{
+		Kind: "schedule", Label: "reminder", OwnerSession: "sess-owner",
+		OutputLimitBytes: 5,
+		Run: func(context.Context) (JobOutcome, error) {
+			return JobOutcome{Status: StatusCompleted, Detail: "fired", Output: "abcdef"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	select {
+	case notice := <-notices:
+		if notice.snapshot.ID != id || notice.snapshot.OwnerSession != "sess-owner" {
+			t.Fatalf("notice snapshot = %+v, want id=%s owner=sess-owner", notice.snapshot, id)
+		}
+		if notice.snapshot.Status != StatusCompleted || notice.output != capOutput("abcdef", 5) {
+			t.Fatalf("notice = %+v output=%q, want completed and bounded output", notice.snapshot, notice.output)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("completion observer was not called")
+	}
+	select {
+	case duplicate := <-notices:
+		t.Fatalf("completion observer called more than once: %+v", duplicate)
+	case <-time.After(30 * time.Millisecond):
+	}
+}
+
+func TestLocalCloseWaitsForCompletionObserver(t *testing.T) {
+	observerEntered := make(chan struct{})
+	releaseObserver := make(chan struct{})
+	closeReturned := make(chan struct{})
+	l := NewLocal(LocalOpts{OnSettled: func(JobSnapshot, string) {
+		close(observerEntered)
+		<-releaseObserver
+	}})
+
+	_, err := l.Start(context.Background(), JobStart{
+		Kind: "schedule", Label: "quiesce", OwnerSession: "sess-owner",
+		Run: func(context.Context) (JobOutcome, error) {
+			return JobOutcome{Status: StatusCompleted}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	select {
+	case <-observerEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("completion observer was not entered")
+	}
+	go func() {
+		if err := l.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+		close(closeReturned)
+	}()
+
+	select {
+	case <-closeReturned:
+		t.Fatal("Close returned before completion observer finished")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseObserver)
+	select {
+	case <-closeReturned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not return after completion observer finished")
 	}
 }
 
@@ -610,6 +751,82 @@ func TestLocalCloseCancelsLiveJobs(t *testing.T) {
 		if snap.Status != StatusKilled {
 			t.Fatalf("job %s status after Close = %q, want killed", id, snap.Status)
 		}
+	}
+}
+
+func TestLocalCloseOwnerCancelsAwaitsAndRemovesOnlyOwnerJobs(t *testing.T) {
+	l := NewLocal(LocalOpts{})
+	ownerID := mustStart(t, l, "bash", "owner", make(chan struct{}))
+	otherID := mustStart(t, l, "bash", "other", make(chan struct{}))
+	unownedID := mustStart(t, l, "bash", "", make(chan struct{}))
+
+	if err := l.CloseOwner("owner"); err != nil {
+		t.Fatalf("CloseOwner: %v", err)
+	}
+	if _, err := l.Get(context.Background(), ownerID, "owner"); !errors.Is(err, ErrUnknownJob) {
+		t.Fatalf("owner job after CloseOwner = %v, want ErrUnknownJob", err)
+	}
+	for _, tc := range []struct {
+		id    string
+		owner string
+	}{
+		{otherID, "other"},
+		{unownedID, "observer"},
+	} {
+		snap, err := l.Get(context.Background(), tc.id, tc.owner)
+		if err != nil {
+			t.Fatalf("Get(%s) after CloseOwner: %v", tc.id, err)
+		}
+		if snap.Status != StatusStopping && snap.Status != StatusRunning {
+			t.Fatalf("job %s status after unrelated CloseOwner = %q", tc.id, snap.Status)
+		}
+	}
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestLocalCloseOwnerClosesAdmissionAndWaitsForObserver(t *testing.T) {
+	observerEntered := make(chan struct{})
+	releaseObserver := make(chan struct{})
+	l := NewLocal(LocalOpts{})
+	id, err := l.Start(context.Background(), JobStart{
+		Kind: "bash", Label: "owner", OwnerSession: "owner",
+		Run: func(ctx context.Context) (JobOutcome, error) {
+			<-ctx.Done()
+			return JobOutcome{Status: StatusKilled}, nil
+		},
+		OnSettled: func(JobSnapshot) {
+			close(observerEntered)
+			<-releaseObserver
+		},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- l.CloseOwner("owner") }()
+	<-observerEntered
+	if _, err := l.Start(context.Background(), JobStart{
+		Kind: "bash", Label: "late", OwnerSession: "owner",
+		Run: func(context.Context) (JobOutcome, error) { return JobOutcome{Status: StatusCompleted}, nil },
+	}); !errors.Is(err, ErrOwnerClosed) {
+		t.Fatalf("late owner Start error = %v, want ErrOwnerClosed", err)
+	}
+	select {
+	case err := <-closeDone:
+		t.Fatalf("CloseOwner returned before observer release: %v", err)
+	default:
+	}
+	close(releaseObserver)
+	if err := <-closeDone; err != nil {
+		t.Fatalf("CloseOwner: %v", err)
+	}
+	if _, err := l.Get(context.Background(), id, "owner"); !errors.Is(err, ErrUnknownJob) {
+		t.Fatalf("owner job after CloseOwner = %v, want ErrUnknownJob", err)
+	}
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 }
 

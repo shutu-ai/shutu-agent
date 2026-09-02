@@ -9,10 +9,12 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -20,7 +22,12 @@ import (
 	"github.com/jabing/shutu-agent/internal/config"
 	"github.com/jabing/shutu-agent/internal/session"
 	"github.com/jabing/shutu-agent/internal/store"
+	"github.com/jabing/shutu-agent/internal/webserver"
 )
+
+func intPtr(value int) *int { return &value }
+
+func stringPtr(value string) *string { return &value }
 
 func makeWebServerApp(t *testing.T, enabled bool, token string) (*app, *store.SQLiteStore) {
 	t.Helper()
@@ -41,6 +48,117 @@ func makeWebServerApp(t *testing.T, enabled bool, token string) (*app, *store.SQ
 		}},
 		store: st,
 	}, st
+}
+
+func TestRedactMCPHeadersNeverReturnsValues(t *testing.T) {
+	got := redactMCPHeaders(map[string]string{"Authorization": "Bearer secret", "X-Empty": ""})
+	if got["Authorization"] != "[redacted]" || strings.Contains(got["Authorization"], "secret") {
+		t.Fatalf("authorization header was not redacted: %#v", got)
+	}
+	if got["X-Empty"] != "" {
+		t.Fatalf("empty header changed: %#v", got)
+	}
+}
+
+func TestRedactMCPArgsPreservesShapeAndRestoresMaskedValues(t *testing.T) {
+	original := []string{"--api-key", "secret-key", "--mode", "stdio", "TOKEN=env-secret", "--header=Authorization: Bearer secret"}
+	masked := redactMCPArgs(original)
+	want := []string{"--api-key", redactedMCPValue, "--mode", "stdio", "TOKEN=" + redactedMCPValue, "--header=" + redactedMCPValue}
+	if !reflect.DeepEqual(masked, want) {
+		t.Fatalf("masked args = %#v, want %#v", masked, want)
+	}
+	if got := restoreMCPArgs(masked, original); !reflect.DeepEqual(got, original) {
+		t.Fatalf("restored args = %#v, want %#v", got, original)
+	}
+}
+
+func TestRedactMCPURLPreservesEndpointAndRestoresCredentials(t *testing.T) {
+	original := "https://user:secret@example.test/mcp?api_key=query-secret&keep=value"
+	masked := redactMCPURL(original)
+	if strings.Contains(masked, "secret") || !strings.Contains(masked, "keep=value") || !strings.Contains(masked, "redacted") {
+		t.Fatalf("masked URL = %q", masked)
+	}
+	if got := restoreMCPURL(masked, original); got != original {
+		t.Fatalf("restored URL = %q, want %q", got, original)
+	}
+}
+
+func TestMCPUpdateRestoresProjectedSecrets(t *testing.T) {
+	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	a := &app{
+		store: st,
+		cfg: config.Config{Mcp: config.McpConfig{Servers: []config.McpServer{{
+			Name: "secure", Transport: "streamable-http", URL: "https://u:pass@example.test/mcp?api_key=query-secret&keep=value",
+			Args: []string{"--token", "arg-secret"}, Headers: map[string]string{"Authorization": "Bearer header-secret"}, Env: map[string]string{"MCP_SECRET": "env-secret", "MCP_MODE": "strict"}, Cwd: "/srv/mcp", ToolCallTimeoutMS: 1234, FailOnStartupError: true,
+		}}}},
+	}
+	server := a.cfg.Mcp.Servers[0]
+	_, err = a.webManageMCP(context.Background(), "update", webserver.MCPServerEdit{
+		OriginalName: server.Name, Name: server.Name, Transport: server.Transport,
+		URL: redactMCPURL(server.URL), Args: redactMCPArgs(server.Args), Headers: redactMCPHeaders(server.Headers), Env: redactMCPEnv(server.Env), Cwd: stringPtr(server.Cwd), ToolCallTimeoutMS: intPtr(server.ToolCallTimeoutMS),
+	})
+	if err != nil {
+		t.Fatalf("update projected MCP config: %v", err)
+	}
+	got := a.providerConfigSnapshot().Mcp.Servers[0]
+	if got.URL != server.URL || !reflect.DeepEqual(got.Args, server.Args) || !reflect.DeepEqual(got.Headers, server.Headers) || !reflect.DeepEqual(got.Env, server.Env) || got.Cwd != server.Cwd || got.ToolCallTimeoutMS != server.ToolCallTimeoutMS || got.FailOnStartupError != server.FailOnStartupError {
+		t.Fatalf("projected update changed secrets: got=%+v want=%+v", got, server)
+	}
+	view := a.webMCPServers()
+	if len(view) != 1 {
+		t.Fatalf("MCP view = %#v, want one server", view)
+	}
+	env, _ := view[0]["env"].(map[string]string)
+	if env["MCP_SECRET"] != redactedMCPValue || env["MCP_MODE"] != redactedMCPValue {
+		t.Fatalf("MCP view leaked or dropped env values: %#v", view[0]["env"])
+	}
+}
+
+func TestMCPUpdateOmittedCwdPreservesConfiguredDirectory(t *testing.T) {
+	a := makePlanApp(true)
+	a.store = nil
+	a.cfg.Mcp.Servers = []config.McpServer{{Name: "local", Transport: "stdio", Cmd: "mcp", Cwd: "/srv/mcp", ToolCallTimeoutMS: 60000}}
+	// The production path persists through SQLite; use the same helper setup as
+	// the redaction test when the app has a store available.
+	if a.store == nil {
+		st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "mcp-cwd.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		a.store = st
+		defer st.Close()
+	}
+	server := a.cfg.Mcp.Servers[0]
+	if _, err := a.webManageMCP(context.Background(), "update", webserver.MCPServerEdit{
+		OriginalName: server.Name, Name: server.Name, Transport: server.Transport,
+		Cmd: server.Cmd, Cwd: nil, ToolCallTimeoutMS: intPtr(server.ToolCallTimeoutMS),
+	}); err != nil {
+		t.Fatalf("update MCP config: %v", err)
+	}
+	got := a.providerConfigSnapshot().Mcp.Servers[0]
+	if got.Cwd != server.Cwd {
+		t.Fatalf("omitted cwd = %q, want %q", got.Cwd, server.Cwd)
+	}
+}
+
+func TestRedactMCPErrorRemovesConfiguredSecrets(t *testing.T) {
+	server := config.McpServer{
+		URL:     "https://example.test/mcp?api_key=query-secret",
+		Args:    []string{"--token", "arg-secret"},
+		Headers: map[string]string{"Authorization": "Bearer header-secret"},
+		Env:     map[string]string{"MCP_SECRET": "env-secret"},
+	}
+	err := errors.New("request https://example.test/mcp?api_key=query-secret token=arg-secret Authorization: Bearer header-secret MCP_SECRET=env-secret")
+	got := redactMCPError(err, server)
+	for _, secret := range []string{"query-secret", "arg-secret", "Bearer header-secret", "env-secret"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("MCP diagnostic leaks %q: %q", secret, got)
+		}
+	}
 }
 
 func TestResolveFrontendDist(t *testing.T) {

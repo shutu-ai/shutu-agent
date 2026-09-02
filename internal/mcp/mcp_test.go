@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -56,18 +57,49 @@ func TestHelperServer(t *testing.T) {
 				fakeError(out, msg.ID, -32000, "handshake rejected by fake server")
 				continue
 			}
+			if mode == "notify" {
+				fakeFrame(out, map[string]any{"jsonrpc": "2.0", "method": "notifications/tools/list_changed", "params": map[string]any{}})
+			}
+			if mode == "ping" {
+				fakeFrame(out, map[string]any{"jsonrpc": "2.0", "id": 900, "method": "ping", "params": map[string]any{}})
+				pingLine, pingErr := in.ReadBytes('\n')
+				var pingResponse struct {
+					ID     json.RawMessage `json:"id"`
+					Result map[string]any  `json:"result"`
+					Error  json.RawMessage `json:"error"`
+				}
+				if pingErr != nil || json.Unmarshal(pingLine, &pingResponse) != nil || string(pingResponse.ID) != "900" || pingResponse.Result == nil || len(pingResponse.Error) != 0 {
+					return
+				}
+			}
 			fakeResult(out, msg.ID, map[string]any{
 				"protocolVersion": "2024-11-05",
 				"capabilities":    map[string]any{},
 				"serverInfo":      map[string]any{"name": "fake-mcp", "version": "1.0.0"},
 			})
 		case "tools/list":
-			if mode == "timeout" {
+			if mode == "timeout" || mode == "timeout-close" {
+				if mode == "timeout-close" {
+					fakeFrame(out, map[string]any{"jsonrpc": "2.0", "method": "notifications/tools/list_changed", "params": map[string]any{}})
+				}
 				// Stay alive without responding: a pending timer keeps the Go
 				// runtime's deadlock detector (which kills a test binary on
 				// `select {}` with all goroutines asleep) from firing. The
 				// client times out, then kills us via Close.
 				time.Sleep(time.Hour)
+			}
+			if mode == "env-check" {
+				fakeResult(out, msg.ID, map[string]any{"tools": []any{map[string]any{
+					"name": "env", "description": os.Getenv("DSH_API_KEY") + "|" + os.Getenv("SAFE_MODE"),
+					"inputSchema": map[string]any{"type": "object"},
+				}}})
+				continue
+			}
+			if mode == "cwd-check" {
+				fakeResult(out, msg.ID, map[string]any{"tools": []any{map[string]any{
+					"name": "cwd", "description": mustGetwd() + "|" + os.Getenv("DSH_API_KEY") + "|" + os.Getenv("SAFE_MODE"), "inputSchema": map[string]any{"type": "object"},
+				}}})
+				continue
 			}
 			if mode == "pages" {
 				var params struct {
@@ -125,6 +157,14 @@ func TestHelperServer(t *testing.T) {
 					"content": []any{map[string]any{"type": "text", "text": "operation failed"}},
 					"isError": true,
 				})
+			case "errimage":
+				fakeResult(out, msg.ID, map[string]any{
+					"content": []any{map[string]any{
+						"type": "image", "mimeType": "image/png",
+						"data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+					}},
+					"isError": true,
+				})
 			case "boom":
 				fakeError(out, msg.ID, -32602, "boom requested")
 			case "nope":
@@ -136,6 +176,50 @@ func TestHelperServer(t *testing.T) {
 			fakeError(out, msg.ID, -32601, "method not found")
 		}
 	}
+}
+
+func TestClientCloseInterruptsInFlightRequest(t *testing.T) {
+	c := newFakeClient(t, "timeout-close", 30*time.Second)
+	changed := make(chan struct{}, 1)
+	c.SetToolListChangedHandler(func() { changed <- struct{}{} })
+	if err := c.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	requestDone := make(chan error, 1)
+	go func() {
+		_, err := c.ListTools(context.Background())
+		requestDone <- err
+	}()
+	select {
+	case <-changed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout helper did not receive the in-flight tools/list")
+	}
+
+	closeDone := make(chan struct{})
+	go func() {
+		_ = c.Close()
+		close(closeDone)
+	}()
+	select {
+	case <-closeDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close blocked behind an in-flight stdio request")
+	}
+	select {
+	case err := <-requestDone:
+		if !errors.Is(err, ErrClosed) {
+			t.Fatalf("in-flight ListTools error = %v, want ErrClosed", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("in-flight ListTools did not settle after Close")
+	}
+}
+
+func mustGetwd() string {
+	wd, _ := os.Getwd()
+	return wd
 }
 
 func fakeResult(w *bufio.Writer, id json.RawMessage, result any) {
@@ -182,6 +266,88 @@ func TestClientStartHandshake(t *testing.T) {
 	}
 	if err := c.Start(context.Background()); err != nil {
 		t.Fatalf("second Start (idempotent): %v", err)
+	}
+}
+
+func TestClientAnswersServerPing(t *testing.T) {
+	c := newFakeClient(t, "ping", 0)
+	defer c.Close()
+	if err := c.Start(context.Background()); err != nil {
+		t.Fatalf("Start with server ping: %v", err)
+	}
+}
+
+func TestScrubEnvRemovesCredentialShapedNamesOnly(t *testing.T) {
+	got := scrubEnv([]string{
+		"PATH=/bin",
+		"DSH_API_KEY=secret",
+		"SERVICE_TOKEN=secret",
+		"SAFE_MODE=1",
+		"BROKEN_NO_EQUALS",
+	})
+	if strings.Join(got, "\x00") != "PATH=/bin\x00SAFE_MODE=1" {
+		t.Fatalf("scrubbed MCP environment = %#v", got)
+	}
+}
+
+func TestStdioChildDoesNotInheritAmbientCredentials(t *testing.T) {
+	t.Setenv("DSH_API_KEY", "ambient-secret")
+	t.Setenv("SAFE_MODE", "1")
+	c := newFakeClient(t, "env-check", 0)
+	defer c.Close()
+	if err := c.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	tools, err := c.ListTools(context.Background())
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	if len(tools) != 1 || tools[0].Description != "|1" {
+		t.Fatalf("child environment description = %#v, want ambient credential removed and safe value retained", tools)
+	}
+}
+
+func TestConfiguredServerPreservesEnvCwdAndCallTimeout(t *testing.T) {
+	t.Setenv("DSH_API_KEY", "ambient-secret")
+	dir := t.TempDir()
+	client, err := NewClientForServer(context.Background(), NewStdioFactory(), McpServer{
+		Name: "configured", Cmd: os.Args[0],
+		Args: []string{"-test.run=^TestHelperServer$"},
+		Env:  map[string]string{helperServerEnv: "1", helperServerModeEnv: "cwd-check", "SAFE_MODE": "1", "DSH_API_KEY": "explicit-secret"},
+		Cwd:  dir, ToolCallTimeout: 1234 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("NewClientForServer: %v", err)
+	}
+	defer client.Close()
+	if err := client.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	tools, err := client.ListTools(context.Background())
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	if len(tools) != 1 || tools[0].Description != dir+"|explicit-secret|1" {
+		t.Fatalf("configured child boundary = %#v, want cwd/env", tools)
+	}
+	configured, ok := client.(*stdioClient)
+	if !ok || configured.callTimeout != 1234*time.Millisecond {
+		t.Fatalf("configured call timeout = %#v, want 1234ms", configured)
+	}
+}
+
+func TestClientDispatchesToolListChangedNotification(t *testing.T) {
+	c := newFakeClient(t, "notify", 0)
+	defer c.Close()
+	changed := make(chan struct{}, 1)
+	c.SetToolListChangedHandler(func() { changed <- struct{}{} })
+	if err := c.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	select {
+	case <-changed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("tool-list-changed notification was not dispatched")
 	}
 }
 
@@ -352,14 +518,17 @@ func TestClientCallUnknownMethod(t *testing.T) {
 
 // TestClientTimeout covers the per-request timeout: a server that never answers
 // tools/list yields ErrTimeout promptly, and Close still terminates the hung
-// server promptly (no goroutine holds the connection open).
+// server promptly (no goroutine holds the connection open). Start intentionally
+// uses the normal handshake bound; process launch latency must not turn this
+// timeout test into a flaky initialize failure.
 func TestClientTimeout(t *testing.T) {
-	c := newFakeClient(t, "timeout", 300*time.Millisecond)
+	c := newFakeClient(t, "timeout", 0)
 	defer c.Close()
 
 	if err := c.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	c.timeout = 300 * time.Millisecond
 	start := time.Now()
 	_, err := c.ListTools(context.Background())
 	elapsed := time.Since(start)
@@ -379,6 +548,33 @@ func TestClientTimeout(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Close blocked on the hung server (goroutine/process leak)")
+	}
+}
+
+// TestClientReconnectAfterTimeout covers the recoverable connection state:
+// request timeout tears down only the current subprocess, while Start performs
+// a fresh initialize handshake. Explicit Close remains terminal afterwards.
+func TestClientReconnectAfterTimeout(t *testing.T) {
+	c := newFakeClient(t, "timeout", 0)
+	if err := c.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	c.timeout = 300 * time.Millisecond
+	if _, err := c.ListTools(context.Background()); err == nil || !errors.Is(err, ErrTimeout) {
+		t.Fatalf("ListTools error = %v, want ErrTimeout", err)
+	}
+	c.timeout = DefaultTimeout
+	if err := c.Start(context.Background()); err != nil {
+		t.Fatalf("Start after timeout: %v", err)
+	}
+	if !c.started {
+		t.Fatal("client is not started after reconnect")
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := c.Start(context.Background()); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Start after explicit Close = %v, want ErrClosed", err)
 	}
 }
 
@@ -455,4 +651,42 @@ func TestClientNoGoroutineLeak(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("goroutine leak: before=%d after=%d", before, runtime.NumGoroutine())
+}
+
+func TestStdioCloseWaitsForNotificationCallback(t *testing.T) {
+	c := newStdioClient("unused", nil)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	c.SetToolListChangedHandler(func() {
+		close(entered)
+		<-release
+	})
+
+	c.mu.Lock()
+	c.startNotificationDispatcherLocked()
+	c.mu.Unlock()
+	c.signalToolListChanged()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("notification callback did not start")
+	}
+
+	closed := make(chan struct{})
+	go func() {
+		_ = c.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+		t.Fatal("Close returned while notification callback was in flight")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not drain notification callback")
+	}
 }

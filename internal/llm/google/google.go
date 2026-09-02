@@ -21,6 +21,8 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/jabing/shutu-agent/internal/llm"
 )
@@ -31,8 +33,10 @@ const (
 	defaultBaseURL = "https://generativelanguage.googleapis.com/v1beta"
 	// defaultModel is the default model when Config.Model is empty.
 	defaultModel = "gemini-2.5-flash"
-	// defaultMaxOutputTokens is the response token budget.
-	defaultMaxOutputTokens = 4096
+	// defaultMaxOutputTokens is the route-level request default used by the
+	// reference pi-ai adapter. ModelInfo.MaxTokens remains capacity metadata
+	// and is not promoted into a request budget.
+	defaultMaxOutputTokens = 32768
 	// providerID is the stable provider id.
 	providerID = "google"
 	// maxErrorBody bounds the non-2xx error body read (1 MiB).
@@ -52,11 +56,15 @@ var errRedirectDetected = fmt.Errorf("google: redirect not followed")
 // (GEMINI_API_KEY only, 纪律 6).
 type Config struct {
 	// ID is the provider's registry id; empty defaults to "google".
-	ID      string
-	BaseURL string // default https://generativelanguage.googleapis.com/v1beta
-	APIKey  string // GEMINI_API_KEY value; empty means absent
-	Model   string // default gemini-2.5-flash
-	// MaxOutputTokens is the response token budget; <= 0 uses the default 4096.
+	ID                      string
+	BaseURL                 string // default https://generativelanguage.googleapis.com/v1beta
+	APIKey                  string // GEMINI_API_KEY value; empty means absent
+	CredentialProvider      llm.CredentialProvider
+	CredentialLeaseProvider llm.CredentialLeaseProvider
+	Model                   string // default gemini-2.5-flash
+	ModelCatalog            []llm.ModelInfo
+	// MaxOutputTokens is the route-level response token budget; <= 0 uses the
+	// reference default 32768.
 	MaxOutputTokens int
 	// HTTPClient is optional; defaults to http.DefaultClient. The provider
 	// copies it with a no-redirect CheckRedirect, never mutating the caller's
@@ -72,15 +80,19 @@ type Config struct {
 
 // googleProvider is the llm.Provider implementing the Gemini Generative AI API.
 type googleProvider struct {
-	id              string
-	baseURL         string
-	apiKey          string
-	model           string
-	maxOutputTokens int
-	client          *http.Client
+	id                      string
+	baseURL                 string
+	apiKey                  string
+	apiKeyMu                sync.RWMutex
+	credentialProvider      llm.CredentialProvider
+	credentialLeaseProvider llm.CredentialLeaseProvider
+	model                   string
+	maxOutputTokens         int
+	client                  *http.Client
 
 	supportsImages       bool
 	maxRequestImageBytes int
+	modelCatalog         []llm.ModelInfo
 }
 
 // New returns a googleProvider with defaults applied.
@@ -104,14 +116,17 @@ func New(cfg Config) *googleProvider {
 		cfg.MaxRequestImageBytes = defaultMaxRequestImageBytes
 	}
 	return &googleProvider{
-		id:                   cfg.ID,
-		baseURL:              strings.TrimRight(cfg.BaseURL, "/"),
-		apiKey:               cfg.APIKey,
-		model:                cfg.Model,
-		maxOutputTokens:      cfg.MaxOutputTokens,
-		client:               cfg.HTTPClient,
-		supportsImages:       cfg.SupportsImages,
-		maxRequestImageBytes: cfg.MaxRequestImageBytes,
+		id:                      cfg.ID,
+		baseURL:                 strings.TrimRight(cfg.BaseURL, "/"),
+		apiKey:                  cfg.APIKey,
+		credentialProvider:      cfg.CredentialProvider,
+		credentialLeaseProvider: cfg.CredentialLeaseProvider,
+		model:                   cfg.Model,
+		maxOutputTokens:         cfg.MaxOutputTokens,
+		client:                  cfg.HTTPClient,
+		supportsImages:          cfg.SupportsImages,
+		maxRequestImageBytes:    cfg.MaxRequestImageBytes,
+		modelCatalog:            llm.CopyModelCatalog(cfg.ModelCatalog),
 	}
 }
 
@@ -119,10 +134,77 @@ func New(cfg Config) *googleProvider {
 // custom route configured via Config.ID).
 func (p *googleProvider) ID() string { return p.id }
 
+func (p *googleProvider) SupportsImages() bool { return p.supportsImages }
+
+func (p *googleProvider) ListModels(context.Context) ([]llm.ModelInfo, error) {
+	return llm.CopyModelCatalog(p.modelCatalog), nil
+}
+
+func (p *googleProvider) ResolveModelInfo(_ context.Context, model string) (llm.ModelInfo, error) {
+	info, err := llm.ResolveModelFromCatalog(p.id, p.modelCatalog, model)
+	if err != nil {
+		return llm.ModelInfo{}, err
+	}
+	info.DefaultMaxTokens = llm.ModelDefaultMaxTokens(p.modelCatalog, model)
+	return info, nil
+}
+
+func (p *googleProvider) Close() error {
+	if p == nil {
+		return nil
+	}
+	p.apiKeyMu.Lock()
+	p.apiKey = ""
+	p.credentialProvider = nil
+	p.credentialLeaseProvider = nil
+	p.apiKeyMu.Unlock()
+	return nil
+}
+
+func (p *googleProvider) keySnapshot(ctx context.Context) (string, error) {
+	p.apiKeyMu.RLock()
+	provider := p.credentialProvider
+	key := p.apiKey
+	p.apiKeyMu.RUnlock()
+	if provider != nil {
+		return provider(ctx)
+	}
+	return key, nil
+}
+
+func (p *googleProvider) keyLease(ctx context.Context) (string, llm.CredentialLease, error) {
+	p.apiKeyMu.RLock()
+	leaseProvider := p.credentialLeaseProvider
+	provider := p.credentialProvider
+	key := p.apiKey
+	p.apiKeyMu.RUnlock()
+	if leaseProvider != nil {
+		lease, err := leaseProvider(ctx)
+		if err != nil {
+			return "", nil, err
+		}
+		if lease == nil {
+			return "", nil, nil
+		}
+		value := lease.Value()
+		if value == "" {
+			lease.Release()
+			return "", nil, nil
+		}
+		return value, lease, nil
+	}
+	if provider != nil {
+		value, err := provider(ctx)
+		return value, nil, err
+	}
+	return key, nil, nil
+}
+
 // Available reports whether the provider can be used: a cheap local check that
 // never performs a network call — apiKey present and base URL parseable.
 func (p *googleProvider) Available() bool {
-	if p.apiKey == "" {
+	key, err := p.keySnapshot(context.Background())
+	if err != nil || key == "" {
 		return false
 	}
 	u, err := url.Parse(p.baseURL)
@@ -138,9 +220,32 @@ func (p *googleProvider) Available() bool {
 // header, and the SSE response is decoded into llm.StreamEvents. ctx
 // cancellation runs through the HTTP request and the body reads.
 func (p *googleProvider) Stream(ctx context.Context, req llm.ChatRequest) (llm.StreamReader, error) {
+	if err := llm.ValidateRequestBlocks(p.ID(), req.Messages); err != nil {
+		return nil, err
+	}
+	apiKey, credentialLease, err := p.keyLease(ctx)
+	if err != nil {
+		return nil, llm.NewFailureError("google: credential resolution failed", "CREDENTIAL_UNAVAILABLE", err)
+	}
+	leaseTransferred := false
+	defer func() {
+		if !leaseTransferred && credentialLease != nil {
+			credentialLease.Release()
+		}
+	}()
+	if apiKey == "" {
+		return nil, llm.NewFailureError("google: credential unavailable", "CREDENTIAL_UNAVAILABLE", nil)
+	}
+	model := strings.TrimSpace(req.Model)
+	if model == "" {
+		model = p.model
+	}
+	if err := llm.ValidateReasoningEffortForModel(p.ID(), p.modelCatalog, model, req.ReasoningEffort); err != nil {
+		return nil, err
+	}
 	// Image fail-closed check FIRST (dispatch-m8-3b §3): a model that does not
 	// declare image input must error on an image request, never silently drop it.
-	if !p.supportsImages {
+	if !llm.ModelSupportsImages(p.supportsImages, p.modelCatalog, model) {
 		for _, m := range req.Messages {
 			if m.HasImage() {
 				return nil, fmt.Errorf("%s: model does not support image input (model_input_modalities=text)", p.ID())
@@ -149,40 +254,58 @@ func (p *googleProvider) Stream(ctx context.Context, req llm.ChatRequest) (llm.S
 	}
 	msgs := llm.OffloadRequestImages(req.Messages, p.maxRequestImageBytes)
 
+	maxOutputTokens := p.maxOutputTokens
+	if catalogDefault := llm.ModelDefaultMaxTokens(p.modelCatalog, model); catalogDefault > 0 {
+		maxOutputTokens = catalogDefault
+	}
+	if req.MaxTokens > 0 {
+		maxOutputTokens = req.MaxTokens
+	}
+	effort := strings.TrimSpace(req.ReasoningEffort)
+	if effort == "" {
+		effort = llm.ModelDefaultReasoningEffort(p.modelCatalog, model)
+	}
+	reasoning, reasoningKnown := llm.ModelReasoningCapability(p.modelCatalog, model)
+	thinking := thinkingForEffort(effort, req.ReasoningBudgetTokens, reasoningKnown && reasoning)
 	body := requestBody{
-		Model:            p.model,
+		Model:            model,
 		System:           extractSystem(msgs),
 		Contents:         toContents(msgs, p.maxRequestImageBytes),
 		Tools:            toTools(req.Tools),
-		GenerationConfig: generationConfig{MaxOutputTokens: p.maxOutputTokens},
+		GenerationConfig: generationConfig{MaxOutputTokens: maxOutputTokens, Temperature: req.Temperature, StopSequences: append([]string(nil), req.Stop...), ThinkingConfig: thinking},
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("google: marshal request: %w", err)
 	}
 
-	endpoint := p.baseURL + "/models/" + url.PathEscape(p.model) + ":streamGenerateContent?alt=sse"
+	endpoint := p.baseURL + "/models/" + url.PathEscape(model) + ":streamGenerateContent?alt=sse"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
 		return nil, fmt.Errorf("google: build request: %w", err)
 	}
-	httpReq.Header.Set(apiKeyHeader, p.apiKey)
+	httpReq.Header.Set(apiKeyHeader, apiKey)
 	httpReq.Header.Set("content-type", "application/json")
 	httpReq.Header.Set("accept", "text/event-stream")
+	llm.ApplyAttributionHeaders(httpReq.Header)
 
 	resp, err := p.doNoRedirect(httpReq)
 	if err != nil {
 		return nil, err
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return newStreamReader(resp), nil
+		reader := newStreamReader(resp)
+		reader.credentialLease = credentialLease
+		leaseTransferred = credentialLease != nil
+		return reader, nil
 	}
 	defer resp.Body.Close()
 	detail := errorDetail(resp)
 	if detail == "" {
 		detail = resp.Status
 	}
-	return nil, fmt.Errorf("google: provider error: %s", detail)
+	return nil, llm.ClassifyHTTPFailureWithMetadata("google", resp.StatusCode, resp.Status, detail,
+		llm.RetryAfterMilliseconds(resp.Header.Get("Retry-After"), time.Now()), resp.Header.Get("x-request-id"))
 }
 
 // doNoRedirect issues httpReq with a no-follow redirect policy (any 3xx is
@@ -200,12 +323,12 @@ func (p *googleProvider) doNoRedirect(req *http.Request) (*http.Response, error)
 	resp, err := client.Do(req)
 	if err != nil {
 		if err == errRedirectDetected {
-			return nil, fmt.Errorf("google: redirect blocked (3xx not followed)")
+			return nil, llm.NewFailureError("google: redirect blocked (3xx not followed)", "TRANSPORT", err)
 		}
 		if req.Context().Err() != nil {
-			return nil, fmt.Errorf("google: cancelled: %w", req.Context().Err())
+			return nil, llm.NewFailureError("google: cancelled: "+req.Context().Err().Error(), "ABORTED", req.Context().Err())
 		}
-		return nil, fmt.Errorf("google: request failed: %w", err)
+		return nil, llm.NewFailureError("google: request failed: "+err.Error(), "TRANSPORT", err)
 	}
 	return resp, nil
 }
@@ -273,7 +396,32 @@ type tool struct {
 }
 
 type generationConfig struct {
-	MaxOutputTokens int `json:"maxOutputTokens"`
+	MaxOutputTokens int             `json:"maxOutputTokens"`
+	Temperature     *float64        `json:"temperature,omitempty"`
+	StopSequences   []string        `json:"stopSequences,omitempty"`
+	ThinkingConfig  *thinkingConfig `json:"thinkingConfig,omitempty"`
+}
+
+type thinkingConfig struct {
+	IncludeThoughts bool `json:"includeThoughts"`
+	ThinkingBudget  int  `json:"thinkingBudget"`
+}
+
+func thinkingForEffort(effort string, budget int, reasoningKnownTrue bool) *thinkingConfig {
+	switch strings.TrimSpace(effort) {
+	case "off":
+		if !reasoningKnownTrue {
+			return nil
+		}
+		return &thinkingConfig{ThinkingBudget: 0}
+	case "minimal", "low", "medium", "high", "xhigh", "max":
+		if budget <= 0 {
+			budget = 1024
+		}
+		return &thinkingConfig{IncludeThoughts: true, ThinkingBudget: budget}
+	default:
+		return nil
+	}
 }
 
 type requestBody struct {

@@ -17,7 +17,10 @@ import (
 
 // attachTestPNG is a tiny fake PNG payload (the store does not decode — bytes
 // only matter for size and round-trip equality, M8 裁剪).
-var attachTestPNG = []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52}
+var attachTestPNG = func() []byte {
+	data, _ := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+	return data
+}()
 
 // makeAttachApp builds a minimal app for /attach wiring tests: a multimodal
 // config (enabled or not), a fresh log, and — when enabled — a real attachment
@@ -101,14 +104,13 @@ func TestAttachCommandEnabledLogsImageRef(t *testing.T) {
 	}
 	var data struct {
 		Content []struct {
-			Kind  string
-			Image struct {
-				ID        string
-				MediaType string
-				Bytes     int64
-				Width     int
-				Height    int
-				Path      string
+			Type       string `json:"type"`
+			Attachment struct {
+				AttachmentID string `json:"attachmentId"`
+				MediaType    string `json:"mediaType"`
+				Bytes        int64  `json:"bytes"`
+				Width        int    `json:"width"`
+				Height       int    `json:"height"`
 			}
 		}
 	}
@@ -119,20 +121,12 @@ func TestAttachCommandEnabledLogsImageRef(t *testing.T) {
 		t.Fatalf("content = %+v, want one block", data.Content)
 	}
 	img := data.Content[0]
-	if img.Kind != "image" {
-		t.Errorf("kind = %q, want image", img.Kind)
+	if img.Type != "image" {
+		t.Errorf("type = %q, want image", img.Type)
 	}
-	if img.Image.ID == "" || img.Image.MediaType != "image/png" ||
-		img.Image.Bytes != int64(len(attachTestPNG)) || img.Image.Width != 0 || img.Image.Height != 0 || img.Image.Path == "" {
-		t.Errorf("image ref = %+v, want id/mediaType/bytes set, width/height 0, path set", img.Image)
-	}
-	// The store's saved file is readable and round-trips.
-	got, err := os.ReadFile(img.Image.Path)
-	if err != nil {
-		t.Fatalf("read stored file %s: %v", img.Image.Path, err)
-	}
-	if string(got) != string(attachTestPNG) {
-		t.Errorf("stored bytes differ")
+	if img.Attachment.AttachmentID == "" || img.Attachment.MediaType != "image/png" ||
+		img.Attachment.Bytes != int64(len(attachTestPNG)) || img.Attachment.Width != 1 || img.Attachment.Height != 1 {
+		t.Errorf("canonical image ref = %+v, want attachmentId/mediaType/bytes set", img.Attachment)
 	}
 }
 
@@ -203,7 +197,8 @@ func TestAttachCommandViaDispatcher(t *testing.T) {
 	if !strings.Contains(out, "attached "+path+" as image ") {
 		t.Errorf("hint = %q, want the attached hint", out)
 	}
-	if n := len(a.log.Events()); n != 1 || a.log.Events()[0].Type != session.EventUserMessage {
-		t.Fatalf("events = %+v, want one user/message via the dispatcher", a.log.Events())
+	events := a.log.Events()
+	if len(events) != 3 || events[0].Type != session.EventCommandRun || events[1].Type != session.EventUserMessage || events[2].Type != session.EventCommandDone {
+		t.Fatalf("events = %+v, want command/run + user/message + command/done", events)
 	}
 }

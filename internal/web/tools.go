@@ -155,6 +155,10 @@ func (t WebSearchTool) ExecuteResult(ctx context.Context, args any) (agenttools.
 
 func (WebSearchTool) ConcurrencySafe(args any) bool { return true }
 
+// CancellationAware is explicit: search uses a derived timeout and forwards it
+// to every provider call.
+func (WebSearchTool) CancellationAware() bool { return true }
+
 func (t WebSearchTool) execute(ctx context.Context, args any) (WebSearchResult, error) {
 	var a struct {
 		Queries []string `json:"queries"`
@@ -449,6 +453,10 @@ func (t WebFetchTool) ExecuteResult(ctx context.Context, args any) (agenttools.T
 }
 
 func (WebFetchTool) ConcurrencySafe(args any) bool { return true }
+
+// CancellationAware is explicit: fetch derives its timeout from the registry
+// context and forwards it to the provider.
+func (WebFetchTool) CancellationAware() bool { return true }
 
 func (t WebFetchTool) execute(ctx context.Context, args any) (WebFetchResult, error) {
 	var a struct {

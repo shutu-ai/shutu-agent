@@ -32,6 +32,8 @@ import (
 	"time"
 
 	"github.com/jabing/shutu-agent/internal/jobs"
+	"github.com/jabing/shutu-agent/internal/llm"
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 )
 
 // pwshToolName is the model-facing tool name (dsh: pwsh). The registry
@@ -71,37 +73,49 @@ type PwshOpts struct {
 	Workdir string
 	// WorkdirFunc, when set, is evaluated for every call and takes precedence
 	// over Workdir. It is the session-header cwd bridge used by Web sessions.
-	WorkdirFunc func() string
+	WorkdirFunc            func() string
+	WorkdirContextFunc     func(context.Context) string
+	WorkdirRootContextFunc func(context.Context) string
 	// Jobs is the background-job registry used by run_in_background; nil
 	// means the parameter is not advertised and is rejected.
 	Jobs jobs.Registry
 	// Owner returns the current session id, the authorization boundary for
 	// background jobs. nil means jobs are unowned.
-	Owner func() string
+	Owner            func() string
+	OwnerContextFunc func(context.Context) string
 	// DshEnvFunc supplies managed DSH_* facts per invocation.
-	DshEnvFunc ManagedEnvFunc
+	DshEnvFunc        ManagedEnvFunc
+	DshEnvContextFunc func(context.Context) map[string]string
 }
 
 // PwshTool runs one PowerShell command in a fresh process per call.
 type PwshTool struct {
-	workdir     string
-	workdirFunc func() string
-	jobs        jobs.Registry
-	owner       func() string
-	dshEnv      ManagedEnvFunc
-	background  bool // run_in_background advertised and accepted
+	workdir                string
+	workdirFunc            func() string
+	workdirContextFunc     func(context.Context) string
+	workdirRootContextFunc func(context.Context) string
+	jobs                   jobs.Registry
+	owner                  func() string
+	ownerContextFunc       func(context.Context) string
+	dshEnv                 ManagedEnvFunc
+	dshEnvContextFunc      func(context.Context) map[string]string
+	background             bool // run_in_background advertised and accepted
 }
 
 // NewPwsh returns a PwshTool bound to the composition's defaults. Background
 // execution is available exactly when a usable jobs registry is supplied.
 func NewPwsh(opts PwshOpts) PwshTool {
 	return PwshTool{
-		workdir:     opts.Workdir,
-		workdirFunc: opts.WorkdirFunc,
-		jobs:        opts.Jobs,
-		owner:       opts.Owner,
-		dshEnv:      opts.DshEnvFunc,
-		background:  registryPresent(opts.Jobs),
+		workdir:                opts.Workdir,
+		workdirFunc:            opts.WorkdirFunc,
+		workdirContextFunc:     opts.WorkdirContextFunc,
+		workdirRootContextFunc: opts.WorkdirRootContextFunc,
+		jobs:                   opts.Jobs,
+		owner:                  opts.Owner,
+		ownerContextFunc:       opts.OwnerContextFunc,
+		dshEnv:                 opts.DshEnvFunc,
+		dshEnvContextFunc:      opts.DshEnvContextFunc,
+		background:             registryPresent(opts.Jobs),
 	}
 }
 
@@ -122,6 +136,10 @@ func registryPresent(r jobs.Registry) bool {
 }
 
 func (PwshTool) Name() string { return pwshToolName }
+
+// CancellationAware is explicit: foreground execution selects on ctx.Done and
+// kills the owned process tree before returning quiescence.
+func (PwshTool) CancellationAware() bool { return true }
 
 // Description is the model-facing summary (dsh tool-pwsh description, minus
 // the sandbox/escalation sentences shutu does not mount for pwsh).
@@ -199,15 +217,24 @@ func (t PwshTool) Execute(ctx context.Context, args any) (string, error) {
 		return "", fmt.Errorf("pwsh: timeoutMs must be a positive number")
 	}
 	base := t.workdir
-	if t.workdirFunc != nil {
+	if t.workdirContextFunc != nil {
+		base = t.workdirContextFunc(ctx)
+	} else if t.workdirFunc != nil {
 		base = t.workdirFunc()
 	}
 	workdir := resolveWorkdir(a.Workdir, base)
+	if t.workdirRootContextFunc != nil {
+		var err error
+		workdir, err = constrainWorkdir(workdir, t.workdirRootContextFunc(ctx))
+		if err != nil {
+			return "", fmt.Errorf("pwsh: %w", err)
+		}
+	}
 	if a.RunInBackground {
 		if !t.background {
 			return "", fmt.Errorf("pwsh: run_in_background is unavailable (jobs disabled)")
 		}
-		return t.startBackground(ctx, a.Command, workdir)
+		return t.startBackground(ctx, a.Command, a.Description, workdir)
 	}
 	return t.runForeground(ctx, a.Command, workdir, a.TimeoutMS)
 }
@@ -261,8 +288,17 @@ func effectiveTimeout(requested *int64) time.Duration {
 // pwshCommand assembles the fresh-process invocation: the command string is
 // ONE argv element after the UTF-8 preamble, so no quoting layer exists.
 func pwshCommand(pwsh, command, workdir string, managed ManagedEnvFunc) *exec.Cmd {
-	cmd := exec.Command(pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", pwshEncodingPreamble+command)
-	cmd.Dir = workdir
+	// Starting PowerShell with cmd.Dir is observably different on some
+	// managed Windows hosts: the child rejects an otherwise accessible temp
+	// directory during startup. Start from the agent cwd and establish the
+	// requested location inside PowerShell instead. LiteralPath plus doubled
+	// single quotes preserves the same workdir semantics without introducing a
+	// command-injection quoting layer.
+	location := ""
+	if workdir != "" {
+		location = "Set-Location -LiteralPath '" + strings.ReplaceAll(workdir, "'", "''") + "'; "
+	}
+	cmd := exec.Command(pwsh, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", pwshEncodingPreamble+location+command)
 	cmd.Env = pwshEnv(managed)
 	prepareProcessGroup(cmd)
 	return cmd
@@ -296,7 +332,15 @@ func (t PwshTool) runForeground(ctx context.Context, command, workdir string, ti
 		timeout = time.Millisecond
 	}
 
-	cmd := pwshCommand(pwsh, command, workdir, t.dshEnv)
+	cmd := pwshCommand(pwsh, command, workdir, func() map[string]string {
+		if t.dshEnvContextFunc != nil {
+			return t.dshEnvContextFunc(ctx)
+		}
+		if t.dshEnv != nil {
+			return t.dshEnv()
+		}
+		return nil
+	})
 	outFile, errFile, cleanup, err := pwshOutputFiles()
 	if err != nil {
 		return "", fmt.Errorf("pwsh: %w", err)
@@ -307,6 +351,8 @@ func (t PwshTool) runForeground(ctx context.Context, command, workdir string, ti
 	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("pwsh: start: %w", err)
 	}
+	attachProcessGroup(cmd)
+	defer releaseProcessGroup(cmd)
 
 	waitDone := make(chan error, 1)
 	go func() { waitDone <- cmd.Wait() }()
@@ -328,7 +374,11 @@ func (t PwshTool) runForeground(ctx context.Context, command, workdir string, ti
 			// executor's timeout is a normal result).
 			timedOut = true
 		} else {
-			return "", fmt.Errorf("pwsh: interrupted: %w", waitErr)
+			return "", &ExecutionError{
+				Info:    ErrorInfo{Name: "AbortError", Code: CodeAborted},
+				Message: fmt.Sprintf("pwsh: interrupted: %v", waitErr),
+				Cause:   waitErr,
+			}
 		}
 	}
 	if !timer.Stop() {
@@ -370,7 +420,7 @@ func (t PwshTool) runForeground(ctx context.Context, command, workdir string, ti
 // and returns the registry-issued id in the dsh acknowledgement text. The
 // registry's owner fence and cancellation apply; the job's stored output is
 // bounded to pwshJobOutputLimit.
-func (t PwshTool) startBackground(ctx context.Context, command, workdir string) (string, error) {
+func (t PwshTool) startBackground(ctx context.Context, command, description, workdir string) (string, error) {
 	pwsh, err := resolvePwshPath()
 	if err != nil {
 		return "", err
@@ -379,13 +429,25 @@ func (t PwshTool) startBackground(ctx context.Context, command, workdir string) 
 	var live *exec.Cmd
 	var capture capturePaths
 	id, err := t.jobs.Start(ctx, jobs.JobStart{
-		Kind:             jobs.Kind(pwshToolName),
-		Label:            command,
-		OwnerSession:     t.ownerSession(),
+		Kind: jobs.Kind(pwshToolName),
+		// Never put the command itself in job/start: it can contain a token,
+		// password or private file content. Durable UI labels use the
+		// explicit model description instead.
+		Label:            llm.RedactDiagnostic(description),
+		OwnerSession:     t.ownerSession(ctx),
+		Correlation:      jobs.CorrelationFromContext(ctx),
 		OutputLimitBytes: pwshJobOutputLimit,
 		ReadOutput:       capture.Read,
 		Run: func(jctx context.Context) (jobs.JobOutcome, error) {
-			return runPwshJob(jctx, pwsh, command, workdir, &mu, &live, &capture, t.dshEnv)
+			return runPwshJob(jctx, pwsh, command, workdir, &mu, &live, &capture, func() map[string]string {
+				if t.dshEnvContextFunc != nil {
+					return t.dshEnvContextFunc(jctx)
+				}
+				if t.dshEnv != nil {
+					return t.dshEnv()
+				}
+				return nil
+			})
 		},
 		Cancel: func(reason string) error {
 			mu.Lock()
@@ -405,7 +467,14 @@ func (t PwshTool) startBackground(ctx context.Context, command, workdir string) 
 
 // ownerSession returns the current session id (the job authorization
 // boundary); "" when no owner provider is installed (unowned job).
-func (t PwshTool) ownerSession() string {
+
+func (t PwshTool) ownerSession(ctx context.Context) string {
+	if id := runtimectx.SessionID(ctx); id != "" {
+		return id
+	}
+	if t.ownerContextFunc != nil {
+		return t.ownerContextFunc(ctx)
+	}
 	if t.owner != nil {
 		return t.owner()
 	}
@@ -441,6 +510,8 @@ func runPwshJob(ctx context.Context, pwsh, command, workdir string, mu *sync.Mut
 	if err := cmd.Start(); err != nil {
 		return jobs.JobOutcome{}, fmt.Errorf("pwsh: start: %w", err)
 	}
+	attachProcessGroup(cmd)
+	defer releaseProcessGroup(cmd)
 	stop := monitorCtx(ctx, cmd)
 	waitErr := cmd.Wait()
 	stop()

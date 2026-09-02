@@ -17,12 +17,11 @@
 //     DefaultMaxReadSize = 1MiB when 0) is rejected with ErrTooLarge before
 //     its content is read, so a huge file can never blow the model context.
 //
-// The boundary is lexical containment (Clean + prefix), not symlink
-// resolution: a symlink inside the root that points outside it is followed by
-// the OS. That is a recorded limitation of the v1 local backend, matching the
-// controlled-isolation posture of M3's run_command and M6e's code sandbox —
-// this is a convenience seam for the personal agent's own files, not a
-// security boundary for hostile input.
+// Existing path components are also resolved through realpath before the
+// operation. A symlink inside the root that points outside it is rejected;
+// missing write targets are checked through their nearest existing ancestor.
+// This closes ordinary traversal/symlink escapes, but is not an OS-level
+// hostile-code boundary against a concurrent rename race.
 //
 // Lifecycle: Close marks the service closed and is idempotent. The local
 // backend (local.go) holds no OS resources, so Close only flips a flag;

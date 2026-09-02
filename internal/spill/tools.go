@@ -27,6 +27,7 @@ import (
 	agenttools "github.com/jabing/shutu-agent/internal/tools"
 	"strings"
 
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 	"github.com/jabing/shutu-agent/internal/session"
 )
 
@@ -69,6 +70,14 @@ func (t *SpillTools) emit(typ string, data any) {
 	if t.onEvent != nil {
 		t.onEvent(typ, data)
 	}
+}
+
+func (t *SpillTools) emitContext(ctx context.Context, typ string, data any) error {
+	if runtime, ok := runtimectx.Get(ctx); ok && runtime.Emit != nil {
+		return runtime.Emit(typ, data)
+	}
+	t.emit(typ, data)
+	return nil
 }
 
 // formatMemos renders a memo list as model-facing text: one
@@ -137,7 +146,9 @@ func (t SpillWriteTool) Execute(ctx context.Context, args any) (string, error) {
 	// spill/write is a log-only fact (D3); the memo id + bounded content
 	// summary are logged, and the returned text is what the loop logs as
 	// tool/result.
-	t.t.emit(session.EventSpillWrite, session.NewSpillWrite(m.ID, m.Content))
+	if err := t.t.emitContext(ctx, session.EventSpillWrite, session.NewSpillWrite(m.ID, m.Content)); err != nil {
+		return "", err
+	}
 	return fmt.Sprintf("spilled memo %s", m.ID), nil
 }
 
@@ -186,7 +197,9 @@ func (t SpillRecallTool) Execute(ctx context.Context, args any) (string, error) 
 		return "", fmt.Errorf("spill_recall: %w", err)
 	}
 	// spill/recall is a log-only fact (D3) carrying the query and hit count.
-	t.t.emit(session.EventSpillRecall, session.NewSpillRecall(a.Query, len(hits)))
+	if err := t.t.emitContext(ctx, session.EventSpillRecall, session.NewSpillRecall(a.Query, len(hits))); err != nil {
+		return "", err
+	}
 	return formatMemos(hits), nil
 }
 
@@ -215,7 +228,9 @@ func (t SpillListTool) Execute(ctx context.Context, args any) (string, error) {
 		return "", fmt.Errorf("spill_list: %w", err)
 	}
 	// spill/list is a log-only fact (D3) carrying the returned table size.
-	t.t.emit(session.EventSpillList, session.NewSpillList(len(all)))
+	if err := t.t.emitContext(ctx, session.EventSpillList, session.NewSpillList(len(all))); err != nil {
+		return "", err
+	}
 	return formatMemos(all), nil
 }
 
@@ -256,6 +271,8 @@ func (t SpillDeleteTool) Execute(ctx context.Context, args any) (string, error) 
 		return "", fmt.Errorf("spill_delete: %w", err)
 	}
 	// spill/delete is a log-only fact (D3).
-	t.t.emit(session.EventSpillDelete, session.NewSpillDelete(a.ID))
+	if err := t.t.emitContext(ctx, session.EventSpillDelete, session.NewSpillDelete(a.ID)); err != nil {
+		return "", err
+	}
 	return "deleted memo " + a.ID, nil
 }

@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +12,7 @@ import (
 	"github.com/jabing/shutu-agent/internal/config"
 	"github.com/jabing/shutu-agent/internal/interact"
 	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/jabing/shutu-agent/internal/store"
 	"github.com/jabing/shutu-agent/internal/tools"
 )
 
@@ -84,6 +87,58 @@ func TestRegisterInteractsDisabledRegistersNothing(t *testing.T) {
 	}
 	if !ft.executed {
 		t.Fatal("run_command must run with no gate when interact is disabled")
+	}
+}
+
+func TestRegisterInteractsDoesNotReplayUnrelatedDamagedSession(t *testing.T) {
+	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "pa.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	if err := st.CreateSession(ctx, "damaged-history", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	log := session.New()
+	for _, event := range []struct {
+		typ  string
+		data any
+	}{
+		{session.EventTurnStart, session.NewTurnStart()},
+		{session.EventTurnStart, session.NewTurnStart()},
+	} {
+		if _, err := log.Append(event.typ, event.data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.AppendEvents(ctx, "damaged-history", log.Events()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.LoadSession(ctx, "damaged-history"); err == nil {
+		t.Fatal("fixture must fail strict session replay")
+	}
+
+	a := makeInteractApp(true, nil)
+	a.store = st
+	if err := a.registerInteracts(); err != nil {
+		t.Fatalf("interaction startup should ignore unrelated transcript damage: %v", err)
+	}
+	defer a.interacts.Close()
+}
+
+// TestAskUserQuestionCatalogCancellationClassification verifies that the
+// long-running interactive tool exposes the same cancellation contract that
+// its Await(ctx) implementation provides.
+func TestAskUserQuestionCatalogCancellationClassification(t *testing.T) {
+	a := makeInteractApp(true, nil)
+	if err := a.registerInteracts(); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range a.reg.Catalog() {
+		if entry.Name == "ask_user_question" && !entry.Cancellable {
+			t.Fatal("ask_user_question must declare cooperative cancellation")
+		}
 	}
 }
 
@@ -190,7 +245,7 @@ func TestSensitiveGateApprovedRuns(t *testing.T) {
 	}
 	defer a.interacts.Close()
 
-	res, err := a.reg.Execute(context.Background(), "bash", json.RawMessage(`{"command":"ls"}`))
+	res, err := a.reg.ExecuteWithCallID(context.Background(), "call-sensitive-1", "bash", json.RawMessage(`{"command":"ls"}`))
 	if err != nil {
 		t.Fatalf("run_command through the approved gate: %v", err)
 	}
@@ -203,6 +258,64 @@ func TestSensitiveGateApprovedRuns(t *testing.T) {
 	}
 	if hasEvent(a.log, session.EventInteractDeny) {
 		t.Fatal("interact/deny must not fire on an approved execution")
+	}
+	var asked struct {
+		CallID string `json:"callId"`
+	}
+	if err := json.Unmarshal(a.log.Events()[0].Data, &asked); err != nil || asked.CallID != "call-sensitive-1" {
+		t.Fatalf("approval request call id = %q, err=%v", asked.CallID, err)
+	}
+}
+
+func TestSensitiveGateFailsClosedWhenApprovalEventCannotPersist(t *testing.T) {
+	a := makeInteractApp(true, []string{"bash"})
+	a.approveInput = strings.NewReader("y\n")
+	a.reg.SetPolicy(interactPolicy("bash"))
+	ft := &fakeSensitiveTool{name: "bash"}
+	if err := a.reg.Register(ft); err != nil {
+		t.Fatalf("register fake: %v", err)
+	}
+	a.log.SetSink(func(session.Event) error { return errors.New("disk full") })
+	if err := a.registerInteracts(); err != nil {
+		t.Fatalf("registerInteracts: %v", err)
+	}
+	defer a.interacts.Close()
+	if _, err := a.reg.ExecuteWithCallID(context.Background(), "call-no-durable-approval", "bash", json.RawMessage(`{}`)); err == nil {
+		t.Fatal("approval persistence failure must deny the sensitive tool")
+	}
+	if ft.executed {
+		t.Fatal("sensitive tool executed after approval event persistence failure")
+	}
+}
+
+func TestResolveInteractionDurablyRollsBackOnDecisionAppendFailure(t *testing.T) {
+	a := makeInteractApp(true, nil)
+	if err := a.registerInteracts(); err != nil {
+		t.Fatalf("registerInteracts: %v", err)
+	}
+	defer a.interacts.Close()
+	requester, ok := a.interacts.(interact.SessionRequester)
+	if !ok {
+		t.Fatal("interaction engine lacks session requester")
+	}
+	req, err := requester.RequestForSession(context.Background(), a.currentID, "Approve?", "bash", "{}")
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	a.rememberInteraction(req.ID, a.currentID, req.CallID)
+	if _, err := a.log.Append(session.EventApprovalAsked, map[string]any{"id": req.ID, "toolName": req.ToolName}); err != nil {
+		t.Fatalf("append asked: %v", err)
+	}
+	a.log.SetSink(func(session.Event) error { return errors.New("disk full") })
+	if err := a.resolveInteractionDurably(context.Background(), a.currentID, req.ID, interact.StatusApproved, ""); err == nil {
+		t.Fatal("decision append failure must be returned")
+	}
+	items, err := a.interacts.List(context.Background())
+	if err != nil {
+		t.Fatalf("list after rollback: %v", err)
+	}
+	if len(items) != 1 || items[0].Status != interact.StatusPending {
+		t.Fatalf("request after rollback = %+v, want one pending request", items)
 	}
 }
 

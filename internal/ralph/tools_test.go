@@ -3,9 +3,11 @@ package ralph
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 	"github.com/jabing/shutu-agent/internal/session"
 )
 
@@ -51,6 +53,19 @@ func TestRalphToolExecuteFormatsReport(t *testing.T) {
 	}
 	if p.Objective != "交付目标" || p.Rounds != 1 || !p.Done || p.Blocked {
 		t.Errorf("ralph/run payload = %+v, want objective/rounds/done", p)
+	}
+}
+
+func TestRalphToolDurableEventFailureIsReturned(t *testing.T) {
+	eng := mustEngine(t, &fakeSpawn{outputs: []string{`{"status":"complete","summary":"ok","evidence":["verified"],"nextSteps":[],"blocker":""}`}})
+	tool := NewRalphTool(eng, nil)
+	ctx := runtimectx.With(context.Background(), runtimectx.Runtime{
+		SessionID: "session-1",
+		Emit:      func(string, any) error { return errors.New("durable sink unavailable") },
+	})
+	_, err := tool.Execute(ctx, json.RawMessage(`{"objective":"finish","maxRounds":1}`))
+	if err == nil || !strings.Contains(err.Error(), "persist event") {
+		t.Fatalf("ralph durable event error = %v, want persist event failure", err)
 	}
 }
 

@@ -1,0 +1,26 @@
+{
+  "scenario": "rich-session-tool-turn",
+  "workspace": "D:\\fixture-workspace",
+  "sessionId": "fixture-session-1",
+  "messageId": "fixture-message-1",
+  "prompt": [
+    {"type": "text", "text": "Inspect the shared fixture."},
+    {"type": "image", "attachment": {"attachmentId": "fixture-image", "mediaType": "image/png", "bytes": 2, "width": 1, "height": 1}}
+  ],
+  "tool": {
+    "name": "fixture_echo",
+    "arguments": {"text": "Inspect the shared fixture."},
+    "output": "fixture tool output"
+  },
+  "assistant": "fixture assistant response",
+  "stages": [
+    "initialize",
+    "open",
+    "prompt",
+    "event",
+    "tool",
+    "assistant",
+    "settle",
+    "close"
+  ]
+}

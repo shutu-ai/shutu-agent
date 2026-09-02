@@ -17,6 +17,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 )
 
 // Status is a job's lifecycle state (dsh jobs JobStatus): running, optionally
@@ -48,14 +50,24 @@ type JobSnapshot struct {
 	StartedAt        time.Time  // when the job was registered
 	FinishedAt       *time.Time // set once the job settles; nil while running/stopping
 	OutputLimitBytes int        // per-job byte cap on the stored output (0 = unlimited)
+	// Correlation is the runtime identity captured at registration. Background
+	// work outlives the initiating tool context, so observers must not recover
+	// identity from labels or durable human-facing event text.
+	Correlation runtimectx.Correlation
 }
 
 // JobStart describes one job to start.
 type JobStart struct {
-	Kind             Kind
-	Label            string
-	OwnerSession     string // "" = unowned job, visible to any caller
-	OutputLimitBytes int    // >0 truncates the stored terminal output to this cap
+	Kind         Kind
+	Label        string
+	OwnerSession string // "" = unowned job, visible to any caller
+	// CWD is the addressed session's captured workspace. Host wiring should
+	// populate it so a background command does not depend on process cwd.
+	CWD              string
+	OutputLimitBytes int // >0 truncates the stored terminal output to this cap
+	// Correlation is copied from the initiating runtime context when available.
+	// Empty fields are valid for host-created daemon jobs.
+	Correlation runtimectx.Correlation
 	// ReadOutput, when supplied, returns output produced since the previous
 	// read. This is dsh's consuming stream contract; the final JobOutcome.Output
 	// remains the fallback for jobs that do not expose a stream.
@@ -70,7 +82,14 @@ type JobStart struct {
 	// Kill and Close with the reason forwarded verbatim. A nil Cancel means
 	// context cancellation is the only kill mechanism. It must not block.
 	Cancel func(reason string) error
+	// OnSettled is called once after the job reaches a terminal state. It is an
+	// observation/delivery hook; the registry still owns lifecycle state.
+	OnSettled func(JobSnapshot)
 }
+
+// IDReservation reserves a provider-issued job id in a durable namespace.
+// Local remains fully usable in memory when this hook is nil.
+type IDReservation func(context.Context, string, string) (bool, error)
 
 // JobOutcome is the terminal result of a job's Run.
 type JobOutcome struct {
@@ -78,6 +97,23 @@ type JobOutcome struct {
 	Detail string // kind-specific detail ("exit code: 3", "max-tokens", …)
 	Output string // final output; truncated to OutputLimitBytes when bounded
 }
+
+// CorrelationFromContext snapshots the initiating runtime identity for a
+// background job. It returns the zero value for host-created work that has no
+// runtime context; callers can pass the result directly to JobStart.
+func CorrelationFromContext(ctx context.Context) runtimectx.Correlation {
+	if correlation, ok := runtimectx.CorrelationOf(ctx); ok {
+		return correlation
+	}
+	return runtimectx.Correlation{}
+}
+
+// CompletionObserver receives every first terminal transition together with
+// the registry-owned, already-bounded final output. It is deliberately
+// provider-level rather than tied to one model-facing tool: schedule,
+// subagent and terminal producers must be able to wake the owning Agent even
+// when no job_* observation call is made.
+type CompletionObserver func(JobSnapshot, string)
 
 // Registry is the background-job Service (design.md §10 D2). Consumers depend
 // only on this interface, never on a concrete backend, so swapping the
@@ -131,5 +167,6 @@ var (
 	ErrUnknownJob     = errors.New("jobs: unknown job")
 	ErrForbidden      = errors.New("jobs: job belongs to another session")
 	ErrRegistryClosed = errors.New("jobs: registry closed")
+	ErrOwnerClosed    = errors.New("jobs: owner is closed")
 	ErrLimitReached   = errors.New("jobs: background job limit reached for this owner")
 )

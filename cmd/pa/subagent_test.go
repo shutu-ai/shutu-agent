@@ -61,7 +61,7 @@ func makeSubagentApp(enabled bool) *app {
 // run them (in production config.applyDefaults + PolicyFromConfig do this).
 func subagentPolicy() tools.Policy {
 	return tools.Policy{
-		Enabled:     []string{"subagent", "spawn_teammate", "send_message", "followup_task", "wait_agent", "interrupt_agent", "list_agents"},
+		Enabled:     []string{"subagent", "subagent_fork", "spawn_teammate", "send_message", "followup_task", "wait_agent", "interrupt_agent", "list_agents"},
 		Timeout:     0, // no per-tool deadline in tests
 		OutputLimit: 0,
 	}
@@ -120,10 +120,17 @@ func TestRegisterSubagentEnabledRegistersAndLogsEvents(t *testing.T) {
 	for _, s := range specs {
 		names = append(names, s.Name)
 	}
-	for _, want := range []string{"subagent", "spawn_teammate", "send_message", "followup_task", "wait_agent", "interrupt_agent", "list_agents"} {
+	for _, want := range []string{"subagent", "subagent_fork", "spawn_teammate", "send_message", "followup_task", "wait_agent", "interrupt_agent", "list_agents"} {
 		if !containsStr(names, want) {
 			t.Fatalf("registered tools %v lack %q", names, want)
 		}
+	}
+	visible := make(map[string]bool)
+	for _, spec := range app.reg.VisibleSpecs() {
+		visible[spec.Name] = true
+	}
+	if !visible["subagent_fork"] {
+		t.Fatalf("subagent_fork is registered but not model-visible: %v", names)
 	}
 
 	// D7: bad arguments are rejected before any tool code runs.

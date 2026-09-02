@@ -65,14 +65,38 @@ func truncateResult(out, locator string, limit int) ToolResult {
 	if budget < 0 {
 		budget = 0
 	}
-	head := truncateUTF8(out, budget)
-	omitted := len(out) - len(head)
+	// Keep a deterministic head/tail preview. The reference spill policy uses
+	// the same split so that a large command result retains both its beginning
+	// (usually the command/error header) and its final lines (usually the useful
+	// summary), rather than silently losing the tail.
+	head, tail := truncateHeadTailUTF8(out, budget)
+	omitted := len(out) - len(head) - len(tail)
 	notice := prefix + strconv.Itoa(omitted) + suffix + locator + "]"
 	return ToolResult{
-		Output:     head + notice,
+		Output:     head + tail + notice,
 		SpillPath:  locator,
 		SpillBytes: len(out),
 	}
+}
+
+// truncateHeadTailUTF8 retains approximately half of maxBytes from each end,
+// backing off at UTF-8 cut boundaries. It returns the retained slices and does
+// not insert a synthetic separator; the spill notice is the explicit boundary.
+func truncateHeadTailUTF8(s string, maxBytes int) (string, string) {
+	if maxBytes < 0 || len(s) <= maxBytes {
+		return s, ""
+	}
+	headBudget := (maxBytes + 1) / 2
+	tailBudget := maxBytes / 2
+	head := truncateUTF8(s, headBudget)
+	if tailBudget == 0 {
+		return head, ""
+	}
+	tailBytes := []byte(s[len(s)-tailBudget:])
+	for len(tailBytes) > 0 && (tailBytes[0]&0xc0) == 0x80 {
+		tailBytes = tailBytes[1:]
+	}
+	return head, string(tailBytes)
 }
 
 // truncateUTF8 shortens s to at most maxBytes bytes, backing off until the

@@ -50,6 +50,21 @@ func TestLoadDefaultsWhenFileMissing(t *testing.T) {
 	if cfg.PromptsDir != DefaultPromptsDir {
 		t.Errorf("prompts_dir = %q, want %q", cfg.PromptsDir, DefaultPromptsDir)
 	}
+	if cfg.Security.CrashDumpPolicy != CrashDumpPolicyDisabled {
+		t.Errorf("crash_dump_policy = %q, want %q", cfg.Security.CrashDumpPolicy, CrashDumpPolicyDisabled)
+	}
+}
+
+func TestLoadRejectsUnknownCrashDumpPolicy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := "security:\n  crash_dump_policy: enabled\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "crash_dump_policy") {
+		t.Fatalf("unknown crash-dump policy error = %v, want fail-closed validation", err)
+	}
 }
 
 func TestLoadParsesFileAndFillsDefaults(t *testing.T) {
@@ -77,6 +92,77 @@ func TestLoadParsesFileAndFillsDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadParsesProviderScopedRetryPolicies(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := `llm:
+  retry:
+    mode: normal
+    max_retries: 5
+    providers:
+      anthropic:
+        mode: always
+        max_retries: 0
+        initial_backoff: 25ms
+        max_backoff: 2s
+        jitter_ratio: 0.2
+        retryable_codes: [RATE_LIMIT, SERVER]
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, ok := cfg.LLM.Retry.Providers["anthropic"]
+	if !ok || policy.Mode == nil || *policy.Mode != "always" || policy.MaxRetries == nil || *policy.MaxRetries != 0 {
+		t.Fatalf("provider retry policy = %+v", policy)
+	}
+	if policy.InitialBackoff == nil || policy.InitialBackoff.Duration != 25*time.Millisecond || policy.MaxBackoff == nil || policy.MaxBackoff.Duration != 2*time.Second {
+		t.Fatalf("provider retry delays = %+v", policy)
+	}
+	if policy.RetryableCodes == nil || len(*policy.RetryableCodes) != 2 {
+		t.Fatalf("provider retry codes = %+v", policy.RetryableCodes)
+	}
+}
+
+func TestLoadRejectsInvalidRetryPolicyInsteadOfSilentlyNormalizing(t *testing.T) {
+	cases := map[string]string{
+		"global mode": `llm:
+  retry:
+    mode: sometimes
+`,
+		"global negative retries": `llm:
+  retry:
+    max_retries: -1
+`,
+		"route duplicate codes": `llm:
+  retry:
+    providers:
+      mock:
+        retryable_codes: [SERVER, SERVER]
+`,
+		"route inverted backoff": `llm:
+  retry:
+    providers:
+      mock:
+        initial_backoff: 2s
+        max_backoff: 1s
+`,
+	}
+	for name, content := range cases {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(path); err == nil {
+				t.Fatal("invalid retry policy was accepted")
+			}
+		})
+	}
+}
+
 func TestLoadRejectsInvalidYAML(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte("model: [unclosed"), 0o600); err != nil {
@@ -84,6 +170,26 @@ func TestLoadRejectsInvalidYAML(t *testing.T) {
 	}
 	if _, err := Load(path); err == nil {
 		t.Fatal("expected error for invalid yaml")
+	}
+}
+
+func TestLoadRejectsInvalidThinkingBudget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := "llm:\n  thinking_budgets:\n    high: 0\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "thinking_budgets") {
+		t.Fatalf("invalid thinking budget error = %v", err)
+	}
+}
+
+func TestConfigCloneDetachesThinkingBudgets(t *testing.T) {
+	original := Config{LLM: LLMConfig{ThinkingBudgets: map[string]int{"high": 2048}}}
+	snapshot := original.Clone()
+	snapshot.LLM.ThinkingBudgets["high"] = 4096
+	if original.LLM.ThinkingBudgets["high"] != 2048 {
+		t.Fatalf("original thinking budget mutated: %+v", original.LLM.ThinkingBudgets)
 	}
 }
 
@@ -227,6 +333,9 @@ func TestLoadJobsDefaultsWhenAbsent(t *testing.T) {
 	if cfg.Jobs.MaxConcurrentJobsPerOwner != DefaultMaxConcurrentJobsPerOwner {
 		t.Errorf("jobs.max_concurrent_jobs_per_owner = %d, want default %d",
 			cfg.Jobs.MaxConcurrentJobsPerOwner, DefaultMaxConcurrentJobsPerOwner)
+	}
+	if cfg.Jobs.CompletionDelivery != DefaultJobCompletionDelivery || cfg.Jobs.MaxConsecutiveWakes != DefaultJobMaxConsecutiveWakes {
+		t.Errorf("job completion defaults = delivery=%q wakes=%d, want %q/%d", cfg.Jobs.CompletionDelivery, cfg.Jobs.MaxConsecutiveWakes, DefaultJobCompletionDelivery, DefaultJobMaxConsecutiveWakes)
 	}
 	// With jobs disabled no job tool may be whitelisted.
 	for _, name := range jobsToolNames {
@@ -909,6 +1018,9 @@ func TestLoadCodeDefaultsWhenAbsent(t *testing.T) {
 	if cfg.Code.MaxOutput != DefaultCodeMaxOutput {
 		t.Errorf("code.max_output = %d, want default %d", cfg.Code.MaxOutput, DefaultCodeMaxOutput)
 	}
+	if cfg.Code.MaxParallelSubCalls != 10 {
+		t.Errorf("code.max_parallel_sub_calls = %d, want default 10", cfg.Code.MaxParallelSubCalls)
+	}
 	if cfg.Code.SandboxDir != "" {
 		t.Errorf("code.sandbox_dir = %q, want empty (provider default <project>/.sandbox)", cfg.Code.SandboxDir)
 	}
@@ -927,7 +1039,7 @@ func TestLoadCodeDefaultsWhenAbsent(t *testing.T) {
 // back to their defaults (校验非负: a negative configured value never survives).
 func TestLoadCodeParsesSectionAndFallsBack(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte("code:\n  enabled: true\n  timeout: 5s\n  max_output: 4096\n  sandbox_dir: C:\\sandbox\n  allow_network: true\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("code:\n  enabled: true\n  timeout: 5s\n  max_output: 4096\n  max_parallel_sub_calls: 3\n  sandbox_dir: C:\\sandbox\n  allow_network: true\n"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	cfg, err := Load(path)
@@ -943,6 +1055,9 @@ func TestLoadCodeParsesSectionAndFallsBack(t *testing.T) {
 	if cfg.Code.MaxOutput != 4096 {
 		t.Errorf("code.max_output = %d, want 4096", cfg.Code.MaxOutput)
 	}
+	if cfg.Code.MaxParallelSubCalls != 3 {
+		t.Errorf("code.max_parallel_sub_calls = %d, want 3", cfg.Code.MaxParallelSubCalls)
+	}
 	if cfg.Code.SandboxDir != `C:\sandbox` {
 		t.Errorf("code.sandbox_dir = %q, want C:\\sandbox", cfg.Code.SandboxDir)
 	}
@@ -952,7 +1067,7 @@ func TestLoadCodeParsesSectionAndFallsBack(t *testing.T) {
 
 	// Non-positive (including negative) bounds fall back to the defaults.
 	path2 := filepath.Join(t.TempDir(), "config2.yaml")
-	if err := os.WriteFile(path2, []byte("code:\n  enabled: true\n  timeout: -1s\n  max_output: 0\n"), 0o600); err != nil {
+	if err := os.WriteFile(path2, []byte("code:\n  enabled: true\n  timeout: -1s\n  max_output: 0\n  max_parallel_sub_calls: 0\n"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	cfg2, err := Load(path2)
@@ -964,6 +1079,9 @@ func TestLoadCodeParsesSectionAndFallsBack(t *testing.T) {
 	}
 	if cfg2.Code.MaxOutput != DefaultCodeMaxOutput {
 		t.Errorf("code.max_output 0 = %d, want default %d", cfg2.Code.MaxOutput, DefaultCodeMaxOutput)
+	}
+	if cfg2.Code.MaxParallelSubCalls != 10 {
+		t.Errorf("code.max_parallel_sub_calls 0 = %d, want default 10", cfg2.Code.MaxParallelSubCalls)
 	}
 }
 
@@ -1072,6 +1190,117 @@ func TestLoadMcpParsesSection(t *testing.T) {
 		if contains(cfg2.Tools.Enabled, name) {
 			t.Errorf("whitelist %v must not contain %q when mcp explicitly disabled", cfg2.Tools.Enabled, name)
 		}
+	}
+}
+
+func TestLoadMcpReconnectDefaultsAndBounds(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := "mcp:\n  enabled: true\n  reconnect_enabled: false\n  reconnect_initial_delay_ms: 25\n  reconnect_max_delay_ms: 250\n  reconnect_max_attempts: 4\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Mcp.ReconnectEnabled == nil || *cfg.Mcp.ReconnectEnabled {
+		t.Fatalf("reconnect_enabled = %v, want false", cfg.Mcp.ReconnectEnabled)
+	}
+	if cfg.Mcp.ReconnectInitialDelayMS != 25 || cfg.Mcp.ReconnectMaxDelayMS != 250 || cfg.Mcp.ReconnectMaxAttempts != 4 {
+		t.Fatalf("reconnect config = %+v, want 25/250/4", cfg.Mcp)
+	}
+	defaults, err := Load(filepath.Join(t.TempDir(), "absent.yaml"))
+	if err != nil {
+		t.Fatalf("Load defaults: %v", err)
+	}
+	if defaults.Mcp.ReconnectEnabled == nil || !*defaults.Mcp.ReconnectEnabled || defaults.Mcp.ReconnectInitialDelayMS != 500 || defaults.Mcp.ReconnectMaxDelayMS != 30000 || defaults.Mcp.ReconnectMaxAttempts != 10 {
+		t.Fatalf("default reconnect config = %+v, want enabled and 500/30000/10", defaults.Mcp)
+	}
+}
+
+func TestLoadMcpReconnectRejectsExplicitInvalidPolicy(t *testing.T) {
+	cases := []string{
+		"mcp:\n  reconnect_initial_delay_ms: 0\n",
+		"mcp:\n  reconnect_max_delay_ms: -1\n",
+		"mcp:\n  reconnect_max_attempts: 0\n",
+		"mcp:\n  reconnect_initial_delay_ms: 6000\n  reconnect_max_delay_ms: 5000\n",
+		"mcp:\n  reconnect_max_attempts: nope\n",
+	}
+	for _, content := range cases {
+		t.Run(strings.ReplaceAll(strings.TrimSpace(content), "\n", ";"), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			if _, err := Load(path); err == nil {
+				t.Fatalf("Load(%q) succeeded; explicit invalid reconnect policy must fail", content)
+			}
+		})
+	}
+}
+
+func TestLoadMcpParsesStreamableHTTPServer(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := "mcp:\n  enabled: true\n  servers:\n    - name: remote\n      transport: streamable-http\n      url: https://example.test/mcp\n      headers:\n        Authorization: Bearer token\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Mcp.Servers) != 1 {
+		t.Fatalf("servers = %#v, want one", cfg.Mcp.Servers)
+	}
+	server := cfg.Mcp.Servers[0]
+	if server.Transport != "streamable-http" || server.URL != "https://example.test/mcp" || server.Headers["Authorization"] != "Bearer token" {
+		t.Fatalf("HTTP MCP server = %#v", server)
+	}
+}
+
+func TestLoadMcpParsesStartupFailurePolicy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := "mcp:\n  enabled: true\n  servers:\n    - name: strict\n      cmd: mcp-server\n      fail_on_startup_error: true\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Mcp.Servers) != 1 || !cfg.Mcp.Servers[0].FailOnStartupError {
+		t.Fatalf("MCP startup policy = %#v, want strict=true", cfg.Mcp.Servers)
+	}
+}
+
+func TestLoadMcpParsesPerServerProcessPolicy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	content := "mcp:\n  enabled: true\n  servers:\n    - name: local\n      cmd: mcp-server\n      cwd: /srv/mcp\n      env:\n        MCP_MODE: strict\n        DSH_API_KEY: explicit\n      tool_call_timeout_ms: 1234\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	server := cfg.Mcp.Servers[0]
+	if server.Cwd != "/srv/mcp" || server.Env["MCP_MODE"] != "strict" || server.Env["DSH_API_KEY"] != "explicit" || server.ToolCallTimeoutMS != 1234 {
+		t.Fatalf("per-server MCP policy = %#v, want cwd/env/timeout preserved", server)
+	}
+}
+
+func TestLoadMcpRejectsInvalidExplicitToolCallTimeout(t *testing.T) {
+	for _, value := range []string{"0", "-1", "not-an-int"} {
+		t.Run(value, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			content := "mcp:\n  servers:\n    - name: local\n      cmd: mcp-server\n      tool_call_timeout_ms: " + value + "\n"
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			if _, err := Load(path); err == nil {
+				t.Fatalf("Load accepted invalid explicit timeout %q", value)
+			}
+		})
 	}
 }
 
@@ -1672,6 +1901,12 @@ func TestLoadMultimodalDefaultsWhenAbsent(t *testing.T) {
 		t.Errorf("llm.multimodal.max_request_image_bytes = %d, want default %d",
 			cfg.LLM.Multimodal.MaxRequestImageBytes, DefaultMultimodalMaxRequestImageBytes)
 	}
+	if cfg.LLM.Multimodal.MaxImagesPerMessage != DefaultMultimodalMaxImagesPerMessage ||
+		cfg.LLM.Multimodal.MaxMessageImageBytes != DefaultMultimodalMaxMessageImageBytes ||
+		cfg.LLM.Multimodal.MaxImagePixels != DefaultMultimodalMaxImagePixels ||
+		cfg.LLM.Multimodal.MaxImageDimension != DefaultMultimodalMaxImageDimension {
+		t.Fatalf("multimodal image limits = %+v, want reference defaults", cfg.LLM.Multimodal)
+	}
 }
 
 // M8-3: an explicit multimodal section is honored (enabled, model_input_
@@ -1685,6 +1920,10 @@ func TestLoadMultimodalParsesSectionAndFallsBack(t *testing.T) {
   multimodal:
     enabled: true
     max_image_bytes: 2097152
+    max_images_per_message: 3
+    max_message_image_bytes: 4096
+    max_image_pixels: 10000
+    max_image_dimension: 128
 `
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
@@ -1702,7 +1941,10 @@ func TestLoadMultimodalParsesSectionAndFallsBack(t *testing.T) {
 	if cfg.LLM.Multimodal.MaxImageBytes != 2097152 {
 		t.Errorf("llm.multimodal.max_image_bytes = %d, want 2097152", cfg.LLM.Multimodal.MaxImageBytes)
 	}
-
+	if cfg.LLM.Multimodal.MaxImagesPerMessage != 3 || cfg.LLM.Multimodal.MaxMessageImageBytes != 4096 ||
+		cfg.LLM.Multimodal.MaxImagePixels != 10000 || cfg.LLM.Multimodal.MaxImageDimension != 128 {
+		t.Errorf("explicit multimodal limits = %+v", cfg.LLM.Multimodal)
+	}
 	// Non-positive max_image_bytes / empty modalities fall back to defaults.
 	path2 := filepath.Join(t.TempDir(), "config2.yaml")
 	content2 := `llm:
@@ -1727,6 +1969,12 @@ func TestLoadMultimodalParsesSectionAndFallsBack(t *testing.T) {
 	if cfg2.LLM.Multimodal.MaxImageBytes != DefaultMultimodalMaxImageBytes {
 		t.Errorf("llm.multimodal.max_image_bytes 0 = %d, want default %d",
 			cfg2.LLM.Multimodal.MaxImageBytes, DefaultMultimodalMaxImageBytes)
+	}
+	if cfg2.LLM.Multimodal.MaxImagesPerMessage != DefaultMultimodalMaxImagesPerMessage ||
+		cfg2.LLM.Multimodal.MaxMessageImageBytes != DefaultMultimodalMaxMessageImageBytes ||
+		cfg2.LLM.Multimodal.MaxImagePixels != DefaultMultimodalMaxImagePixels ||
+		cfg2.LLM.Multimodal.MaxImageDimension != DefaultMultimodalMaxImageDimension {
+		t.Errorf("absent image limits = %+v, want defaults", cfg2.LLM.Multimodal)
 	}
 }
 
@@ -2114,3 +2362,38 @@ func modeCapStates(cfg Config) map[string]bool {
 		"llm.multimodal": *cfg.LLM.Multimodal.Enabled,
 	}
 }
+
+func TestConfigCloneDetachesMutableFields(t *testing.T) {
+	enabled := true
+	blocked := 4
+	original := Config{
+		Tools:    ToolsConfig{Enabled: []string{"read"}},
+		Terminal: TerminalConfig{Enabled: &enabled, Args: []string{"-lc"}},
+		Subagent: SubagentConfig{ExternalProviders: map[string]ExternalProviderConfig{
+			"codex": {Command: "codex"},
+		}},
+		Mcp:  McpConfig{Servers: []McpServer{{Name: "one", Args: []string{"--stdio"}, Headers: map[string]string{"Authorization": "Bearer one"}}}},
+		LSP:  LSPConfig{Extensions: map[string]string{"go": "gopls"}},
+		Plan: PlanConfig{BlockedAfterConsecutiveRounds: &blocked},
+	}
+	snapshot := original.Clone()
+	snapshot.Tools.Enabled[0] = "write"
+	snapshot.Terminal.Args[0] = "-c"
+	snapshot.Terminal.Enabled = boolPtr(false)
+	snapshot.Subagent.ExternalProviders["codex"] = ExternalProviderConfig{Command: "other"}
+	snapshot.Mcp.Servers[0].Headers["Authorization"] = "Bearer other"
+	snapshot.Mcp.Servers[0].Args[0] = "--other"
+	snapshot.LSP.Extensions["go"] = "other"
+	*snapshot.Plan.BlockedAfterConsecutiveRounds = 9
+	if original.Tools.Enabled[0] != "read" || original.Terminal.Args[0] != "-lc" || !*original.Terminal.Enabled {
+		t.Fatal("clone mutated original slices/pointers")
+	}
+	if original.Subagent.ExternalProviders["codex"].Command != "codex" || original.Mcp.Servers[0].Args[0] != "--stdio" || original.Mcp.Servers[0].Headers["Authorization"] != "Bearer one" || original.LSP.Extensions["go"] != "gopls" {
+		t.Fatal("clone mutated original maps/nested slices")
+	}
+	if *original.Plan.BlockedAfterConsecutiveRounds != 4 {
+		t.Fatal("clone mutated original int pointer")
+	}
+}
+
+func boolPtr(value bool) *bool { return &value }

@@ -23,6 +23,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // discoverMaxResponseBytes bounds a listing reply (dsh MAX_RESPONSE_BYTES).
@@ -30,6 +31,10 @@ import (
 // bytes actually read; a truncated listing is not parseable, so overflow
 // rejects instead of truncating.
 const discoverMaxResponseBytes = 4 * 1024 * 1024
+
+// discoverProbeTimeout bounds one remote catalog probe even when the caller
+// passes a background context. Caller deadlines and cancellation still apply.
+var discoverProbeTimeout = 10 * time.Second
 
 // discoverRequest is the wire probe payload (the form as it currently shows:
 // base URL + protocol + a key typed but not yet saved).
@@ -53,11 +58,9 @@ func (a *app) webDiscoverModels(ctx context.Context, req discoverRequest) ([]cus
 	// candidates (dsh: the catalog is authoritative for its own providers).
 	if req.Provider != "" {
 		if bp, ok := builtinProviderByID(req.Provider); ok {
-			cands := modelCandidates(bp.id)
-			out := make([]customModel, 0, len(cands))
-			for _, c := range cands {
-				out = append(out, customModel{ID: c})
-			}
+			owned := builtinModelCatalog[bp.id]
+			out := make([]customModel, len(owned))
+			copy(out, owned)
 			return out, nil
 		}
 	}
@@ -87,6 +90,11 @@ func (a *app) webDiscoverModels(ctx context.Context, req discoverRequest) ([]cus
 // whole interrogation.
 func probeListing(ctx context.Context, baseURL, apiKey string) ([]customModel, error) {
 	u := strings.TrimRight(baseURL, "/") + "/models"
+	if discoverProbeTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, discoverProbeTimeout)
+		defer cancel()
+	}
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, fmt.Errorf("model listing: build request: %w", err)
@@ -95,11 +103,10 @@ func probeListing(ctx context.Context, baseURL, apiKey string) ([]customModel, e
 	if apiKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	}
-	client := &http.Client{}
+	client := &http.Client{Timeout: discoverProbeTimeout}
 	if http.DefaultClient.Transport != nil {
 		client.Transport = http.DefaultClient.Transport
 	}
-	client.Timeout = 0 // context governs cancellation
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		if ctx.Err() != nil {

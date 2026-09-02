@@ -1,7 +1,7 @@
 // webcmd_test.go — the web slash-command tests (dsh 输入条 "/" 对齐, ①③⑤):
-// webCommand routes a "/" command to a handler, appends user/message +
-// assistant/message (and the command's fact) to the session log, and never
-// runs an LLM turn. The webMessage leading-"/" branch is asserted too.
+// webCommand routes a "/" command to a handler, records the command lifecycle
+// and a UI-only result (never model history), and never runs an LLM turn. The
+// webMessage leading-"/" branch is asserted too.
 package main
 
 import (
@@ -13,9 +13,36 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jabing/shutu-agent/internal/agent"
+	"github.com/jabing/shutu-agent/internal/llm"
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 	"github.com/jabing/shutu-agent/internal/session"
 	"github.com/jabing/shutu-agent/internal/store"
+	"github.com/jabing/shutu-agent/internal/tools"
 )
+
+func webCommandResultText(t *testing.T, log *session.Log) string {
+	t.Helper()
+	var text string
+	found := false
+	for _, event := range log.Events() {
+		if event.Type != session.EventWebCommandResult {
+			continue
+		}
+		var result struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal(event.Data, &result); err != nil {
+			t.Fatal(err)
+		}
+		text = result.Text
+		found = true
+	}
+	if !found {
+		t.Fatalf("session has no web/command-result: %+v", log.Events())
+	}
+	return text
+}
 
 // assistantText extracts the "text" field of an assistant/message payload.
 func assistantText(t *testing.T, data any) string {
@@ -38,15 +65,17 @@ func assistantText(t *testing.T, data any) string {
 func lastEvent(t *testing.T, log *session.Log) session.Event {
 	t.Helper()
 	evs := log.Events()
-	if len(evs) == 0 {
-		t.Fatal("log is empty")
+	for i := len(evs) - 1; i >= 0; i-- {
+		if evs[i].Type != session.EventCommandRun && evs[i].Type != session.EventCommandDone {
+			return evs[i]
+		}
 	}
-	return evs[len(evs)-1]
+	t.Fatal("log contains only command lifecycle events")
+	return session.Event{}
 }
 
-// TestWebCommandGoal verifies /goal routes to plan_goal: the log gains
-// user/message, the plan/create fact and an assistant/message carrying the
-// created-goal result.
+// TestWebCommandGoal verifies /goal routes to plan_goal without entering model
+// history; the UI result is carried by web/command-result.
 func TestWebCommandGoal(t *testing.T) {
 	a := makePlanApp(true)
 	a.reg.SetPolicy(planPolicy())
@@ -57,19 +86,102 @@ func TestWebCommandGoal(t *testing.T) {
 	if err := a.webCommand(context.Background(), "/goal Ship 完成目标"); err != nil {
 		t.Fatalf("webCommand: %v", err)
 	}
-	for _, typ := range []string{session.EventUserMessage, session.EventAssistantMessage, session.EventPlanCreate} {
+	for _, typ := range []string{session.EventCommandRun, session.EventPlanCreate, session.EventWebCommandResult, session.EventCommandDone} {
 		if !hasEvent(a.log, typ) {
 			t.Fatalf("log missing %s after /goal", typ)
 		}
 	}
-	text := assistantText(t, lastEvent(t, a.log).Data)
+	text := webCommandResultText(t, a.log)
 	if !strings.Contains(text, "goal-1") {
 		t.Fatalf("/goal result = %q, want it to report the created goal id", text)
 	}
 }
 
-// TestWebCommandHelp verifies /help returns the command table as the final
-// assistant message (no plan/create, no LLM turn).
+func TestNativeCommandManagerReturnsCommittedWebLifecycleResult(t *testing.T) {
+	a := makePlanApp(false)
+	manager := nativeCommandManager{app: a}
+	execution, matched, err := manager.Execute(context.Background(), a.currentID, "/help", nil)
+	if err != nil || !matched {
+		t.Fatalf("native command execute = %+v, matched=%v, err=%v", execution, matched, err)
+	}
+	if execution.CommandID == "" || !strings.HasPrefix(execution.CommandID, "shutu-cmd-") {
+		t.Fatalf("native command id = %q, want committed shutu-cmd id", execution.CommandID)
+	}
+	if execution.Result.Kind != "success" || !strings.Contains(execution.Result.Text, "斜杠") {
+		t.Fatalf("native command result = %+v, want successful help text", execution.Result)
+	}
+	if events := a.log.Events(); len(events) != 3 || events[0].Type != session.EventCommandRun || events[2].Type != session.EventCommandDone {
+		t.Fatalf("native command events = %+v, want one committed run/result/done sequence", events)
+	}
+}
+
+func TestWebCommandRejectsUndeclaredImagesBeforeModelTurn(t *testing.T) {
+	a := makePlanApp(false)
+	image := llm.ImageRef{ID: "image-1", MediaType: "image/png"}
+	if err := a.webMessage(context.Background(), a.currentID, "/help", []llm.ImageRef{image}); err == nil {
+		t.Fatal("/help with an image was accepted")
+	}
+	if events := a.log.Events(); len(events) != 0 {
+		t.Fatalf("image-rejected command wrote events = %+v", events)
+	}
+	commands, err := (nativeCommandManager{app: a}).List(context.Background(), a.currentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range commands {
+		if command.Name == "help" && command.Images {
+			t.Fatal("/help incorrectly advertises image support")
+		}
+		if command.Name == "plan" && !command.Images {
+			t.Fatal("/plan does not advertise its image support")
+		}
+	}
+}
+
+func TestWebCommandUsesRuntimeSessionLog(t *testing.T) {
+	a := makePlanApp(true)
+	a.reg.SetPolicy(planPolicy())
+	if err := a.registerPlans(); err != nil {
+		t.Fatalf("registerPlans: %v", err)
+	}
+	defer a.closePlanEngines()
+	a.agentRegistry = agent.NewRegistry()
+	defer a.agentRegistry.CloseAll()
+	a.basePolicy = planPolicy()
+	a.prompt = makeTurnApp().prompt
+	// The global registry is deliberately unusable. An Agent-backed Web
+	// command must derive a scoped policy from basePolicy rather than execute
+	// directly against this process-global view.
+	a.reg.SetPolicy(tools.Policy{})
+	legacy := session.New()
+	target := session.New()
+	a.currentID = "legacy"
+	a.log = legacy
+	a.runtimeMu.Lock()
+	a.runtimeLogs = map[string]*session.Log{"target": target}
+	a.runtimeMu.Unlock()
+	ctx := runtimectx.With(context.Background(), runtimectx.Runtime{
+		SessionID: "target",
+		Emit: func(typ string, data any) error {
+			_, err := target.Append(typ, data)
+			return err
+		},
+	})
+	if err := a.webCommand(ctx, "/goal Ship target"); err != nil {
+		t.Fatalf("webCommand: %v", err)
+	}
+	for _, typ := range []string{session.EventCommandRun, session.EventPlanCreate, session.EventWebCommandResult, session.EventCommandDone} {
+		if !hasEvent(target, typ) {
+			t.Fatalf("target log missing %s: %+v", typ, target.Events())
+		}
+	}
+	if len(legacy.Events()) != 0 {
+		t.Fatalf("runtime command leaked into legacy log: %+v", legacy.Events())
+	}
+}
+
+// TestWebCommandHelp verifies /help returns the command table as a UI-only
+// result (no plan/create, no LLM turn).
 func TestWebCommandHelp(t *testing.T) {
 	a := makePlanApp(true)
 	a.reg.SetPolicy(planPolicy())
@@ -83,7 +195,7 @@ func TestWebCommandHelp(t *testing.T) {
 	if hasEvent(a.log, session.EventPlanCreate) {
 		t.Fatal("/help must not run plan_goal")
 	}
-	text := assistantText(t, lastEvent(t, a.log).Data)
+	text := webCommandResultText(t, a.log)
 	if !strings.Contains(text, "可用的斜杠命令") || !strings.Contains(text, "/export") {
 		t.Fatalf("/help result = %q, want the command table", text)
 	}
@@ -138,13 +250,13 @@ func TestWebCommandFeedbackMatchesDSH(t *testing.T) {
 		t.Fatalf("webCommand feedback: %v", err)
 	}
 	evs := a.log.Events()
-	if len(evs) != 2 || evs[0].Type != session.EventFeedbackRecord || evs[1].Type != session.EventWebCommandResult {
-		t.Fatalf("feedback events = %+v, want feedback/record + web/command-result", evs)
+	if len(evs) != 4 || evs[0].Type != session.EventCommandRun || evs[1].Type != session.EventFeedbackRecord || evs[2].Type != session.EventWebCommandResult || evs[3].Type != session.EventCommandDone {
+		t.Fatalf("feedback events = %+v, want command/run + feedback/record + web/command-result + command/done", evs)
 	}
 	var feedback struct {
 		Text string `json:"text"`
 	}
-	if err := json.Unmarshal(evs[0].Data, &feedback); err != nil {
+	if err := json.Unmarshal(evs[1].Data, &feedback); err != nil {
 		t.Fatal(err)
 	}
 	if feedback.Text != "/plan felt SLOW\n\ttwice today" {
@@ -153,11 +265,20 @@ func TestWebCommandFeedbackMatchesDSH(t *testing.T) {
 	var result struct {
 		Text string `json:"text"`
 	}
-	if err := json.Unmarshal(evs[1].Data, &result); err != nil {
+	if err := json.Unmarshal(evs[2].Data, &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.Text != "Feedback recorded for session s-feedback" {
+	if !strings.HasPrefix(result.Text, "Feedback recorded for session s-feedback\nAnonymous user: anonymous-") || !strings.HasSuffix(result.Text, ". Session sharing is not configured.") {
 		t.Fatalf("feedback result = %q", result.Text)
+	}
+	var commandRun struct {
+		Args string `json:"args"`
+	}
+	if err := json.Unmarshal(evs[0].Data, &commandRun); err != nil {
+		t.Fatal(err)
+	}
+	if commandRun.Args != "" {
+		t.Fatalf("feedback command/run leaked input args = %q", commandRun.Args)
 	}
 	if got := a.log.DeriveHistory(); len(got) != 0 {
 		t.Fatalf("feedback entered model history: %+v", got)
@@ -270,7 +391,7 @@ func TestWebCommandCompact(t *testing.T) {
 	if err := a.webCommand(context.Background(), "/compact"); err != nil {
 		t.Fatalf("webCommand: %v", err)
 	}
-	text := assistantText(t, lastEvent(t, a.log).Data)
+	text := webCommandResultText(t, a.log)
 	if !strings.Contains(text, "compacted") || !strings.Contains(text, "summary: S") {
 		t.Fatalf("/compact result = %q, want compaction report", text)
 	}
@@ -301,7 +422,7 @@ func TestWebCommandPermission(t *testing.T) {
 	if err := a.webCommand(ctx, "/permission"); err != nil {
 		t.Fatalf("read global permission: %v", err)
 	}
-	if text := assistantText(t, lastEvent(t, a.log).Data); !strings.Contains(text, "current preset full") {
+	if text := webCommandResultText(t, a.log); !strings.Contains(text, "current preset full") {
 		t.Fatalf("global permission query = %q, want full", text)
 	}
 	if err := a.webCommand(ctx, "/permission readonly"); err != nil {
@@ -317,7 +438,7 @@ func TestWebCommandPermission(t *testing.T) {
 	if err := a.webCommand(ctx, "/permission"); err != nil {
 		t.Fatalf("read permission: %v", err)
 	}
-	if text := assistantText(t, lastEvent(t, a.log).Data); !strings.Contains(text, "current preset readonly") {
+	if text := webCommandResultText(t, a.log); !strings.Contains(text, "current preset readonly") {
 		t.Fatalf("permission query = %q, want readonly", text)
 	}
 }
@@ -355,14 +476,14 @@ func TestWebCommandExportMatchesDSH(t *testing.T) {
 		t.Fatalf("/export: %v", err)
 	}
 	evs := a.log.Events()
-	if len(evs) != 1 || evs[0].Type != session.EventWebCommandResult {
-		t.Fatalf("export events = %+v, want one web/command-result", evs)
+	if len(evs) != 3 || evs[0].Type != session.EventCommandRun || evs[1].Type != session.EventWebCommandResult || evs[2].Type != session.EventCommandDone {
+		t.Fatalf("export events = %+v, want command/run + web/command-result + command/done", evs)
 	}
 	var result struct {
 		Text    string `json:"text"`
 		Command string `json:"command"`
 	}
-	if err := json.Unmarshal(evs[0].Data, &result); err != nil {
+	if err := json.Unmarshal(evs[1].Data, &result); err != nil {
 		t.Fatal(err)
 	}
 	if result.Text != "Session log download requested." || result.Command != "export" {
@@ -379,24 +500,20 @@ func TestWebCommandExportMatchesDSH(t *testing.T) {
 	}
 }
 
-// TestWebCommandUnknown verifies an unknown command answers with the /help
-// guidance inside the assistant reply (the user message is still logged).
+// TestWebCommandUnknown verifies an unknown slash command is rejected before
+// it can enter model history, matching the reference command executor.
 func TestWebCommandUnknown(t *testing.T) {
 	a := makePlanApp(true)
-	if err := a.webCommand(context.Background(), "/bogus"); err != nil {
-		t.Fatalf("webCommand: %v", err)
+	if err := a.webCommand(context.Background(), "/bogus"); err == nil || !strings.Contains(err.Error(), "unknown command") {
+		t.Fatalf("webCommand error = %v, want unknown-command rejection", err)
 	}
-	if !hasEvent(a.log, session.EventUserMessage) {
-		t.Fatal("the command text must be logged as user/message")
-	}
-	if text := assistantText(t, lastEvent(t, a.log).Data); !strings.Contains(text, "unknown command") {
-		t.Fatalf("unknown result = %q, want /help guidance", text)
+	if len(a.log.Events()) != 0 {
+		t.Fatalf("unknown command polluted session history: %+v", a.log.Events())
 	}
 }
 
 // TestWebMessageSlashRouting verifies webMessage dispatches a leading "/" to
-// webCommand: the log gains user/message + assistant/message and the LLM is
-// never invoked (the command is not a turn).
+// webCommand without entering model history or starting an LLM turn.
 func TestWebMessageSlashRouting(t *testing.T) {
 	llm := &turnLLM{}
 	a := makeTurnApp()
@@ -408,7 +525,7 @@ func TestWebMessageSlashRouting(t *testing.T) {
 	if llm.calls != 0 {
 		t.Fatalf("LLM calls = %d, want 0 (a slash command must not run a turn)", llm.calls)
 	}
-	for _, typ := range []string{session.EventUserMessage, session.EventAssistantMessage} {
+	for _, typ := range []string{session.EventCommandRun, session.EventWebCommandResult, session.EventCommandDone} {
 		if !hasEvent(a.log, typ) {
 			t.Fatalf("log missing %s after /help via webMessage", typ)
 		}

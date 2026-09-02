@@ -17,12 +17,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	agenttools "github.com/jabing/shutu-agent/internal/tools"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/jabing/shutu-agent/internal/pathsecure"
+	agenttools "github.com/jabing/shutu-agent/internal/tools"
 )
 
 // Tool names — the dsh-aligned content/path search tools (whitelisted when
@@ -41,9 +44,11 @@ type SearchFunc func(ctx context.Context, query string, opts Options) ([]Hit, er
 // relative-path display; searchFn defaults to Search and is injectable for
 // tests.
 type GrepTool struct {
-	cwd      string
-	cwdFn    func() string
-	searchFn SearchFunc
+	cwd             string
+	cwdFn           func() string
+	CwdContextFunc  func(context.Context) string
+	RootContextFunc func(context.Context) string
+	searchFn        SearchFunc
 }
 
 // NewGrepTool returns the grep tool bound to the agent working directory
@@ -57,6 +62,10 @@ func NewGrepToolForCWD(cwd func() string) GrepTool {
 }
 
 func (GrepTool) Name() string { return GrepToolName }
+
+// CancellationAware is explicit: Search checks both entry and walk context
+// state, so a cancelled registry deadline stops the filesystem scan.
+func (GrepTool) CancellationAware() bool { return true }
 
 // ConcurrencySafe marks grep as a read-only filesystem query. dsh may run
 // independent grep calls in parallel and commit their results in model order.
@@ -116,12 +125,17 @@ func (t GrepTool) Execute(ctx context.Context, args any) (string, error) {
 		}
 	}
 	root := a.Path
-	cwd := t.currentCWD()
+	cwd := t.currentCWD(ctx)
 	if strings.TrimSpace(root) == "" {
 		root = cwd
 	}
 	if strings.TrimSpace(root) == "" {
 		return "", fmt.Errorf("grep: no search path (pass path or configure the agent working directory)")
+	}
+	var err error
+	root, err = t.constrainPath(ctx, root, cwd)
+	if err != nil {
+		return "", fmt.Errorf("grep: %w", err)
 	}
 	hits, err := t.searchFn(ctx, a.Pattern, Options{
 		Path:       root,
@@ -134,11 +148,21 @@ func (t GrepTool) Execute(ctx context.Context, args any) (string, error) {
 	return formatGrepOutput(hits, func(path string) string { return displayRelative(cwd, path) }, errors.Is(err, ErrLimit)), nil
 }
 
-func (t GrepTool) currentCWD() string {
+func (t GrepTool) currentCWD(ctx ...context.Context) string {
+	if len(ctx) > 0 && ctx[0] != nil && t.CwdContextFunc != nil {
+		return t.CwdContextFunc(ctx[0])
+	}
 	if t.cwdFn != nil {
 		return t.cwdFn()
 	}
 	return t.cwd
+}
+
+func (t GrepTool) constrainPath(ctx context.Context, path, cwd string) (string, error) {
+	if t.RootContextFunc == nil {
+		return path, nil
+	}
+	return constrainSearchPath(path, cwd, t.RootContextFunc(ctx))
 }
 
 // validateInclude rejects an include that is not ONE positive glob filter
@@ -240,8 +264,10 @@ func displayRelative(cwd, p string) string {
 // whole tree). cwd is the default root when the model omits path and the
 // display base.
 type GlobTool struct {
-	cwd   string
-	cwdFn func() string
+	cwd             string
+	cwdFn           func() string
+	CwdContextFunc  func(context.Context) string
+	RootContextFunc func(context.Context) string
 }
 
 // NewGlobTool returns the glob tool bound to the agent working directory.
@@ -254,6 +280,9 @@ func NewGlobToolForCWD(cwd func() string) GlobTool {
 }
 
 func (GlobTool) Name() string { return GlobToolName }
+
+// CancellationAware is explicit: the walk callback returns context errors.
+func (GlobTool) CancellationAware() bool { return true }
 
 // ConcurrencySafe marks glob as a read-only filesystem query.
 func (GlobTool) ConcurrencySafe(any) bool { return true }
@@ -305,8 +334,9 @@ func (t GlobTool) Execute(ctx context.Context, args any) (string, error) {
 		return "", fmt.Errorf("glob: invalid pattern: %w", err)
 	}
 	root := a.Path
+	cwd := t.currentCWD(ctx)
 	if strings.TrimSpace(root) == "" {
-		root = t.currentCWD()
+		root = cwd
 	}
 	if strings.TrimSpace(root) == "" {
 		return "", fmt.Errorf("glob: no search path (pass path or configure the agent working directory)")
@@ -316,6 +346,14 @@ func (t GlobTool) Execute(ctx context.Context, args any) (string, error) {
 		return "", fmt.Errorf("glob: resolve %s: %w", root, err)
 	}
 	absRoot = filepath.Clean(absRoot)
+	if t.RootContextFunc != nil {
+		var err error
+		absRoot, err = constrainSearchPath(absRoot, cwd, t.RootContextFunc(ctx))
+		if err != nil {
+			return "", fmt.Errorf("glob: %w", err)
+		}
+		absRoot = filepath.Clean(absRoot)
+	}
 
 	matches := []globEntry{}
 	walk := func(path string, d fs.DirEntry, walkErr error) error {
@@ -364,7 +402,7 @@ func (t GlobTool) Execute(ctx context.Context, args any) (string, error) {
 	}
 	lines := make([]string, 0, len(page))
 	for _, m := range page {
-		lines = append(lines, t.displayPath(m))
+		lines = append(lines, t.displayPathWithContext(ctx, m))
 	}
 	body := strings.Join(lines, "\n")
 	if seen <= DefaultGlobMaxResults {
@@ -386,7 +424,11 @@ type globEntry struct {
 // lies under it (dsh prints workdir-relative paths); anything else stays
 // relative to the search root.
 func (t GlobTool) displayPath(m globEntry) string {
-	cwd := t.currentCWD()
+	return t.displayPathWithContext(nil, m)
+}
+
+func (t GlobTool) displayPathWithContext(ctx context.Context, m globEntry) string {
+	cwd := t.currentCWD(ctx)
 	if cwd == "" {
 		return m.rel
 	}
@@ -397,9 +439,53 @@ func (t GlobTool) displayPath(m globEntry) string {
 	return m.rel
 }
 
-func (t GlobTool) currentCWD() string {
+func (t GlobTool) currentCWD(ctx ...context.Context) string {
+	if len(ctx) > 0 && ctx[0] != nil && t.CwdContextFunc != nil {
+		return t.CwdContextFunc(ctx[0])
+	}
 	if t.cwdFn != nil {
 		return t.cwdFn()
 	}
 	return t.cwd
+}
+
+// constrainSearchPath resolves an existing search path and requires its real
+// path to remain under the injected workspace root. Search paths must exist:
+// rejecting them before walking avoids a symlink or cwd ambiguity in the
+// backend and gives both grep and glob the same host policy.
+func constrainSearchPath(path, cwd, root string) (string, error) {
+	if strings.TrimSpace(root) == "" {
+		return path, nil
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(cwd, path)
+	}
+	if !filepath.IsAbs(root) {
+		root, _ = filepath.Abs(root)
+	}
+	if !filepath.IsAbs(path) {
+		path, _ = filepath.Abs(path)
+	}
+	rootReal, err := pathsecure.ResolveExisting(filepath.Clean(root))
+	if err != nil {
+		return "", fmt.Errorf("workspace root unavailable: %w", err)
+	}
+	targetReal, err := pathsecure.ResolveExisting(filepath.Clean(path))
+	if err != nil {
+		return "", fmt.Errorf("search path unavailable: %w", err)
+	}
+	if !withinSearchRoot(filepath.Clean(rootReal), filepath.Clean(targetReal)) {
+		return "", fmt.Errorf("path %q escapes workspace root", path)
+	}
+	if info, err := os.Stat(targetReal); err != nil {
+		return "", err
+	} else if !info.IsDir() && info.Mode().IsRegular() == false {
+		return "", fmt.Errorf("search path is not a regular file or directory")
+	}
+	return filepath.Clean(targetReal), nil
+}
+
+func withinSearchRoot(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
 }

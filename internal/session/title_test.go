@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -60,6 +61,31 @@ func TestFallbackTitleFirstWordsAndBytes(t *testing.T) {
 	// Empty input yields empty title.
 	if got := FallbackTitle("   ", TitleFallbackMaxWords, TitleFallbackMaxBytes); got != "" {
 		t.Fatalf("FallbackTitle(empty) = %q, want empty", got)
+	}
+}
+
+func TestFirstEligibleUserTextUsesRichContentProjection(t *testing.T) {
+	data, err := json.Marshal(map[string]any{
+		"content": []map[string]any{{"type": "image"}, {"type": "text", "text": "rich"}, {"type": "text", "text": "prompt"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := []Event{
+		{Seq: 1, Type: EventUserMessage, Version: EventVersion, Data: data},
+	}
+	if got := FirstEligibleUserText(events); got != "rich\nprompt" {
+		t.Fatalf("FirstEligibleUserText = %q, want rich\\nprompt", got)
+	}
+}
+
+func TestFirstEligibleUserTextSkipsNonUserProvenance(t *testing.T) {
+	events := []Event{
+		{Seq: 1, Type: EventUserMessage, Version: EventVersion, Data: json.RawMessage(`{"text":"team input","source":{"kind":"team-message"}}`)},
+		{Seq: 2, Type: EventUserMessage, Version: EventVersion, Data: json.RawMessage(`{"text":"human input","source":{"kind":"user"}}`)},
+	}
+	if got := FirstEligibleUserText(events); got != "human input" {
+		t.Fatalf("FirstEligibleUserText provenance = %q, want human input", got)
 	}
 }
 

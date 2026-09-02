@@ -1,19 +1,428 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/jabing/shutu-agent/internal/config"
+	"github.com/jabing/shutu-agent/internal/credential"
 	"github.com/jabing/shutu-agent/internal/llm"
+	"github.com/jabing/shutu-agent/internal/llm/anthropic"
+	"github.com/jabing/shutu-agent/internal/llm/deepseek"
+	"github.com/jabing/shutu-agent/internal/llm/google"
+	"github.com/jabing/shutu-agent/internal/llm/openai"
+	"github.com/jabing/shutu-agent/internal/llm/openairesponses"
+	llmretry "github.com/jabing/shutu-agent/internal/llm/retry"
+	"github.com/jabing/shutu-agent/internal/store"
 )
+
+type generationTestProvider struct {
+	id       string
+	attempts atomic.Int32
+	closed   atomic.Int32
+}
+
+func (p *generationTestProvider) ID() string      { return p.id }
+func (p *generationTestProvider) Available() bool { return true }
+func (p *generationTestProvider) Close() error {
+	p.closed.Add(1)
+	return nil
+}
+func (p *generationTestProvider) Stream(context.Context, llm.ChatRequest) (llm.StreamReader, error) {
+	p.attempts.Add(1)
+	return &generationTestReader{}, nil
+}
+
+type unavailableTestProvider struct {
+	id       string
+	attempts atomic.Int32
+}
+
+func (p *unavailableTestProvider) ID() string      { return p.id }
+func (p *unavailableTestProvider) Available() bool { return false }
+func (p *unavailableTestProvider) Stream(context.Context, llm.ChatRequest) (llm.StreamReader, error) {
+	p.attempts.Add(1)
+	return nil, errors.New("must not stream")
+}
+
+type generationTestReader struct{ done bool }
+
+func (r *generationTestReader) Next() (llm.StreamEvent, error) {
+	if r.done {
+		return llm.StreamEvent{}, io.EOF
+	}
+	r.done = true
+	return llm.StreamEvent{Kind: llm.StreamTextDelta, Text: "ok"}, nil
+}
+
+// TestProviderWireFailureAndPolicyMatrixCoversEveryProtocolFamily binds every
+// wire adapter to the shared normalized HTTP failure vocabulary and to one
+// provider-scoped retry policy at composition time. Production adapters
+// deliberately disable private retries; the loop executes the route policy.
+func TestProviderWireFailureAndPolicyMatrixCoversEveryProtocolFamily(t *testing.T) {
+	secret := "wire-matrix-secret"
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Retry-After", "2")
+		w.Header().Set("X-Request-ID", "request-matrix")
+		w.Header().Set("Request-ID", "request-matrix")
+		w.Header().Set("X-DeepSeek-Request-ID", "request-matrix")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"message":"temporary provider failure","api_key":"` + secret + `"}}`))
+	}))
+	defer srv.Close()
+
+	newProvider := func(t *testing.T, family string) llm.Provider {
+		t.Helper()
+		switch family {
+		case "deepseek-completions":
+			return deepseek.New(deepseek.Config{
+				ProviderName: family, BaseURL: srv.URL, APIKey: secret,
+				DisableRetry: true,
+			})
+		case "openai-completions":
+			return openai.New(openai.Config{
+				ID: family, BaseURL: srv.URL, APIKey: secret,
+				DisableRetry: true,
+			})
+		case "anthropic-messages":
+			return anthropic.New(anthropic.Config{
+				ID: family, BaseURL: srv.URL, APIKey: secret,
+			})
+		case "google-generative-ai":
+			return google.New(google.Config{
+				ID: family, BaseURL: srv.URL, APIKey: secret,
+			})
+		case "openai-responses":
+			return openairesponses.New(openairesponses.Config{
+				ID: family, BaseURL: srv.URL, APIKey: secret,
+			})
+		default:
+			t.Fatalf("unknown protocol family %q", family)
+			return nil
+		}
+	}
+
+	cfg := config.Config{}
+	cfg.LLM.Retry.Mode = "normal"
+	cfg.LLM.Retry.MaxRetries = 7
+	cfg.LLM.Retry.InitialBackoff = config.Duration{Duration: 3 * time.Millisecond}
+	cfg.LLM.Retry.MaxBackoff = config.Duration{Duration: 9 * time.Millisecond}
+	cfg.LLM.Retry.JitterRatio = 0.25
+	cfg.LLM.Retry.RetryableCodes = []string{"SERVER", "TIMEOUT", "TRANSPORT"}
+
+	for _, family := range []string{
+		"deepseek-completions", "openai-completions", "anthropic-messages",
+		"google-generative-ai", "openai-responses",
+	} {
+		t.Run(family, func(t *testing.T) {
+			routeID := family
+			wireLabel := family
+			if family == "deepseek-completions" {
+				routeID = "deepseek-official"
+			} else if family == "anthropic-messages" {
+				wireLabel = "anthropic"
+			} else if family == "google-generative-ai" {
+				wireLabel = "google"
+			} else if family == "openai-responses" {
+				wireLabel = "openairesponses"
+			}
+			mode := cfg.LLM.Retry.Mode
+			maxRetries := cfg.LLM.Retry.MaxRetries
+			initial := cfg.LLM.Retry.InitialBackoff
+			maxBackoff := cfg.LLM.Retry.MaxBackoff
+			jitter := cfg.LLM.Retry.JitterRatio
+			codes := append([]string(nil), cfg.LLM.Retry.RetryableCodes...)
+			cfg.LLM.Retry.Providers = map[string]config.RetryProviderConfig{
+				routeID: {
+					Mode: &mode, MaxRetries: &maxRetries,
+					InitialBackoff: &initial, MaxBackoff: &maxBackoff,
+					JitterRatio: &jitter, RetryableCodes: &codes,
+				},
+			}
+
+			provider := wrapProvider(newProvider(t, family), &cfg)
+			if provider.ID() != routeID {
+				t.Fatalf("wrapped provider ID = %q, want %q", provider.ID(), routeID)
+			}
+			policyProvider, ok := provider.(llm.RetryPolicyProvider)
+			if !ok {
+				t.Fatalf("%s provider does not publish a route policy", family)
+			}
+			policy := policyProvider.RetryPolicy()
+			wantPolicy := llm.RetryPolicy{
+				Mode: "normal", MaxRetries: 7, RetryableCodes: codes,
+				InitialDelayMS: 3, MaxDelayMS: 9, JitterRatio: 0.25,
+			}
+			if !reflect.DeepEqual(policy, wantPolicy) {
+				t.Fatalf("%s route policy = %+v, want %+v", family, policy, wantPolicy)
+			}
+
+			before := requests.Load()
+			_, err := provider.Stream(context.Background(), llm.ChatRequest{
+				Messages: []llm.Message{{
+					Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("wire failure matrix")},
+				}},
+			})
+			if err == nil {
+				t.Fatalf("%s unexpectedly accepted rate-limited response", family)
+			}
+			if got := requests.Load(); got != before+1 {
+				t.Fatalf("%s made %d requests for one disabled private retry, want one", family, got-before)
+			}
+			facts, ok := llm.FailureFacts(err)
+			if !ok {
+				t.Fatalf("%s error is not a typed llm failure: %v", family, err)
+			}
+			wantFacts := llm.Failure{
+				Message:              facts.Message,
+				Code:                 "RATE_LIMIT",
+				Status:               http.StatusTooManyRequests,
+				ProviderRetryAfterMS: 2_000,
+				RequestID:            "request-matrix",
+			}
+			if facts.Code != wantFacts.Code || facts.Status != wantFacts.Status ||
+				facts.ProviderRetryAfterMS != wantFacts.ProviderRetryAfterMS ||
+				facts.RequestID != wantFacts.RequestID {
+				t.Fatalf("%s normalized failure = %+v, want code/status/retry/request %+v", family, facts, wantFacts)
+			}
+			if !strings.Contains(facts.Message, wireLabel) || !strings.Contains(facts.Message, "temporary provider failure") {
+				t.Fatalf("%s failure lost provider/failure context: %+v", family, facts)
+			}
+			if strings.Contains(err.Error(), secret) {
+				t.Fatalf("%s wire diagnostic leaked credential: %q", family, err)
+			}
+
+			// RATE_LIMIT deliberately falls outside this route's configured
+			// policy. The decision must be made from the shared typed code,
+			// never by re-parsing provider-specific text.
+			retryConfig := llmretry.Config{
+				Mode: "normal", MaxRetries: 7, MaxRetriesSet: true,
+				InitialBackoff: 3 * time.Millisecond, MaxBackoff: 9 * time.Millisecond,
+				JitterRatio: 0.25, RetryableCodes: codes,
+			}
+			if llmretry.ShouldRetry(retryConfig, err) {
+				t.Fatalf("%s RATE_LIMIT unexpectedly matched route policy %+v", family, retryConfig)
+			}
+		})
+	}
+}
+
+type generationFinishReader struct{ done bool }
+
+func (r *generationFinishReader) Next() (llm.StreamEvent, error) {
+	if r.done {
+		return llm.StreamEvent{}, io.EOF
+	}
+	r.done = true
+	return llm.StreamEvent{Kind: llm.StreamFinish, FinishReason: "stop"}, nil
+}
+
+func TestProviderGenerationClosesAfterLastStreamLease(t *testing.T) {
+	provider := &generationTestProvider{id: "deepseek-official"}
+	reg := llm.NewRegistry()
+	if err := reg.Register(provider); err != nil {
+		t.Fatal(err)
+	}
+	a := &app{cfg: config.Config{LLM: config.LLMConfig{Provider: provider.id}}, llm: provider, llmReg: reg}
+	generation := &providerGeneration{registry: reg}
+	a.providerGeneration = generation
+
+	reader, err := a.llmFor(provider.id).Stream(context.Background(), llm.ChatRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation.retire()
+	if got := provider.closed.Load(); got != 0 {
+		t.Fatalf("provider closed while stream was still live: %d", got)
+	}
+	if _, err := reader.Next(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.Next(); !errors.Is(err, io.EOF) {
+		t.Fatalf("stream termination error = %v, want EOF", err)
+	}
+	if got := provider.closed.Load(); got != 1 {
+		t.Fatalf("provider close count = %d, want 1", got)
+	}
+}
+
+func TestProviderGenerationReleasesAtStreamFinish(t *testing.T) {
+	provider := &generationTestProvider{id: "deepseek-official"}
+	reg := llm.NewRegistry()
+	if err := reg.Register(provider); err != nil {
+		t.Fatal(err)
+	}
+	generation := &providerGeneration{registry: reg}
+	routed := &leasedLLM{inner: provider, gen: generation}
+	// Replace the normal reader with a finish-only reader to model consumers
+	// that stop at StreamFinish and never probe EOF.
+	routed.inner = finishOnlyLLM{reader: &generationFinishReader{}}
+	reader, err := routed.Stream(context.Background(), llm.ChatRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation.retire()
+	if got := provider.closed.Load(); got != 0 {
+		t.Fatalf("provider closed while stream was still live: %d", got)
+	}
+	if event, err := reader.Next(); err != nil || event.Kind != llm.StreamFinish {
+		t.Fatalf("finish = %+v, err=%v", event, err)
+	}
+	if got := provider.closed.Load(); got != 1 {
+		t.Fatalf("provider close count after finish = %d, want 1", got)
+	}
+}
+
+// TestRetiredProviderGenerationRejectsNewStreamAndDrainsOldLease proves both
+// halves of the replacement contract: a retired credential-bearing generation
+// cannot acquire a new stream, while an already-acquired in-flight stream keeps
+// the old provider alive exactly until its terminal stream boundary.
+func TestRetiredProviderGenerationRejectsNewStreamAndDrainsOldLease(t *testing.T) {
+	provider := &generationTestProvider{id: "retired-route"}
+	reg := llm.NewRegistry()
+	if err := reg.Register(provider); err != nil {
+		t.Fatal(err)
+	}
+	a := &app{cfg: config.Config{LLM: config.LLMConfig{Provider: provider.id}}, llm: provider, llmReg: reg}
+	generation := &providerGeneration{registry: reg}
+	a.providerGeneration = generation
+
+	oldReader, err := a.llmFor(provider.id).Stream(context.Background(), llm.ChatRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation.retire()
+
+	var retiredErr error
+	retiredReader, retiredErr := a.llmFor(provider.id).Stream(context.Background(), llm.ChatRequest{})
+	if retiredReader != nil || retiredErr == nil || !strings.Contains(retiredErr.Error(), "provider generation retired") {
+		t.Fatalf("retired stream = reader=%#v err=%v, want generation rejection", retiredReader, retiredErr)
+	}
+	if got := provider.attempts.Load(); got != 1 {
+		t.Fatalf("provider attempts after retirement = %d, want 1", got)
+	}
+	if got := provider.closed.Load(); got != 0 {
+		t.Fatalf("provider closed while old lease was live: %d", got)
+	}
+
+	if _, err := oldReader.Next(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := oldReader.Next(); !errors.Is(err, io.EOF) {
+		t.Fatalf("old stream termination error = %v, want EOF", err)
+	}
+	if got := provider.closed.Load(); got != 1 {
+		t.Fatalf("provider close count after drain = %d, want 1", got)
+	}
+}
+
+type finishOnlyLLM struct{ reader llm.StreamReader }
+
+func (l finishOnlyLLM) Stream(context.Context, llm.ChatRequest) (llm.StreamReader, error) {
+	return l.reader, nil
+}
+
+func TestProviderRuntimeSnapshotKeepsProviderAndRegistryGenerationTogether(t *testing.T) {
+	t.Setenv("DEEPSEEK_API_KEY", "deepseek-key")
+	t.Setenv("OPENAI_API_KEY", "openai-key")
+	a := &app{cfg: config.Config{
+		Model: "deepseek-chat",
+		LLM: config.LLMConfig{
+			Provider: "deepseek-official",
+			OpenAI:   config.OpenAIProviderConfig{BaseURL: "https://api.openai.com/v1", Model: "gpt-4o"},
+		},
+	}}
+	if err := a.registerLLM(); err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			runtime := a.providerRuntimeSnapshot("")
+			if runtime.selected == nil || runtime.selectedID != runtime.provider {
+				t.Errorf("inconsistent runtime snapshot: provider=%q selected=%v", runtime.provider, runtime.selected)
+				return
+			}
+		}
+	}()
+	for i := 0; i < 12; i++ {
+		if err := a.webSwitchModel(context.Background(), "openai", "gpt-4o-mini", ""); err != nil {
+			t.Fatal(err)
+		}
+		if err := a.webSwitchModel(context.Background(), "deepseek-official", "deepseek-chat", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	close(stop)
+	wg.Wait()
+}
+
+func TestProviderRuntimeSnapshotRejectsUnavailableRouteBeforeStream(t *testing.T) {
+	provider := &unavailableTestProvider{id: "dormant"}
+	reg := llm.NewRegistry()
+	if err := reg.Register(provider); err != nil {
+		t.Fatal(err)
+	}
+	generation := &providerGeneration{registry: reg}
+	a := &app{
+		cfg:                config.Config{LLM: config.LLMConfig{Provider: "dormant"}},
+		llm:                provider,
+		llmReg:             reg,
+		providerGeneration: generation,
+	}
+
+	pinned := a.providerRuntimeSnapshotPinned("dormant")
+	unavailable, ok := pinned.selected.(unavailableLLM)
+	if !ok {
+		t.Fatalf("pinned selected = %T, want unavailableLLM", pinned.selected)
+	}
+	if !errors.Is(unavailable.err, llm.ErrProviderUnavailable) || pinned.selectedID != "" {
+		t.Fatalf("pinned route error = %v, selectedID=%q", unavailable.err, pinned.selectedID)
+	}
+	if pinned.release != nil {
+		t.Fatal("unavailable route acquired a generation lease")
+	}
+
+	snapshot := a.providerRuntimeSnapshot("dormant")
+	if snapshot.selectedID != "" {
+		t.Fatalf("non-pinned snapshot selected unavailable route: %+v", snapshot)
+	}
+	if _, err := snapshot.selected.Stream(context.Background(), llm.ChatRequest{}); !errors.Is(err, llm.ErrProviderUnavailable) {
+		t.Fatalf("non-pinned stream error = %v, want ErrProviderUnavailable", err)
+	}
+	if _, err := a.llmFor("dormant").Stream(context.Background(), llm.ChatRequest{}); !errors.Is(err, llm.ErrProviderUnavailable) {
+		t.Fatalf("routed stream error = %v, want ErrProviderUnavailable", err)
+	}
+	if got := provider.attempts.Load(); got != 0 {
+		t.Fatalf("provider stream attempts = %d, want 0", got)
+	}
+}
 
 // boolPtr returns a pointer to v (test helper for *bool config fields, e.g.
 // llm.multimodal.enabled which defaults to on — 用户拍板「图片附件默认打开」).
@@ -495,5 +904,339 @@ func TestRegisterLLMWiresMaxRequestImageBytes(t *testing.T) {
 	first := msgs[0].(map[string]any)
 	if first["content"] != "d"+llm.OffloadedImageText {
 		t.Fatalf("content = %v, want the offloaded text (MaxRequestImageBytes wired from config)", first["content"])
+	}
+}
+
+// TestProviderGenerationColdRestartRebuildsDurableCustomRoute models the
+// provider cold-restart boundary with SQLite: the first process owns a
+// generation, drains and retires it exactly once, and closes its in-memory
+// credential vault. A fresh app rebuilds the route only from durable settings
+// and the credential backend, then streams through a real HTTP adapter.
+func TestProviderGenerationColdRestartRebuildsDurableCustomRoute(t *testing.T) {
+	const helperEnv = "PA_PROVIDER_COLD_RESTART_HELPER"
+	if os.Getenv(helperEnv) == "1" {
+		if err := runProviderColdRestartChild(); err != nil {
+			fmt.Fprintln(os.Stderr, "provider cold-restart helper:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	var gotAuth atomic.Value
+	var gotPath atomic.Value
+	var gotBody atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth.Store(r.Header.Get("Authorization"))
+		gotPath.Store(r.URL.Path)
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
+			gotBody.Store(body)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"cold\"},\"finish_reason\":null}]}\n\n" +
+			"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+	}))
+	defer srv.Close()
+
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "provider-cold.db")
+	firstStore, err := store.OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := customProviderProfile{
+		ID: "cold-route", Name: "Cold Route", BaseURL: srv.URL, Model: "cold-model",
+		DefaultMaxTokens: 2345,
+	}
+	profileJSON, err := json.Marshal(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := firstStore.SetSetting(ctx, "llm.custom.cold-route", string(profileJSON)); err != nil {
+		t.Fatal(err)
+	}
+	firstVault, err := credential.New(ctx, firstStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := firstVault.Set(ctx, "COLD_ROUTE_API_KEY", "cold-secret"); err != nil {
+		t.Fatal(err)
+	}
+	firstCfg := config.Config{
+		BaseURL: "https://default.invalid/v1",
+		Model:   "default-model",
+		LLM:     config.LLMConfig{Provider: "cold-route"},
+	}
+	first := &app{
+		cfg:             firstCfg,
+		store:           firstStore,
+		credentials:     firstVault,
+		llmKeys:         map[string]string{},
+		customProviders: []customProviderProfile{profile},
+	}
+	if err := first.registerLLM(); err != nil {
+		t.Fatalf("first registerLLM: %v", err)
+	}
+	oldGeneration := first.providerGeneration
+	if oldGeneration == nil {
+		t.Fatal("first process has no provider generation")
+	}
+	releaseGeneration := func() {
+		t.Helper()
+		snapshot := first.providerRuntimeSnapshotPinned("cold-route")
+		if snapshot.selectedID != "cold-route" {
+			t.Fatalf("first selected route = %q, want cold-route", snapshot.selectedID)
+		}
+		snapshot.release()
+	}
+	releaseGeneration()
+
+	// Model process teardown at the cold boundary. The old in-memory credential
+	// is rejected after vault close, and the registry-backed generation is
+	// retired exactly once.
+	if err := firstVault.Close(); err != nil {
+		t.Fatalf("close first credential vault: %v", err)
+	}
+	if _, err := firstVault.Resolve(ctx, "COLD_ROUTE_API_KEY"); err == nil {
+		t.Fatal("closed vault unexpectedly resolved a credential")
+	}
+	oldGeneration.retire()
+	oldGeneration.mu.Lock()
+	retired, closed, refs := oldGeneration.retired, oldGeneration.closed, oldGeneration.refs
+	oldGeneration.mu.Unlock()
+	if !retired || !closed || refs != 0 {
+		t.Fatalf("retired generation state = retired:%v closed:%v refs:%d", retired, closed, refs)
+	}
+	if err := first.closeProviderGenerations(); err != nil {
+		t.Fatalf("idempotent provider teardown: %v", err)
+	}
+	if err := firstVault.Close(); err != nil {
+		t.Fatalf("second vault close: %v", err)
+	}
+	if err := firstStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+	resultPath := filepath.Join(t.TempDir(), "child.pid")
+	helper := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$")
+	helper.Env = append(os.Environ(),
+		helperEnv+"=1",
+		"PA_PROVIDER_COLD_DB="+dbPath,
+		"PA_PROVIDER_COLD_RESULT="+resultPath,
+	)
+	output := &bytes.Buffer{}
+	helper.Stdout = output
+	helper.Stderr = output
+	if err := helper.Run(); err != nil {
+		t.Fatalf("provider cold-restart child: %v\n%s", err, output)
+	}
+	childPID, err := os.ReadFile(resultPath)
+	if err != nil {
+		t.Fatalf("provider cold-restart result: %v\n%s", err, output)
+	}
+	if strings.TrimSpace(string(childPID)) == fmt.Sprint(os.Getpid()) {
+		t.Fatalf("provider cold restart ran in parent process %s", childPID)
+	}
+	if auth := gotAuth.Load(); auth != "Bearer cold-secret" {
+		t.Fatalf("cold request auth = %#v, want the durable credential", auth)
+	}
+	if path := gotPath.Load(); path != "/chat/completions" {
+		t.Fatalf("cold request path = %#v, want /chat/completions", path)
+	}
+	bodyValue := gotBody.Load()
+	body, _ := bodyValue.(map[string]any)
+	if body == nil || body["model"] != "cold-model" || body["max_tokens"] != float64(2345) {
+		t.Fatalf("cold request model = %#v, want cold-model", bodyValue)
+	}
+}
+
+func runProviderColdRestartChild() error {
+	ctx := context.Background()
+	dbPath := os.Getenv("PA_PROVIDER_COLD_DB")
+	if dbPath == "" {
+		return errors.New("missing provider cold-restart database")
+	}
+	resultPath := os.Getenv("PA_PROVIDER_COLD_RESULT")
+	if resultPath == "" {
+		return errors.New("missing provider cold-restart result path")
+	}
+	st, err := store.OpenSQLite(dbPath)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = st.Close() }()
+	settings, err := st.GetSettings(ctx)
+	if err != nil {
+		return err
+	}
+	var profile customProviderProfile
+	if err := json.Unmarshal([]byte(settings["llm.custom.cold-route"]), &profile); err != nil {
+		return err
+	}
+	if profile.ID != "cold-route" || profile.Model != "cold-model" || profile.BaseURL == "" || profile.DefaultMaxTokens != 2345 {
+		return fmt.Errorf("cold provider profile = %+v", profile)
+	}
+	vault, err := credential.New(ctx, st)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = vault.Close() }()
+	key, err := vault.Resolve(ctx, providerEnv("cold-route"))
+	if err != nil {
+		return err
+	}
+	a := &app{
+		cfg: config.Config{
+			BaseURL: "https://default.invalid/v1",
+			Model:   "default-model",
+			LLM:     config.LLMConfig{Provider: "cold-route"},
+		},
+		store:           st,
+		credentials:     vault,
+		llmKeys:         map[string]string{"cold-route": key},
+		customProviders: []customProviderProfile{profile},
+	}
+	if err := a.registerLLM(); err != nil {
+		return err
+	}
+	if a.providerGeneration == nil {
+		return errors.New("cold process did not publish a provider generation")
+	}
+	snapshot := a.providerRuntimeSnapshotPinned("cold-route")
+	if snapshot.selectedID != "cold-route" || snapshot.selected == nil {
+		return fmt.Errorf("cold runtime snapshot = %+v", snapshot)
+	}
+	reader, err := snapshot.selected.Stream(ctx, llm.ChatRequest{
+		Messages: []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("cold")}}},
+	})
+	if err != nil {
+		return err
+	}
+	var text strings.Builder
+	for {
+		event, err := reader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if event.Kind == llm.StreamTextDelta {
+			text.WriteString(event.Text)
+		}
+	}
+	snapshot.release()
+	if text.String() != "cold" {
+		return fmt.Errorf("cold stream text = %q, want cold", text.String())
+	}
+	return os.WriteFile(resultPath, []byte(fmt.Sprint(os.Getpid())), 0o600)
+}
+
+// TestProviderCredentialRevocationMatrixCoversEveryProtocolFamily binds every
+// wire adapter family to one credential vault. An in-flight stream retains its
+// lease across revocation, the next stream is rejected before the revoked
+// secret can be reused, and draining the old stream releases the last reference.
+func TestProviderCredentialRevocationMatrixCoversEveryProtocolFamily(t *testing.T) {
+	secret := "revocation-matrix-secret"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		// Deliberately malformed payloads: the stream remains open while the
+		// revoked lease is probed; the terminal drain closes/releases it.
+		_, _ = w.Write([]byte("data: not-json\n\n"))
+	}))
+	defer srv.Close()
+
+	newVault := func(t *testing.T) *credential.Vault {
+		t.Helper()
+		vault, err := credential.New(context.Background(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := vault.Set(context.Background(), "MATRIX_API_KEY", secret); err != nil {
+			t.Fatal(err)
+		}
+		return vault
+	}
+	newProvider := func(t *testing.T, family string, vault *credential.Vault) llm.Provider {
+		t.Helper()
+		leaseProvider := func(context.Context) (llm.CredentialLease, error) {
+			return vault.Acquire(context.Background(), "MATRIX_API_KEY")
+		}
+		switch family {
+		case "deepseek-completions":
+			return deepseek.New(deepseek.Config{
+				ProviderName: family, BaseURL: srv.URL,
+				CredentialLeaseProvider: leaseProvider, DisableRetry: true,
+			})
+		case "openai-completions":
+			return openai.New(openai.Config{
+				BaseURL: srv.URL, CredentialLeaseProvider: leaseProvider, DisableRetry: true,
+			})
+		case "anthropic-messages":
+			return anthropic.New(anthropic.Config{
+				BaseURL: srv.URL, CredentialLeaseProvider: leaseProvider,
+			})
+		case "google-generative-ai":
+			return google.New(google.Config{
+				BaseURL: srv.URL, CredentialLeaseProvider: leaseProvider,
+			})
+		case "openai-responses":
+			return openairesponses.New(openairesponses.Config{
+				BaseURL: srv.URL, CredentialLeaseProvider: leaseProvider,
+			})
+		default:
+			t.Fatalf("unknown protocol family %q", family)
+			return nil
+		}
+	}
+
+	for _, family := range []string{
+		"deepseek-completions", "openai-completions", "anthropic-messages",
+		"google-generative-ai", "openai-responses",
+	} {
+		t.Run(family, func(t *testing.T) {
+			vault := newVault(t)
+			provider := newProvider(t, family, vault)
+			request := llm.ChatRequest{Messages: []llm.Message{{
+				Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("credential matrix")},
+			}}}
+			live, err := provider.Stream(context.Background(), request)
+			if err != nil {
+				t.Fatalf("%s first stream: %v", family, err)
+			}
+			if err := vault.Unset(context.Background(), "MATRIX_API_KEY"); err != nil {
+				t.Fatal(err)
+			}
+			if vault.Has("MATRIX_API_KEY") {
+				t.Fatal("revoked credential remains available for new acquisition")
+			}
+
+			_, err = provider.Stream(context.Background(), request)
+			if err == nil {
+				t.Fatalf("%s started a stream after credential revocation", family)
+			}
+			facts, ok := llm.FailureFacts(err)
+			if !ok || facts.Code != "CREDENTIAL_UNAVAILABLE" {
+				t.Fatalf("%s revocation failure = %#v, ok=%v; want CREDENTIAL_UNAVAILABLE", family, facts, ok)
+			}
+			if strings.Contains(err.Error(), secret) {
+				t.Fatalf("%s revocation diagnostic leaked secret: %q", family, err)
+			}
+
+			// Drain the already-owned stream to its terminal boundary. Every
+			// adapter releases its credential lease when the reader closes.
+			for {
+				_, err := live.Next()
+				if err != nil {
+					break
+				}
+			}
+			if vault.Has("MATRIX_API_KEY") {
+				t.Fatal("vault still reports revoked credential after in-flight drain")
+			}
+			if closeable, ok := provider.(llm.Closeable); ok {
+				if err := closeable.Close(); err != nil {
+					t.Fatalf("%s provider close: %v", family, err)
+				}
+			}
+		})
 	}
 }

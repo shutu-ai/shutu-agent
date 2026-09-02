@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -11,7 +13,9 @@ import (
 
 	"github.com/jabing/shutu-agent/internal/config"
 	"github.com/jabing/shutu-agent/internal/jobs"
+	"github.com/jabing/shutu-agent/internal/pathsecure"
 	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/jabing/shutu-agent/internal/terminal"
 	"github.com/jabing/shutu-agent/internal/tools"
 )
 
@@ -68,6 +72,24 @@ func TestRegisterTerminalDisabledRegistersNothing(t *testing.T) {
 	}
 	if containsStr(specNames(app.reg), "pwsh") {
 		t.Fatal("pwsh registered while terminal disabled")
+	}
+}
+
+// TestModelTerminalCancellationClassification documents the audited boundary:
+// foreground writes reset the terminal on cancellation, while lifecycle
+// receipts remain non-cancellable.
+func TestModelTerminalCancellationClassification(t *testing.T) {
+	app := makeTermApp(true)
+	if err := app.registerModelTerminalTools(); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range app.reg.Catalog() {
+		if entry.Name == "pwsh" && !entry.Cancellable {
+			t.Fatal("fresh-process pwsh must declare foreground cooperative cancellation")
+		}
+		if strings.HasPrefix(entry.Name, "terminal_") && entry.Cancellable != (entry.Name == "terminal_send") {
+			t.Fatalf("%s catalog cancellable = %v, want write-only contract", entry.Name, entry.Cancellable)
+		}
 	}
 }
 
@@ -151,7 +173,10 @@ func TestPersistentTerminalToolsMatchDshSurface(t *testing.T) {
 	}
 	value, ok := opened.Value.(map[string]any)
 	if !ok {
-		t.Fatalf("terminal_open value = %T", opened.Value)
+		if opened.Error != nil {
+			t.Fatalf("terminal_open value = %T output=%q error=%s/%s", opened.Value, opened.Output, opened.Error.Name, opened.Error.Code)
+		}
+		t.Fatalf("terminal_open value = %T output=%q error=<nil>", opened.Value, opened.Output)
 	}
 	id, _ := value["sessionId"].(string)
 	if id == "" {
@@ -174,6 +199,203 @@ func TestPersistentTerminalToolsMatchDshSurface(t *testing.T) {
 	}
 	if _, err := app.reg.Execute(context.Background(), "terminal_close", json.RawMessage(fmt.Sprintf(`{"sessionId":%q}`, id))); err != nil {
 		t.Fatalf("terminal_close: %v", err)
+	}
+}
+
+func TestModelTerminalWorkspaceBoundaryAndDurableLifecycle(t *testing.T) {
+	root := t.TempDir()
+	app := makeTermApp(true)
+	app.cfg.Workspace.DefaultDir = root
+	if err := app.registerTerminal(); err != nil {
+		t.Fatalf("registerTerminal: %v", err)
+	}
+	app.reg.SetPolicy(tools.Policy{Enabled: []string{"terminal_open", "terminal_close"}, Timeout: time.Minute})
+	defer app.closeModelTerminalSessions()
+
+	opened, err := app.reg.Execute(context.Background(), "terminal_open", json.RawMessage(`{"type":"shell","name":"scoped"}`))
+	if err != nil {
+		t.Fatalf("terminal_open: %v", err)
+	}
+	value, ok := opened.Value.(map[string]any)
+	if !ok {
+		if opened.Error != nil {
+			t.Fatalf("terminal_open value = %T output=%q error=%s/%s", opened.Value, opened.Output, opened.Error.Name, opened.Error.Code)
+		}
+		t.Fatalf("terminal_open value = %T output=%q error=<nil>", opened.Value, opened.Output)
+	}
+	id, _ := value["sessionId"].(string)
+	if id == "" {
+		t.Fatalf("terminal_open returned no id: %#v", value)
+	}
+	rec, err := app.currentModelTerminalFor(app.currentID, id)
+	if err != nil {
+		t.Fatalf("lookup terminal: %v", err)
+	}
+	wantRoot, err := pathsecure.ResolveExisting(root)
+	if err != nil {
+		t.Fatalf("resolve expected workspace: %v", err)
+	}
+	if got, want := filepath.Clean(rec.cwd), filepath.Clean(wantRoot); got != want {
+		t.Fatalf("terminal cwd = %q, want workspace %q", got, want)
+	}
+
+	escaped, err := app.reg.Execute(context.Background(), "terminal_open", json.RawMessage(fmt.Sprintf(`{"type":"shell","cwd":%q}`, filepath.Dir(root))))
+	if err != nil {
+		t.Fatalf("terminal_open escape should be a classified tool result, got execution error: %v", err)
+	}
+	if !escaped.IsError || !strings.Contains(escaped.Output, "escapes session workspace") {
+		t.Fatalf("terminal_open escape result = %#v, want a workspace-boundary error", escaped)
+	}
+	if _, err := app.reg.Execute(context.Background(), "terminal_close", json.RawMessage(fmt.Sprintf(`{"sessionId":%q}`, id))); err != nil {
+		t.Fatalf("terminal_close: %v", err)
+	}
+
+	var got []string
+	for _, event := range app.log.Events() {
+		if event.Type == session.EventTerminalStart || event.Type == session.EventTerminalStop {
+			got = append(got, event.Type)
+		}
+	}
+	want := []string{session.EventTerminalStart, session.EventTerminalStop}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("terminal lifecycle events = %v, want %v", got, want)
+	}
+}
+
+func TestModelTerminalOwnerCloseStopsOnlyOwnedSessions(t *testing.T) {
+	root := t.TempDir()
+	app := makeTermApp(true)
+	app.cfg.Workspace.DefaultDir = root
+	app.runtimeLogs = map[string]*session.Log{app.currentID: app.log}
+	if err := app.registerTerminal(); err != nil {
+		t.Fatalf("registerTerminal: %v", err)
+	}
+	app.reg.SetPolicy(tools.Policy{Enabled: []string{"terminal_open", "terminal_list"}, Timeout: time.Minute})
+
+	opened, err := app.reg.Execute(context.Background(), "terminal_open", json.RawMessage(`{"type":"shell","name":"owned"}`))
+	if err != nil {
+		t.Fatalf("terminal_open: %v", err)
+	}
+	id := opened.Value.(map[string]any)["sessionId"].(string)
+
+	other := &modelTerminalRecord{owner: "other", typ: "shell", sess: nil}
+	// The owner disposer must not touch records belonging to another Agent.
+	// Use a real session for the foreign record so its lifecycle is observable.
+	other.sess, err = terminal.NewSession(terminal.SessionOpts{Shell: app.cfg.Terminal.Shell, Workdir: root, IdleMS: 100, TimeoutMS: 2500})
+	if err != nil {
+		t.Fatalf("foreign terminal: %v", err)
+	}
+	app.modelTermMu.Lock()
+	app.modelTerms[other.sess.ID()] = other
+	app.modelTermMu.Unlock()
+	defer func() { _ = other.sess.Close() }()
+
+	if err := app.closeModelTerminalOwner(app.currentID); err != nil {
+		t.Fatalf("closeModelTerminalOwner: %v", err)
+	}
+	if err := app.closeModelTerminalOwner(app.currentID); err != nil {
+		t.Fatalf("repeat closeModelTerminalOwner: %v", err)
+	}
+	listed, err := app.reg.Execute(context.Background(), "terminal_list", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("terminal_list: %v", err)
+	}
+	if got := listed.Value.([]any); len(got) != 0 {
+		t.Fatalf("owned terminal remains listed after owner close: %#v", got)
+	}
+	if rec, err := app.currentModelTerminalFor(app.currentID, id); err == nil || rec != nil {
+		t.Fatalf("closed owned terminal remains addressable: rec=%v err=%v", rec, err)
+	}
+	app.modelTermMu.Lock()
+	_, retained := app.modelTerms[id]
+	app.modelTermMu.Unlock()
+	if retained {
+		t.Fatal("closed owned terminal remains in the process registry")
+	}
+	if status := other.sess.Status(); status.Kind != "running" {
+		t.Fatalf("foreign terminal status = %#v, owner close must not stop it", status)
+	}
+	var stops int
+	for _, event := range app.log.Events() {
+		if event.Type == session.EventTerminalStop {
+			stops++
+		}
+	}
+	if stops != 1 {
+		t.Fatalf("terminal stop events = %d, want one owner-scoped stop", stops)
+	}
+}
+
+func TestRecoverTerminalClaimsAppendsOneColdRestartStop(t *testing.T) {
+	app := makeTermApp(true)
+	log := session.New()
+	if _, err := log.Append(session.EventTerminalStart, session.NewTerminalStart("terminal-old", app.currentID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := log.Append(session.EventTerminalStart, session.NewTerminalStart("terminal-closed", app.currentID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := log.Append(session.EventTerminalStop, session.NewTerminalStop("terminal-closed", "tool_close")); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := app.recoverTerminalClaims(log, app.currentID); err != nil {
+		t.Fatalf("recover terminal claims: %v", err)
+	}
+	if err := app.recoverTerminalClaims(log, app.currentID); err != nil {
+		t.Fatalf("repeat terminal claim recovery: %v", err)
+	}
+	var stops []string
+	for _, event := range log.Events() {
+		if event.Type != session.EventTerminalStop {
+			continue
+		}
+		var payload struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(event.Data, &payload); err != nil {
+			t.Fatal(err)
+		}
+		stops = append(stops, payload.ID)
+	}
+	if !reflect.DeepEqual(stops, []string{"terminal-closed", "terminal-old"}) {
+		t.Fatalf("terminal stop receipts = %v, want the closed edge then one cold-restart edge", stops)
+	}
+}
+
+func TestRecoverTerminalClaimsSkipsLiveProcessOwner(t *testing.T) {
+	root := t.TempDir()
+	app := makeTermApp(true)
+	app.cfg.Workspace.DefaultDir = root
+	if err := app.registerTerminal(); err != nil {
+		t.Fatal(err)
+	}
+	app.reg.SetPolicy(tools.Policy{Enabled: []string{"terminal_open"}, Timeout: time.Minute})
+	defer app.closeModelTerminalSessions()
+	opened, err := app.reg.Execute(context.Background(), "terminal_open", json.RawMessage(`{"type":"shell"}`))
+	if err != nil {
+		t.Fatalf("terminal_open: %v", err)
+	}
+	id := opened.Value.(map[string]any)["sessionId"].(string)
+	if _, err := app.log.Append(session.EventTerminalStart, session.NewTerminalStart("terminal-stale", app.currentID)); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.recoverTerminalClaims(app.log, app.currentID); err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range app.log.Events() {
+		if event.Type != session.EventTerminalStop {
+			continue
+		}
+		var payload struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(event.Data, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.ID == id {
+			t.Fatalf("live terminal %s was marked stale", id)
+		}
 	}
 }
 

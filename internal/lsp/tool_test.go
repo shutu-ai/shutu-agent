@@ -71,6 +71,9 @@ func TestLSPRegistryPreservesDSHStructuredLocations(t *testing.T) {
 	if !ok || value["kind"] != "locations" || value["resolvedWorkspaceUri"] == nil {
 		t.Fatalf("lsp value = %#v, want DSH locations object", result.Value)
 	}
+	if entry := reg.Catalog()[0]; !entry.Cancellable {
+		t.Fatalf("lsp catalog contract = %+v, want cancellable", entry)
+	}
 }
 
 func TestLSPHelperProcess(t *testing.T) {

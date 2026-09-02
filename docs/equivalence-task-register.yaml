@@ -1,0 +1,697 @@
+schemaVersion: 1
+kind: shutu-dsh-equivalence-task-register
+asOf: 2026-08-31
+authority:
+  summary: docs/dsh-equivalence-tasks.md
+  manifest: docs/equivalence-manifest.yaml
+  rule: An item is complete only when implementation, negative-path evidence, and the listed acceptance command all pass.
+  releaseRule: No capability-equivalent claim is allowed while any required item is partial, open, blocked, or unverifiable.
+
+statusVocabulary:
+  done: implementation and acceptance evidence are present
+  partial: a seam or local test exists, but the equivalence boundary is not proven
+  open: implementation or required evidence is missing
+  blocked: a required external capability is unavailable; the product must fail closed or remove that profile
+
+tasks:
+  - id: A0.1
+    area: baseline
+    status: done
+    priority: P0
+    objective: Pin one reference commit, tag, profile set, subject baseline, and release claim policy.
+    implementation: docs/equivalence-manifest.yaml
+    acceptance:
+      - manifest reference commit/tag is unchanged for the audit run
+      - gate rejects claimAllowed=false
+    command: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/equivalence-gate.ps1
+    evidence: docs/equivalence-manifest.yaml; scripts/equivalence-gate.ps1; scripts/equivalence-report.ps1
+    releaseBlocker: false
+
+  - id: A0.2
+    area: baseline
+    status: done
+    priority: P0
+    objective: Separate dsh-base/core, web/headless, and optional e2b/python/Cordis/Team/provider profiles.
+    implementation: internal/profile; internal/webserver
+    acceptance:
+      - every reference capability has exactly one required, optional, or unsupported classification
+      - unsupported is exposed as a stable negative response, never a silently failing endpoint
+    command: go test ./internal/profile ./internal/webserver -run 'Capability|Profile|Unsupported' -count=1
+    evidence: internal/profile/classification.go; internal/profile/classification_test.go; internal/webserver/runtime_profile_test.go; docs/dsh-equivalence-progress.md
+    dependencies: [A0.1]
+    releaseBlocker: true
+
+  - id: A0.3
+    area: baseline
+    status: done
+    priority: P0
+    objective: Generate one capability catalog covering tool name/alias, owner, profile, schemas, rich blocks, errors, cancellation, persistence, and policy.
+    implementation: internal/tools/tools.go; internal/tools/policy.go; docs/dsh-tool-catalog-snapshots.md
+    acceptance:
+      - prompt visibility, policy admission, native, ACP, Web, and SDK inventory derive from the same versioned snapshot
+      - catalog has deterministic bytes and schema version
+      - get_time compatibility extension is explicitly classified against DSH time context
+    command: go test ./internal/tools ./cmd/pa -run 'Catalog|Tool.*Visible|Capability' -count=1
+    evidence: docs/dsh-tool-catalog-snapshots.md; internal/tools/tools_test.go; cmd/pa/webw1_test.go; cmd/pa/catalog_test.go; internal/acp/server_test.go; internal/sdkclient/protocol_schema_test.go
+    dependencies: [A0.2]
+    releaseBlocker: true
+
+  - id: A0.4
+    area: baseline
+    status: done
+    priority: P0
+    objective: Make the manifest the only release-status source and remove contradictory completed wording.
+    implementation: docs/equivalence-manifest.yaml; scripts/equivalence-gate.ps1
+    acceptance:
+      - task list, status report, parity docs, and gate agree on every open blocker
+      - generated reports include commit, profile, and verification timestamp
+    command: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/equivalence-gate.ps1
+    evidence: docs/equivalence-manifest.yaml; scripts/equivalence-gate.ps1; scripts/equivalence-report.ps1; docs/dsh-equivalence-status.md; docs/dsh-tool-capability-parity.md
+    dependencies: [A0.1, A0.3]
+    releaseBlocker: true
+
+  - id: A0.5
+    area: baseline
+    status: done
+    priority: P0
+    objective: Link every completed item to source, test, fixture, and reproducible command.
+    implementation: docs/equivalence-task-register.yaml
+    acceptance:
+      - no done task has an empty evidence or command field
+      - evidence is a replayable test, not a type/interface existence claim
+    command: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/equivalence-register-lint.ps1
+    evidence: docs/equivalence-task-register.yaml; scripts/equivalence-register-lint.ps1
+    dependencies: [A0.1]
+    releaseBlocker: true
+
+  - id: A1.1
+    area: turn-runtime
+    status: done
+    priority: P0
+    objective: Remove process-global currentID/sessionStateMu/log/runtimeLogs fallback from production turn paths.
+    implementation: cmd/pa/agent_runtime.go; cmd/pa/main.go; internal/agent
+    acceptance:
+      - two concurrent addressed Agents cannot cross-write event, tool, approval, job, or provider state
+      - production startup cannot enable legacy turn fallback
+      - compatibility fallback is isolated to explicitly marked tests/adapters
+    command: go test ./cmd/pa ./internal/agent -run 'Runtime|Concurrent|Address|Legacy' -count=1
+    evidence: docs/dsh-equivalence-progress.md; cmd/pa/agent_runtime_recovery_test.go; cmd/pa/runtime_context_test.go; cmd/pa/status_test.go; internal/fs/runtime_sink_test.go; internal/skill/runtime_sink_test.go; internal/mcp/runtime_sink_test.go; internal/jobs/runtime_sink_test.go; internal/plan/runtime_sink_test.go; internal/schedule/runtime_sink_test.go; internal/spill/runtime_sink_test.go; internal/workflow/runtime_sink_test.go; internal/subagent/runtime_sink_test.go
+    dependencies: [A0.3]
+    releaseBlocker: true
+
+  - id: A1.2
+    area: turn-runtime
+    status: done
+    priority: P0
+    objective: Implement one canonical turn/step waterfall for success, empty, max-token, transient, fatal, cancel, abort, approval, timeout, and worker death.
+    implementation: internal/loop; cmd/pa/agent_runtime.go; internal/session; internal/llm
+    acceptance:
+      - every branch emits turn/start, step/start, request, assistant/tool facts, step/end, and turn/end in the defined order
+      - retry and compaction never create orphan or duplicate terminal facts
+      - replay produces the same terminal state after restart
+    command: go test ./cmd/pa ./internal/session ./internal/llm -run 'Waterfall|Replay|Cancel|Abort|Retry|Compaction' -count=1
+    evidence: docs/evidence/dsh-equivalence/core-turn-contract.json; internal/loop/loop_test.go; internal/loop/turn_stopping_test.go; internal/session/recovery_test.go; internal/persistence/jsonl_test.go; internal/store/sqlite_test.go
+    dependencies: [A1.1, A2.2]
+    releaseBlocker: true
+
+  - id: A1.3
+    area: turn-runtime
+    status: done
+    priority: P0
+    objective: Centralize retry, Retry-After, max-token, abort/cancel, provider fallback, and disposal-drain policy.
+    implementation: internal/llm/retry; internal/llm; internal/loop; cmd/pa/llm.go
+    acceptance:
+      - all provider calls use the same normalized error and retry policy
+      - provider replacement waits for in-flight leases and never reuses a retired credential
+    command: go test ./internal/llm/retry ./internal/llm ./cmd/pa -run 'Retry|Lease|Provider|Drain' -count=1
+    evidence: internal/llm/retry/retry_test.go; internal/loop/loop_test.go; cmd/pa/llm_test.go
+    dependencies: [A1.2, A6.2]
+    releaseBlocker: true
+
+  - id: A1.4
+    area: turn-runtime
+    status: done
+    priority: P0
+    objective: Make durable event log the sole model-visible history source and make DeriveHistory deterministic after cold recovery.
+    implementation: internal/session; internal/loop; internal/store; cmd/pa/agent_runtime.go
+    acceptance:
+      - raw stream chunks, projections, and process memory are not model history authorities
+      - fork, compaction, steering, quiet injection, and surface replacement replay from committed events
+    command: go test ./internal/session ./internal/store ./cmd/pa -run 'DeriveHistory|Cold|Fork|Compaction|Steer' -count=1
+    evidence: internal/session/session_test.go; internal/session/contract_test.go; internal/session/recovery_test.go; internal/loop/loop_test.go; internal/persistence/contract_test.go; docs/evidence/dsh-equivalence/reference-replay.md
+    dependencies: [A1.2, A2.3]
+    releaseBlocker: true
+
+  - id: A1.5
+    area: turn-runtime
+    status: done
+    priority: P0
+    objective: Atomically publish Agent handle, session header, lifecycle fact, registry index, provider lease, and child/job owner.
+    implementation: internal/agent; internal/jobs; internal/store; internal/subagent; cmd/pa/agent_runtime.go
+    acceptance:
+      - any injected write failure leaves no usable ghost Agent or disposed handle
+      - publication and disposal receipts are replayable across processes
+    command: go test ./internal/agent ./internal/store ./cmd/pa -run 'Publish|Dispose|Receipt|Failure|Recovery|SessionAgent|ConcurrentAddressed' -count=1
+    evidence: internal/agent/agent_test.go; internal/store/sqlite_test.go; internal/subagent/spawn_test.go; cmd/pa/lifecycle_test.go; cmd/pa/agent_runtime_recovery_test.go; cmd/pa/jobs_test.go
+    dependencies: [A2.2, A2.4, A5.1]
+    releaseBlocker: true
+
+  - id: A2.1
+    area: persistence
+    status: done
+    priority: P0
+    objective: Prove cross-process JSONL/SQLite writer lock, reader/writer ordering, durable ID reservation, migration, backup, repair, and stale-lock recovery.
+    implementation: internal/store/sqlite.go; internal/persistence/jsonl.go
+    acceptance:
+      - two processes append without gaps, duplicate seq, torn rows, or lost commits
+      - restart preserves reservations and does not reuse identities
+      - stale lock is recoverable without deleting committed data
+    command: go test ./internal/store ./internal/persistence -run 'CrossProcess|Reservation|Migration|Backup|Repair|Lock|Append|Schema|Handle|Interrupt|Conflict|Fixture|Replay|Integrity' -count=1
+    evidence: docs/dsh-equivalence-progress.md; internal/store/sqlite_test.go; internal/persistence/jsonl_test.go; internal/persistence/contract_test.go
+    releaseBlocker: true
+
+  - id: A2.2
+    area: persistence
+    status: done
+    priority: P0
+    objective: Make domain mutation, durable event, projection, and receipt one transaction or one explicitly recoverable protocol.
+    implementation: internal/store; internal/credential; internal/interact; internal/team; internal/jobs; internal/mcp; internal/schedule; internal/workflow; cmd/pa
+    acceptance:
+      - approval, Team membership/task/mailbox, MCP lifecycle, job completion, Agent publication, credential rotation, workflow/code receipts have crash-injection coverage
+      - recovery yields committed or retryable, never half-decided state
+    command: go test ./internal/store ./internal/credential ./internal/interact ./internal/team ./internal/jobs ./cmd/pa -run 'Atomic|Receipt|Crash|Recovery|Transaction|BackendFailure|Rotation|AuthFailure|RequiredTask' -count=1
+    evidence: docs/dsh-equivalence-progress.md; internal/store/sqlite_test.go; internal/credential/vault_test.go; internal/interact/sqlite_test.go; internal/team/board_test.go; internal/mcp/reconnect_test.go; internal/mcp/http_test.go; internal/schedule/durable_test.go; internal/workflow/node/node_test.go; internal/workflow/tools_test.go; cmd/pa/mcps_test.go; cmd/pa/schedules_test.go; cmd/pa/terminal_test.go; cmd/pa/agent_runtime_recovery_test.go
+    dependencies: [A2.1]
+    releaseBlocker: true
+
+  - id: A2.3
+    area: persistence
+    status: done
+    priority: P0
+    objective: Complete corruption matrix and fail-closed/repair/quarantine/backup-restore behavior.
+    implementation: internal/store/sqlite.go; internal/persistence/jsonl.go
+    acceptance:
+      - truncated header, bad seq, duplicate seq, partial JSON, torn SQLite transaction, missing fork seed, missing tool result, abnormal close, and concurrent append each have defined outcome
+      - repair never silently changes committed event bytes
+    command: go test ./internal/store ./internal/persistence -run 'Corrupt|Torn|Quarantine|Repair|Integrity|Replay|Interrupt|Conflict|Atomic|Fork|Lock|Backup|Close|Fixture' -count=1
+    evidence: docs/dsh-equivalence-progress.md; internal/store/sqlite_test.go; internal/persistence/jsonl_test.go; internal/persistence/contract_test.go; internal/session/contract_test.go
+    dependencies: [A2.1]
+    releaseBlocker: true
+
+  - id: A2.4
+    area: persistence
+    status: done
+    priority: P0
+    objective: Recover every owner/claim (job, terminal, subagent, Team, approval, MCP server, workflow child, provider generation) after cold restart.
+    implementation: internal/store; internal/jobs; internal/team; internal/acp; internal/mcp; cmd/pa
+    acceptance:
+      - stale claims are detectable, safely released, and cannot repeat external side effects
+      - owner state is reconstructed only from durable receipts
+    command: go test ./internal/... ./cmd/pa -run 'Owner|Claim|ColdRestart|ColdRecovery|Stale|ExactlyOnce' -count=1
+    evidence: docs/dsh-equivalence-progress.md; cmd/pa/agent_runtime_recovery_test.go; cmd/pa/terminal_test.go; cmd/pa/llm_test.go; cmd/pa/jobs_test.go; internal/mcp/reconnect_test.go
+    dependencies: [A2.2]
+    releaseBlocker: true
+
+  - id: A2.5
+    area: persistence
+    status: done
+    priority: P0
+    objective: Give every external side effect an explicit crash-boundary contract: at-most-once, retryable receipt, or audited unordered failure.
+    implementation: internal/crashboundary; internal/mcp; internal/jobs; internal/terminal; internal/schedule; internal/workflow; internal/subagent; cmd/pa
+    acceptance:
+      - each MCP, terminal, schedule, workflow-child, subagent and plugin call records whether process death can lose an external effect
+      - failed transports are never replayed automatically; only durable owner receipts are eligible for recovery
+      - process-local lifecycle is classified as config/runtime state, not falsely recorded as a durable domain receipt
+    command: go test ./internal/... ./cmd/pa -run 'Crash|Kill|Receipt|Recovery|ExactlyOnce|NoReplay' -count=1
+    evidence: internal/crashboundary/contract_test.go; internal/webserver/runtime_crash_test.go; cmd/pa/agent_runtime_recovery_test.go; cmd/pa/terminal_test.go; cmd/pa/jobs_test.go; cmd/pa/schedules_test.go; internal/mcp/reconnect_test.go; internal/workflow/tools_test.go; internal/subagent/tools_test.go; internal/plugin/registry_test.go; internal/tools/kill_windows.go; internal/tools/kill_windows_test.go; internal/jobs/exec_windows.go; internal/jobs/exec_windows_test.go
+    dependencies: [A2.2, A2.4, A4.5]
+    releaseBlocker: true
+
+  - id: A3.1
+    area: sandbox
+    status: partial
+    priority: P1
+    objective: Provide a real enforcing backend for root, read-only/write/full access, network, process tree, cwd/symlink, credentials, CPU/wall/memory/output/file limits.
+    implementation: internal/code; internal/tools; platform-specific sandbox backend
+    acceptance:
+      - hostile child process, traversal, symlink, env leak, network, fork bomb, output flood, and timeout fixtures fail closed on every claimed platform
+      - limits are enforced by the backend, not context/capability metadata alone
+    command: go test ./internal/... -run 'Sandbox|Hostile|Network|Symlink|ProcessTree|Resource' -count=1
+    evidence: internal/code/local.go; internal/code/service.go:RunRequest; internal/code/typescript.go; internal/code/capabilities.go; internal/code/capabilities_test.go; internal/code/code_test.go:TestSeatbeltProfileMatchesFileEffectPolicy; internal/code/code_test.go:TestSeatbeltEnforcesReadOnlyWhenAvailable; internal/code/code_test.go:TestControlledShellEnforcesHardFileLimit; internal/code/windows_acl.go; internal/code/windows_acl_test.go:TestWindowsACLWorkspaceWriteAndReadOnlyBoundaries; internal/code/process_tree_windows.go; internal/code/process_tree_windows_test.go:TestProcessTreeEnforcesPerProcessCPU; internal/code/process_tree_windows_test.go:TestProcessTreeEnforcesActiveProcessLimit; internal/code/typescript_test.go:TestTypeScriptRuntimeContainsHeapExhaustion
+    remaining:
+      - validate the Windows restricted-token backend on a host where the caller may grant workspace capability ACEs and CreateRestrictedToken succeeds; the current managed host denies `SetNamedSecurityInfo` on the user's own TEMP workspace with Access Denied before token creation, so controlled workspace modes remain unadvertised/fail-closed
+      - the controlled POSIX shell now installs inherited hard memory/file-size/process-count ceilings; add runnable memory/file-size/fork-bomb/hostile-descendant fixtures on each claimed POSIX backend. Windows Job Object CPU and active-process limits are now validated on this host; memory/file-size and ACL-equivalent coverage still require a host where CreateRestrictedToken succeeds
+    dependencies: [A0.2]
+    releaseBlocker: true
+
+  - id: A3.2
+    area: sandbox
+    status: done
+    priority: P1
+    objective: Remove workspace-write/run_code from any platform without proven enforcement, or return stable unsupported errors.
+    implementation: internal/config; internal/tools; docs/equivalence-manifest.yaml
+    acceptance:
+      - unsupported platform/profile cannot advertise or execute the capability
+      - negative response is covered by native, Web, ACP, and SDK tests
+    command: go test ./internal/config ./internal/tools ./cmd/pa -run 'Unsupported|SandboxUnavailable|FailClosed' -count=1
+    evidence: docs/dsh-equivalence-progress.md; internal/code/capabilities.go; internal/code/capabilities_test.go; internal/profile/profile.go; cmd/pa/codes.go; cmd/pa/codes_test.go; cmd/pa/main.go; cmd/pa/webserver.go; internal/webserver/native_rpc.go; internal/webserver/native_rpc_test.go; internal/webserver/webserver.go; internal/webserver/webserver_test.go; internal/code/code_test.go
+    notes: TestCodeUnavailableFailClosedAcrossEntries drives one unavailable runtime probe through the production composition and checks Native mode projection, Web capability/tool inventory, ACP catalog, SDK catalog, and the registry denial. registerCode removes run_code from the whitelist and registry, leaves the engine nil, reports the probe reason, and does not stop startup. Independent tests cover Native preset hiding/rejection, Web settings hiding/rejection, and workspace-mode fail-closed admission. A3.2 remains a fail-closed contract; it does not claim that an enforcing sandbox backend exists (A3.1).
+    dependencies: [A3.1]
+    releaseBlocker: true
+
+  - id: A3.3
+    area: sandbox
+    status: done
+    priority: P1
+    objective: Finish Code Mode worker isolation, resource budgets, timeout/kill-tree, quiescence, duplicate call admission, and cleanup.
+    implementation: internal/code; internal/tools; internal/profile; cmd/pa/codes.go
+    acceptance:
+      - worker death and timeout produce one terminal receipt and no orphan process/file
+      - external Node exec is explicitly classified as an architecture-equivalent process-isolation substitute with the same model-facing budgets and fail-closed ambient effects
+    command: go test ./internal/code ./internal/tools ./internal/profile ./cmd/pa -run 'Code|Worker|Timeout|Kill|Quiescence|Duplicate|Permission|Sandbox' -count=1
+    evidence: docs/dsh-equivalence-progress.md; internal/code/process_tree_windows.go; internal/code/process_tree_unix.go; internal/code/process_tree_limits.go; internal/code/process_tree_windows_test.go; internal/code/process_tree_unix_test.go; internal/code/typescript.go; internal/code/typescript_test.go; internal/code/typescript_lifecycle_matrix_test.go; internal/profile/classification.go
+    notes: The TypeScript worker's Windows Job Object enforces per-process CPU, a 16-process concurrent ceiling, and kill-on-close; a real child proves the active-process limit admits exactly one descendant. A bounded four-level POSIX fork bomb proves owned process-group cleanup leaves no addressable descendant tree. The full internal/code matrix passed on Windows/Node 24.19.0 and AlmaLinux 8.10/Node 24.19.0: timeout, hostile oversized frame, worker death, heap/output quotas, CPU/wall budgets, forged duplicate call admission, queued-unstarted abandonment, cancellation, close join, empty environment, and no generated program file. A real ambient probe proves Node permission admission denies child-process and worker_threads effects on both platforms. Settlement now drains bounded host replies before OS shutdown: an in-flight call receives cancellation and a queued-unstarted call receives explicit abandonment without reaching the binding, while post-terminal done/call frames remain ignored. The DSH worker-thread transport is registered as an internal architecture exclusion; Shutu's external permission-model subprocess provides the same observable budgets with process-level isolation.
+    dependencies: [A3.1, A3.2]
+    releaseBlocker: true
+
+  - id: A3.4
+    area: sandbox
+    status: done
+    priority: P1
+    objective: Finish Workflow worker lifecycle including death race, pending start, one terminal end, late JSONL, cancellation, and child disposal.
+    implementation: internal/workflow; internal/workflow/node; cmd/pa
+    acceptance:
+      - worker death/restart replay never duplicates an external action
+      - late output is rejected after terminal ownership
+    command: go test ./internal/workflow ./cmd/pa -run 'Workflow|Worker|Late|Terminal|Replay' -count=1
+    evidence: docs/dsh-equivalence-progress.md; internal/workflow/tools_test.go; internal/workflow/recorder.go; internal/workflow/node/node_test.go; internal/session/workflow_record_test.go; internal/code/process_tree_windows.go
+    dependencies: [A2.2, A2.4]
+    releaseBlocker: true
+
+  - id: A4.1
+    area: tool-catalog
+    status: done
+    priority: P1
+    objective: Replace scattered whitelist logic with generated ToolDefinition records consumed by visibility and admission.
+    implementation: internal/tools/tools.go; internal/tools/policy.go; cmd/pa
+    acceptance:
+      - each tool has owner/plugin/generation/profile/provenance/input-output schema/error/cancel-timeout/event/policy metadata
+      - no transport can expose a tool absent from the canonical catalog
+    command: go test ./internal/tools ./cmd/pa -run 'Catalog|Policy|Visibility|Schema' -count=1
+    evidence: internal/tools/tools_test.go; internal/plugin/registry_test.go; cmd/pa/sessionruntime_test.go; cmd/pa/mcps_test.go; cmd/pa/terminal_test.go; cmd/pa/catalog_test.go; internal/acp/server_test.go; internal/sdkclient/protocol_schema_test.go
+    dependencies: [A0.3]
+    releaseBlocker: true
+
+  - id: A4.2
+    area: tool-catalog
+    status: done
+    priority: P1
+    objective: Ensure MCP defaults and production registry admission expose mcp_list/mcp_call.
+    implementation: internal/config/config.go; cmd/pa/main.go; cmd/pa/mcps.go
+    acceptance:
+      - PolicyFromConfig admits the defaults without test-only manual Allow calls
+    command: go test ./internal/config -run TestLoadMcpEnabledAppendsToolsToWhitelist -count=1; go test ./cmd/pa -run TestRegisterMcpsUsesConfigDerivedSelectorPolicy -count=1
+    evidence: internal/config/config_test.go; cmd/pa/mcps_test.go
+    releaseBlocker: false
+
+  - id: A4.3
+    area: tool-catalog
+    status: done
+    priority: P1
+    objective: Expose subagent_fork consistently in native/ACP target profiles with alias/schema/policy/seed/replay behavior.
+    implementation: cmd/pa/subagent.go; cmd/pa/acp.go; internal/subagent
+    acceptance:
+      - model-visible registry and ACP registry both contain the same fork contract
+    command: go test ./cmd/pa ./internal/subagent -run 'Fork|Subagent.*Visible|ACP.*Registry' -count=1
+    evidence: internal/subagent/spawn_test.go; internal/subagent/tools_test.go; cmd/pa/acp_test.go; cmd/pa/subagent_test.go
+    releaseBlocker: false
+
+  - id: A4.4
+    area: tool-catalog
+    status: done
+    priority: P1
+    objective: Complete valid/invalid/unknown/timeout/cancel/approval/rich-result/disabled/disposed-owner contract for every tool.
+    implementation: internal/tools; cmd/pa; internal/acp; internal/webserver
+    acceptance:
+      - each required tool has a negative-path test and replay evidence
+      - rich image/audio/resource outputs preserve block type and metadata across transports
+    command: go test ./internal/... ./cmd/pa -run 'Tool.*Contract|Rich|Disabled|Disposed|Approval|Timeout' -count=1
+    evidence: docs/dsh-equivalence-progress.md; cmd/pa/tool_contract_matrix_test.go; internal/tools/tools_test.go; internal/workflow/tools_test.go; internal/session/session_test.go; cmd/pa/acp.go; cmd/pa/acp_test.go; cmd/pa/codes.go; cmd/pa/codes_test.go; internal/acp/contract_external_test.go; internal/mcp/tools_test.go; internal/sessionquery/tools_test.go
+    notes: cmd/pa/tool_contract_matrix_test.go assembles every required model-facing production tool through its owning package and proves per-tool disabled, schema-invalid, and pre-execute denial paths. Each rejected call has exactly one terminal ResultHook observation, and each approval-boundary denial is committed through SQLite as a canonical turn/step/tool-call plus source-linked tool/error sequence, reloaded with Store.LoadSession, byte-compared, and checked for stable call ID, output, and error code. The same file proves image, audio-with-metadata, and resource-with-metadata blocks survive the Registry, canonical tool/result event, restore, and derived provider history. Existing focused suites cover cancellation/timeout ownership, stale generation/disposal, rich ACP/MCP/Code projection, and per-domain negative behavior. The registry accepts an unknown merge-extensible ContentBlock only when its lossless Raw wire representation is retained.
+    dependencies: [A4.7]
+    releaseBlocker: true
+
+  - id: A4.5
+    area: tool-catalog
+    status: done
+    priority: P1
+    objective: Complete lifecycle contracts for MCP, terminal/job, LSP, Web fetch/search, plugin generation reload, and unsupported profiles.
+    implementation: internal/mcp; internal/acp; internal/webserver; internal/jobs; internal/terminal; internal/lsp; internal/web; internal/plugin; internal/profile
+    acceptance:
+      - list-changed/reconnect/task/auth/cancellation/close and process ownership are observable and replayable
+      - unsupported DSH capabilities are explicit in the manifest
+    command: go test ./internal/... ./cmd/pa -run 'Lifecycle|Reconnect|Shutdown|ListChanged|Unsupported' -count=1
+    evidence: internal/mcp/reconnect_test.go; internal/mcp/contract_external_test.go; internal/mcp/http_test.go; internal/mcp/http_fault_schema_matrix_test.go; internal/mcp/mcp_test.go; cmd/pa/mcps_test.go; cmd/pa/terminal_test.go; internal/terminal/terminal_test.go; internal/jobs/local_test.go; internal/jobs/tools_test.go; internal/lsp/tool_test.go; internal/web/tools_test.go; internal/web/httpfetch_test.go; internal/web/deepseek_test.go; internal/web/web_external_contract_matrix_test.go; internal/plugin/registry_test.go; internal/plugin/reload_contract_matrix_test.go; internal/profile/profile_test.go; internal/webserver/runtime_profile_test.go; internal/crashboundary/contract_test.go
+    dependencies: [A4.7]
+    releaseBlocker: true
+
+  - id: A4.6
+    area: tool-catalog
+    status: done
+    priority: P1
+    objective: Bind explicit provenance and cancellation classification to every required, plugin, MCP, and long-running tool registration.
+    implementation: internal/tools; internal/plugin; internal/mcp; internal/code; internal/fssearch; internal/web; internal/interact; internal/jobs; internal/subagent; internal/workflow; internal/lsp; cmd/pa/main.go; cmd/pa/mcps.go; cmd/pa/team.go
+    acceptance:
+      - built-in, plugin, dynamic MCP, and generated tools expose a non-default owner/provenance source
+      - timeout metadata is backed by effective registry admission and long-running tools explicitly classify cooperative cancellation
+    command: go test ./internal/tools ./internal/mcp ./internal/code ./internal/fssearch ./internal/web ./internal/interact ./internal/jobs ./internal/subagent ./internal/workflow ./internal/lsp ./internal/plugin ./cmd/pa -run 'Catalog|Provenance|Cancellation|Registration|PublishesAndReplacesPlugin' -count=1
+    evidence: internal/tools/tools_test.go; internal/plugin/registry_test.go; internal/code/tools_test.go; internal/fssearch/tools_test.go; internal/web/tools_test.go; internal/jobs/tools_test.go; internal/subagent/tools_test.go; internal/workflow/tools_test.go; internal/lsp/tool_test.go; cmd/pa/mcps_test.go; cmd/pa/interacts_test.go; cmd/pa/terminal_test.go
+    dependencies: [A4.1]
+    releaseBlocker: true
+
+  - id: A4.7
+    area: tool-catalog
+    status: done
+    priority: P1
+    objective: Fail-close every transport and generated SDK inventory against one versioned canonical catalog snapshot.
+    implementation: internal/tools; cmd/pa/catalog.go; cmd/pa/main.go; cmd/pa/acp.go; cmd/pa/webserver.go; internal/acp; internal/sdkclient
+    acceptance:
+      - native CLI/Web, ACP, SDK, PTC nested bindings, and release artifacts reject unknown/drifted/schema-mismatched projections
+      - catalog schema/version, visibility profile, and registration generation changes are observable across reload and reconnect
+    command: go test ./internal/tools ./cmd/pa ./internal/webserver ./internal/acp ./internal/sdkclient -run 'Catalog|Projection|Inventory|Schema|Capability' -count=1
+    evidence: internal/tools/tools_test.go; cmd/pa/catalog_test.go; cmd/pa/webw1_test.go; cmd/pa/sessionruntime_test.go
+    dependencies: [A4.6]
+    releaseBlocker: true
+
+  - id: A5.1
+    area: ownership
+    status: done
+    priority: P1
+    objective: Unify spawn/fork/resume/status/cancel/list/send/followup/wait/report under Agent-owned authorization and disposal.
+    implementation: internal/agent; internal/subagent; cmd/pa/agent_runtime.go
+    acceptance:
+      - every action validates owner, lineage, session, policy, credential, and disposed state
+      - parent cannot observe child events through the wrong address
+    command: go test ./internal/agent ./internal/subagent ./cmd/pa -run 'Ownership|Lineage|Disposed|Resume|Cancel|Followup' -count=1
+    evidence: docs/dsh-equivalence-progress.md; internal/agent/agent_test.go; internal/subagent/tools_test.go; internal/subagent/spawn_test.go; cmd/pa/agent_runtime_recovery_test.go; cmd/pa/lifecycle_test.go
+    dependencies: [A1.1, A2.4]
+    releaseBlocker: true
+
+  - id: A5.2
+    area: ownership
+    status: done
+    priority: P1
+    objective: Complete Team roster/member/task/mailbox append-only fold, CAS revision, blocker DAG, receipts, authorization, and restart recovery.
+    implementation: internal/team; cmd/pa/team.go
+    acceptance:
+      - stale revision, cross-team id, duplicate delivery, and member death are deterministic
+      - member identity and task/message IDs are durable across processes
+    command: go test ./internal/team ./cmd/pa -run 'Team|Roster|Mailbox|Blocker|Revision|Recovery' -count=1
+    evidence: docs/dsh-equivalence-progress.md; internal/team/tools_test.go; internal/team/roster_test.go; internal/team/board_test.go; cmd/pa/team_test.go
+    dependencies: [A2.2, A2.4, A5.4]
+    releaseBlocker: true
+
+  - id: A5.3
+    area: ownership
+    status: done
+    priority: P1
+    objective: Give job/terminal durable owner claims, completion wakeup, restart recovery, kill-tree, late-result rejection, and safe retry semantics.
+    implementation: internal/jobs; internal/terminal; cmd/pa/jobs.go
+    acceptance:
+      - closing an Agent prevents further job/terminal writes
+      - exactly one terminal completion is accepted after process restart
+    command: go test ./internal/jobs ./internal/terminal ./cmd/pa -run 'Job|Terminal|Owner|Wake|Late|Kill|Restart' -count=1
+    evidence: docs/dsh-equivalence-progress.md; internal/jobs/local_test.go; internal/terminal/owned_process_test.go; cmd/pa/jobs_test.go; cmd/pa/terminal_test.go; cmd/pa/agent_runtime_recovery_test.go
+    dependencies: [A2.2, A2.4]
+    releaseBlocker: true
+
+  - id: A5.4
+    area: ownership
+    status: done
+    priority: P1
+    objective: Reserve child/member/task/message/job identities atomically and bind reservation to the domain receipt transaction.
+    implementation: internal/store/store.go; internal/store/sqlite.go; internal/subagent; internal/team; internal/jobs; cmd/pa/team.go
+    acceptance:
+      - all claimed namespaces reject simultaneous duplicate IDs and survive restart
+      - a reservation without a committed receipt is recoverable and cannot strand an identity forever
+      - Team member and legacy job/event identities are included, not only generated IDs
+    command: go test ./internal/store ./internal/subagent ./internal/team ./internal/jobs -run 'Reservation|Receipt|CrossProcess|Identity' -count=1
+    evidence: docs/dsh-equivalence-progress.md; internal/team/roster_test.go; internal/team/board_test.go; internal/store/sqlite_test.go; internal/jobs/local_test.go
+    dependencies: [A2.2]
+    releaseBlocker: true
+
+  - id: A6.1
+    area: credentials
+    status: done
+    priority: P1
+    objective: Store only credential references in configuration; move real values behind a dedicated secret-store seam.
+    implementation: internal/credential; internal/store; cmd/pa/native_credentials.go; cmd/pa/llm.go
+    acceptance:
+      - llm.key.* is absent from generic settings after migration
+      - startup, rotation, unset, and failure rollback use reference-only metadata
+      - secret store has explicit access, wipe, close, and unavailable behavior
+    command: go test ./internal/credential ./internal/store ./cmd/pa -run 'Credential|Secret|Reference|Migration' -count=1
+    evidence: docs/dsh-equivalence-progress.md; internal/credential/vault_test.go; internal/store/sqlite_test.go; cmd/pa/native_credentials_test.go; cmd/pa/webm11_test.go
+    dependencies: [A0.2]
+    releaseBlocker: true
+
+  - id: A6.2
+    area: credentials
+    status: done
+    priority: P1
+    objective: Bind provider-generation lease and per-operation credential lease with rotation, revoke, wipe, in-flight drain, and cross-process recovery.
+    implementation: cmd/pa/llm.go; internal/llm; internal/credential
+    acceptance:
+      - new operations cannot acquire retired generations
+      - old secret remains only until in-flight streams quiesce, then is wiped
+      - revoked credentials cannot be used after the revocation boundary
+    command: go test ./internal/llm ./internal/credential ./cmd/pa -run 'Credential.*Lease|Rotation|Revoke|Drain|Wipe|BackendFailure|ProviderGenerationColdRestart|CredentialRevocationMatrix' -count=1
+    evidence: internal/llm/retry/retry_test.go; internal/llm/provider_test.go; internal/credential/vault_test.go; cmd/pa/llm_test.go
+    dependencies: [A6.1, A1.3]
+    releaseBlocker: true
+
+  - id: A6.3
+    area: model-catalog
+    status: done
+    priority: P1
+    objective: Drive model/provider route, context/token capacity, reasoning, tool, vision, and audio capabilities from one catalog in CLI/Web/ACP/SDK/loop.
+    implementation: internal/llm; cmd/pa/llm.go; internal/webserver; internal/acp
+    acceptance:
+      - no transport guesses defaults independently
+      - unavailable model/provider produces a stable negative capability result
+    command: go test ./internal/llm ./internal/acp ./internal/webserver ./cmd/pa -run 'Catalog|Discover|Model|Capability|Provider' -count=1
+    evidence: docs/dsh-equivalence-progress.md; cmd/pa/model_catalog_generated.json; cmd/pa/discover.go; cmd/pa/discover_test.go; internal/llm/provider.go; internal/llm/model_catalog.go; internal/llm/catalog_snapshot.go; internal/llm/model_catalog_test.go; internal/llm/deepseek/deepseek.go; internal/llm/deepseek/model_catalog_test.go; internal/llm/openai/openai.go; internal/llm/anthropic/anthropic.go; internal/llm/anthropic/anthropic_test.go; internal/llm/google/google.go; internal/llm/google/google_test.go; internal/llm/openairesponses/openairesponses.go; internal/llm/openairesponses/openairesponses_test.go; internal/llm/openai/openai_test.go; internal/llm/retry/retry.go; cmd/pa/modelcatalog.go; cmd/pa/model_catalog_data.go; cmd/pa/model_catalog_data_test.go; cmd/pa/llm_test.go; cmd/pa/modelcatalog_test.go; cmd/pa/webm11_test.go; cmd/pa/acp_catalog_test.go; internal/webserver/native_rpc.go; internal/webserver/native_rpc_test.go; internal/loop/loop.go; cmd/pa/sdk.go
+    notes: The embedded catalog is generated from the reference-pinned @earendil-works/pi-ai@0.82.1 provider-data inventory (38 providers, 1234 models) and carries id/name/context/max/input/reasoning plus non-null effort wire maps and deterministic first efforts. Curated facts merge by provider/model ID: DeepSeek defaults, OpenAI/other protocol tool facts, and route fallbacks remain authoritative without inventing a second catalog. Discovery now returns owned built-in rows instead of ID-only suggestions. Provider-owned ListModels/ResolveModelInfo forwarding, first-party facts, effort/default-output wires, Native/Web/ACP/SDK projection, image admission, and stable negatives are covered by the referenced suites. Remote discovery remains bounded/fail-closed and accepts only complete object listings.
+    dependencies: [A0.3, A6.1]
+    releaseBlocker: true
+
+  - id: A6.4
+    area: credentials
+    status: done
+    priority: P1
+    objective: Prove secret non-disclosure through environment, errors, logs, spill files, MCP headers/URLs, catalog, Web inventory, crash dumps, and telemetry.
+    implementation: internal/credential; internal/mcp; internal/observability; cmd/pa
+    acceptance:
+      - hostile secret fixtures never appear in serialized diagnostics or telemetry
+      - cancellation and panic paths wipe temporary buffers as far as Go permits
+    command: go test ./internal/... ./cmd/pa -run 'Secret|Redact|Credential|Telemetry|Panic|Dump' -count=1
+    evidence: internal/llm/errors_test.go; internal/mcp/mcp_test.go; internal/spill/hostile_secret_test.go; internal/tools/hostile_secret_test.go; internal/observability/hostile_secret_test.go; internal/credential/vault_test.go; cmd/pa/llm_test.go; cmd/pa/crash_dump_test.go; cmd/pa/crash_dump_windows_test.go; cmd/pa/webserver_test.go; cmd/pa/webm11_test.go; cmd/pa/webw1_test.go
+    dependencies: [A6.1]
+    releaseBlocker: true
+
+  - id: A7.1
+    area: protocol
+    status: done
+    priority: P2
+    objective: Replay ACP initialize/auth/session/new/resume/reconnect/prompt/cancel/update/permissions and rich content lifecycle.
+    implementation: internal/acp; cmd/pa/acp.go
+    acceptance:
+      - external client matrix covers cwd/additionalContexts/attachment/resource/image/audio/embedded/error/disconnect/reconnect
+      - ownership and durable replay match the pinned reference or are explicit unsupported
+    command: go test ./internal/acp ./internal/acpclient ./cmd/pa -run 'External|Contract|Reconnect|Attachment|Permission|IndependentClient' -count=1
+    evidence: internal/acp/server.go; internal/acp/server_test.go; internal/acp/contract_external_test.go; cmd/pa/acp.go; cmd/pa/acp_test.go; cmd/pa/acp_external_disconnect_test.go; internal/acpclient/client.go; internal/acpclient/client_test.go; cmd/pa/acp_second_client_test.go; docs/dsh-equivalence-progress.md
+    notes: A second independent external client (internal/acpclient) now drives the production SQLite/acpFactory/loop/server composition through authenticate, initialize, session/new, text and image prompts, session/update, reverse permission approval and tool execution, cancellation, reconnect, and durable provider-history replay. The same register also retains external wire matrices and provider-fault/output-loss/rich-output restart oracles.
+    dependencies: [A1.2, A2.2, A4.4]
+    releaseBlocker: true
+
+  - id: A7.2
+    area: protocol
+    status: done
+    priority: P2
+    objective: Replay MCP stdio and Streamable HTTP initialize/headers/auth/session/pagination/list-changed/SSE/call/rich result/reconnect/close/taskSupport.
+    implementation: internal/mcp; cmd/pa/mcps.go
+    acceptance:
+      - repeated process startup/reconnect cannot duplicate external side effects
+      - server ownership, auth, cancellation, and close receipts survive restart
+    command: go test ./internal/mcp ./cmd/pa -run 'External|Protocol|Reconnect|Auth|Task|Streamable' -count=1
+    evidence: internal/mcp/mcp_test.go; internal/mcp/reconnect_test.go; internal/mcp/http_test.go; internal/mcp/http_fault_schema_matrix_test.go; internal/mcp/contract_external_test.go; internal/mcp/tools.go; internal/mcp/tools_test.go; cmd/pa/mcps.go; cmd/pa/mcps_test.go; internal/config/config_test.go; docs/dsh-equivalence-progress.md
+    notes: Reconnect generation retirement now waits for all in-flight operations owned by the old generation before invoking its context-free Close; new-generation traffic is tracked separately. Reconnected MCP tool publication is also transactional: duplicate public names and registry conflicts leave the previous live generation and published-name index intact. Caller cancellation on Streamable HTTP is request-scoped and retains the live MCP session; only transport errors and client-owned request timeouts trigger connection recovery. A real two-process stdio oracle commits one external effect in a crashing generation, restarts through a fresh process, proves no tools/call replay reaches the replacement, and asserts the effect journal contains exactly one committed entry. HTTP evidence covers headers/auth/session, pagination, SSE/list-changed, rich structured results, task metadata, and DELETE close receipts.
+    dependencies: [A2.2, A4.5]
+    releaseBlocker: true
+
+  - id: A7.3
+    area: protocol
+    status: done
+    priority: P2
+    objective: Replay real SDK/client/provider wire behavior for chunks, empty response, usage, finish reason, retry, auth, tool calls, image/audio, close, and cancellation.
+    implementation: internal/sdkclient; internal/llm; docs/evidence/dsh-equivalence
+    acceptance:
+      - tests exercise real local protocol servers and reference fixtures, not only fake providers
+      - remote model catalog and unsupported capability responses are covered
+    command: go test ./internal/sdkclient ./internal/llm/... ./cmd/pa -run 'External|Wire|Stream|Cancel|Retry|Auth|Catalog|Image|SSE|Discover|HeaderReplay|ReferenceSDK|ReferenceACP' -count=1
+    evidence: docs/dsh-equivalence-progress.md; internal/sdkclient/client.go; internal/sdkclient/transport.go; internal/sdkclient/subscription.go; internal/sdkclient/types.go; internal/sdkclient/client_test.go; internal/sdkclient/protocol_schema_test.go; tools/generate-sdk-protocol-schema.mjs; internal/sdkclient/subscription_test.go; internal/sdkclient/transport_test.go; cmd/pa/sdk.go; cmd/pa/sdk_test.go; cmd/pa/reference_sdk_runtime_test.go; cmd/pa/reference_acp_runtime_test.go; cmd/pa/testdata/reference_source_loader.mjs; internal/session/session.go; internal/projection/projection.go; internal/llm/provider_header_replay_test.go; internal/llm/provider_unsupported_input_test.go; internal/llm/attribution.go; internal/llm/deepseek/deepseek.go; internal/llm/deepseek/deepseek_test.go; internal/llm/anthropic/anthropic.go; internal/llm/anthropic/reasoning_wire_test.go; internal/llm/google/google.go; internal/llm/google/reasoning_wire_test.go; internal/llm/openairesponses/openairesponses.go; internal/llm/openairesponses/reasoning_wire_test.go; internal/config/config.go; internal/config/config_test.go; internal/loop/loop.go; internal/loop/loop_test.go; cmd/pa/discover.go; cmd/pa/discover_test.go
+    notes: Client.Close now also settles subscriptions created before process start or retained after a failed spawn; internal/sdkclient/client_test.go:TestClientCloseBeforeStartFailsSubscriptions covers both no-process and failed-spawn states. SDK server status notifications are reserved per session and flushed after the prerequisite durable event, fixing receipt/running/event/idle ordering under an external client. DeepSeek exact/unlisted model resolution preserves DSH defaultMaxTokens=256000 through the shared catalog seam. Remote catalog discovery is bounded, cancellation-aware, and fail-closed for timeouts, HTTP errors, malformed non-object listings, and oversize replies. The provider seam rejects audio/resource/vendor request blocks before credentials, attachments, image offloading, or network I/O with UNSUPPORTED_INPUT_CONTENT; every claimed provider adapter is covered by a zero-request oracle. A shared provider/header replay matrix drives DeepSeek official, OpenAI-compatible, Anthropic, Gemini, and OpenAI Responses through real local HTTP, replays the stream to its terminal event, and fixes endpoint/auth scheme/User-Agent plus DeepSeek-only anonymous/session/compaction headers. A read-only source loader runs the pinned reference SDK and ACP runtimes from TypeScript without reference edits or build artifacts. The external Go SDK client proves initialize/prompt/receipt/assistant/idle/shutdown and local provider wire facts. A Shutu raw JSON-RPC ndjson client separately drives the pinned reference ACP runtime through initialize identity, session/new, committed assistant session/update, end_turn settlement, client stdin EOF, quiescence, and clean process exit. Reconnect remains outside this matrix because that reference ACP runtime deliberately owns one connection lifecycle; production reconnect/disconnect evidence is owned by A7.1.
+    dependencies: [A1.2, A6.3]
+    releaseBlocker: true
+
+  - id: A7.4
+    area: protocol
+    status: done
+    priority: P2
+    objective: Complete Web user/session/Agent authorization, CSRF, masked secret update, reconnect replay, and shutdown admission matrix.
+    implementation: internal/webserver; cmd/pa/webserver.go; cmd/pa/lifecycle.go; web
+    acceptance:
+      - cross-origin browser mutations, stale session/Agent ownership, replay cursor, and shutdown races are all rejected or replayed deterministically
+      - no bearer-authenticated request can mutate another addressed owner
+    command: go test ./internal/webserver ./cmd/pa -run 'Auth|CSRF|Origin|Replay|Shutdown|Owner' -count=1
+    evidence: internal/webserver/web_authorization_matrix_test.go; cmd/pa/web_queue_owner_matrix_test.go; cmd/pa/lifecycle_test.go; internal/webserver/webserver_test.go; internal/webserver/native_rpc_test.go; internal/webserver/native_projection_test.go; docs/dsh-equivalence-progress.md
+    dependencies: [A1.1, A2.4]
+    releaseBlocker: true
+
+  - id: A8.1
+    area: projection
+    status: done
+    priority: P2
+    objective: Make CLI/native/Web/ACP/SDK consume one canonical projection for session query, trajectory/history, title, feedback, plan/todo, approval, Team, jobs, and MCP inventory.
+    implementation: internal/projection; internal/store; cmd/pa; internal/webserver; internal/acp
+    acceptance:
+      - every projection can be rebuilt from durable events and no client maintains a private authority
+      - query results and rich blocks match after cold restart
+    command: go test ./internal/... ./cmd/pa -run 'Projection|Query|Trajectory|History|Feedback|Inventory' -count=1
+    evidence: internal/projection/projection.go; internal/projection/projection_test.go; internal/projection/surface.go; internal/projection/surface_test.go; internal/session/session.go; internal/session/projection.go; internal/sessionquery/tools.go; internal/loop/loop.go; internal/compaction/basic.go; internal/meter/meter.go; internal/webserver/native_projection.go; internal/webserver/native_projection_test.go; internal/webserver/native_rpc.go; internal/webserver/webserver.go; cmd/pa/acp.go; cmd/pa/sdk.go; cmd/pa/webserver.go; cmd/pa/title.go; internal/contractfixture/cross_entry_test.go; internal/contractfixture/child_agent_entry_test.go; cmd/pa/cross_entry_side_effect_test.go; docs/dsh-equivalence-progress.md
+    notes: internal/projection is the strict cold-rebuild seam for history, session-list/title, plan/todo, permission/sandbox tier, approval, feedback, job, MCP activity, and optional Team snapshot/task/mailbox state; Cursor incrementally folds committed live events and is checked against Build after every event, with detached snapshots. Both cold Build and live Cursor history use session.DeriveHistoryEvents; Cursor's validation Log is not a second history authority. Native reconnect surface snapshots consume the shared projection through a canonical cursor, and native plan/todo/permission/goal/session-list values are sourced from its Snapshot. ACP resume admission validates the shared projection and derives ResumeMetadata.eventCursor from Snapshot.AsOfSeq. projection.EventRelations owns replacement chains and tool-call edges for session-query. Web session state, CLI title selection, CLI/Web/ACP plan-mode reads, model-selection image gating, Web context-token fallback, ACP compaction token estimation, main-loop request/overflow history, native history validation/title fallback, and meter surface pricing consume the projection. SDK notifications use session.WireEvent for canonical surface metadata, and session/snapshot rebuilds history/surface/control state through projection.Build. ACP committed assistant delivery consumes projection.Surface. Native rich state remains a wire adapter only. The completed A9.1 suite supplies the native/SDK/ACP/child cross-entry trajectory, side-effect, restart, and control-state runtime evidence.
+    dependencies: [A1.4, A2.2]
+    releaseBlocker: true
+
+  - id: A8.2
+    area: projection
+    status: done
+    priority: P2
+    objective: Define projection cache revision, invalidation, rebuild, stale cursor, partial write, and reconnect semantics.
+    implementation: internal/projection; internal/store; internal/webserver
+    acceptance:
+      - cache loss, stale revision, concurrent reconnect, and partial write converge to the durable result
+      - invalidation is tied to committed event revision, not wall-clock polling
+    command: go test ./internal/... ./cmd/pa -run 'Cache|Revision|Invalidation|Reconnect|Partial' -count=1
+    evidence: internal/store/sqlite.go; internal/store/sqlite_test.go; internal/webserver/native_rpc_test.go; internal/webserver/native_projection.go
+    notes: Projection checkpoints are revision-bound, atomically replaced, monotonic against late/concurrent stale writers, deleted on schema/payload corruption, and rebuilt from the durable event log on cache miss. Evidence tests: TestSQLiteProjectionCacheIsDurableVersionedAndRevisionBound; TestSQLiteProjectionCacheNeverRegressesAfterLateReconnectWrite; TestSQLiteProjectionCacheConcurrentWritersConvergeToHighestRevision; TestNativeHistoryProjectionCacheIsUsedOnlyAtCommittedRevision; TestNativeHistoryProjectionCacheCorruptionFallsBackAndRepairs; TestNativeSessionListDoesNotCheckpointTailOnlyProjection. Cache failure remains fail-soft and never changes the durable event outcome.
+    dependencies: [A2.2, A8.1]
+    releaseBlocker: false
+
+  - id: A8.3
+    area: profiles
+    status: partial
+    priority: P2
+    objective: Define storage/file/session references and optional e2b/Python/Cordis/inspect profile seams.
+    implementation: docs/equivalence-manifest.yaml; internal/profile; internal/webserver
+    acceptance:
+      - selected profile has an enforcing implementation and replay test
+      - unselected/unimplemented profile returns explicit disabled/unsupported response
+    command: go test ./internal/... ./cmd/pa -run 'Profile|Storage|Python|Cordis|E2B|Inspect|Unsupported' -count=1
+    evidence: internal/profile/profile_test.go; internal/webserver/runtime_profile_test.go; docs/dsh-equivalence-progress.md
+    remaining:
+      - close A3.2 enforcing sandbox backend before selected sandbox profiles can be advertised as equivalent
+      - keep e2b/Python/Cordis runner/inspect fail-closed unless a concrete backend is composed
+    dependencies: [A0.2, A3.2]
+    releaseBlocker: false
+
+  - id: A8.4
+    area: telemetry
+    status: done
+    priority: P2
+    objective: Keep telemetry best-effort without changing durable outcomes; prove provider/session/user/resource identity, redaction, queue retry, collector fault isolation, and shutdown flush.
+    implementation: internal/observability; cmd/pa/main.go
+    acceptance:
+      - exporter failure cannot fail or reorder a committed turn
+      - shutdown flush is bounded and all secret fields are redacted
+    command: go test ./internal/observability ./cmd/pa -run 'Telemetry|Exporter|Redact|Shutdown|Failure' -count=1
+    evidence: docs/dsh-equivalence-progress.md; internal/observability/session_exporter_test.go; internal/observability/session_lifecycle_test.go; internal/observability/hostile_secret_test.go; internal/observability/observability_test.go
+    dependencies: [A6.4]
+    releaseBlocker: true
+
+  - id: A9.1
+    area: release-gate
+    status: done
+    priority: P0
+    objective: Build one cross-entry contract suite from the same fixture through native CLI, Web, ACP, SDK, child Agent, JSONL, SQLite, and reference.
+    implementation: internal/contractfixture; scripts; docs/evidence/dsh-equivalence
+    acceptance:
+      - event envelope/seq/history/tool schema/result/error/projection/side effect/cleanup are compared byte-for-byte or by declared normalization
+    command: go test ./... -run 'Contract|ReferenceReplay|CrossEntry|ExternalDisconnect|SideEffect' -count=1
+    evidence: internal/contractfixture/cross_entry_test.go; internal/contractfixture/protocol_entry_test.go; internal/contractfixture/child_agent_entry_test.go; cmd/pa/native_cli_cross_entry_test.go; cmd/pa/cross_entry_side_effect_test.go; cmd/pa/acp_external_disconnect_test.go; cmd/pa/sdk_test.go; internal/session/reference_replay_test.go; scripts/verify-reference-replay.mjs; internal/session/projection.go; internal/webserver/native_projection.go; docs/dsh-equivalence-progress.md
+    notes: One shared core-turn suite compares SQLite/JSONL persistence, Web event envelopes, native session.history projection, and the SDK event envelope type with declared native normalization. A second leg drives ACP and MCP stdio public transports from the same lifecycle fixture, and a third drives the public SDK client against a child JSON-RPC runtime; the SDK leg also drives the production shutu SDK server in a real child process and checks initialization, prompt receipt, durable events, assistant output, running/idle ordering, and shutdown. The production native CLI sends the same fixture prompt through stdin, invokes the production write tool, verifies the file effect and durable tool result, requires the fixture assistant on stdout and a second model step, then rebuilds shared projection through an independent SQLite handle. A child-Agent leg verifies independent loop/session lineage, tool schema/result, an fsynced effect, temporary-lock cleanup, and cold projection. The Web Agent-backed path and real SDK child path commit an effect, clean its lock, fail with a stable TOOL_EXECUTION_ERROR, continue to the fixture assistant, and survive independent SQLite projection rebuilds. The production ACP child commits the fixture write effect, rejects an outside-workspace write with tool/error, survives real client disconnect/child exit, and passes independent durable/projection/resume oracles. The real reference double-replay gate is stable on Node 24.19.0: five consecutive runs against the local read-only reference passed with no diff. The child delegation API takes text, so its fixture image block is declared out of scope and remains covered by rich input suites.
+    dependencies: [A1.2, A2.2, A4.4, A7.1, A7.2, A7.3, A8.1]
+    releaseBlocker: true
+
+  - id: A9.2
+    area: release-gate
+    status: done
+    priority: P0
+    objective: Build capability-negative suite for disabled/unsupported, policy denial, sandbox unavailable, unknown tool/event, bad schema, expired approval, disposed owner, worker death, and network loss.
+    implementation: internal/contractfixture; internal/tools; scripts
+    acceptance:
+      - every negative case returns stable fail-closed code and leaves no partial durable state
+    command: go test ./... -run 'Negative|FailClosed|Unsupported|Denied|Disposed|WorkerDeath' -count=1
+    evidence: docs/dsh-equivalence-progress.md; cmd/pa/tool_contract_matrix_test.go; internal/contractfixture/negative_matrix_test.go; internal/llm/provider_unsupported_input_test.go; internal/store/sqlite_test.go; internal/session/contract_test.go; internal/webserver/native_rpc_test.go; internal/tools/tools_test.go; internal/code/code_test.go; internal/profile/profile_test.go; internal/interact/interact_test.go; internal/workflow/node/node_test.go; internal/web/web_external_contract_matrix_test.go; internal/mcp/http_fault_schema_matrix_test.go; internal/mcp/reconnect_test.go; internal/credential/vault_test.go; internal/plugin/reload_contract_matrix_test.go; internal/tools/kill_windows_test.go; internal/jobs/exec_windows_test.go
+    notes: The negative release inventory is closed at production boundaries. The required-tool matrix assembles all 49 model-facing tools and proves disabled admission, bad schema, and policy denial return stable registry codes; a boundary wrapper proves none reaches the production tool body, and each normalized denial is committed to SQLite, cold-replayed byte-for-byte, and retains its stable call ID/output/error code. A 49-case inventory covers filesystem, shell/terminal, search, image, skill, web, schedule, goal/todo, interaction, subagent/team, job, workflow, session-query, MCP, and Code Mode surfaces. The provider seam covers all five claimed adapters (DeepSeek, OpenAI, Anthropic, Gemini, and OpenAI Responses) rejecting unsupported input before a real local provider endpoint receives any request or credential header. Dedicated dependency matrices cover unknown durable events across SQLite/JSONL/native replay, sandbox unavailability, expired/cross-owner approval, disposed plugin generations, worker death, network loss/cross-origin blocking, MCP schema/auth/fault and no-replay reconnect, credential lease/rotation/revocation, bounded process termination, and platform process-tree cleanup. Optional external Codex/Claude subagent backends remain explicitly disabled unless configured and are outside the required inventory.
+    dependencies: [A3.2, A4.4, A8.3]
+    releaseBlocker: true
+
+  - id: A9.3
+    area: release-gate
+    status: partial
+    priority: P0
+    objective: Build fault/security suite for process races, kill -9, crash injection, disk full, pipe flood, process tree, symlink, network boundary, credential rotation, generation reload, and MCP reconnect.
+    implementation: internal/contractfixture; internal/persistence; internal/store; internal/fs; scripts; platform CI
+    acceptance:
+      - each injected fault has a post-restart oracle for durable state and external side effects
+    command: go test ./internal/contractfixture ./internal/persistence ./internal/store ./internal/code -run 'Fault|Security|Crash|Recovery|Truncated|Symlink|Reconnect|Rotation|Network|Hostile' -count=1
+    evidence: internal/contractfixture/fault_security_matrix_test.go:TestFaultSecurityRestartMatrix; internal/contractfixture/generation_release_matrix_test.go; internal/contractfixture/hostile_worker_matrix_test.go; internal/persistence/jsonl_test.go; internal/persistence/jsonl_test.go:TestJSONLWriteFaultSettlesAcrossProcessRestart; internal/store/sqlite_test.go:TestSQLiteAbandonedJobReservationRecoversAcrossRestart; internal/store/sqlite_test.go:TestSQLiteControlPlaneWritesShareCrossProcessLock; internal/code/code_test.go:TestRunTruncated; internal/code/process_tree_windows_test.go:TestProcessTreeEnforcesActiveProcessLimit; internal/fs/local_test.go:TestLocalFSRejectsSymlinkEscapes; internal/credential/vault_test.go:TestVaultRefreshesRotationAndRevocationAcrossProcesses; internal/plugin/reload_contract_matrix_test.go:TestPluginReloadFaultAndGenerationMatrix; internal/mcp/reconnect_test.go; docs/dsh-equivalence-progress.md
+    notes: The contract-fixture SQLite leg now starts a real child worker through the production adapter, lets it exit abruptly with an open turn, and requires the first post-death handle to recover the committed prefix while a second independent handle observes the same five-event lifecycle. The JSONL write-fault matrix starts a real second process for injected ENOSPC and abrupt process death at a record boundary; a reopened handle reads the exact physical file, then proves disk-full rolls back the physical batch while process death settles only the first complete event and recovery closes the open turn deterministically. The network-boundary leg starts real HTTP endpoints and a real second-process fetch: a cross-origin redirect is blocked before target contact, the child writes a bounded settlement status, and an independent JSONL handle proves the committed durable prefix is byte-stable. A consolidated generation matrix now covers SQLite-backed credential rotation across two independent vault handles, plugin reload disposal plus old/new effect settlement, and MCP reconnect across two real child processes; the failed MCP effect commits exactly once and is not replayed into the replacement generation. A hostile Code Mode worker matrix runs the production Node runtime and binding bridge, commits and fsyncs one external effect, then injects a 20MiB oversized raw protocol frame; the host settles one bounded worker-exit result, invokes the binding exactly once, and an independent SQLite handle rebuilds exactly one durable failure receipt. Job reservation, SQLite lock, bounded stdout/stderr pipe flood, and symlink legs reuse existing owning-package regressions. The current managed Windows host skips the symlink leg because symlink creation is privilege-denied; do not count that skip as platform proof.
+    remaining:
+      - add runnable POSIX fork-bomb/hostile-descendant fixtures; JSONL disk-full, kill-at-every-write, HTTP cross-origin network boundary, Windows Job Object active-process exhaustion, the consolidated credential/plugin/MCP generation matrix, and the Code Mode hostile oversized-frame worker now have real process/oracle coverage
+      - run the completed matrix on every claimed platform; the current Windows symlink evidence is skipped by host privilege and remains unproven
+    dependencies: [A2.3, A2.4, A3.1, A6.2, A7.2]
+    releaseBlocker: true
+
+  - id: A9.4
+    area: release-gate
+    status: partial
+    priority: P0
+    objective: Run race/leak/process/temporary-file/SQLite-lock/provider-wipe gates on Linux and Windows with CGO enabled.
+    implementation: CI workflow; internal/contractfixture; scripts/equivalence-gate.ps1
+    acceptance:
+      - CGO_ENABLED=1 go test -race ./... passes on claimed platforms
+      - goroutine, FD, child process, worker, temp file, SQLite lock, provider and credential cleanup has an automated oracle
+      - missing compiler is recorded as unverified, never pass
+    command: CGO_ENABLED=1 go test -race ./... -count=1
+    evidence: cmd/pa/llm_test.go; internal/credential/vault_test.go; internal/mcp/mcp_test.go; internal/code/code_test.go; internal/code/typescript_test.go; internal/jobs/local_test.go; internal/store/sqlite_test.go; internal/subagent/spawn_test.go; docs/dsh-equivalence-progress.md
+    remaining:
+      - run CGO_ENABLED=1 go test -race ./... on Linux and Windows CI; the managed Windows host has no C compiler, so the strict race gate is unverified and must not be treated as passing
+      - add cross-platform automated gates for bounded goroutine/FD/process/temp-file/SQLite-lock/provider/credential cleanup; provider generation retirement, credential drain/wipe, MCP goroutine cleanup, Code Mode worker joins, child-process kills, job reservation recovery, and SQLite cross-process locks already have owning-package oracles
+    dependencies: [A9.3]
+    releaseBlocker: true
+
+  - id: A9.5
+    area: release-gate
+    status: open
+    priority: P0
+    objective: Permit capability-equivalent only after A0-A8 are green, reference replay has no unexplained diff, claimed platform enforcement passes, and the manifest is updated.
+    implementation: scripts/equivalence-gate.ps1; docs/equivalence-manifest.yaml
+    acceptance:
+      - no partial/open/blocked task remains in a required profile
+      - go test, vet, build, Web tests/build/manifest, reference replay, and strict race all pass
+      - release report cites the same manifest and reference commit
+    command: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/equivalence-gate.ps1
+    dependencies: [A0.4, A9.1, A9.2, A9.3, A9.4]
+    releaseBlocker: true

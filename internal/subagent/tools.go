@@ -15,11 +15,11 @@
 // dispatch-m5b-2 §2): subagent emits subagent/start on a successful
 // Start. The model-facing control tools send_message and interrupt_agent
 // operate on the same runtime.
-// once per child once it observes a settled child. Every append happens inside
+// Terminal settlement is emitted once per child. Foreground control events
+// use the serial tool path; settlement uses the explicitly parent-addressed
+// sink for the terminal event and optional Agent wake, never process-global
+// selection.
 // a tool Execute — the serial main-loop path — so the session log is never
-// touched from the background child goroutines (D5). The background goroutine
-// that awaits a child's settle only caches the terminal Result in this bundle;
-// it never appends to any session log.
 package subagent
 
 import (
@@ -28,12 +28,14 @@ import (
 	"errors"
 	"fmt"
 	agenttools "github.com/jabing/shutu-agent/internal/tools"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/jabing/shutu-agent/internal/jobs"
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 	"github.com/jabing/shutu-agent/internal/session"
 )
 
@@ -45,11 +47,34 @@ func valueJSON(value any) string {
 	return string(b)
 }
 
+// agentOptionsInput is the model-facing subset of DSH AgentOptions that this
+// in-process tool can enforce locally. Provider selection remains a
+// composition-bound property of the mounted tool; model and maxTokens are
+// per-child overrides and therefore belong on the request.
+type agentOptionsInput struct {
+	Model     string `json:"model"`
+	MaxTokens int    `json:"maxTokens"`
+}
+
+func resolveAgentOptions(options *agentOptionsInput) (string, int, error) {
+	if options == nil {
+		return "", 0, nil
+	}
+	model := strings.TrimSpace(options.Model)
+	if options.Model != "" && model == "" {
+		return "", 0, fmt.Errorf("agentOptions.model must be non-empty")
+	}
+	if options.MaxTokens <= 0 {
+		return "", 0, fmt.Errorf("agentOptions.maxTokens must be positive")
+	}
+	return model, options.MaxTokens, nil
+}
+
 // Tool names (whitelisted when subagent.enabled; see config.subagentToolNames).
 const (
 	ToolSpawnName      = "subagent"
 	ToolTeammateName   = "spawn_teammate"
-	ToolForkName       = "subagent_fork" // internal/provider compatibility; never model-visible
+	ToolForkName       = "subagent_fork"
 	ToolStatusName     = "subagent_status"
 	ToolCancelName     = "subagent_cancel"
 	ToolListName       = "subagent_list"
@@ -77,6 +102,51 @@ type childInfo struct {
 	parent   string
 }
 
+// TeammateProvision is the adapter result for a host-owned Agent Teams
+// roster. The subagent package owns message/control bookkeeping, while the
+// composition root owns the concrete Agent Registry and durable team board.
+type TeammateProvision struct {
+	ID          string
+	Name        string
+	Description string
+	Provider    string
+	Context     string
+	Status      string
+	Run         *Run
+}
+
+type TeammateProvisioner func(context.Context, string, string, string, string, string) (TeammateProvision, error)
+
+// Teammate is the process-local control projection of a durable Team member.
+// The roster owns identity and authorization; callbacks are deliberately
+// capability-shaped so this package does not import the Agent/Team runtime.
+type Teammate struct {
+	ID          string
+	Label       string
+	Parent      string
+	Running     bool
+	Continuable bool
+	Send        func(context.Context, string) error
+	SendQuiet   func(context.Context, string) error
+	Followup    func(context.Context, string) error
+	Cancel      func(string) error
+}
+
+// TeammateDirectory is the cold-restore seam for Agent Teams. A directory is
+// queried in addition to the in-memory provider registry, so durable members
+// remain addressable after process restart/rebind.
+type TeammateDirectory interface {
+	List(context.Context, string) ([]Teammate, error)
+	Direct(context.Context, string, string) (Teammate, error)
+	Parent(context.Context, string) (string, bool, error)
+}
+
+// CompletionWake delivers a settled child notification to its direct parent.
+// The composition root decides whether a live parent exists and how the
+// notification enters that parent's Agent inbox; the subagent package only
+// supplies the stable child result and lineage.
+type CompletionWake func(context.Context, string, string, Result) error
+
 // SubagentTools bundles the shared state of the four subagent_* tools: the
 // Runtime service, the default delegation depth (from config.max_depth), the
 // owner-session provider, the event sink, the child/settle registry shared
@@ -87,7 +157,10 @@ type SubagentTools struct {
 	defaultMaxDepth    int
 	defaultContinuable bool
 	owner              func() string
+	ownerContext       func(context.Context) string
 	onEvent            func(typ string, data any)
+	onSessionEvent     func(sessionID, typ string, data any) error
+	onCompletionWake   CompletionWake
 	endTracker         *subagentEndTracker
 
 	mu         sync.Mutex
@@ -96,6 +169,8 @@ type SubagentTools struct {
 	jobs       jobs.Registry
 	messageSeq uint64
 	changeCh   chan struct{}
+	teammate   TeammateProvisioner
+	directory  TeammateDirectory
 }
 
 // NewSubagentTools returns the shared subagent-tool bundle bound to a Runtime.
@@ -125,14 +200,32 @@ func NewSubagentToolsWithContinuable(r Runtime, defaultMaxDepth int, owner func(
 	}
 }
 
+// NewSubagentToolsWithContinuableContext is the Agent-owned constructor. The
+// owner resolver receives the addressed runtime context for each operation;
+// the older constructor remains for direct embedders and tests.
+func NewSubagentToolsWithContinuableContext(r Runtime, defaultMaxDepth int, owner func(context.Context) string, onEvent func(typ string, data any), defaultContinuable bool) *SubagentTools {
+	return &SubagentTools{
+		rt:                 r,
+		defaultMaxDepth:    defaultMaxDepth,
+		defaultContinuable: defaultContinuable,
+		ownerContext:       owner,
+		onEvent:            onEvent,
+		endTracker:         newSubagentEndTracker(),
+		children:           map[string]*childInfo{},
+		settled:            map[string]Result{},
+		changeCh:           make(chan struct{}),
+	}
+}
+
 // Spawn returns the subagent tool.
 func (t *SubagentTools) Spawn() SubagentSpawnTool {
 	return SubagentSpawnTool{t: t, provider: defaultProviderName, continuable: t.defaultContinuable}
 }
 
 // SpawnTeammate returns the DSH Agent Teams-compatible durable delegation
-// surface. Team tasks are intentionally not implemented; this tool only
-// creates a named continuable child and returns its member projection.
+// surface. The composition root may bind it to a durable Team roster; the
+// library fallback still creates a named continuable child and returns its
+// member projection without importing Team storage.
 func (t *SubagentTools) SpawnTeammate() SubagentTeammateTool {
 	return SubagentTeammateTool{t: t}
 }
@@ -180,6 +273,13 @@ func (t *SubagentTools) Report() SubagentReportTool { return SubagentReportTool{
 // ReportFromChild validates the exact child identity and records a report on
 // its direct parent. The provider uses this as the child-scoped report seam.
 func (t *SubagentTools) ReportFromChild(childID, output string) (string, error) {
+	return t.ReportFromChildContext(context.Background(), childID, output)
+}
+
+// ReportFromChildContext is the context-aware child-to-parent report seam.
+// The parent identity is taken from the registered child record, never from
+// model-provided arguments.
+func (t *SubagentTools) ReportFromChildContext(ctx context.Context, childID, output string) (string, error) {
 	childID = strings.TrimSpace(childID)
 	output = strings.TrimSpace(output)
 	if childID == "" || output == "" {
@@ -190,7 +290,9 @@ func (t *SubagentTools) ReportFromChild(childID, output string) (string, error) 
 		return "", fmt.Errorf("%s: direct parent is not live; report was not delivered", ToolReportName)
 	}
 	messageID := t.nextMessageID(childID)
-	t.emit(session.EventSubagentReport, session.NewSubagentReport(childID, info.parent, output))
+	if err := t.emitForSession(ctx, info.parent, session.EventSubagentReport, session.NewSubagentReport(childID, info.parent, output)); err != nil {
+		return "", err
+	}
 	return messageID, nil
 }
 
@@ -200,6 +302,55 @@ func (t *SubagentTools) Resume() SubagentResumeTool { return SubagentResumeTool{
 // SetJobs attaches the host job registry used by one-shot background
 // delegation. It is optional: continuable background children do not need it.
 func (t *SubagentTools) SetJobs(reg jobs.Registry) { t.jobs = reg }
+
+// SetSessionEventSink binds asynchronous child events to an addressed parent
+// session. Background child callbacks cannot safely consult a process-global
+// current session, so the host receives the parent id explicitly.
+func (t *SubagentTools) SetSessionEventSink(sink func(sessionID, typ string, data any) error) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.onSessionEvent = sink
+	t.mu.Unlock()
+}
+
+// SetCompletionWake binds the optional parent-Agent wakeup used by the host.
+// It is intentionally separate from SetSessionEventSink: durable event
+// publication must remain useful for cold sessions, while a live inbox wake
+// is only possible when the parent Agent is currently registered.
+func (t *SubagentTools) SetCompletionWake(wake CompletionWake) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.onCompletionWake = wake
+	t.mu.Unlock()
+}
+
+// SetTeammateProvisioner binds the DSH spawn_teammate surface to a durable
+// Agent Teams roster. Without it, the legacy subagent provider remains the
+// compatibility fallback for library users.
+func (t *SubagentTools) SetTeammateProvisioner(provisioner TeammateProvisioner) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.teammate = provisioner
+	t.mu.Unlock()
+}
+
+// SetTeammateDirectory binds the recovered Team control projection. It is
+// separate from provisioning: a cold roster may be queried before a new
+// teammate is created in this process.
+func (t *SubagentTools) SetTeammateDirectory(directory TeammateDirectory) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.directory = directory
+	t.mu.Unlock()
+}
 
 func (t *SubagentTools) nextMessageID(childID string) string {
 	return fmt.Sprintf("%s-message-%d", childID, atomic.AddUint64(&t.messageSeq, 1))
@@ -211,7 +362,14 @@ func (t *SubagentTools) nextMessageID(childID string) string {
 func (t *SubagentTools) SendTo(ctx context.Context, childID, message string) error {
 	info, _, _ := t.lookup(childID)
 	if info == nil {
-		return fmt.Errorf("subagent: unknown subagent %q", childID)
+		member, err := t.directoryMember(ctx, childID)
+		if err != nil {
+			return fmt.Errorf("subagent: unknown subagent %q", childID)
+		}
+		if member.Send == nil {
+			return fmt.Errorf("%w: %s", ErrNotContinuable, childID)
+		}
+		return member.Send(ctx, message)
 	}
 	if info.run.Send == nil {
 		return fmt.Errorf("%w: %s", ErrNotContinuable, childID)
@@ -224,7 +382,14 @@ func (t *SubagentTools) SendTo(ctx context.Context, childID, message string) err
 func (t *SubagentTools) InterruptTo(childID, reason string) error {
 	info, _, _ := t.lookup(childID)
 	if info == nil {
-		return fmt.Errorf("subagent: unknown subagent %q", childID)
+		member, err := t.directoryMember(context.Background(), childID)
+		if err != nil {
+			return fmt.Errorf("subagent: unknown subagent %q", childID)
+		}
+		if member.Cancel == nil {
+			return fmt.Errorf("subagent: cancel is unavailable for %q", childID)
+		}
+		return member.Cancel(reason)
 	}
 	if info.run.Cancel == nil {
 		return fmt.Errorf("subagent: cancel is unavailable for %q", childID)
@@ -248,28 +413,115 @@ func (t *SubagentTools) isDescendant(childID, ancestorID string) bool {
 	}
 	t.mu.Unlock()
 	seen := map[string]bool{}
-	for childID != "" && !seen[childID] {
-		seen[childID] = true
-		info, _, ok := t.lookup(childID)
+	for current := childID; current != "" && !seen[current]; {
+		seen[current] = true
+		info, _, ok := t.lookup(current)
 		if !ok || info == nil {
-			return false
+			break
 		}
 		if strings.TrimSpace(info.parent) == ancestorID {
 			return true
 		}
-		childID = info.parent
+		current = strings.TrimSpace(info.parent)
+	}
+	t.mu.Lock()
+	directory := t.directory
+	t.mu.Unlock()
+	if directory != nil {
+		// Team members currently have direct lead lineage. Walking Parent keeps
+		// this check correct if nested Team rosters are enabled later.
+		for candidate := strings.TrimSpace(childID); candidate != ""; {
+			parent, ok, err := t.directory.Parent(context.Background(), candidate)
+			if err != nil || !ok {
+				break
+			}
+			if parent == ancestorID {
+				return true
+			}
+			candidate = strings.TrimSpace(parent)
+		}
 	}
 	return false
+}
+
+func (t *SubagentTools) directoryMember(ctx context.Context, id string) (Teammate, error) {
+	t.mu.Lock()
+	directory := t.directory
+	t.mu.Unlock()
+	if directory == nil {
+		return Teammate{}, errors.New("subagent: teammate directory unavailable")
+	}
+	return directory.Direct(ctx, "", id)
+}
+
+// listChildren merges process-local provider children and durable Team
+// members, preferring the roster projection when an identity is present in
+// both views. Stable IDs prevent duplicate descendants after rebind.
+func (t *SubagentTools) listChildren(ctx context.Context, parent string) ([]ChildSummary, error) {
+	children, err := t.rt.ListChildren(ctx, parent)
+	if err != nil {
+		return nil, err
+	}
+	t.mu.Lock()
+	directory := t.directory
+	t.mu.Unlock()
+	if directory == nil {
+		return children, nil
+	}
+	members, err := directory.List(ctx, parent)
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[string]ChildSummary, len(children)+len(members))
+	for _, child := range children {
+		byID[child.ID] = child
+	}
+	for _, member := range members {
+		byID[member.ID] = ChildSummary{ID: member.ID, Label: member.Label, Running: member.Running, Continuable: member.Continuable}
+	}
+	merged := make([]ChildSummary, 0, len(byID))
+	for _, child := range byID {
+		merged = append(merged, child)
+	}
+	sort.Slice(merged, func(i, j int) bool { return merged[i].ID < merged[j].ID })
+	return merged, nil
 }
 
 // callerSession returns the active session id (the delegating session for a
 // spawn and the parent filter for subagent_list); "" when no owner provider is
 // installed.
-func (t *SubagentTools) callerSession() string {
+func (t *SubagentTools) callerSession(ctx ...context.Context) string {
+	if len(ctx) > 0 {
+		if sessionID := runtimectx.SessionID(ctx[0]); sessionID != "" {
+			return sessionID
+		}
+		if t.ownerContext != nil {
+			return t.ownerContext(ctx[0])
+		}
+	}
 	if t.owner != nil {
 		return t.owner()
 	}
 	return ""
+}
+
+func (t *SubagentTools) emitContext(ctx context.Context, typ string, data any) error {
+	if runtime, ok := runtimectx.Get(ctx); ok && runtime.Emit != nil {
+		return runtime.Emit(typ, data)
+	}
+	t.emit(typ, data)
+	return nil
+}
+
+func (t *SubagentTools) emitForSession(_ context.Context, sessionID, typ string, data any) error {
+	t.mu.Lock()
+	sink := t.onSessionEvent
+	t.mu.Unlock()
+	if sink != nil {
+		return sink(sessionID, typ, data)
+	}
+	t.emit(typ, data)
+	return nil
 }
 
 // emit forwards one subagent/* event payload to the injected sink (D3).
@@ -289,9 +541,11 @@ func (t *SubagentTools) signalChange() {
 }
 
 // register records a freshly started child and spawns the settle-await
-// goroutine that caches its terminal Result. The goroutine never touches any
+// goroutine that caches its terminal Result. Settlement may publish the
+// explicitly parent-addressed terminal event and wake a live parent Agent; it
+// never consults process-global session selection. The goroutine never touches
 // session log (D5) — it only fills the bundle's settle cache, which the serial
-// status tool reads to emit subagent/end.
+// addressed completion sink above.
 func (t *SubagentTools) register(childID string, info *childInfo) {
 	t.mu.Lock()
 	t.children[childID] = info
@@ -315,8 +569,21 @@ func (t *SubagentTools) awaitSettle(childID string, run *Run) {
 	t.mu.Unlock()
 	if info != nil && t.endTracker.mark(childID) {
 		// DSH delivers a completion notice without requiring a polling status
-		// call. The event sink is session-log safe and is the host's wake-up seam.
-		t.emit(session.EventSubagentEnd, session.NewSubagentEnd(childID, info.provider, res.StopReason, res.Output))
+		// call. Address the parent explicitly: this goroutine has no safe notion
+		// of the process-global current session.
+		if err := t.emitForSession(context.Background(), info.parent, session.EventSubagentEnd,
+			session.NewSubagentEnd(childID, info.provider, res.StopReason, res.Output)); err == nil {
+			t.mu.Lock()
+			wake := t.onCompletionWake
+			t.mu.Unlock()
+			if wake != nil && strings.TrimSpace(info.parent) != "" {
+				// The durable end event is published first. A failed wake
+				// therefore cannot make the live Agent claim a result that is
+				// absent from the replay source; a later status/list or cold
+				// restore can recover it.
+				_ = wake(context.Background(), info.parent, childID, res)
+			}
+		}
 	}
 	t.mu.Lock()
 	t.settled[childID] = res
@@ -350,6 +617,12 @@ type SubagentSpawnTool struct {
 
 func (SubagentSpawnTool) Name() string { return ToolSpawnName }
 
+// ConcurrencySafe marks sibling delegations as safe to admit to the loop's
+// rolling pool. The tool only creates an independently owned child and the
+// bundle serializes its own registries; the parent transcript still commits
+// each result in model order.
+func (SubagentSpawnTool) ConcurrencySafe(any) bool { return true }
+
 func (SubagentSpawnTool) Description() string {
 	return "delegate a task to a new subagent (independent session + agent) and return its child id; " +
 		"it runs in the background — observe with subagent_status/subagent_list, cancel with subagent_cancel"
@@ -372,6 +645,14 @@ func (SubagentSpawnTool) Schema() map[string]any {
 				"type":        "boolean",
 				"description": "whether to return immediately with a background id",
 			},
+			"agentOptions": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"model":     map[string]any{"type": "string", "minLength": 1},
+					"maxTokens": map[string]any{"type": "integer", "minimum": 1},
+				},
+				"additionalProperties": false,
+			},
 		},
 		"required":             []string{"description", "prompt"},
 		"additionalProperties": false,
@@ -388,9 +669,10 @@ func (t SubagentSpawnTool) Execute(ctx context.Context, args any) (string, error
 
 func (t SubagentSpawnTool) ExecuteResult(ctx context.Context, args any) (agenttools.ToolResult, error) {
 	var a struct {
-		Description     string `json:"description"`
-		Prompt          string `json:"prompt"`
-		RunInBackground *bool  `json:"run_in_background"`
+		Description     string             `json:"description"`
+		Prompt          string             `json:"prompt"`
+		RunInBackground *bool              `json:"run_in_background"`
+		AgentOptions    *agentOptionsInput `json:"agentOptions"`
 	}
 	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return agenttools.ToolResult{}, fmt.Errorf("%s: %w", t.Name(), err)
@@ -401,7 +683,11 @@ func (t SubagentSpawnTool) ExecuteResult(ctx context.Context, args any) (agentto
 	if strings.TrimSpace(a.Description) == "" {
 		return agenttools.ToolResult{}, fmt.Errorf("%s: empty description", t.Name())
 	}
-	parent := t.t.callerSession()
+	model, maxTokens, err := resolveAgentOptions(a.AgentOptions)
+	if err != nil {
+		return agenttools.ToolResult{}, fmt.Errorf("%s: %w", t.Name(), err)
+	}
+	parent := t.t.callerSession(ctx)
 	if parent == "" {
 		return agenttools.ToolResult{}, fmt.Errorf("%s: requires a calling agent", t.Name())
 	}
@@ -424,6 +710,7 @@ func (t SubagentSpawnTool) ExecuteResult(ctx context.Context, args any) (agentto
 		return t.t.rt.Start(startCtx, provider, StartRequest{
 			Label: labelOrPrompt(a.Description, a.Prompt), Prompt: a.Prompt,
 			ParentSessionID: parent, MaxDepth: t.t.defaultMaxDepth,
+			Model: model, MaxTokens: maxTokens,
 			Continuable: continuable, InheritParentContext: inherit,
 		})
 	}
@@ -433,13 +720,17 @@ func (t SubagentSpawnTool) ExecuteResult(ctx context.Context, args any) (agentto
 		}
 		jobID, err := t.t.jobs.Start(ctx, jobs.JobStart{
 			Kind: jobs.Kind("subagent"), Label: a.Description, OwnerSession: parent,
+			Correlation: jobs.CorrelationFromContext(ctx),
 			Run: func(jobCtx context.Context) (jobs.JobOutcome, error) {
 				run, err := start(jobCtx)
 				if err != nil {
 					return jobs.JobOutcome{Status: jobs.StatusFailed, Detail: err.Error()}, nil
 				}
 				t.t.register(run.ID, &childInfo{run: run, provider: provider, label: a.Description, parent: parent})
-				t.t.emit(session.EventSubagentStart, session.NewSubagentStart(run.ID, provider, parent, a.Description))
+				if err := t.t.emitContext(jobCtx, session.EventSubagentStart, session.NewSubagentStart(run.ID, provider, parent, a.Description)); err != nil {
+					_ = run.Cancel("subagent/start persistence failed")
+					return jobs.JobOutcome{Status: jobs.StatusFailed, Detail: "subagent/start persistence failed: " + err.Error()}, nil
+				}
 				res, err := run.Result(jobCtx)
 				if err != nil {
 					return jobs.JobOutcome{Status: jobs.StatusFailed, Detail: err.Error()}, nil
@@ -457,7 +748,10 @@ func (t SubagentSpawnTool) ExecuteResult(ctx context.Context, args any) (agentto
 		return agenttools.ToolResult{}, fmt.Errorf("%s: %w", t.Name(), err)
 	}
 	t.t.register(run.ID, &childInfo{run: run, provider: provider, label: a.Description, parent: parent})
-	t.t.emit(session.EventSubagentStart, session.NewSubagentStart(run.ID, provider, parent, a.Description))
+	if err := t.t.emitContext(ctx, session.EventSubagentStart, session.NewSubagentStart(run.ID, provider, parent, a.Description)); err != nil {
+		_ = run.Cancel("subagent/start persistence failed")
+		return agenttools.ToolResult{}, fmt.Errorf("%s: persist event: %w", t.Name(), err)
+	}
 	if continuable {
 		return agenttools.ToolResult{Value: map[string]any{"kind": "continuable", "subagentId": run.ID}, Output: fmt.Sprintf("started subagent %s", run.ID)}, nil
 	}
@@ -488,7 +782,8 @@ func labelOrPrompt(label, prompt string) string {
 // context.
 type SubagentTeammateTool struct{ t *SubagentTools }
 
-func (SubagentTeammateTool) Name() string { return ToolTeammateName }
+func (SubagentTeammateTool) Name() string             { return ToolTeammateName }
+func (SubagentTeammateTool) ConcurrencySafe(any) bool { return true }
 func (SubagentTeammateTool) Description() string {
 	return "create one named, durable teammate; context fresh starts clean or fork inherits completed parent turns"
 }
@@ -528,13 +823,40 @@ func (t SubagentTeammateTool) ExecuteResult(ctx context.Context, args any) (agen
 	if a.Name == "" || a.Description == "" || a.Prompt == "" {
 		return agenttools.ToolResult{}, fmt.Errorf("%s: name, description and prompt are required", ToolTeammateName)
 	}
-	parent := t.t.callerSession()
+	parent := t.t.callerSession(ctx)
 	if parent == "" {
 		return agenttools.ToolResult{}, fmt.Errorf("%s: requires a calling agent", ToolTeammateName)
 	}
 	contextKind := a.Context
 	if contextKind == "" {
 		contextKind = "fresh"
+	}
+	t.t.mu.Lock()
+	provisioner := t.t.teammate
+	t.t.mu.Unlock()
+	if provisioner != nil {
+		member, err := provisioner(ctx, parent, a.Name, a.Description, a.Prompt, contextKind)
+		if err != nil {
+			return agenttools.ToolResult{}, fmt.Errorf("%s: %w", ToolTeammateName, err)
+		}
+		if member.ID == "" || member.Run == nil {
+			return agenttools.ToolResult{}, fmt.Errorf("%s: provisioner returned an incomplete member", ToolTeammateName)
+		}
+		t.t.register(member.ID, &childInfo{run: member.Run, provider: member.Provider, label: a.Name + ": " + a.Description, parent: parent})
+		memberStatus := member.Status
+		if memberStatus == "" {
+			memberStatus = "running"
+		}
+		if err := t.t.emitContext(ctx, session.EventSubagentStart, session.NewSubagentStart(member.ID, member.Provider, parent, a.Description)); err != nil {
+			_ = member.Run.Cancel("subagent/start persistence failed")
+			return agenttools.ToolResult{}, fmt.Errorf("%s: persist event: %w", ToolTeammateName, err)
+		}
+		memberView := map[string]any{
+			"id": member.ID, "name": a.Name, "role": "teammate", "status": memberStatus,
+			"description": a.Description, "provider": member.Provider, "context": contextKind,
+			"diagnostics": []string{},
+		}
+		return agenttools.ToolResult{Value: map[string]any{"member": memberView}, Output: fmt.Sprintf("started teammate %s (%s)", a.Name, member.ID)}, nil
 	}
 	provider := defaultProviderName
 	inherit := false
@@ -551,7 +873,10 @@ func (t SubagentTeammateTool) ExecuteResult(ctx context.Context, args any) (agen
 		return agenttools.ToolResult{}, fmt.Errorf("%s: %w", ToolTeammateName, err)
 	}
 	t.t.register(run.ID, &childInfo{run: run, provider: provider, label: a.Name + ": " + a.Description, parent: parent})
-	t.t.emit(session.EventSubagentStart, session.NewSubagentStart(run.ID, provider, parent, a.Description))
+	if err := t.t.emitContext(ctx, session.EventSubagentStart, session.NewSubagentStart(run.ID, provider, parent, a.Description)); err != nil {
+		_ = run.Cancel("subagent/start persistence failed")
+		return agenttools.ToolResult{}, fmt.Errorf("%s: persist event: %w", ToolTeammateName, err)
+	}
 	member := map[string]any{
 		"id": run.ID, "name": a.Name, "role": "teammate", "status": "running",
 		"description": a.Description, "provider": provider, "context": contextKind,
@@ -605,20 +930,45 @@ func (t SubagentMessageTool) ExecuteResult(ctx context.Context, args any) (agent
 	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return agenttools.ToolResult{}, fmt.Errorf("%s: %w", t.name, err)
 	}
-	parent := t.t.callerSession()
+	parent := t.t.callerSession(ctx)
 	if parent == "" {
 		return agenttools.ToolResult{}, fmt.Errorf("%s: requires a calling agent", t.name)
 	}
 	info, err := t.t.directChild(a.Target, parent)
-	if err != nil {
-		return agenttools.ToolResult{}, fmt.Errorf("%s: %w", t.name, err)
-	}
-	if info.run.Send == nil {
-		return agenttools.ToolResult{}, fmt.Errorf("%s: %w", t.name, ErrNotContinuable)
-	}
-	send := info.run.Send
-	if !t.wakeup && info.run.SendQuiet != nil {
-		send = info.run.SendQuiet
+	var id string
+	var send func(context.Context, string) error
+	if err == nil {
+		if info.run.Send == nil {
+			return agenttools.ToolResult{}, fmt.Errorf("%s: %w", t.name, ErrNotContinuable)
+		}
+		send = info.run.Send
+		if !t.wakeup && info.run.SendQuiet != nil {
+			send = info.run.SendQuiet
+		}
+		id = info.run.ID
+	} else {
+		t.t.mu.Lock()
+		directory := t.t.directory
+		t.t.mu.Unlock()
+		if directory == nil {
+			return agenttools.ToolResult{}, fmt.Errorf("%s: %w", t.name, err)
+		}
+		member, memberErr := directory.Direct(ctx, parent, a.Target)
+		if memberErr != nil {
+			return agenttools.ToolResult{}, fmt.Errorf("%s: %w", t.name, err)
+		}
+		if !member.Continuable {
+			return agenttools.ToolResult{}, fmt.Errorf("%s: %w", t.name, ErrNotContinuable)
+		}
+		if t.wakeup {
+			send = member.Followup
+		} else {
+			send = member.SendQuiet
+			if send == nil {
+				send = member.Send
+			}
+		}
+		id = member.ID
 	}
 	if send == nil {
 		return agenttools.ToolResult{}, fmt.Errorf("%s: %w", t.name, ErrNotContinuable)
@@ -627,10 +977,10 @@ func (t SubagentMessageTool) ExecuteResult(ctx context.Context, args any) (agent
 		return agenttools.ToolResult{}, fmt.Errorf("%s: %w", t.name, err)
 	}
 	t.t.signalChange()
-	messageID := t.t.nextMessageID(info.run.ID)
+	messageID := t.t.nextMessageID(id)
 	return agenttools.ToolResult{
 		Value:  map[string]any{"messageId": messageID, "status": "queued"},
-		Output: fmt.Sprintf("message queued for %s as %s", info.run.ID, messageID),
+		Output: fmt.Sprintf("message queued for %s as %s", id, messageID),
 	}, nil
 }
 
@@ -656,6 +1006,10 @@ func (t *SubagentTools) directChild(target, parent string) (*childInfo, error) {
 type SubagentWaitTool struct{ t *SubagentTools }
 
 func (SubagentWaitTool) Name() string { return ToolWaitName }
+
+// CancellationAware is explicit: wait_agent selects on ctx.Done while its
+// bounded timeout and roster poll remain active.
+func (SubagentWaitTool) CancellationAware() bool { return true }
 func (SubagentWaitTool) Description() string {
 	return "wait for the next teammate status, mailbox, or child change; never wakes inactive children"
 }
@@ -688,11 +1042,11 @@ func (t SubagentWaitTool) ExecuteResult(ctx context.Context, args any) (agenttoo
 	if a.TimeoutMS < 10000 || a.TimeoutMS > 3600000 {
 		return agenttools.ToolResult{}, fmt.Errorf("%s: timeout_ms must be between 10000 and 3600000", ToolWaitName)
 	}
-	parent := t.t.callerSession()
+	parent := t.t.callerSession(ctx)
 	if parent == "" {
 		return agenttools.ToolResult{}, fmt.Errorf("%s: requires a calling agent", ToolWaitName)
 	}
-	children, err := t.t.rt.ListChildren(ctx, parent)
+	children, err := t.t.listChildren(ctx, parent)
 	if err != nil {
 		return agenttools.ToolResult{}, fmt.Errorf("%s: %w", ToolWaitName, err)
 	}
@@ -712,9 +1066,18 @@ func (t SubagentWaitTool) ExecuteResult(ctx context.Context, args any) (agenttoo
 	}
 	t.t.mu.Lock()
 	changes := t.t.changeCh
+	_, hasDirectory := t.t.directory.(TeammateDirectory)
 	t.t.mu.Unlock()
 	timer := time.NewTimer(time.Duration(a.TimeoutMS) * time.Millisecond)
 	defer timer.Stop()
+	var poll *time.Ticker
+	if hasDirectory {
+		// Rebound Agent handles do not share the provider's change channel.
+		// Polling the authoritative roster state gives wait_agent a bounded,
+		// leak-free completion signal after restart as well.
+		poll = time.NewTicker(100 * time.Millisecond)
+		defer poll.Stop()
+	}
 	select {
 	case <-ctx.Done():
 		return agenttools.ToolResult{}, ctx.Err()
@@ -724,14 +1087,64 @@ func (t SubagentWaitTool) ExecuteResult(ctx context.Context, args any) (agenttoo
 	case <-timer.C:
 		value := map[string]any{"timedOut": true}
 		return agenttools.ToolResult{Value: value, Output: valueJSON(value)}, nil
+	case <-tickerChannel(poll):
+		current, listErr := t.t.listChildren(ctx, parent)
+		if listErr == nil && !sameChildStates(children, current) {
+			value := map[string]any{"timedOut": false}
+			return agenttools.ToolResult{Value: value, Output: valueJSON(value)}, nil
+		}
+		// A ticker case is only a sampling opportunity. Continue waiting for a
+		// real change, cancellation, or the caller's timeout.
+		return t.t.waitForChange(ctx, parent, children, changes, timer, poll)
 	}
+}
+
+func tickerChannel(ticker *time.Ticker) <-chan time.Time {
+	if ticker == nil {
+		return nil
+	}
+	return ticker.C
+}
+
+func (t *SubagentTools) waitForChange(ctx context.Context, parent string, previous []ChildSummary, changes <-chan struct{}, timer *time.Timer, poll *time.Ticker) (agenttools.ToolResult, error) {
+	for {
+		select {
+		case <-ctx.Done():
+			return agenttools.ToolResult{}, ctx.Err()
+		case <-changes:
+			value := map[string]any{"timedOut": false}
+			return agenttools.ToolResult{Value: value, Output: valueJSON(value)}, nil
+		case <-timer.C:
+			value := map[string]any{"timedOut": true}
+			return agenttools.ToolResult{Value: value, Output: valueJSON(value)}, nil
+		case <-tickerChannel(poll):
+			current, err := t.listChildren(ctx, parent)
+			if err == nil && !sameChildStates(previous, current) {
+				value := map[string]any{"timedOut": false}
+				return agenttools.ToolResult{Value: value, Output: valueJSON(value)}, nil
+			}
+		}
+	}
+}
+
+func sameChildStates(a, b []ChildSummary) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].ID != b[i].ID || a[i].Running != b[i].Running || a[i].Continuable != b[i].Continuable {
+			return false
+		}
+	}
+	return true
 }
 
 // SubagentForkTool is the DSH-named one-shot fork delegation entry. The
 // provider is separate in production and receives the parent context seed.
 type SubagentForkTool struct{ t *SubagentTools }
 
-func (SubagentForkTool) Name() string { return ToolForkName }
+func (SubagentForkTool) Name() string             { return ToolForkName }
+func (SubagentForkTool) ConcurrencySafe(any) bool { return true }
 func (SubagentForkTool) Description() string {
 	return "delegate a task to a subagent that inherits the completed conversation context and return its result"
 }
@@ -778,7 +1191,7 @@ func (t SubagentSendTool) ExecuteResult(ctx context.Context, args any) (agenttoo
 	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return agenttools.ToolResult{}, fmt.Errorf("%s: %w", ToolSendName, err)
 	}
-	parent := t.t.callerSession()
+	parent := t.t.callerSession(ctx)
 	if parent == "" {
 		return agenttools.ToolResult{}, fmt.Errorf("%s: requires a calling agent", ToolSendName)
 	}
@@ -834,10 +1247,10 @@ func (t SubagentInterruptTool) ExecuteResult(ctx context.Context, args any) (age
 	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return agenttools.ToolResult{}, fmt.Errorf("%s: %w", ToolInterruptName, err)
 	}
-	if t.t.callerSession() == "" {
+	if t.t.callerSession(ctx) == "" {
 		return agenttools.ToolResult{}, fmt.Errorf("%s: requires a calling agent", ToolInterruptName)
 	}
-	if !t.t.isDescendant(a.ID, t.t.callerSession()) {
+	if !t.t.isDescendant(a.ID, t.t.callerSession(ctx)) {
 		return agenttools.ToolResult{}, fmt.Errorf("%s: agent %q is not a descendant of the calling agent", ToolInterruptName, a.ID)
 	}
 	if err := t.t.InterruptTo(a.ID, "interrupted via interrupt_agent"); err != nil {
@@ -858,13 +1271,18 @@ type SubagentReportTool struct{ t *SubagentTools }
 // identity is minted by the provider, so the model cannot choose a sender or
 // recipient.
 type childReportTool struct {
-	childID string
-	parent  string
-	deliver func(childID, parentID, output string) (string, error)
+	childID        string
+	parent         string
+	deliver        func(childID, parentID, output string) (string, error)
+	deliverContext func(context.Context, string, string, string) (string, error)
 }
 
 func newChildReportTool(childID, parent string, deliver func(string, string, string) (string, error)) childReportTool {
 	return childReportTool{childID: childID, parent: parent, deliver: deliver}
+}
+
+func newChildReportToolWithContext(childID, parent string, deliver func(context.Context, string, string, string) (string, error)) childReportTool {
+	return childReportTool{childID: childID, parent: parent, deliverContext: deliver}
 }
 
 func (childReportTool) Name() string { return ToolReportName }
@@ -900,10 +1318,16 @@ func (t childReportTool) ExecuteResult(ctx context.Context, args any) (agenttool
 	if err := ctx.Err(); err != nil {
 		return agenttools.ToolResult{}, err
 	}
-	if t.deliver == nil {
+	if t.deliver == nil && t.deliverContext == nil {
 		return agenttools.ToolResult{}, fmt.Errorf("%s: direct parent is not live; report was not delivered", ToolReportName)
 	}
-	messageID, err := t.deliver(t.childID, t.parent, input.Output)
+	var messageID string
+	var err error
+	if t.deliverContext != nil {
+		messageID, err = t.deliverContext(ctx, t.childID, t.parent, input.Output)
+	} else {
+		messageID, err = t.deliver(t.childID, t.parent, input.Output)
+	}
 	if err != nil {
 		return agenttools.ToolResult{}, fmt.Errorf("%s: %w", ToolReportName, err)
 	}
@@ -961,19 +1385,30 @@ func (t SubagentResumeTool) Execute(ctx context.Context, args any) (string, erro
 	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("%s: %w", ToolResumeName, err)
 	}
+	parent := t.t.callerSession(ctx)
+	if parent == "" {
+		return "", fmt.Errorf("%s: requires a calling agent", ToolResumeName)
+	}
+	// Resume is a mutating operation on a durable child. The supplied id is
+	// untrusted input and must remain within the caller's descendant boundary,
+	// including after a restart when the process-local child map is empty.
+	if !t.t.isDescendant(a.ID, parent) {
+		return "", fmt.Errorf("%s: subagent %q is not a descendant of the calling agent", ToolResumeName, a.ID)
+	}
 	provider := strings.TrimSpace(a.Provider)
-	if provider == "" {
-		if info, _, ok := t.t.lookup(a.ID); ok && info.provider != "" {
-			provider = info.provider
-		} else {
-			provider = defaultProviderName
+	if info, _, ok := t.t.lookup(a.ID); ok && info != nil && info.provider != "" {
+		if provider != "" && provider != info.provider {
+			return "", fmt.Errorf("%s: provider %q does not match durable provider %q", ToolResumeName, provider, info.provider)
 		}
+		provider = info.provider
+	} else if provider == "" {
+		provider = defaultProviderName
 	}
 	run, err := t.t.rt.Resume(ctx, provider, a.ID, a.Message, a.Continuable)
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", ToolResumeName, err)
 	}
-	t.t.register(run.ID, &childInfo{run: run, provider: provider, label: "resumed"})
+	t.t.register(run.ID, &childInfo{run: run, provider: provider, label: "resumed", parent: parent})
 	return fmt.Sprintf("resumed subagent %s (provider=%s)", run.ID, provider), nil
 }
 
@@ -1012,9 +1447,30 @@ func (t SubagentStatusTool) Execute(ctx context.Context, args any) (string, erro
 	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("subagent_status: %w", err)
 	}
+	parent := t.t.callerSession(ctx)
+	if parent == "" {
+		return "", fmt.Errorf("subagent_status: requires a calling agent")
+	}
+	if !t.t.isDescendant(a.ID, parent) {
+		return "", fmt.Errorf("subagent_status: agent %q is not a descendant of the calling agent", a.ID)
+	}
 	info, res, settled := t.t.lookup(a.ID)
 	if info == nil {
-		return "", fmt.Errorf("subagent_status: unknown subagent %q", a.ID)
+		t.t.mu.Lock()
+		directory := t.t.directory
+		t.t.mu.Unlock()
+		if directory == nil {
+			return "", fmt.Errorf("subagent_status: unknown subagent %q", a.ID)
+		}
+		member, err := directory.Direct(ctx, parent, a.ID)
+		if err != nil {
+			return "", fmt.Errorf("subagent_status: unknown subagent %q", a.ID)
+		}
+		state := "idle"
+		if member.Running {
+			state = "running"
+		}
+		return fmt.Sprintf("subagent %s: %s (provider=agent-registry, label=%q)", member.ID, state, member.Label), nil
 	}
 	if !settled {
 		return fmt.Sprintf("subagent %s: running (provider=%s, label=%q)", a.ID, info.provider, info.label), nil
@@ -1061,9 +1517,29 @@ func (t SubagentCancelTool) Execute(ctx context.Context, args any) (string, erro
 	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("subagent_cancel: %w", err)
 	}
+	parent := t.t.callerSession(ctx)
+	if parent == "" {
+		return "", fmt.Errorf("subagent_cancel: requires a calling agent")
+	}
+	if !t.t.isDescendant(a.ID, parent) {
+		return "", fmt.Errorf("subagent_cancel: agent %q is not a descendant of the calling agent", a.ID)
+	}
 	info, _, _ := t.t.lookup(a.ID)
 	if info == nil {
-		return "", fmt.Errorf("subagent_cancel: unknown subagent %q", a.ID)
+		t.t.mu.Lock()
+		directory := t.t.directory
+		t.t.mu.Unlock()
+		if directory == nil {
+			return "", fmt.Errorf("subagent_cancel: unknown subagent %q", a.ID)
+		}
+		member, err := directory.Direct(ctx, parent, a.ID)
+		if err != nil || member.Cancel == nil {
+			return "", fmt.Errorf("subagent_cancel: unknown subagent %q", a.ID)
+		}
+		if err := member.Cancel(a.Reason); err != nil {
+			return "already-finished", nil
+		}
+		return "requested", nil
 	}
 	if a.Reason == "" {
 		a.Reason = "cancelled via subagent_cancel"
@@ -1108,9 +1584,16 @@ func (t SubagentListTool) Execute(ctx context.Context, args any) (string, error)
 	}
 	parent := a.ParentSession
 	if parent == "" {
-		parent = t.t.callerSession()
+		parent = t.t.callerSession(ctx)
 	}
-	children, err := t.t.rt.ListChildren(ctx, parent)
+	caller := t.t.callerSession(ctx)
+	if caller == "" {
+		return "", fmt.Errorf("subagent_list: requires a calling agent")
+	}
+	if parent != caller && !t.t.isDescendant(parent, caller) {
+		return "", fmt.Errorf("subagent_list: parent %q is outside the calling agent scope", parent)
+	}
+	children, err := t.t.listChildren(ctx, parent)
 	if err != nil {
 		return "", fmt.Errorf("subagent_list: %w", err)
 	}
@@ -1162,7 +1645,7 @@ func (t SubagentListAgentsTool) ExecuteResult(ctx context.Context, args any) (ag
 	if err := agenttools.DecodeArgs(args, &a); err != nil {
 		return agenttools.ToolResult{}, fmt.Errorf("%s: %w", ToolListAgentsName, err)
 	}
-	parent := t.t.callerSession()
+	parent := t.t.callerSession(ctx)
 	if parent == "" {
 		return agenttools.ToolResult{}, fmt.Errorf("%s: requires a calling agent", ToolListAgentsName)
 	}
@@ -1181,7 +1664,7 @@ func (t *SubagentTools) collectAgents(ctx context.Context, parent string, depth 
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	children, err := t.rt.ListChildren(ctx, parent)
+	children, err := t.listChildren(ctx, parent)
 	if err != nil {
 		return err
 	}

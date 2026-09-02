@@ -8,11 +8,55 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jabing/shutu-agent/internal/llm"
 )
 
 // bigOutputTool returns a fixed oversized payload.
 type bigOutputTool struct {
 	text string
+}
+
+type richBigOutputTool struct{ text string }
+
+type contextHandleTool struct{}
+
+type invalidContentTool struct{}
+
+func (invalidContentTool) Name() string        { return "invalid_content" }
+func (invalidContentTool) Description() string { return "returns an invalid content tag" }
+func (invalidContentTool) Schema() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{}}
+}
+func (invalidContentTool) OutputSchema() map[string]any                 { return map[string]any{"type": "string"} }
+func (invalidContentTool) Execute(context.Context, any) (string, error) { return "unused", nil }
+func (invalidContentTool) ExecuteResult(context.Context, any) (ToolResult, error) {
+	return ToolResult{
+		Value: "ok", Output: "ok", Content: []llm.ContentBlock{{Kind: "future-block"}},
+		AdditionalContextMessages: []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("context survives validation")}}},
+	}, nil
+}
+
+func (contextHandleTool) Name() string        { return "context_handle" }
+func (contextHandleTool) Description() string { return "returns a context handle" }
+func (contextHandleTool) Schema() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{}}
+}
+func (contextHandleTool) OutputSchema() map[string]any                 { return map[string]any{"type": "string"} }
+func (contextHandleTool) Execute(context.Context, any) (string, error) { return "ok", nil }
+func (contextHandleTool) ExecuteResult(context.Context, any) (ToolResult, error) {
+	return ToolResult{Value: "ok", Output: "ok", AdditionalContexts: []string{"ctx-1", "ctx-2"}}, nil
+}
+
+func (richBigOutputTool) Name() string        { return "rich_big_out" }
+func (richBigOutputTool) Description() string { return "returns rich content and text" }
+func (richBigOutputTool) Schema() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{}}
+}
+func (richBigOutputTool) OutputSchema() map[string]any                   { return map[string]any{"type": "string"} }
+func (b richBigOutputTool) Execute(context.Context, any) (string, error) { return b.text, nil }
+func (b richBigOutputTool) ExecuteResult(context.Context, any) (ToolResult, error) {
+	return ToolResult{Output: b.text, Content: []llm.ContentBlock{{Kind: llm.BlockImage, Image: llm.ImageRef{ID: "att-1", MediaType: "image/png"}}}}, nil
 }
 
 func (bigOutputTool) Name() string        { return "big_out" }
@@ -97,6 +141,58 @@ func TestExecuteOutputUnderLimitNoSpill(t *testing.T) {
 	}
 }
 
+func TestSpillSkipsRichContent(t *testing.T) {
+	big := strings.Repeat("x", 4096)
+	r := New()
+	if err := r.Register(richBigOutputTool{text: big}); err != nil {
+		t.Fatal(err)
+	}
+	r.SetPolicy(Policy{Enabled: []string{"rich_big_out"}, OutputLimit: 64, SpillDir: t.TempDir()})
+	res, err := r.Execute(context.Background(), "rich_big_out", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.SpillPath != "" || res.Output != big || len(res.Content) != 1 {
+		t.Fatalf("rich result was rewritten by text spill policy: %+v", res)
+	}
+}
+
+func TestOutputNormalizationPreservesAdditionalContexts(t *testing.T) {
+	r := New()
+	if err := r.Register(contextHandleTool{}); err != nil {
+		t.Fatal(err)
+	}
+	r.SetPolicy(Policy{Enabled: []string{"context_handle"}, OutputLimit: 64})
+	res, err := r.Execute(context.Background(), "context_handle", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(res.AdditionalContexts, ","), "ctx-1,ctx-2"; got != want {
+		t.Fatalf("additional contexts = %q, want %q", got, want)
+	}
+}
+
+func TestInvalidRichContentFailsClosed(t *testing.T) {
+	r := New()
+	if err := r.Register(invalidContentTool{}); err != nil {
+		t.Fatal(err)
+	}
+	r.SetPolicy(Policy{Enabled: []string{"invalid_content"}})
+	res, err := r.Execute(context.Background(), "invalid_content", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError || res.Error == nil || res.Error.Code != CodeInvalidToolOutput {
+		t.Fatalf("invalid rich result = %+v, want INVALID_TOOL_OUTPUT", res)
+	}
+	if !strings.Contains(res.Output, "unsupported block kind") {
+		t.Fatalf("invalid rich result output = %q", res.Output)
+	}
+	if len(res.AdditionalContextMessages) != 1 || res.AdditionalContextMessages[0].Text() != "context survives validation" {
+		t.Fatalf("invalid rich result dropped additional context: %+v", res.AdditionalContextMessages)
+	}
+}
+
 // TestSpillKeepsInlineOnWriteFailure is the best-effort degradation: a spill
 // write failure must never turn a successful tool call into an error, so the
 // inline result is kept (mirrors dsh-spill-policy).
@@ -141,5 +237,15 @@ func TestTruncateUTF8NeverSplitsRune(t *testing.T) {
 	// byte of 好, which is invalid, so we must stop at 3 bytes.
 	if got != "你" {
 		t.Fatalf("truncated = %q, want %q", got, "你")
+	}
+}
+
+func TestTruncateResultRetainsHeadAndTail(t *testing.T) {
+	res := truncateResult("HEAD-"+strings.Repeat("x", 100)+"-TAIL", "spill.txt", 160)
+	if !strings.HasPrefix(res.Output, "HEAD-") || !strings.Contains(res.Output, "-TAIL") {
+		t.Fatalf("head/tail preview lost an endpoint: %q", res.Output)
+	}
+	if len(res.Output) > 160 {
+		t.Fatalf("preview exceeds cap: %d", len(res.Output))
 	}
 }

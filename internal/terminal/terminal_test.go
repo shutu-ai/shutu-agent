@@ -1,10 +1,14 @@
 package terminal
 
 import (
-	"path/filepath"
+	"context"
+	"errors"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jabing/shutu-agent/internal/pathsecure"
 )
 
 // testOpts returns short idle/timeout windows so the real-subprocess tests are
@@ -91,7 +95,7 @@ func TestCwdPersists(t *testing.T) {
 	// EvalSymlinks resolves the 8.3 short form (e.g. SWX153~1) to the long path;
 	// `cd /d` is required because the session starts on D: while t.TempDir() is
 	// on C:, and a bare cmd `cd` does not change drives.
-	dir, err := filepath.EvalSymlinks(t.TempDir())
+	dir, err := pathsecure.ResolveExisting(t.TempDir())
 	if err != nil {
 		t.Fatalf("EvalSymlinks(temp) error = %v", err)
 	}
@@ -175,6 +179,48 @@ func TestWriteTimeout(t *testing.T) {
 	}
 	if res.Wait != WaitTimeout {
 		t.Errorf("Write().Wait = %q, want %q", res.Wait, WaitTimeout)
+	}
+}
+
+func TestWriteContextCancelsForegroundCommand(t *testing.T) {
+	// Keep the shell's idle window longer than the cancellation delay; idle is
+	// only a heuristic that foreground work finished, not a kill signal.
+	s, err := NewSession(SessionOpts{IdleMS: 1000, TimeoutMS: 5000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	command := "sleep 10"
+	if runtime.GOOS == "windows" {
+		command = "ping -n 10 127.0.0.1"
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	var res WriteResult
+	var writeErr error
+	go func() {
+		defer close(done)
+		res, writeErr = s.WriteContext(ctx, command, true)
+	}()
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("WriteContext ignored caller cancellation")
+	}
+	if !errors.Is(writeErr, context.Canceled) {
+		t.Fatalf("WriteContext error = %v, result=%+v, want context.Canceled", writeErr, res)
+	}
+	if res.Wait != WaitCancelled {
+		t.Fatalf("WriteContext wait = %q, want %q", res.Wait, WaitCancelled)
+	}
+	if !waitKind(s, "exited", 3*time.Second) {
+		t.Fatalf("cancelled terminal still %v; want reset", s.Status())
+	}
+	if _, err := s.Write("echo after-cancel", true); err == nil {
+		t.Fatal("reset terminal accepted input")
 	}
 }
 

@@ -21,6 +21,20 @@ type Message struct {
 	Content    []ContentBlock // parts; use Text()/SetText() for plain text
 	ToolCallID string         // role=tool only: the call id this result answers
 	ToolCalls  []ToolCall     // role=assistant only: tool calls this message emitted
+	// SourceKind/SourcePlugin are runtime-only provenance carried from a
+	// pre-step extension into the durable session event. They are intentionally
+	// not part of provider wire encoding.
+	SourceKind   string
+	SourcePlugin string
+	// Team-message provenance is runtime-only until session.NewUserMessageAt
+	// projects it into the durable source object. Persisted marks an input
+	// already accepted by the target Session receipt transaction, so the loop
+	// does not append a second user/message row.
+	SourceTeamID     string
+	SourceMessageID  string
+	SourceSenderID   string
+	SourceSenderName string
+	Persisted        bool
 }
 
 // Text concatenates every BlockText block's Text. Reasoning blocks are
@@ -72,4 +86,43 @@ func hasImageBlocks(blocks []ContentBlock) bool {
 		}
 	}
 	return false
+}
+
+// HasUnsupportedInput reports whether message content contains a block the
+// provider request layer cannot encode. The durable log may preserve
+// merge-extensible audio/resource/vendor blocks, but preserving those bytes is
+// not permission to send them to a provider that only honors the core request
+// vocabulary. Checks recurse into nested tool-result content.
+func (m Message) HasUnsupportedInput() bool {
+	return hasUnsupportedRequestBlocks(m.Content)
+}
+
+func hasUnsupportedRequestBlocks(blocks []ContentBlock) bool {
+	for _, block := range blocks {
+		switch block.Kind {
+		case BlockText, BlockReasoning, BlockImage, BlockToolCall, BlockToolResult:
+		default:
+			return true
+		}
+		if len(block.Blocks) > 0 && hasUnsupportedRequestBlocks(block.Blocks) {
+			return true
+		}
+	}
+	return false
+}
+
+// ValidateRequestBlocks rejects non-core request content before credentials,
+// attachment reads, image offloading, and network I/O. The stable code lets
+// transports and replay clients classify audio/vendor input without parsing
+// provider-specific diagnostics.
+func ValidateRequestBlocks(provider string, messages []Message) error {
+	for _, message := range messages {
+		if message.HasUnsupportedInput() {
+			return NewFailureError(
+				provider+": request contains an unsupported content block",
+				"UNSUPPORTED_INPUT_CONTENT", nil,
+			)
+		}
+	}
+	return nil
 }

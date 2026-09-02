@@ -22,6 +22,8 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/jabing/shutu-agent/internal/llm"
 )
@@ -33,8 +35,10 @@ const (
 	// defaultModel is the default model when Config.Model is empty. Kept in
 	// sync with config.DefaultAnthropicModel (dispatch-m8-2b §3).
 	defaultModel = "claude-sonnet-4-5"
-	// defaultMaxTokens is the response token budget (dispatch-m8-2b §2.1).
-	defaultMaxTokens = 4096
+	// defaultMaxTokens is the route-level request default used by the
+	// reference pi-ai adapter. It is separate from ModelInfo.MaxTokens, which
+	// describes model capacity rather than a per-request budget.
+	defaultMaxTokens = 32768
 	// apiVersion is the anthropic-version header (dispatch-m8-2b §2.1).
 	apiVersion = "2023-06-01"
 	// providerID is the stable provider id (dispatch-m8-2b §2.3).
@@ -65,11 +69,15 @@ type Config struct {
 	// non-empty ID lets the composition root register arbitrary Anthropic
 	// Messages-compatible endpoints (M11-pi-ai: minimax / minimax-cn /
 	// kimi-coding / vercel-ai-gateway) under their own route.
-	ID      string
-	BaseURL string // default https://api.anthropic.com/v1 ("/messages" appended)
-	APIKey  string // ANTHROPIC_API_KEY value; empty means absent
-	Model   string // default claude-sonnet-4-5
-	// MaxTokens is the response token budget; <= 0 uses the default 4096
+	ID                      string
+	BaseURL                 string // default https://api.anthropic.com/v1 ("/messages" appended)
+	APIKey                  string // ANTHROPIC_API_KEY value; empty means absent
+	CredentialProvider      llm.CredentialProvider
+	CredentialLeaseProvider llm.CredentialLeaseProvider
+	Model                   string // default claude-sonnet-4-5
+	ModelCatalog            []llm.ModelInfo
+	// MaxTokens is the route-level response token budget; <= 0 uses the
+	// reference default 32768
 	// (advanced max_tokens/temperature/stop knobs are out of scope this
 	// milestone, dispatch-m8-2b §1).
 	MaxTokens int
@@ -92,15 +100,19 @@ type Config struct {
 // anthropicProvider is the llm.Provider implementing the Anthropic Messages
 // API (dispatch-m8-2b §2.3).
 type anthropicProvider struct {
-	id        string
-	baseURL   string
-	apiKey    string
-	model     string
-	maxTokens int
-	client    *http.Client
+	id                      string
+	baseURL                 string
+	apiKey                  string
+	apiKeyMu                sync.RWMutex
+	credentialProvider      llm.CredentialProvider
+	credentialLeaseProvider llm.CredentialLeaseProvider
+	model                   string
+	maxTokens               int
+	client                  *http.Client
 
 	supportsImages       bool
 	maxRequestImageBytes int
+	modelCatalog         []llm.ModelInfo
 }
 
 // New returns an anthropicProvider with defaults applied (base URL, model,
@@ -125,14 +137,17 @@ func New(cfg Config) *anthropicProvider {
 		cfg.MaxRequestImageBytes = defaultMaxRequestImageBytes
 	}
 	return &anthropicProvider{
-		id:                   cfg.ID,
-		baseURL:              strings.TrimRight(cfg.BaseURL, "/"),
-		apiKey:               cfg.APIKey,
-		model:                cfg.Model,
-		maxTokens:            cfg.MaxTokens,
-		client:               cfg.HTTPClient,
-		supportsImages:       cfg.SupportsImages,
-		maxRequestImageBytes: cfg.MaxRequestImageBytes,
+		id:                      cfg.ID,
+		baseURL:                 strings.TrimRight(cfg.BaseURL, "/"),
+		apiKey:                  cfg.APIKey,
+		credentialProvider:      cfg.CredentialProvider,
+		credentialLeaseProvider: cfg.CredentialLeaseProvider,
+		model:                   cfg.Model,
+		maxTokens:               cfg.MaxTokens,
+		client:                  cfg.HTTPClient,
+		supportsImages:          cfg.SupportsImages,
+		maxRequestImageBytes:    cfg.MaxRequestImageBytes,
+		modelCatalog:            llm.CopyModelCatalog(cfg.ModelCatalog),
 	}
 }
 
@@ -140,12 +155,79 @@ func New(cfg Config) *anthropicProvider {
 // the custom route configured via Config.ID).
 func (p *anthropicProvider) ID() string { return p.id }
 
+func (p *anthropicProvider) SupportsImages() bool { return p.supportsImages }
+
+func (p *anthropicProvider) ListModels(context.Context) ([]llm.ModelInfo, error) {
+	return llm.CopyModelCatalog(p.modelCatalog), nil
+}
+
+func (p *anthropicProvider) ResolveModelInfo(_ context.Context, model string) (llm.ModelInfo, error) {
+	info, err := llm.ResolveModelFromCatalog(p.id, p.modelCatalog, model)
+	if err != nil {
+		return llm.ModelInfo{}, err
+	}
+	info.DefaultMaxTokens = llm.ModelDefaultMaxTokens(p.modelCatalog, model)
+	return info, nil
+}
+
+func (p *anthropicProvider) Close() error {
+	if p == nil {
+		return nil
+	}
+	p.apiKeyMu.Lock()
+	p.apiKey = ""
+	p.credentialProvider = nil
+	p.credentialLeaseProvider = nil
+	p.apiKeyMu.Unlock()
+	return nil
+}
+
+func (p *anthropicProvider) keySnapshot(ctx context.Context) (string, error) {
+	p.apiKeyMu.RLock()
+	provider := p.credentialProvider
+	key := p.apiKey
+	p.apiKeyMu.RUnlock()
+	if provider != nil {
+		return provider(ctx)
+	}
+	return key, nil
+}
+
+func (p *anthropicProvider) keyLease(ctx context.Context) (string, llm.CredentialLease, error) {
+	p.apiKeyMu.RLock()
+	leaseProvider := p.credentialLeaseProvider
+	provider := p.credentialProvider
+	key := p.apiKey
+	p.apiKeyMu.RUnlock()
+	if leaseProvider != nil {
+		lease, err := leaseProvider(ctx)
+		if err != nil {
+			return "", nil, err
+		}
+		if lease == nil {
+			return "", nil, nil
+		}
+		value := lease.Value()
+		if value == "" {
+			lease.Release()
+			return "", nil, nil
+		}
+		return value, lease, nil
+	}
+	if provider != nil {
+		value, err := provider(ctx)
+		return value, nil, err
+	}
+	return key, nil, nil
+}
+
 // Available reports whether the provider can be used: a cheap local check that
 // never performs a network call — apiKey present and base URL parseable (same
 // shape as deepseek.Client.Available / web.DeepSeekSearchProvider.Available,
 // dispatch-m8-2b §2.3).
 func (p *anthropicProvider) Available() bool {
-	if p.apiKey == "" {
+	key, err := p.keySnapshot(context.Background())
+	if err != nil || key == "" {
 		return false
 	}
 	u, err := url.Parse(p.baseURL)
@@ -161,11 +243,34 @@ func (p *anthropicProvider) Available() bool {
 // decoded per §2.2. ctx cancellation runs through the HTTP request and the
 // body reads.
 func (p *anthropicProvider) Stream(ctx context.Context, req llm.ChatRequest) (llm.StreamReader, error) {
+	if err := llm.ValidateRequestBlocks(p.ID(), req.Messages); err != nil {
+		return nil, err
+	}
+	apiKey, credentialLease, err := p.keyLease(ctx)
+	if err != nil {
+		return nil, llm.NewFailureError("anthropic: credential resolution failed", "CREDENTIAL_UNAVAILABLE", err)
+	}
+	leaseTransferred := false
+	defer func() {
+		if !leaseTransferred && credentialLease != nil {
+			credentialLease.Release()
+		}
+	}()
+	if apiKey == "" {
+		return nil, llm.NewFailureError("anthropic: credential unavailable", "CREDENTIAL_UNAVAILABLE", nil)
+	}
+	model := strings.TrimSpace(req.Model)
+	if model == "" {
+		model = p.model
+	}
+	if err := llm.ValidateReasoningEffortForModel(p.ID(), p.modelCatalog, model, req.ReasoningEffort); err != nil {
+		return nil, err
+	}
 	// M8-3b image fail-closed check FIRST (dispatch-m8-3b §3): a model that
 	// does not declare image input must error on an image request, never
 	// silently drop it. The check runs before offload so offloading cannot
 	// mask an image.
-	if !p.supportsImages {
+	if !llm.ModelSupportsImages(p.supportsImages, p.modelCatalog, model) {
 		for _, m := range req.Messages {
 			if m.HasImage() {
 				return nil, fmt.Errorf("%s: model does not support image input (model_input_modalities=text)", p.ID())
@@ -181,13 +286,34 @@ func (p *anthropicProvider) Stream(ctx context.Context, req llm.ChatRequest) (ll
 	if err != nil {
 		return nil, err
 	}
+	maxTokens := p.maxTokens
+	if catalogDefault := llm.ModelDefaultMaxTokens(p.modelCatalog, model); catalogDefault > 0 {
+		maxTokens = catalogDefault
+	}
+	if req.MaxTokens > 0 {
+		maxTokens = req.MaxTokens
+	}
+	effort := strings.TrimSpace(req.ReasoningEffort)
+	if effort == "" {
+		effort = llm.ModelDefaultReasoningEffort(p.modelCatalog, model)
+	}
+	reasoning, reasoningKnown := llm.ModelReasoningCapability(p.modelCatalog, model)
+	thinking := thinkingForEffort(effort, req.ReasoningBudgetTokens, reasoningKnown && reasoning)
+	temperature := req.Temperature
+	if thinking != nil && thinking.Type == "enabled" {
+		// Anthropic rejects temperature together with extended thinking.
+		temperature = nil
+	}
 	body := requestBody{
-		Model:     p.model,
-		MaxTokens: p.maxTokens,
-		System:    extractSystem(msgs),
-		Messages:  messages,
-		Tools:     toWireTools(req.Tools),
-		Stream:    true,
+		Model:       model,
+		MaxTokens:   maxTokens,
+		Temperature: temperature,
+		Stop:        append([]string(nil), req.Stop...),
+		System:      extractSystem(msgs),
+		Messages:    messages,
+		Tools:       toWireTools(req.Tools),
+		Stream:      true,
+		Thinking:    thinking,
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -198,24 +324,29 @@ func (p *anthropicProvider) Stream(ctx context.Context, req llm.ChatRequest) (ll
 	if err != nil {
 		return nil, fmt.Errorf("anthropic: build request: %w", err)
 	}
-	httpReq.Header.Set("x-api-key", p.apiKey)
+	httpReq.Header.Set("x-api-key", apiKey)
 	httpReq.Header.Set("anthropic-version", apiVersion)
 	httpReq.Header.Set("content-type", "application/json")
 	httpReq.Header.Set("accept", "application/json")
+	llm.ApplyAttributionHeaders(httpReq.Header)
 
 	resp, err := p.doNoRedirect(httpReq)
 	if err != nil {
 		return nil, err
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return newStreamReader(resp), nil
+		reader := newStreamReader(resp)
+		reader.credentialLease = credentialLease
+		leaseTransferred = credentialLease != nil
+		return reader, nil
 	}
 	defer resp.Body.Close()
 	detail := errorDetail(resp)
 	if detail == "" {
 		detail = resp.Status
 	}
-	return nil, fmt.Errorf("anthropic: provider error: %s", detail)
+	return nil, llm.ClassifyHTTPFailureWithMetadata("anthropic", resp.StatusCode, resp.Status, detail,
+		llm.RetryAfterMilliseconds(resp.Header.Get("Retry-After"), time.Now()), resp.Header.Get("request-id"))
 }
 
 // doNoRedirect issues httpReq with a no-follow redirect policy (any 3xx is
@@ -233,12 +364,12 @@ func (p *anthropicProvider) doNoRedirect(req *http.Request) (*http.Response, err
 	resp, err := client.Do(req)
 	if err != nil {
 		if errors.Is(err, errRedirectDetected) {
-			return nil, fmt.Errorf("anthropic: redirect blocked (3xx not followed)")
+			return nil, llm.NewFailureError("anthropic: redirect blocked (3xx not followed)", "TRANSPORT", err)
 		}
 		if req.Context().Err() != nil {
-			return nil, fmt.Errorf("anthropic: cancelled: %w", req.Context().Err())
+			return nil, llm.NewFailureError("anthropic: cancelled: "+req.Context().Err().Error(), "ABORTED", req.Context().Err())
 		}
-		return nil, fmt.Errorf("anthropic: request failed: %w", err)
+		return nil, llm.NewFailureError("anthropic: request failed: "+err.Error(), "TRANSPORT", err)
 	}
 	return resp, nil
 }
@@ -285,12 +416,37 @@ type wireTool struct {
 }
 
 type requestBody struct {
-	Model     string        `json:"model"`
-	MaxTokens int           `json:"max_tokens"`
-	System    string        `json:"system,omitempty"` // extracted RoleSystem text
-	Messages  []wireMessage `json:"messages"`
-	Tools     []wireTool    `json:"tools,omitempty"`
-	Stream    bool          `json:"stream"`
+	Model       string        `json:"model"`
+	MaxTokens   int           `json:"max_tokens"`
+	Temperature *float64      `json:"temperature,omitempty"`
+	Stop        []string      `json:"stop_sequences,omitempty"`
+	System      string        `json:"system,omitempty"` // extracted RoleSystem text
+	Messages    []wireMessage `json:"messages"`
+	Tools       []wireTool    `json:"tools,omitempty"`
+	Stream      bool          `json:"stream"`
+	Thinking    *thinkingWire `json:"thinking,omitempty"`
+}
+
+type thinkingWire struct {
+	Type         string `json:"type"`
+	BudgetTokens int    `json:"budget_tokens,omitempty"`
+}
+
+func thinkingForEffort(effort string, budget int, reasoningKnownTrue bool) *thinkingWire {
+	switch strings.TrimSpace(effort) {
+	case "off":
+		if !reasoningKnownTrue {
+			return nil
+		}
+		return &thinkingWire{Type: "disabled"}
+	case "minimal", "low", "medium", "high", "xhigh", "max":
+		if budget <= 0 {
+			budget = 1024
+		}
+		return &thinkingWire{Type: "enabled", BudgetTokens: budget}
+	default:
+		return nil
+	}
 }
 
 // extractSystem joins every RoleSystem message's text into the top-level

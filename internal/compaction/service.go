@@ -42,17 +42,44 @@ type Result struct {
 	ShadowedRange  [2]int64 // first/last shadowed surface seq (event seq span)
 	ShadowedSeqs   []int64  // every event seq in [Start, End] — the authoritative fold set
 	ShadowedTokens int      // estimated tokens of the shadowed surface
+	Measurement    SurfaceMeasurement
 }
 
 // SessionLike is the minimal session surface a compaction consumer needs (D2).
 // *session.Log satisfies it: Events is read-only (the provider never mutates
-// old events, D1), Append is how the summary marker lands, DeriveHistory is
-// the current model-visible surface.
+// old events, D1), and Append is how the summary marker lands. The current
+// model-visible surface is rebuilt by BasicEngine through internal/projection
+// from Events, so compaction shares the same history authority as the loop.
 type SessionLike interface {
 	Events() []session.Event
 	Append(typ string, data any) (session.Event, error)
-	DeriveHistory() []llm.Message
 }
+
+// SurfaceNode is one currently model-visible event and its price.  The
+// sequence is the durable event sequence, not the node's positional index;
+// replacements therefore remain auditable after a log has been folded.
+type SurfaceNode struct {
+	Seq    uint64
+	Tokens int
+}
+
+// SurfaceMeasurement is the detached pressure projection consumed by
+// compaction.  A provider may supply the same measurement used by telemetry;
+// when absent BasicEngine retains its legacy injected estimator for standalone
+// use and tests.
+type SurfaceMeasurement struct {
+	LogRevision             uint64
+	BaselineEstimatedTokens int
+	BaselineUsageTokens     int
+	SurfaceDeltaTokens      int
+	TotalTokens             int
+	SurfaceTokens           int
+	Nodes                   []SurfaceNode
+}
+
+// SurfaceMeter prices a replayed session surface.  It deliberately accepts
+// SessionLike rather than *session.Log so compaction remains provider-agnostic.
+type SurfaceMeter func(SessionLike) SurfaceMeasurement
 
 // Engine is the compaction Service (ADR 决策 ③). Providers implement it.
 type Engine interface {

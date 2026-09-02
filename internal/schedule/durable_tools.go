@@ -11,15 +11,41 @@ import (
 )
 
 type DurableScheduleTools struct {
-	s   *DurableScheduler
-	now func() time.Time
+	s       *DurableScheduler
+	resolve func(context.Context) (*DurableScheduler, error)
+	now     func() time.Time
 }
 
 func NewDurableScheduleTools(s *DurableScheduler, now func() time.Time) *DurableScheduleTools {
+	return newDurableScheduleTools(s, nil, now)
+}
+
+// NewDurableScheduleToolsWithResolver binds the tools to the scheduler owned by
+// the caller's runtime context. This is the production seam for session-local
+// reminders; the legacy constructor remains useful for isolated callers and
+// package tests.
+func NewDurableScheduleToolsWithResolver(resolve func(context.Context) (*DurableScheduler, error), now func() time.Time) *DurableScheduleTools {
+	return newDurableScheduleTools(nil, resolve, now)
+}
+
+func newDurableScheduleTools(s *DurableScheduler, resolve func(context.Context) (*DurableScheduler, error), now func() time.Time) *DurableScheduleTools {
 	if now == nil {
 		now = time.Now
 	}
-	return &DurableScheduleTools{s: s, now: now}
+	return &DurableScheduleTools{s: s, resolve: resolve, now: now}
+}
+
+func (t *DurableScheduleTools) scheduler(ctx context.Context) (*DurableScheduler, error) {
+	if t == nil {
+		return nil, ErrDurableClosed
+	}
+	if t.resolve != nil {
+		return t.resolve(ctx)
+	}
+	if t.s == nil {
+		return nil, ErrDurableClosed
+	}
+	return t.s, nil
 }
 
 func (t DurableCreateTool) Execute(ctx context.Context, args any) (string, error) {
@@ -36,7 +62,11 @@ func (t DurableCreateTool) Execute(ctx context.Context, args any) (string, error
 	if err != nil {
 		return "", fmt.Errorf("schedule_create: %w", err)
 	}
-	record, err := t.t.s.Create(ctx, DurableCreateRequest{Prompt: in.Prompt, AfterSeconds: in.AfterSeconds, At: at, AtLocal: atLocal, EverySeconds: in.EverySeconds}, t.t.now())
+	scheduler, err := t.t.scheduler(ctx)
+	if err != nil {
+		return "", fmt.Errorf("schedule_create: %w", err)
+	}
+	record, err := scheduler.Create(ctx, DurableCreateRequest{Prompt: in.Prompt, AfterSeconds: in.AfterSeconds, At: at, AtLocal: atLocal, EverySeconds: in.EverySeconds}, t.t.now())
 	if err != nil {
 		return "", fmt.Errorf("schedule_create: %w", err)
 	}
@@ -117,7 +147,11 @@ func (DurableListTool) Schema() map[string]any {
 }
 
 func (t DurableListTool) Execute(ctx context.Context, args any) (string, error) {
-	views, err := t.t.s.List(ctx, t.t.now())
+	scheduler, err := t.t.scheduler(ctx)
+	if err != nil {
+		return "", fmt.Errorf("schedule_list: %w", err)
+	}
+	views, err := scheduler.List(ctx, t.t.now())
 	if err != nil {
 		return "", fmt.Errorf("schedule_list: %w", err)
 	}
@@ -155,7 +189,11 @@ func (t DurableDeleteTool) Execute(ctx context.Context, args any) (string, error
 	if in.ID == "" || strings.TrimSpace(in.ID) != in.ID {
 		return "", fmt.Errorf("schedule_delete: invalid id")
 	}
-	deleted, err := t.t.s.Delete(ctx, in.ID)
+	scheduler, err := t.t.scheduler(ctx)
+	if err != nil {
+		return "", fmt.Errorf("schedule_delete: %w", err)
+	}
+	deleted, err := scheduler.Delete(ctx, in.ID)
 	if err != nil {
 		return "", fmt.Errorf("schedule_delete: %w", err)
 	}

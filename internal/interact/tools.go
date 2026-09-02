@@ -25,8 +25,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 	agenttools "github.com/jabing/shutu-agent/internal/tools"
 	"strings"
+	"time"
 
 	"github.com/jabing/shutu-agent/internal/session"
 )
@@ -41,8 +43,11 @@ const (
 // InteractTools bundles the shared state of the two interact_* tools: the
 // Engine service and the event sink.
 type InteractTools struct {
-	e       Engine
-	onEvent func(typ string, data any)
+	e          Engine
+	onEvent    func(typ string, data any)
+	onEventErr func(typ string, data any) error
+	sessionID  func() string
+	logFor     func(context.Context) (*session.Log, error)
 }
 
 // NewInteractTools returns the shared interact-tool bundle bound to an Engine.
@@ -50,6 +55,118 @@ type InteractTools struct {
 // composition root wires it to the session log (D3).
 func NewInteractTools(e Engine, onEvent func(typ string, data any)) *InteractTools {
 	return &InteractTools{e: e, onEvent: onEvent}
+}
+
+// NewInteractToolsWithSession binds requests to the currently addressed
+// session. The callback is evaluated at execution time so session switches do
+// not leave an approval request owned by the previous conversation.
+func NewInteractToolsWithSession(e Engine, onEvent func(typ string, data any), sessionID func() string) *InteractTools {
+	return &InteractTools{e: e, onEvent: onEvent, sessionID: sessionID}
+}
+
+// NewInteractToolsWithSessionAndErrorSink is the durable composition-root
+// variant. Legacy callers retain the void callback, while runtimes that need
+// approval facts to be commit-before-visible can return append failures to the
+// tool execution instead of silently continuing with an unlogged request.
+func NewInteractToolsWithSessionAndErrorSink(e Engine, onEvent func(typ string, data any), onEventErr func(typ string, data any) error, sessionID func() string) *InteractTools {
+	return &InteractTools{e: e, onEvent: onEvent, onEventErr: onEventErr, sessionID: sessionID}
+}
+
+// SetSessionLogResolver enables the durable creation-side approval seam for
+// interact tools. It is optional so package-level embedders and compatibility
+// test doubles can keep the legacy event callback.
+func (t *InteractTools) SetSessionLogResolver(resolve func(context.Context) (*session.Log, error)) {
+	if t != nil {
+		t.logFor = resolve
+	}
+}
+
+func (t *InteractTools) currentSession(ctx ...context.Context) string {
+	if len(ctx) > 0 {
+		if sessionID := runtimectx.SessionID(ctx[0]); sessionID != "" {
+			return sessionID
+		}
+	}
+	if t.sessionID == nil {
+		return ""
+	}
+	return strings.TrimSpace(t.sessionID())
+}
+
+func (t *InteractTools) request(ctx context.Context, prompt, toolName, args string) (Request, error) {
+	if sessionID := t.currentSession(ctx); sessionID != "" {
+		if requester, ok := t.e.(SessionRequester); ok {
+			return requester.RequestForSession(ctx, sessionID, prompt, toolName, args)
+		}
+	}
+	return t.e.Request(ctx, prompt, toolName, args)
+}
+
+func (t *InteractTools) requestWithQuestions(ctx context.Context, prompt, toolName, args string, questions []Question) (Request, error) {
+	if sessionID := t.currentSession(ctx); sessionID != "" {
+		if requester, ok := t.e.(StructuredSessionRequester); ok {
+			return requester.RequestForSessionWithQuestions(ctx, sessionID, prompt, toolName, args, questions)
+		}
+	}
+	requester, ok := t.e.(StructuredRequester)
+	if !ok {
+		return Request{}, fmt.Errorf("structured questions are unavailable")
+	}
+	return requester.RequestWithQuestions(ctx, prompt, toolName, args, questions)
+}
+
+// requestWithAudit creates an approval request and, when a durable session log
+// plus an atomic provider are available, returns the already-committed asked
+// event for projection into that log. The bool is false for compatibility
+// providers, which continue through emitContext and rollback on append failure.
+func (t *InteractTools) requestWithAudit(ctx context.Context, prompt, toolName, args string, questions []Question) (Request, bool, session.Event, *session.Log, error) {
+	sessionID := t.currentSession(ctx)
+	if sessionID == "" || t.logFor == nil {
+		if len(questions) > 0 {
+			req, err := t.requestWithQuestions(ctx, prompt, toolName, args, questions)
+			return req, false, session.Event{}, nil, err
+		}
+		req, err := t.request(ctx, prompt, toolName, args)
+		return req, false, session.Event{}, nil, err
+	}
+	log, err := t.logFor(ctx)
+	if err != nil || log == nil {
+		if err == nil {
+			err = errors.New("session log is unavailable")
+		}
+		return Request{}, false, session.Event{}, nil, err
+	}
+	if correlation, ok := runtimectx.CorrelationOf(ctx); ok && correlation.TurnID != "" && !session.HasOpenTurn(log.Events()) {
+		return Request{}, false, session.Event{}, nil, errors.New("interact: approval request requires an open turn")
+	}
+	callID := agenttools.CallIDFromContext(ctx)
+	var asked session.Event
+	makeEvent := func(created Request) session.Event {
+		payload := session.NewInteractRequestDetailWithCallID(created.ID, callID, toolName, created.Prompt, created.Args, created.Questions)
+		asked = session.Event{Seq: log.NextSeq(), Type: session.EventApprovalAsked, At: time.Now().UTC(), Version: session.EventVersion, Data: marshalEvent(payload)}
+		return asked
+	}
+	if len(questions) > 0 {
+		requester, ok := t.e.(AtomicStructuredSessionRequester)
+		if !ok {
+			req, fallbackErr := t.requestWithQuestions(ctx, prompt, toolName, args, questions)
+			return req, false, session.Event{}, nil, fallbackErr
+		}
+		req, atomic, eventErr := requester.RequestForSessionWithQuestionsAndEvent(ctx, sessionID, prompt, toolName, args, questions, makeEvent)
+		return req, atomic, asked, log, eventErr
+	}
+	requester, ok := t.e.(AtomicSessionCallRequester)
+	if !ok {
+		req, fallbackErr := t.request(ctx, prompt, toolName, args)
+		return req, false, session.Event{}, nil, fallbackErr
+	}
+	req, atomic, eventErr := requester.RequestForSessionWithCallIDAndEvent(ctx, sessionID, callID, prompt, toolName, args, makeEvent)
+	return req, atomic, asked, log, eventErr
+}
+
+func marshalEvent(value any) json.RawMessage {
+	raw, _ := json.Marshal(value)
+	return raw
 }
 
 // Ask returns the interact_ask tool.
@@ -68,6 +185,20 @@ func (t *InteractTools) emit(typ string, data any) {
 	if t.onEvent != nil {
 		t.onEvent(typ, data)
 	}
+}
+
+func (t *InteractTools) emitContext(ctx context.Context, typ string, data any) error {
+	if runtime, ok := runtimectx.Get(ctx); ok && runtime.Emit != nil {
+		if canonical, value, projected := session.CanonicalApprovalEvent(typ, data); projected {
+			return runtime.Emit(canonical, value)
+		}
+		return runtime.Emit(typ, data)
+	}
+	if t.onEventErr != nil {
+		return t.onEventErr(typ, data)
+	}
+	t.emit(typ, data)
+	return nil
 }
 
 // boundArgs trims args to the engine's stored-args bound (maxArgsLen runes,
@@ -136,24 +267,38 @@ func (t InteractAskTool) Execute(ctx context.Context, args any) (string, error) 
 		return "", fmt.Errorf("interact_ask: %w", err)
 	}
 	rawArgs, _ := json.Marshal(args)
-	var req Request
-	var err error
-	if len(a.Questions) > 0 {
-		structured, ok := t.t.e.(StructuredRequester)
-		if !ok {
-			return "", fmt.Errorf("structured questions are unavailable")
-		}
-		req, err = structured.RequestWithQuestions(ctx, a.Prompt, ToolAskName, boundArgs(string(rawArgs)), a.Questions)
-	} else {
-		req, err = t.t.e.Request(ctx, a.Prompt, ToolAskName, boundArgs(string(rawArgs)))
-	}
+	req, atomic, askedEvent, askedLog, err := t.t.requestWithAudit(ctx, a.Prompt, ToolAskName, boundArgs(string(rawArgs)), a.Questions)
 	if err != nil {
 		return "", fmt.Errorf("interact_ask: %w", err)
+	}
+	if req.Status == StatusRejected && req.ID == "" {
+		return "approval rejected by session policy (no pending request created)", nil
+	}
+	if req.Status == StatusUnavailable && req.ID == "" {
+		return "approval unavailable (no answerer is configured)", nil
 	}
 	// interact/request is a log-only fact (D3); the created request's id and
 	// triggering tool are logged, and the returned text is what the loop logs
 	// as tool/result.
-	t.t.emit(session.EventInteractRequest, session.NewInteractRequestDetail(req.ID, req.ToolName, req.Prompt, req.Args, req.Questions))
+	var emitErr error
+	if atomic {
+		if askedLog != nil {
+			emitErr = askedLog.AppendPersisted(askedEvent)
+		} else {
+			emitErr = errors.New("session log is unavailable")
+		}
+	} else {
+		emitErr = t.t.emitContext(ctx, session.EventInteractRequest, session.NewInteractRequestDetail(req.ID, req.ToolName, req.Prompt, req.Args, req.Questions))
+	}
+	if emitErr != nil {
+		// A request is not durable/answerable until its asked fact commits.
+		// Roll back the in-memory row on a failed append so a retry cannot leave
+		// an invisible pending item consuming the approval cap.
+		if canceler, ok := t.t.e.(Canceler); ok && req.ID != "" {
+			_, _ = canceler.Cancel(context.Background(), req.ID)
+		}
+		return "", fmt.Errorf("interact_ask: persist request event: %w", emitErr)
+	}
 	return fmt.Sprintf("created approval request %s (status=%s); the user will answer on their terminal", req.ID, req.Status), nil
 }
 
@@ -163,6 +308,10 @@ func (t InteractAskTool) Execute(ctx context.Context, args any) (string, error) 
 type AskUserQuestionTool struct{ t *InteractTools }
 
 func (AskUserQuestionTool) Name() string { return ToolAskUserQuestionName }
+
+// CancellationAware is explicit: awaiting the human answer observes the
+// registry context and cancels the pending request on abort.
+func (AskUserQuestionTool) CancellationAware() bool { return true }
 func (AskUserQuestionTool) Description() string {
 	return "Ask the user a concise question when you need confirmation, a choice, or missing information before proceeding. Send one or more questions, each with a stable id that will be echoed in the answer."
 }
@@ -214,22 +363,44 @@ func (t AskUserQuestionTool) Execute(ctx context.Context, args any) (string, err
 	if err := validateQuestions(questions); err != nil {
 		return "", fmt.Errorf("ask_user_question: %w", err)
 	}
-	structured, ok := t.t.e.(StructuredRequester)
-	if !ok {
-		return "", fmt.Errorf("ask_user_question: structured questions are unavailable")
-	}
 	rawArgs, _ := json.Marshal(args)
-	req, err := structured.RequestWithQuestions(ctx, "Please answer the following questions.", ToolAskUserQuestionName, boundArgs(string(rawArgs)), questions)
+	req, atomic, askedEvent, askedLog, err := t.t.requestWithAudit(ctx, "Please answer the following questions.", ToolAskUserQuestionName, boundArgs(string(rawArgs)), questions)
 	if err != nil {
 		return "", fmt.Errorf("ask_user_question: %w", err)
 	}
-	t.t.emit(session.EventInteractRequest, session.NewInteractRequestDetail(req.ID, req.ToolName, req.Prompt, req.Args, req.Questions))
+	if req.Status == StatusRejected && req.ID == "" {
+		return "", errors.New("ask_user_question was rejected by the session approval policy")
+	}
+	if req.Status == StatusUnavailable && req.ID == "" {
+		return "", errors.New("ask_user_question is unavailable: no answerer is registered")
+	}
+	var emitErr error
+	if atomic {
+		if askedLog != nil {
+			emitErr = askedLog.AppendPersisted(askedEvent)
+		} else {
+			emitErr = errors.New("session log is unavailable")
+		}
+	} else {
+		emitErr = t.t.emitContext(ctx, session.EventInteractRequest, session.NewInteractRequestDetail(req.ID, req.ToolName, req.Prompt, req.Args, req.Questions))
+	}
+	if emitErr != nil {
+		// Do not retain a pending question whose durable request fact did not
+		// commit. A subsequent model retry must be able to create a fresh,
+		// answerable request without an orphan occupying the pending cap.
+		if canceler, ok := t.t.e.(Canceler); ok && req.ID != "" {
+			_, _ = canceler.Cancel(context.Background(), req.ID)
+		}
+		return "", fmt.Errorf("ask_user_question: persist request event: %w", emitErr)
+	}
 	resolved, err := t.t.e.Await(ctx, req.ID)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			if canceler, ok := t.t.e.(Canceler); ok {
 				if _, cancelErr := canceler.Cancel(context.Background(), req.ID); cancelErr == nil {
-					t.t.emit(session.EventInteractCancel, session.NewInteractCancel(req.ID))
+					if emitErr := t.t.emitContext(ctx, session.EventInteractCancel, session.NewInteractCancel(req.ID)); emitErr != nil {
+						return "", errors.Join(errors.New("ask_user_question was aborted before the user answered"), fmt.Errorf("persist cancellation event: %w", emitErr))
+					}
 				}
 			}
 			// DSH intentionally exposes both caller cancellation and a
@@ -241,7 +412,10 @@ func (t AskUserQuestionTool) Execute(ctx context.Context, args any) (string, err
 	if resolved.Status == StatusCanceled {
 		return "", errors.New("the user cancelled ask_user_question")
 	}
-	if resolved.Status != StatusApproved {
+	if resolved.Status == StatusUnavailable {
+		return "", errors.New("ask_user_question is unavailable: no answerer is registered")
+	}
+	if resolved.Status != StatusApproved && resolved.Status != StatusAllowedOnce {
 		return "", fmt.Errorf("ask_user_question: user rejected the questions")
 	}
 	if resolved.Answer == "" {
@@ -366,14 +540,29 @@ func (t InteractStatusTool) Execute(ctx context.Context, args any) (string, erro
 	if a.ID == "" {
 		return "", fmt.Errorf("interact_status: id is required")
 	}
-	all, err := t.t.e.List(ctx)
+	var all []Request
+	var err error
+	if sessionID := t.t.currentSession(ctx); sessionID != "" {
+		if lister, ok := t.t.e.(SessionLister); ok {
+			all, err = lister.ListForSession(ctx, sessionID)
+		} else {
+			all, err = t.t.e.List(ctx)
+		}
+	} else {
+		all, err = t.t.e.List(ctx)
+	}
 	if err != nil {
 		return "", fmt.Errorf("interact_status: %w", err)
 	}
 	for _, r := range all {
 		if r.ID == a.ID {
+			if sessionID := t.t.currentSession(ctx); sessionID != "" && r.SessionID != sessionID {
+				return "", fmt.Errorf("interact_status: unknown request %s", a.ID)
+			}
 			// interact/status is a log-only fact (D3).
-			t.t.emit(session.EventInteractStatus, session.NewInteractStatus(r.ID, string(r.Status)))
+			if err := t.t.emitContext(ctx, session.EventInteractStatus, session.NewInteractStatus(r.ID, string(r.Status))); err != nil {
+				return "", fmt.Errorf("interact_status: persist status event: %w", err)
+			}
 			return fmt.Sprintf("request %s: status=%s", r.ID, r.Status), nil
 		}
 	}

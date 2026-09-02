@@ -11,9 +11,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 
+	"github.com/jabing/shutu-agent/internal/attachment"
 	"github.com/jabing/shutu-agent/internal/config"
 	"github.com/jabing/shutu-agent/internal/fs"
 	"github.com/jabing/shutu-agent/internal/tools"
@@ -32,7 +34,7 @@ func (a *app) registerFs() error {
 	if a.cfg.Fs.Root != "" {
 		svc = fs.NewLocalFS(a.cfg.Fs.Root)
 	} else {
-		svc = fs.NewLocalFSForRoot(a.sessionCWD)
+		svc = fs.NewLocalFSForRootContext(func(ctx context.Context) string { return a.sessionCWDFor(a.runtimeSessionID(ctx)) })
 	}
 	a.fs = svc
 	// D3 event sink: fs/* events are appended to the active session log. The
@@ -45,6 +47,19 @@ func (a *app) registerFs() error {
 		}
 	}
 	ft := fs.NewFsTools(svc, onEvent)
+	ft.SetImageLimits(attachment.Limits{
+		MaxImagesPerMessage:  a.cfg.LLM.Multimodal.MaxImagesPerMessage,
+		MaxMessageImageBytes: a.cfg.LLM.Multimodal.MaxMessageImageBytes,
+		MaxImagePixels:       a.cfg.LLM.Multimodal.MaxImagePixels,
+		MaxImageDimension:    a.cfg.LLM.Multimodal.MaxImageDimension,
+	}, a.cfg.LLM.Multimodal.MaxImageBytes)
+	ft.SetErrorSink(func(typ string, data any) error {
+		if a.log == nil {
+			return fmt.Errorf("pa: no session log for %s event", typ)
+		}
+		_, err := a.log.Append(typ, data)
+		return err
+	})
 	// DSH standard exposes read/write/edit. DSH minimal collapses those
 	// operations into the single str_replace_editor command surface.
 	fileTools := []tools.Tool{ft.Read(), ft.Write(), ft.Edit(), ft.StrReplaceEditor()}

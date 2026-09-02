@@ -47,8 +47,9 @@ type Config struct {
 
 // Tool is the model-facing, read-only LSP consumer.
 type Tool struct {
-	config Config
-	root   func() string
+	config      Config
+	root        func() string
+	rootContext func(context.Context) string
 }
 
 // NewTool binds an LSP command to the active session workspace provider.
@@ -80,7 +81,19 @@ func NewTool(config Config, workspaceRoot func() string) *Tool {
 	return &Tool{config: config, root: workspaceRoot}
 }
 
+// NewToolWithContext is the session-owned variant used by concurrent Agent
+// runs. The context root takes precedence over the legacy zero-argument root.
+func NewToolWithContext(config Config, workspaceRoot func() string, workspaceRootContext func(context.Context) string) *Tool {
+	t := NewTool(config, workspaceRoot)
+	t.rootContext = workspaceRootContext
+	return t
+}
+
 func (Tool) Name() string { return ToolName }
+
+// CancellationAware is explicit: the query timeout derives from the registry
+// context and is attached to both the language-server process and RPC requests.
+func (*Tool) CancellationAware() bool { return true }
 
 func (Tool) Description() string {
 	return "Query a language server for precise code navigation. operation is one of goToDefinition, findReferences, goToImplementation, hover. line and character are one-based UTF-16 cursor coordinates. findReferences includes the declaration."
@@ -129,7 +142,9 @@ func (t *Tool) execute(ctx context.Context, args any) (any, string, error) {
 		return nil, "", errors.New("lsp: file_path, line, and character are required and must be positive")
 	}
 	root := ""
-	if t.root != nil {
+	if t.rootContext != nil {
+		root = strings.TrimSpace(t.rootContext(ctx))
+	} else if t.root != nil {
 		root = strings.TrimSpace(t.root())
 	}
 	if root == "" {

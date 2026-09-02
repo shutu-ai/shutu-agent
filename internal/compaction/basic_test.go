@@ -2,6 +2,7 @@ package compaction
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"reflect"
@@ -35,6 +36,16 @@ type fakeLLM struct {
 	reqs []llm.ChatRequest
 	text string
 	err  error
+}
+
+type invalidSession struct {
+	events []session.Event
+}
+
+func (s *invalidSession) Events() []session.Event { return append([]session.Event(nil), s.events...) }
+
+func (s *invalidSession) Append(string, any) (session.Event, error) {
+	return session.Event{}, errors.New("invalid test session is immutable")
 }
 
 func (f *fakeLLM) Stream(_ context.Context, req llm.ChatRequest) (llm.StreamReader, error) {
@@ -85,6 +96,14 @@ func TestDefaultTokenEstimate(t *testing.T) {
 	}
 	if got := defaultTokenEstimate("abcdefgh"); got != 2 {
 		t.Fatalf("estimate = %d, want 2 (8 bytes / 4)", got)
+	}
+}
+
+func TestCompactIfNeededFailsClosedOnInvalidProjection(t *testing.T) {
+	sess := &invalidSession{events: []session.Event{{Seq: 1, Type: "unknown/event", Data: json.RawMessage(`{}`)}}}
+	eng := NewBasic(BasicOpts{TokenThreshold: 1, LLM: &fakeLLM{text: "S"}})
+	if _, err := eng.CompactIfNeeded(context.Background(), sess, TriggerPressure); err == nil || !strings.Contains(err.Error(), "compaction history projection") {
+		t.Fatalf("CompactIfNeeded error = %v, want a projection failure", err)
 	}
 }
 
@@ -145,6 +164,15 @@ func TestCompactIfNeededTriggersOnPressure(t *testing.T) {
 	if got := len(sess.Events()); got != 7 {
 		t.Fatalf("log events = %d, want 7 (old events physically retained)", got)
 	}
+	var replacement struct {
+		SourceEventSeqs []uint64 `json:"sourceEventSeqs"`
+	}
+	if err := json.Unmarshal(sess.Events()[6].Data, &replacement); err != nil {
+		t.Fatalf("decode replacement provenance: %v", err)
+	}
+	if !reflect.DeepEqual(replacement.SourceEventSeqs, []uint64{1, 2, 3, 4}) {
+		t.Fatalf("replacement sourceEventSeqs = %v, want [1 2 3 4]", replacement.SourceEventSeqs)
+	}
 	msgs := sess.DeriveHistory()
 	if len(msgs) != 3 {
 		t.Fatalf("derived %d messages, want 3: %+v", len(msgs), msgs)
@@ -154,6 +182,42 @@ func TestCompactIfNeededTriggersOnPressure(t *testing.T) {
 	}
 	if msgs[1].Text() != "q3" || msgs[2].Text() != "a3" {
 		t.Fatalf("retained tail = %+v, want q3/a3", msgs[1:])
+	}
+}
+
+func TestCompactionCarriesExactSurfaceMeasurementBreakdown(t *testing.T) {
+	sess := threeTurnSession(t)
+	eng := NewBasic(BasicOpts{
+		LLM:         &fakeLLM{text: "checkpoint"},
+		RetainTurns: 1,
+		Meter: func(SessionLike) SurfaceMeasurement {
+			return SurfaceMeasurement{
+				LogRevision:             6,
+				BaselineEstimatedTokens: 11,
+				BaselineUsageTokens:     17,
+				SurfaceDeltaTokens:      3,
+				TotalTokens:             20,
+				SurfaceTokens:           9,
+				Nodes: []SurfaceNode{
+					{Seq: 1, Tokens: 2}, {Seq: 2, Tokens: 4},
+					{Seq: 3, Tokens: 1}, {Seq: 4, Tokens: 5},
+					{Seq: 5, Tokens: 2}, {Seq: 6, Tokens: 2},
+				},
+			}
+		},
+	})
+	res, err := eng.CompactNow(context.Background(), sess)
+	if err != nil {
+		t.Fatalf("CompactNow: %v", err)
+	}
+	if res == nil {
+		t.Fatal("expected compaction result")
+	}
+	if res.ShadowedTokens != 12 {
+		t.Fatalf("shadowed tokens = %d, want 12", res.ShadowedTokens)
+	}
+	if got := res.Measurement; got.LogRevision != 6 || got.BaselineEstimatedTokens != 11 || got.BaselineUsageTokens != 17 || got.SurfaceDeltaTokens != 3 || got.TotalTokens != 20 || got.SurfaceTokens != 9 {
+		t.Fatalf("measurement breakdown = %+v", got)
 	}
 }
 

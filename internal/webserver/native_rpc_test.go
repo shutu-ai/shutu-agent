@@ -36,6 +36,15 @@ func nativeResponse(t *testing.T, recBody []byte) nativeRPCResponse {
 	return response
 }
 
+type nativeRawHistoryStore struct {
+	store.Store
+	events []session.Event
+}
+
+func (s nativeRawHistoryStore) LoadSessionRaw(context.Context, string) ([]session.Event, error) {
+	return s.events, nil
+}
+
 func TestNativeCommandsUseDSHDescriptorsAndGeneratedArgumentShape(t *testing.T) {
 	srv, _ := newTestServer(t, "tok")
 	var gotSession, gotLine string
@@ -159,6 +168,32 @@ func TestNativeRespondBridgesDSHQuestionCancellation(t *testing.T) {
 	}
 }
 
+func TestNativeRespondRecoversQuestionOwnerAfterReconnect(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+	var gotSession, gotID string
+	srv.SetInteractionManager(
+		func(context.Context, string) ([]interact.Request, error) { return nil, nil },
+		func(_ context.Context, sessionID, id string, status interact.ApprovalStatus, _ string) error {
+			if status != interact.StatusCanceled {
+				t.Fatalf("status = %q, want cancelled", status)
+			}
+			gotSession, gotID = sessionID, id
+			return nil
+		},
+	)
+	srv.SetInteractionSessionResolver(func(context.Context, string) (string, error) {
+		return "cold-session", nil
+	})
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/respond", "tok", `{"type":"client-response","rpcId":"cold-question","result":{"ok":false,"error":{"code":"cancelled","message":"closed"}}}`)
+	var receipt nativeRPCReceipt
+	if err := json.Unmarshal(rec.Body.Bytes(), &receipt); err != nil {
+		t.Fatalf("decode cancellation receipt: %v", err)
+	}
+	if !receipt.Accepted || gotSession != "cold-session" || gotID != "cold-question" {
+		t.Fatalf("reconnected question cancellation = receipt=%+v callback=%q/%q", receipt, gotSession, gotID)
+	}
+}
+
 func TestNativePendingInteractionFrameUsesDSHQuestionShape(t *testing.T) {
 	method, raw, id, kind, ok := nativePendingInteractionFrame("s1", interact.Request{
 		ID: "q-1", Questions: []interact.Question{{
@@ -179,6 +214,29 @@ func TestNativePendingInteractionFrameUsesDSHQuestionShape(t *testing.T) {
 	}
 	if _, present := questions[0]["options"].([]map[string]any)[0]["description"]; !present {
 		t.Fatal("question option description should be retained when present")
+	}
+}
+
+func TestNativeInteractionFrameProjectsCanonicalApprovalEvents(t *testing.T) {
+	method, raw, id, kind, ok := nativeInteractionFrame("s1", session.Event{
+		Type: session.EventApprovalAsked,
+		Data: json.RawMessage(`{"id":"approval-1","toolName":"bash","reason":"run it","questions":[{"id":"confirm","question":"Proceed?"}]}`),
+	})
+	if !ok || method != "question/requested" || id != "approval-1" || kind != "question" {
+		t.Fatalf("canonical asked frame = %q/%q/%q/%v", method, id, kind, ok)
+	}
+	if raw.(map[string]any)["sessionId"] != "s1" {
+		t.Fatalf("canonical asked payload = %#v", raw)
+	}
+	method, raw, id, kind, ok = nativeInteractionFrame("s1", session.Event{
+		Type: session.EventApprovalDecided,
+		Data: json.RawMessage(`{"id":"approval-1","outcome":"allowed-once"}`),
+	})
+	if !ok || method != "approval/resolved" || id != "approval-1" || kind != "" {
+		t.Fatalf("canonical decided frame = %q/%q/%q/%v", method, id, kind, ok)
+	}
+	if raw.(map[string]any)["outcome"] != "allowed-once" {
+		t.Fatalf("canonical decided payload = %#v", raw)
 	}
 }
 
@@ -526,6 +584,29 @@ func TestNativeRPCSessionHistoryAndPrompt(t *testing.T) {
 	}
 }
 
+func TestNativeHistoryRejectsUnknownDurableEventsFromRawStore(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	if err := st.CreateSession(context.Background(), "native-unknown", time.UnixMilli(1000)); err != nil {
+		t.Fatal(err)
+	}
+	srv.store = nativeRawHistoryStore{
+		Store: st,
+		events: []session.Event{{
+			Seq: 1, Type: "future/required-event", At: time.UnixMilli(1001), Version: session.EventVersion,
+			Data: json.RawMessage(`{"value":true}`),
+		}},
+	}
+
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/session.history", "tok", `{"type":"client-request","rpcId":"unknown-history","method":"session.history","payload":{"sessionId":"native-unknown"}}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "internal" {
+		t.Fatalf("unknown raw event response = %+v", response)
+	}
+	if !strings.Contains(response.Result.Error.Message, "unknown required event") {
+		t.Fatalf("unknown raw event error = %q", response.Result.Error.Message)
+	}
+}
+
 func TestNativeSessionPromptReturnsBeforeTurnCompletes(t *testing.T) {
 	srv, st := newTestServer(t, "tok")
 	if err := st.CreateSession(context.Background(), "native-admission", time.Now()); err != nil {
@@ -582,14 +663,14 @@ func TestNativeSessionPromptPersistsBase64ImagesAndUsesQueueForText(t *testing.T
 		gotImages <- images
 		return nil
 	})
-	rec := doReqBody(t, srv.Handler(), "POST", "/api/session.prompt", "tok", `{"type":"client-request","rpcId":"image-1","method":"session.prompt","payload":{"sessionId":"native-prompt","mode":"queue","content":[{"type":"text","text":"describe this"},{"type":"image","mediaType":"image/png","data":"data:image/png;base64,aGVsbG8="}]}}`)
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/session.prompt", "tok", `{"type":"client-request","rpcId":"image-1","method":"session.prompt","payload":{"sessionId":"native-prompt","mode":"queue","content":[{"type":"text","text":"describe this"},{"type":"image","mediaType":"image/png","data":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="}]}}`)
 	response := nativeResponse(t, rec.Body.Bytes())
 	if !response.Result.OK {
 		t.Fatalf("image prompt response=%+v", response)
 	}
 	select {
 	case images := <-gotImages:
-		if len(images) != 1 || images[0].MediaType != "image/png" || images[0].Bytes != 5 {
+		if len(images) != 1 || images[0].MediaType != "image/png" || images[0].Bytes != 68 {
 			t.Fatalf("image prompt images=%+v", images)
 		}
 	case <-time.After(time.Second):
@@ -605,6 +686,59 @@ func TestNativeSessionPromptPersistsBase64ImagesAndUsesQueueForText(t *testing.T
 	response = nativeResponse(t, rec.Body.Bytes())
 	if !response.Result.OK || queued != "native-prompt:queue this" {
 		t.Fatalf("queue prompt response=%+v queued=%q", response, queued)
+	}
+}
+
+func TestNativeSessionPromptValidatesImageBatchBeforeWriting(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	if err := st.CreateSession(context.Background(), "native-batch", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	attachmentDir := filepath.Join(t.TempDir(), "attachments")
+	att, err := attachment.NewStore(attachmentDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.SetAttachmentStore(att)
+	valid := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/session.prompt", "tok", fmt.Sprintf(`{"type":"client-request","rpcId":"batch-1","method":"session.prompt","payload":{"sessionId":"native-batch","mode":"steer","content":[{"type":"text","text":"batch"},{"type":"image","mediaType":"image/png","data":%q},{"type":"image","mediaType":"image/tiff","data":%q}]}}`, "data:image/png;base64,"+valid, valid))
+	response := nativeResponse(t, rec.Body.Bytes())
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "attachment-error" {
+		t.Fatalf("invalid image batch response = %+v", response)
+	}
+	entries, err := os.ReadDir(attachmentDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("invalid native image batch left %d attachment files", len(entries))
+	}
+}
+
+func TestNativeSessionPromptChecksSessionImageCapabilityBeforeWriting(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	if err := st.CreateSession(context.Background(), "native-no-image", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	attachmentDir := filepath.Join(t.TempDir(), "attachments")
+	att, err := attachment.NewStore(attachmentDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.SetAttachmentStore(att)
+	srv.SetNativeImageCapabilityResolver(func(context.Context, string) bool { return false })
+	data := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/session.prompt", "tok", fmt.Sprintf(`{"type":"client-request","rpcId":"cap-1","method":"session.prompt","payload":{"sessionId":"native-no-image","mode":"steer","content":[{"type":"text","text":"image"},{"type":"image","mediaType":"image/png","data":%q}]}}`, data))
+	response := nativeResponse(t, rec.Body.Bytes())
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "not-supported" {
+		t.Fatalf("unsupported native image response = %+v", response)
+	}
+	entries, err := os.ReadDir(attachmentDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("unsupported native image prompt left %d attachment files", len(entries))
 	}
 }
 
@@ -717,6 +851,59 @@ func TestNativeSessionReferenceCandidatesReturnCanonicalMentions(t *testing.T) {
 	}
 }
 
+func TestNativeSessionListDoesNotCheckpointTailOnlyProjection(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	events := []session.Event{{
+		Seq: 1, Type: session.EventTurnStart, At: time.UnixMilli(1001), Version: session.EventVersion,
+		Data: json.RawMessage(`{"turn":1}`),
+	}, {
+		Seq: 2, Type: session.EventPlanCreate, At: time.UnixMilli(1002), Version: session.EventVersion,
+		Data: json.RawMessage(`{"scope":"goal","id":"goal-old","title":"preserve old state","detail":{"objective":"must survive tail replay","status":"pending","revision":1,"maxRounds":2}}`),
+	}}
+	for seq := uint64(3); seq <= nativeSessionListTailLimit+2; seq++ {
+		events = append(events, session.Event{
+			Seq: seq, Type: session.EventCompactionStart, At: time.UnixMilli(int64(1000 + seq)), Version: session.EventVersion,
+			Data: json.RawMessage(`{"compactionId":"compact-tail"}`),
+		})
+	}
+	seedSession(t, st, "native-list-tail", events)
+
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/session.list", "tok", `{"type":"client-request","rpcId":"tail-list","method":"session.list","payload":{}}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK {
+		t.Fatalf("session.list response = %+v", response)
+	}
+	var list struct {
+		Items []nativeSessionListItem `json:"items"`
+	}
+	encoded, _ := json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Items) != 1 || list.Items[0].Projections == nil || list.Items[0].Blank {
+		t.Fatalf("session.list items = %+v", list.Items)
+	}
+	goal, ok := list.Items[0].Projections.Values["goal"].(map[string]any)
+	goalDetail, detailOK := goal["goal"].(map[string]any)
+	if !ok || !detailOK || goalDetail["id"] != "goal-old" {
+		t.Fatalf("session.list lost state outside tail window: %#v", list.Items[0].Projections.Values["goal"])
+	}
+	row, err := st.GetProjectionCache(context.Background(), "native-list-tail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.Revision != nativeSessionListTailLimit+2 {
+		t.Fatalf("projection cache revision = %d, want %d", row.Revision, nativeSessionListTailLimit+2)
+	}
+	var cached nativeProjectionCachePayload
+	if err := json.Unmarshal(row.Payload, &cached); err != nil {
+		t.Fatal(err)
+	}
+	if cached.Block.Values["goal"] == nil {
+		t.Fatalf("tail-only projection was checkpointed: %#v", cached.Block.Values)
+	}
+}
+
 func TestNativePluginInventoryMatchesNativeManifestShape(t *testing.T) {
 	srv, _ := newTestServer(t, "tok")
 	rec := doReqBody(t, srv.Handler(), "POST", "/api/pluginInventory/list", "tok", `{"type":"client-request","rpcId":"plugins","method":"pluginInventory/list","payload":{"args":[]}}`)
@@ -808,6 +995,132 @@ func TestNativeHistoryReturnsDSHProjectionBaseline(t *testing.T) {
 	}
 }
 
+func TestNativeHistoryUsesCanonicalTitleFallback(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	seedSession(t, st, "native-title-fallback", []session.Event{{
+		Seq: 1, Type: session.EventUserMessage, At: time.UnixMilli(1001), Version: session.EventVersion,
+		Data: json.RawMessage(`{"text":"ship the stable base"}`),
+	}})
+
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/session.history", "tok", `{"type":"client-request","rpcId":"projection-title","method":"session.history","payload":{"sessionId":"native-title-fallback"}}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK {
+		t.Fatalf("session.history response = %+v", response)
+	}
+	var history struct {
+		Projections nativeProjectionBlock `json:"projections"`
+	}
+	encoded, _ := json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &history); err != nil {
+		t.Fatal(err)
+	}
+	if got := history.Projections.Values["title"]; got != "ship the stable base" {
+		t.Fatalf("projection title = %#v, want canonical fallback", got)
+	}
+}
+
+func TestNativeHistoryProjectionCacheIsUsedOnlyAtCommittedRevision(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	seedSession(t, st, "projection-cache", []session.Event{{
+		Seq: 1, Type: session.EventUserMessage, At: time.UnixMilli(1001), Version: session.EventVersion,
+		Data: json.RawMessage(`{"text":"hello"}`),
+	}})
+	request := func(id string) nativeRPCResponse {
+		rec := doReqBody(t, srv.Handler(), "POST", "/api/session.history", "tok", `{"type":"client-request","rpcId":"`+id+`","method":"session.history","payload":{"sessionId":"projection-cache"}}`)
+		return nativeResponse(t, rec.Body.Bytes())
+	}
+	first := request("cache-1")
+	if !first.Result.OK {
+		t.Fatalf("first history response = %+v", first)
+	}
+	row, err := st.GetProjectionCache(context.Background(), "projection-cache")
+	if err != nil || row.Version != nativeProjectionCacheVersion || row.Revision != 1 {
+		t.Fatalf("projection cache row = %+v, err=%v", row, err)
+	}
+	var cached nativeProjectionCachePayload
+	if err := json.Unmarshal(row.Payload, &cached); err != nil {
+		t.Fatal(err)
+	}
+	cached.Block.Values["cacheMarker"] = "committed-checkpoint"
+	payload, _ := json.Marshal(cached)
+	row.Payload = payload
+	if err := st.PutProjectionCache(context.Background(), row); err != nil {
+		t.Fatal(err)
+	}
+	second := request("cache-2")
+	if !second.Result.OK {
+		t.Fatalf("second history response = %+v", second)
+	}
+	var value struct {
+		Projections nativeProjectionBlock `json:"projections"`
+	}
+	encoded, _ := json.Marshal(second.Result.Value)
+	if err := json.Unmarshal(encoded, &value); err != nil {
+		t.Fatal(err)
+	}
+	if value.Projections.Values["cacheMarker"] != "committed-checkpoint" {
+		t.Fatalf("exact-revision cache was not used: %#v", value.Projections.Values)
+	}
+	if err := st.AppendEvents(context.Background(), "projection-cache", []session.Event{{
+		Seq: 2, Type: session.EventAssistantMessage, At: time.UnixMilli(1002), Version: session.EventVersion,
+		Data: json.RawMessage(`{"text":"world"}`),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if beforeThird, cacheErr := st.GetProjectionCache(context.Background(), "projection-cache"); cacheErr != nil || beforeThird.Revision != 1 {
+		t.Fatalf("cache changed before stale-read check: %+v err=%v", beforeThird, cacheErr)
+	}
+	third := request("cache-3")
+	if !third.Result.OK {
+		t.Fatalf("third history response = %+v", third)
+	}
+	value = struct {
+		Projections nativeProjectionBlock `json:"projections"`
+	}{}
+	encoded, _ = json.Marshal(third.Result.Value)
+	if err := json.Unmarshal(encoded, &value); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := value.Projections.Values["cacheMarker"]; exists {
+		after, _ := st.GetProjectionCache(context.Background(), "projection-cache")
+		t.Fatalf("stale cache outranked durable event replay: cache=%+v values=%#v", after, value.Projections.Values)
+	}
+}
+
+func TestNativeHistoryProjectionCacheCorruptionFallsBackAndRepairs(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	seedSession(t, st, "projection-cache-repair", []session.Event{
+		{Seq: 1, Type: session.EventUserMessage, At: time.UnixMilli(1001), Version: session.EventVersion,
+			Data: json.RawMessage(`{"text":"repair me"}`)},
+	})
+	request := func(id string) nativeRPCResponse {
+		rec := doReqBody(t, srv.Handler(), "POST", "/api/session.history", "tok", `{"type":"client-request","rpcId":"`+id+`","method":"session.history","payload":{"sessionId":"projection-cache-repair"}}`)
+		return nativeResponse(t, rec.Body.Bytes())
+	}
+	if response := request("repair-1"); !response.Result.OK {
+		t.Fatalf("initial history response = %+v", response)
+	}
+	row, err := st.GetProjectionCache(context.Background(), "projection-cache-repair")
+	if err != nil || row.Revision != 1 {
+		t.Fatalf("initial cache row = %+v, err=%v", row, err)
+	}
+	row.Payload = []byte(`{"block":`)
+	if err := st.PutProjectionCache(context.Background(), row); err != nil {
+		t.Fatalf("write corrupt cache fixture: %v", err)
+	}
+	if response := request("repair-2"); !response.Result.OK {
+		t.Fatalf("rebuild history response = %+v", response)
+	}
+	repaired, err := st.GetProjectionCache(context.Background(), "projection-cache-repair")
+	if err != nil || repaired.Revision != 1 {
+		t.Fatalf("repaired cache row = %+v, err=%v", repaired, err)
+	}
+	var payload nativeProjectionCachePayload
+	if err := json.Unmarshal(repaired.Payload, &payload); err != nil || payload.Block.Values == nil {
+		t.Fatalf("cache was not repaired from durable events: err=%v payload=%s", err, repaired.Payload)
+	}
+}
+
 func TestNativeHistoryReturnsGoalAndPermissionProjection(t *testing.T) {
 	srv, st := newTestServer(t, "tok")
 	seedSession(t, st, "native-goal", []session.Event{
@@ -863,6 +1176,40 @@ func TestNativeHistoryReturnsGoalAndPermissionProjection(t *testing.T) {
 	}
 	if permissions["currentValue"] != "readonly" {
 		t.Fatalf("permissions projection = %#v", permissions)
+	}
+}
+
+func TestNativeHistoryPermissionUsesSharedProjectionOverConfigFallback(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	seedSession(t, st, "native-permission", []session.Event{
+		{Seq: 1, Type: session.EventPermissionPreset, At: time.UnixMilli(1001), Version: session.EventVersion, Data: json.RawMessage(`{"preset":"read-only"}`)},
+		{Seq: 2, Type: session.EventSandboxMode, At: time.UnixMilli(1002), Version: session.EventVersion, Data: json.RawMessage(`{"mode":"read-only"}`)},
+	})
+	if err := st.SetSessionConfig(context.Background(), "native-permission", store.SessionConfig{Permission: "full"}); err != nil {
+		t.Fatalf("set stale session permission: %v", err)
+	}
+
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/session.history", "tok", `{"type":"client-request","rpcId":"permission-1","method":"session.history","payload":{"sessionId":"native-permission"}}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK {
+		t.Fatalf("session.history response = %+v", response)
+	}
+	var history struct {
+		Projections nativeProjectionBlock `json:"projections"`
+	}
+	encoded, _ := json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &history); err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ = json.Marshal(history.Projections.Values["permissions"])
+	var permissions struct {
+		CurrentValue string `json:"currentValue"`
+	}
+	if err := json.Unmarshal(encoded, &permissions); err != nil {
+		t.Fatal(err)
+	}
+	if permissions.CurrentValue != "readonly" {
+		t.Fatalf("permissions projection = %#v, want durable readonly to beat config fallback", permissions)
 	}
 }
 
@@ -1114,7 +1461,10 @@ func TestNativeSessionAttachmentRequiresReferenceAndReturnsDSHData(t *testing.T)
 		t.Fatal(err)
 	}
 	srv.SetAttachmentStore(att)
-	data := []byte("native-image")
+	data, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+	if err != nil {
+		t.Fatal(err)
+	}
 	ref, err := att.SaveImage("image/png", data, maxWebImageBytes)
 	if err != nil {
 		t.Fatal(err)
@@ -1248,6 +1598,45 @@ func TestNativeAgentPresetsListSelectAndLock(t *testing.T) {
 	response = call("preset-invalid", "agentPreset.select", map[string]any{"sessionId": "blank-preset", "agentPreset": "unknown"})
 	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "agent-preset-invalid" {
 		t.Fatalf("invalid agent preset response = %+v", response)
+	}
+}
+
+func TestNativeAgentPresetsHideCodeWhenRuntimeUnavailable(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+	srv.SetConfigProvider(func() map[string]any {
+		return map[string]any{"mode": "standard", "code_enabled": false, "code_available": false}
+	})
+	call := func(id, method string, payload any) nativeRPCResponse {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{
+			"type": "client-request", "rpcId": id, "method": method, "payload": payload,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := doReqBody(t, srv.Handler(), "POST", "/api/"+method, "tok", string(body))
+		return nativeResponse(t, rec.Body.Bytes())
+	}
+
+	response := call("presets-unavailable-list", "agentPreset.list", map[string]any{})
+	if !response.Result.OK {
+		t.Fatalf("agentPreset.list response = %+v", response)
+	}
+	encoded, _ := json.Marshal(response.Result.Value)
+	var roster struct {
+		Presets []map[string]any `json:"presets"`
+	}
+	if err := json.Unmarshal(encoded, &roster); err != nil {
+		t.Fatal(err)
+	}
+	for _, preset := range roster.Presets {
+		if preset["id"] == "code" {
+			t.Fatalf("unavailable code preset was advertised: %#v", roster.Presets)
+		}
+	}
+	response = call("presets-unavailable-select", "agentPreset.select", map[string]any{"sessionId": "blank", "agentPreset": "code"})
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "agent-preset-invalid" {
+		t.Fatalf("unavailable code selection response = %+v", response)
 	}
 }
 
@@ -1399,6 +1788,49 @@ func TestNativeSessionSelectModelPersistsAndProjectsSelection(t *testing.T) {
 	response = call("select-invalid", "session.selectModel", map[string]any{"sessionId": "select-model", "provider": "openai"})
 	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "bad-request" {
 		t.Fatalf("invalid selection response = %+v", response)
+	}
+}
+
+func TestNativeSessionSelectModelRejectsUnavailableRoute(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	if err := st.CreateSession(context.Background(), "unavailable-model", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	srv.SetSessionModelValidator(func(context.Context, string, string, string, string) error {
+		return fmt.Errorf("%w: dormant", llm.ErrProviderUnavailable)
+	})
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/session.selectModel", "tok", `{
+		"type":"client-request","rpcId":"model-1","method":"session.selectModel",
+		"payload":{"sessionId":"unavailable-model","provider":"dormant","model":"m"}
+	}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "provider-unavailable" {
+		t.Fatalf("unavailable model response = %+v", response)
+	}
+	config, err := st.GetSessionConfig(context.Background(), "unavailable-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Provider != "" || config.Model != "" {
+		t.Fatalf("rejected selection persisted: %+v", config)
+	}
+}
+
+func TestNativeSessionSelectModelMapsCapabilityFailure(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	if err := st.CreateSession(context.Background(), "image-model", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	srv.SetSessionModelValidator(func(context.Context, string, string, string, string) error {
+		return fmt.Errorf("%w: target is text-only", llm.ErrCapabilityUnavailable)
+	})
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/session.selectModel", "tok", `{
+		"type":"client-request","rpcId":"model-capability-1","method":"session.selectModel",
+		"payload":{"sessionId":"image-model","provider":"route-gw","model":"text-model"}
+	}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "model-unavailable" {
+		t.Fatalf("capability rejection response = %+v", response)
 	}
 }
 
@@ -1934,6 +2366,102 @@ func TestNativeSettingsDescribeAndMutate(t *testing.T) {
 	}
 }
 
+func TestNativeSettingsMutationSurvivesServerRestart(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "settings-restart.db")
+	st, err := store.OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(st, "tok", "")
+	if err != nil {
+		st.Close()
+		t.Fatal(err)
+	}
+	body := `{"type":"client-request","rpcId":"settings-persist","method":"settings.update","payload":{"ns":"ui-onboarding","patch":{"welcomeNoticeVersion":"persisted-version"}}}`
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/settings.update", "tok", body)
+	if response := nativeResponse(t, rec.Body.Bytes()); !response.Result.OK {
+		t.Fatalf("settings.update response = %+v", response)
+	}
+	if err := srv.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	st2, err := store.OpenSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st2.Close()
+	srv2, err := New(st2, "tok", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv2.Close()
+	rec = doReqBody(t, srv2.Handler(), "POST", "/api/settings.describe", "tok", `{"type":"client-request","rpcId":"settings-reload","method":"settings.describe","payload":{}}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK {
+		t.Fatalf("settings.describe after restart = %+v", response)
+	}
+	var described struct {
+		Namespaces []struct {
+			Value    map[string]any `json:"value"`
+			Revision int            `json:"revision"`
+		} `json:"namespaces"`
+	}
+	encoded, _ := json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &described); err != nil {
+		t.Fatal(err)
+	}
+	if len(described.Namespaces) != 1 || described.Namespaces[0].Value["welcomeNoticeVersion"] != "persisted-version" || described.Namespaces[0].Revision != 1 {
+		t.Fatalf("reloaded settings = %+v", described.Namespaces)
+	}
+}
+
+type nativeSettingsFailStore struct {
+	store.Store
+	failKey string
+}
+
+func (s *nativeSettingsFailStore) SetSetting(ctx context.Context, key, value string) error {
+	if key == s.failKey {
+		return errors.New("injected settings write failure")
+	}
+	return s.Store.SetSetting(ctx, key, value)
+}
+
+func TestNativeAgentPresetSettingsRollsBackScalarOnDocumentWriteFailure(t *testing.T) {
+	base, err := store.OpenSQLite(filepath.Join(t.TempDir(), "settings-rollback.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = base.Close() })
+	srv, err := New(&nativeSettingsFailStore{Store: base, failKey: nativeSettingsKey(nativeSettingsAgentPresets)}, "tok", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = srv.Close() })
+	rec := doReqBody(t, srv.Handler(), http.MethodPost, "/api/settings.update", "tok", `{"type":"client-request","rpcId":"settings-rollback","method":"settings.update","payload":{"ns":"agent-presets","patch":{"default":"minimal"}}}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "settings-rejected" {
+		t.Fatalf("settings rollback response = %+v", response)
+	}
+	settings, err := base.GetSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings["agent_preset"] != "" {
+		t.Fatalf("scalar setting survived failed document write: %#v", settings)
+	}
+	srv.nativeSettingsMu.Lock()
+	document := srv.nativeSettings[nativeSettingsAgentPresets]
+	srv.nativeSettingsMu.Unlock()
+	if document.Revision != 0 || len(document.Value) != 0 {
+		t.Fatalf("in-memory preset advanced after failed write: %+v", document)
+	}
+}
+
 func TestNativeLLMCatalogUsesSanitizedConfig(t *testing.T) {
 	srv, _ := newTestServer(t, "tok")
 	srv.SetConfigProvider(func() map[string]any {
@@ -1999,6 +2527,55 @@ func TestNativeLLMCatalogUsesSanitizedConfig(t *testing.T) {
 	secondModels, ok := models.Groups[1]["models"].([]any)
 	if !ok || len(secondModels) != 2 {
 		t.Fatalf("explicit configured models = %+v", models.Groups[1])
+	}
+}
+
+func TestNativeLLMCatalogPreservesOwnedModelMetadata(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+	srv.SetConfigProvider(func() map[string]any {
+		return map[string]any{"providers": []map[string]any{{
+			"id": "deepseek-official", "name": "DeepSeek", "available": true, "configured": true,
+			"catalog_models": []map[string]any{{
+				"id": "deepseek-v4-flash", "name": "DeepSeek-V4-Flash", "contextWindow": 1000000,
+				"maxTokens": 256000, "reasoning": true, "tools": true, "vision": false, "audio": false,
+				"input": []string{"text"}, "reasoningEfforts": map[string]any{"off": nil, "high": "high"},
+				"defaultEffort": "high",
+			}},
+		}}}
+	})
+
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/llm.models", "tok", `{"type":"client-request","rpcId":"llm-owned","method":"llm.models","payload":{}}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK {
+		t.Fatalf("llm.models response = %+v", response)
+	}
+	var value struct {
+		Groups []struct {
+			Models []map[string]any `json:"models"`
+		} `json:"groups"`
+	}
+	encoded, _ := json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &value); err != nil {
+		t.Fatal(err)
+	}
+	if len(value.Groups) != 1 || len(value.Groups[0].Models) != 1 {
+		t.Fatalf("owned model catalog = %+v", value)
+	}
+	model := value.Groups[0].Models[0]
+	if model["contextWindow"] != float64(1000000) || model["maxTokens"] != float64(256000) ||
+		model["reasoning"] != true || model["tools"] != true || model["vision"] != false || model["audio"] != false {
+		t.Fatalf("owned model metadata = %+v", model)
+	}
+	if model["defaultEffort"] != "high" {
+		t.Fatalf("owned model default effort = %+v", model["defaultEffort"])
+	}
+	input, ok := model["input"].([]any)
+	if !ok || len(input) != 1 || input[0] != "text" {
+		t.Fatalf("owned model input metadata = %+v", model["input"])
+	}
+	efforts, ok := model["reasoningEfforts"].(map[string]any)
+	if !ok || efforts["high"] != "high" {
+		t.Fatalf("owned model reasoning metadata = %+v", model["reasoningEfforts"])
 	}
 }
 
@@ -2530,6 +3107,7 @@ func TestNativeHostWebSocketSendsHostBaselineAndStatus(t *testing.T) {
 
 func TestNativeHostWebSocketReconcilesSessionsAfterConnect(t *testing.T) {
 	srv, st := newTestServer(t, "tok")
+	defer srv.Close()
 	seedSession(t, st, "native-host-reconcile", nil)
 	httpServer := httptest.NewServer(srv.Handler())
 	defer httpServer.Close()
@@ -3129,4 +3707,36 @@ func readNativeTextFrame(reader *bufio.Reader) ([]byte, error) {
 	payload := make([]byte, length)
 	_, err = io.ReadFull(reader, payload)
 	return payload, err
+}
+
+func TestNativeSessionRenameUsesCanonicalEventCallbackAndRejectsEmptyTitle(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	seedSession(t, st, "rename-session", nil)
+	var calls int
+	srv.SetNativeSessionRenamer(func(_ context.Context, sessionID, title string) (int64, error) {
+		calls++
+		if sessionID != "rename-session" || title != "New title" {
+			t.Fatalf("rename callback = %q/%q", sessionID, title)
+		}
+		return 7, nil
+	})
+	call := func(id, title string) nativeRPCResponse {
+		t.Helper()
+		rec := doReqBody(t, srv.Handler(), "POST", "/api/session.rename", "tok", fmt.Sprintf(`{"type":"client-request","rpcId":%q,"method":"session.rename","payload":{"sessionId":"rename-session","title":%q}}`, id, title))
+		return nativeResponse(t, rec.Body.Bytes())
+	}
+	response := call("rename-1", "  New title  ")
+	if !response.Result.OK || response.Result.Value.(map[string]any)["seq"] != float64(7) {
+		t.Fatalf("rename response = %+v", response)
+	}
+	if calls != 1 {
+		t.Fatalf("rename callback calls = %d, want 1", calls)
+	}
+	empty := call("rename-2", " \t\n ")
+	if empty.Result.OK || empty.Result.Error == nil || empty.Result.Error.Code != "title-invalid" {
+		t.Fatalf("empty rename response = %+v", empty)
+	}
+	if calls != 1 {
+		t.Fatalf("empty rename reached callback: calls=%d", calls)
+	}
 }

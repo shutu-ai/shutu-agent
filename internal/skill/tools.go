@@ -25,6 +25,7 @@ import (
 	agenttools "github.com/jabing/shutu-agent/internal/tools"
 	"strings"
 
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 	"github.com/jabing/shutu-agent/internal/session"
 )
 
@@ -57,6 +58,14 @@ func (t *SkillTools) emit(typ string, data any) {
 	if t.onEvent != nil {
 		t.onEvent(typ, data)
 	}
+}
+
+func (t *SkillTools) emitContext(ctx context.Context, typ string, data any) error {
+	if runtime, ok := runtimectx.Get(ctx); ok && runtime.Emit != nil {
+		return runtime.Emit(typ, data)
+	}
+	t.emit(typ, data)
+	return nil
 }
 
 // SkillLoadTool loads one skill's full body for the model.
@@ -109,7 +118,9 @@ func (t SkillLoadTool) Execute(ctx context.Context, args any) (string, error) {
 	// skill/load is a log-only fact (D3); the body the model sees is bounded
 	// to 200 runes in the payload by session.NewSkillLoad. The full returned
 	// text is what the loop logs as tool/result.
-	t.t.emit(session.EventSkillLoad, session.NewSkillLoad(def.Name, def.Source, body))
+	if err := t.t.emitContext(ctx, session.EventSkillLoad, session.NewSkillLoad(def.Name, def.Source, body)); err != nil {
+		return "", fmt.Errorf("skill: persist event: %w", err)
+	}
 	return renderLoadedSkill(def, body), nil
 }
 
@@ -147,7 +158,9 @@ func (t SkillLoadTool) ExecuteResult(ctx context.Context, args any) (agenttools.
 	if base := resourceBaseValue(def.ResourceBase); base != nil {
 		value["resourceBase"] = base
 	}
-	t.t.emit(session.EventSkillLoad, session.NewSkillLoad(def.Name, def.Source, body))
+	if err := t.t.emitContext(ctx, session.EventSkillLoad, session.NewSkillLoad(def.Name, def.Source, body)); err != nil {
+		return agenttools.ToolResult{}, fmt.Errorf("skill: persist event: %w", err)
+	}
 	rendered := renderLoadedSkill(def, body)
 	return agenttools.ToolResult{Value: value, Output: rendered}, nil
 }

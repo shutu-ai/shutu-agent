@@ -26,8 +26,11 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/jabing/shutu-agent/internal/llm"
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 	"github.com/jabing/shutu-agent/internal/session"
 )
 
@@ -61,10 +64,13 @@ const defaultWaitSeconds = 30
 // tracker shared across all of them so job/status and job/done events are
 // emitted exactly once per observed transition.
 type JobTools struct {
-	reg     Registry
-	owner   func() string
-	onEvent func(typ string, data any)
-	tracker *transitionTracker
+	reg          Registry
+	owner        func() string
+	ownerContext func(context.Context) string
+	cwd          func(context.Context) string
+	onEvent      func(typ string, data any)
+	onSettled    func(owner string, snap JobSnapshot, output string) error
+	tracker      *transitionTracker
 }
 
 // NewJobTools returns the shared job-tool bundle bound to a Registry. owner,
@@ -74,6 +80,31 @@ type JobTools struct {
 // event payloads; the composition root wires it to the session log (D3).
 func NewJobTools(r Registry, owner func() string, onEvent func(typ string, data any)) *JobTools {
 	return &JobTools{reg: r, owner: owner, onEvent: onEvent, tracker: newTransitionTracker()}
+}
+
+// NewJobToolsWithCWD binds command jobs to the addressed session workspace.
+// NewJobTools remains the compatibility constructor for embedders without a
+// session-directory resolver.
+func NewJobToolsWithCWD(r Registry, owner func() string, cwd func(context.Context) string, onEvent func(typ string, data any)) *JobTools {
+	t := NewJobTools(r, owner, onEvent)
+	t.cwd = cwd
+	return t
+}
+
+// NewJobToolsWithContext is the Agent-owned constructor. ownerContext is
+// evaluated for every call and receives the addressed runtime context; owner
+// remains available only to legacy embedders that have no runtime context.
+func NewJobToolsWithContext(r Registry, ownerContext func(context.Context) string, cwd func(context.Context) string, onEvent func(typ string, data any)) *JobTools {
+	return &JobTools{reg: r, ownerContext: ownerContext, cwd: cwd, onEvent: onEvent, tracker: newTransitionTracker()}
+}
+
+// SetCompletionSink installs the host-owned completion delivery seam. The
+// owner is explicit because a background job may finish after another session
+// becomes the REPL's current session.
+func (t *JobTools) SetCompletionSink(sink func(owner string, snap JobSnapshot, output string) error) {
+	if t != nil {
+		t.onSettled = sink
+	}
 }
 
 // Start returns the job_start tool.
@@ -98,11 +129,27 @@ func (t *JobTools) DshList() DshJobListTool     { return DshJobListTool{t: t} }
 
 // callerSession returns the active session id (the tool authorization
 // boundary); "" when no owner provider is installed (unowned access).
-func (t *JobTools) callerSession() string {
+func (t *JobTools) callerSession(ctx ...context.Context) string {
+	if len(ctx) > 0 {
+		if sessionID := runtimectx.SessionID(ctx[0]); sessionID != "" {
+			return sessionID
+		}
+		if t.ownerContext != nil {
+			return t.ownerContext(ctx[0])
+		}
+	}
 	if t.owner != nil {
 		return t.owner()
 	}
 	return ""
+}
+
+func (t *JobTools) emitContext(ctx context.Context, typ string, data any) error {
+	if runtime, ok := runtimectx.Get(ctx); ok && runtime.Emit != nil {
+		return runtime.Emit(typ, data)
+	}
+	t.emit(typ, data)
+	return nil
 }
 
 // emit forwards one job/* event payload to the injected sink (D3).
@@ -116,19 +163,34 @@ func (t *JobTools) emit(typ string, data any) {
 // or job/done for a newly-observed terminal one, exactly once per (id, status)
 // via the shared tracker. A terminal settle also reads the stored output so
 // the job/done event carries its bounded summary (dispatch-m5a-2 §1).
-func (t *JobTools) reportTransition(snap JobSnapshot) {
+func (t *JobTools) reportTransition(ctx context.Context, snap JobSnapshot) error {
 	if !t.tracker.track(snap.ID, snap.Status) {
-		return // already reported for this status
+		return nil // already reported for this status
 	}
 	if isTerminal(snap.Status) {
 		summary := ""
 		if out, _, err := t.reg.Read(context.Background(), snap.ID, snap.OwnerSession); err == nil {
 			summary = out
 		}
-		t.emit(session.EventJobDone, session.NewJobDone(snap.ID, string(snap.Status), snap.Detail, summary))
+		return t.emitContext(ctx, session.EventJobDone, session.NewJobDone(snap.ID, string(snap.Status), snap.Detail, summary))
+	}
+	return t.emitContext(ctx, session.EventJobStatus, session.NewJobStatus(snap.ID, string(snap.Status), snap.Detail))
+}
+
+func (t *JobTools) notifyCompletion(snap JobSnapshot) {
+	if t == nil || t.onSettled == nil || !isTerminal(snap.Status) {
 		return
 	}
-	t.emit(session.EventJobStatus, session.NewJobStatus(snap.ID, string(snap.Status), snap.Detail))
+	// Synchronous observation and asynchronous completion share one tracker so
+	// a fast job cannot produce duplicate job/done events.
+	if !t.tracker.track(snap.ID, snap.Status) {
+		return
+	}
+	output, _, err := t.reg.Read(context.Background(), snap.ID, snap.OwnerSession)
+	if err != nil {
+		output = ""
+	}
+	_ = t.onSettled(snap.OwnerSession, snap, output)
 }
 
 // transitionTracker remembers the last status reported per job id so each
@@ -184,7 +246,7 @@ func (JobStartTool) Schema() map[string]any {
 			},
 			"label": map[string]any{
 				"type":        "string",
-				"description": "one-line job label (default the command)",
+				"description": "one-line non-sensitive job label (default: background command)",
 			},
 			"owner_session": map[string]any{
 				"type":        "string",
@@ -215,29 +277,59 @@ func (t JobStartTool) Execute(ctx context.Context, args any) (string, error) {
 	}
 	label := a.Label
 	if label == "" {
-		label = a.Command
+		label = "background command"
 	}
+	// Labels are durable UI metadata, not an execution channel. Never copy a
+	// command or caller-supplied label into the session log without applying
+	// the same bounded credential redaction used by provider diagnostics.
+	label = llm.RedactDiagnostic(label)
 	owner := a.OwnerSession
 	if owner == "" {
-		owner = t.t.callerSession()
+		owner = t.t.callerSession(ctx)
 	}
+	workdir := ""
+	if t.t.cwd != nil {
+		workdir = t.t.cwd(ctx)
+	}
+	var completionReady atomic.Bool
+	ready := make(chan struct{})
+	defer close(ready)
 	id, err := t.t.reg.Start(ctx, JobStart{
-		Kind:         Kind(kind),
-		Label:        label,
-		OwnerSession: owner,
-		Run:          runCommandLine(a.Command),
+		Kind:             Kind(kind),
+		Label:            label,
+		OwnerSession:     owner,
+		Correlation:      CorrelationFromContext(ctx),
+		CWD:              workdir,
+		OutputLimitBytes: defaultJobOutputLimit,
+		Run:              runCommandLineBounded(a.Command, workdir),
+		OnSettled: func(snap JobSnapshot) {
+			<-ready
+			if completionReady.Load() {
+				t.t.notifyCompletion(snap)
+			}
+		},
 	})
 	if err != nil {
 		return "", fmt.Errorf("job_start: %w", err)
 	}
+	// Registration is not visible to the caller until its durable start event
+	// commits. If that append fails, cancel the newly-created job immediately;
+	// otherwise a failed tool call would leak an owner-visible background job
+	// with no corresponding job/start fact and a retry could execute twice.
 	// Establish the running baseline so a later job_status does not re-log
 	// "running"; job/start is the registration event.
 	t.t.tracker.track(id, StatusRunning)
-	t.t.emit(session.EventJobStart, session.NewJobStart(id, kind, label, owner))
+	if err := t.t.emitContext(ctx, session.EventJobStart, session.NewJobStart(id, kind, label, owner)); err != nil {
+		_, _ = t.t.reg.Kill(context.Background(), id, owner, "job/start persistence failed")
+		return "", fmt.Errorf("job_start: persist event: %w", err)
+	}
+	completionReady.Store(true)
 	// The command may settle before Start returns; report a terminal settle
 	// immediately so job/done is logged even for a fast job.
 	if snap, err := t.t.reg.Get(ctx, id, owner); err == nil {
-		t.t.reportTransition(snap)
+		if err := t.t.reportTransition(ctx, snap); err != nil {
+			return "", fmt.Errorf("job_start: persist transition: %w", err)
+		}
 	}
 	return fmt.Sprintf("started job %s (kind=%s, label=%q); observe with job_output, list with job_list, stop with job_kill", id, kind, label), nil
 }
@@ -275,11 +367,13 @@ func (t JobStatusTool) Execute(ctx context.Context, args any) (string, error) {
 	if err := decodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("job_status: %w", err)
 	}
-	snap, err := t.t.reg.Get(ctx, a.ID, t.t.callerSession())
+	snap, err := t.t.reg.Get(ctx, a.ID, t.t.callerSession(ctx))
 	if err != nil {
 		return "", fmt.Errorf("job_status: %w", err)
 	}
-	t.t.reportTransition(snap)
+	if err := t.t.reportTransition(ctx, snap); err != nil {
+		return "", fmt.Errorf("job_status: persist transition: %w", err)
+	}
 	return formatSnapshot(snap), nil
 }
 
@@ -324,14 +418,16 @@ func (t JobCancelTool) Execute(ctx context.Context, args any) (string, error) {
 	if a.Reason == "" {
 		a.Reason = "cancelled via job_cancel"
 	}
-	res, err := t.t.reg.Kill(ctx, a.ID, t.t.callerSession(), a.Reason)
+	res, err := t.t.reg.Kill(ctx, a.ID, t.t.callerSession(ctx), a.Reason)
 	if err != nil {
 		return "", fmt.Errorf("job_cancel: %w", err)
 	}
 	// Observe the post-kill state so the running→stopping transition (or an
 	// immediate terminal settle) is logged.
-	if snap, err := t.t.reg.Get(ctx, a.ID, t.t.callerSession()); err == nil {
-		t.t.reportTransition(snap)
+	if snap, err := t.t.reg.Get(ctx, a.ID, t.t.callerSession(ctx)); err == nil {
+		if err := t.t.reportTransition(ctx, snap); err != nil {
+			return "", fmt.Errorf("job_cancel: persist transition: %w", err)
+		}
 	}
 	return res, nil
 }
@@ -343,6 +439,10 @@ type JobWaitTool struct {
 }
 
 func (JobWaitTool) Name() string { return ToolWaitName }
+
+// CancellationAware is explicit: the registry context is passed into
+// Local.Wait and returns before the tool persists a transition.
+func (JobWaitTool) CancellationAware() bool { return true }
 
 func (JobWaitTool) Description() string {
 	return "wait (bounded) for one background job to settle and return its terminal snapshot; on timeout returns the current status"
@@ -379,11 +479,13 @@ func (t JobWaitTool) Execute(ctx context.Context, args any) (string, error) {
 	if a.TimeoutSeconds <= 0 {
 		a.TimeoutSeconds = defaultWaitSeconds
 	}
-	snap, err := t.t.reg.Wait(ctx, a.ID, t.t.callerSession(), time.Duration(a.TimeoutSeconds)*time.Second)
+	snap, err := t.t.reg.Wait(ctx, a.ID, t.t.callerSession(ctx), time.Duration(a.TimeoutSeconds)*time.Second)
 	if err != nil {
 		return "", fmt.Errorf("job_wait: %w", err)
 	}
-	t.t.reportTransition(snap)
+	if err := t.t.reportTransition(ctx, snap); err != nil {
+		return "", fmt.Errorf("job_wait: persist transition: %w", err)
+	}
 	if isTerminal(snap.Status) {
 		return "job " + snap.ID + " settled: " + formatSnapshot(snap), nil
 	}
@@ -423,11 +525,13 @@ func (t JobReadTool) Execute(ctx context.Context, args any) (string, error) {
 	if err := decodeArgs(args, &a); err != nil {
 		return "", fmt.Errorf("job_read: %w", err)
 	}
-	out, snap, err := t.t.reg.Read(ctx, a.ID, t.t.callerSession())
+	out, snap, err := t.t.reg.Read(ctx, a.ID, t.t.callerSession(ctx))
 	if err != nil {
 		return "", fmt.Errorf("job_read: %w", err)
 	}
-	t.t.reportTransition(snap)
+	if err := t.t.reportTransition(ctx, snap); err != nil {
+		return "", fmt.Errorf("job_read: persist transition: %w", err)
+	}
 	if !isTerminal(snap.Status) {
 		return fmt.Sprintf("job %s is %s (no output yet)\n%s", snap.ID, snap.Status, formatSnapshot(snap)), nil
 	}
@@ -442,6 +546,10 @@ func (t JobReadTool) Execute(ctx context.Context, args any) (string, error) {
 type DshJobOutputTool struct{ t *JobTools }
 
 func (DshJobOutputTool) Name() string { return "job_output" }
+
+// CancellationAware is explicit for the wait=true path: Local.Wait observes
+// the registry context before output read/persistence continues.
+func (DshJobOutputTool) CancellationAware() bool { return true }
 func (DshJobOutputTool) Description() string {
 	return "read a background job's output; set wait=true when blocked on completion"
 }
@@ -472,7 +580,7 @@ func (t DshJobOutputTool) Execute(ctx context.Context, args any) (string, error)
 		if timeout > 10*time.Minute {
 			timeout = 10 * time.Minute
 		}
-		if _, err := t.t.reg.Wait(ctx, a.JobID, t.t.callerSession(), timeout); err != nil {
+		if _, err := t.t.reg.Wait(ctx, a.JobID, t.t.callerSession(ctx), timeout); err != nil {
 			return "", fmt.Errorf("job_output: %w", err)
 		}
 	}
@@ -480,14 +588,16 @@ func (t DshJobOutputTool) Execute(ctx context.Context, args any) (string, error)
 	var snap JobSnapshot
 	var err error
 	if deltaReader, ok := t.t.reg.(DeltaReader); ok {
-		out, snap, err = deltaReader.ReadDelta(ctx, a.JobID, t.t.callerSession())
+		out, snap, err = deltaReader.ReadDelta(ctx, a.JobID, t.t.callerSession(ctx))
 	} else {
-		out, snap, err = t.t.reg.Read(ctx, a.JobID, t.t.callerSession())
+		out, snap, err = t.t.reg.Read(ctx, a.JobID, t.t.callerSession(ctx))
 	}
 	if err != nil {
 		return "", fmt.Errorf("job_output: %w", err)
 	}
-	t.t.reportTransition(snap)
+	if err := t.t.reportTransition(ctx, snap); err != nil {
+		return "", fmt.Errorf("job_output: persist transition: %w", err)
+	}
 	status := dshStatusLine(snap)
 	if out == "" {
 		out = "(no new output)"
@@ -521,13 +631,15 @@ func (t DshJobKillTool) Execute(ctx context.Context, args any) (string, error) {
 	if a.Reason == "" {
 		a.Reason = "killed via job_kill"
 	}
-	res, err := t.t.reg.Kill(ctx, a.JobID, t.t.callerSession(), a.Reason)
+	res, err := t.t.reg.Kill(ctx, a.JobID, t.t.callerSession(ctx), a.Reason)
 	if err != nil {
 		return "", fmt.Errorf("job_kill: %w", err)
 	}
-	snap, getErr := t.t.reg.Get(ctx, a.JobID, t.t.callerSession())
+	snap, getErr := t.t.reg.Get(ctx, a.JobID, t.t.callerSession(ctx))
 	if getErr == nil {
-		t.t.reportTransition(snap)
+		if err := t.t.reportTransition(ctx, snap); err != nil {
+			return "", fmt.Errorf("job_kill: persist transition: %w", err)
+		}
 	}
 	if res == "already-finished" {
 		return fmt.Sprintf("job %s had already finished %s", a.JobID, dshStatusLine(snap)), nil
@@ -551,7 +663,7 @@ func (DshJobListTool) Schema() map[string]any {
 	return map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}
 }
 func (t DshJobListTool) Execute(ctx context.Context, args any) (string, error) {
-	snaps, err := t.t.reg.List(ctx, t.t.callerSession())
+	snaps, err := t.t.reg.List(ctx, t.t.callerSession(ctx))
 	if err != nil {
 		return "", fmt.Errorf("job_list: %w", err)
 	}

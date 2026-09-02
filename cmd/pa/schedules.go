@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jabing/shutu-agent/internal/config"
@@ -40,20 +41,19 @@ func (a *app) registerSchedules() error {
 	}
 	if a.store != nil {
 		a.scheduleWake = make(chan struct{}, 1)
-		a.goalScheduler = schedule.NewDurableScheduler(func(change schedule.DurableChange) error {
-			if a.log == nil {
-				return fmt.Errorf("schedule: no active session")
-			}
-			_, err := a.log.Append(session.EventScheduleChange, change)
-			if err == nil && a.scheduleWake != nil {
-				select {
-				case a.scheduleWake <- struct{}{}:
-				default:
-				}
-			}
-			return err
-		})
-		st := schedule.NewDurableScheduleTools(a.goalScheduler, time.Now)
+		a.scheduleMu.Lock()
+		a.goalSchedulers = make(map[string]*schedule.DurableScheduler)
+		a.scheduleClosed = false
+		a.scheduleMu.Unlock()
+		// Keep the legacy field populated for callers that inspect it, while all
+		// model-facing tool calls resolve a scheduler from their session context.
+		a.goalScheduler = a.newDurableScheduler(a.currentID, a.log)
+		if a.currentID != "" {
+			a.scheduleMu.Lock()
+			a.goalSchedulers[a.currentID] = a.goalScheduler
+			a.scheduleMu.Unlock()
+		}
+		st := schedule.NewDurableScheduleToolsWithResolver(a.durableSchedulerFor, time.Now)
 		for _, t := range []tools.Tool{st.Create(), st.List(), st.Delete()} {
 			if err := a.reg.Register(t); err != nil {
 				return fmt.Errorf("pa: register %s: %w", t.Name(), err)
@@ -87,40 +87,158 @@ func (a *app) registerSchedules() error {
 	return nil
 }
 
+func (a *app) newDurableScheduler(sessionID string, log *session.Log) *schedule.DurableScheduler {
+	return schedule.NewDurableScheduler(func(change schedule.DurableChange) error {
+		if log == nil || sessionID == "" {
+			return fmt.Errorf("schedule: no active session")
+		}
+		_, err := log.Append(session.EventScheduleChange, change)
+		if err == nil && a.scheduleWake != nil {
+			select {
+			case a.scheduleWake <- struct{}{}:
+			default:
+			}
+		}
+		return err
+	})
+}
+
+// durableSchedulerFor returns the projection owned by the session carried by
+// ctx. A scheduler is rebuilt from that session's log exactly once per live
+// runtime, so schedules from concurrent sessions cannot share state.
+func (a *app) durableSchedulerFor(ctx context.Context) (*schedule.DurableScheduler, error) {
+	if err := a.requireRunning(); err != nil {
+		return nil, err
+	}
+	sessionID := a.runtimeSessionID(ctx)
+	log := a.runtimeLog(ctx)
+	if sessionID == "" || log == nil {
+		return nil, fmt.Errorf("schedule: session runtime is unavailable")
+	}
+	a.scheduleMu.Lock()
+	if a.scheduleClosed {
+		a.scheduleMu.Unlock()
+		return nil, schedule.ErrDurableClosed
+	}
+	if a.goalSchedulers == nil {
+		a.goalSchedulers = make(map[string]*schedule.DurableScheduler)
+	}
+	if scheduler := a.goalSchedulers[sessionID]; scheduler != nil {
+		a.scheduleMu.Unlock()
+		return scheduler, nil
+	}
+	scheduler := a.newDurableScheduler(sessionID, log)
+	if err := scheduler.Restore(log.Events()); err != nil {
+		a.scheduleMu.Unlock()
+		_ = scheduler.Close()
+		return nil, err
+	}
+	a.goalSchedulers[sessionID] = scheduler
+	a.scheduleMu.Unlock()
+	return scheduler, nil
+}
+
+func (a *app) closeGoalSchedulers() {
+	a.scheduleMu.Lock()
+	a.scheduleClosed = true
+	cancel := a.scheduleCancel
+	a.scheduleCancel = nil
+	all := make([]*schedule.DurableScheduler, 0, len(a.goalSchedulers)+1)
+	seen := make(map[*schedule.DurableScheduler]struct{})
+	for _, scheduler := range a.goalSchedulers {
+		if scheduler != nil {
+			seen[scheduler] = struct{}{}
+			all = append(all, scheduler)
+		}
+	}
+	if a.goalScheduler != nil {
+		if _, ok := seen[a.goalScheduler]; !ok {
+			all = append(all, a.goalScheduler)
+		}
+	}
+	a.goalSchedulers = nil
+	a.goalScheduler = nil
+	a.scheduleMu.Unlock()
+	if cancel != nil {
+		cancel()
+		a.scheduleWG.Wait()
+	}
+	for _, scheduler := range all {
+		_ = scheduler.Close()
+	}
+}
+
 func (a *app) restoreGoalScheduler() error {
-	if a.goalScheduler == nil || a.log == nil {
+	if a.log == nil || a.currentID == "" {
 		return nil
 	}
-	err := a.goalScheduler.Restore(a.log.Events())
-	if err == nil && a.scheduleWake != nil {
+	a.scheduleMu.Lock()
+	if a.scheduleClosed {
+		a.scheduleMu.Unlock()
+		return schedule.ErrDurableClosed
+	}
+	old := a.goalSchedulers[a.currentID]
+	delete(a.goalSchedulers, a.currentID)
+	a.scheduleMu.Unlock()
+	if old != nil {
+		_ = old.Close()
+	}
+	scheduler := a.newDurableScheduler(a.currentID, a.log)
+	if err := scheduler.Restore(a.log.Events()); err != nil {
+		_ = scheduler.Close()
+		return err
+	}
+	a.scheduleMu.Lock()
+	if a.goalSchedulers == nil {
+		a.goalSchedulers = make(map[string]*schedule.DurableScheduler)
+	}
+	a.goalSchedulers[a.currentID] = scheduler
+	a.goalScheduler = scheduler
+	a.scheduleMu.Unlock()
+	if a.scheduleWake != nil {
 		select {
 		case a.scheduleWake <- struct{}{}:
 		default:
 		}
 	}
-	return err
+	return nil
 }
 
 func (a *app) startGoalScheduler(ctx context.Context) {
-	if a.goalScheduler == nil {
+	if a.shutdownStarted() {
 		return
 	}
+	a.scheduleMu.Lock()
+	if a.goalScheduler == nil || a.scheduleCancel != nil {
+		a.scheduleMu.Unlock()
+		return
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	a.scheduleCancel = cancel
+	a.scheduleWG.Add(1)
+	a.scheduleMu.Unlock()
 	interval := a.cfg.Schedule.TickInterval.Duration
 	if interval <= 0 {
 		interval = time.Minute
 	}
 	go func() {
+		defer a.scheduleWG.Done()
 		for {
 			delay := interval
-			if next, ok, err := a.goalScheduler.NextWake(ctx); err == nil && ok {
-				delay = time.Until(next)
-				if delay < 0 {
-					delay = 0
+			for _, scheduler := range a.goalSchedulersSnapshot() {
+				if next, ok, err := scheduler.NextWake(runCtx); err == nil && ok {
+					candidate := time.Until(next)
+					if candidate < 0 {
+						candidate = 0
+					}
+					if candidate < delay {
+						delay = candidate
+					}
 				}
 			}
 			timer := time.NewTimer(delay)
 			select {
-			case <-ctx.Done():
+			case <-runCtx.Done():
 				timer.Stop()
 				return
 			case <-a.scheduleWake:
@@ -132,29 +250,121 @@ func (a *app) startGoalScheduler(ctx context.Context) {
 				}
 				continue
 			case <-timer.C:
-				a.runScheduledReminder(ctx)
+				a.runScheduledReminder(runCtx)
 			}
 		}
 	}()
 }
 
+func (a *app) goalSchedulersSnapshot() map[string]*schedule.DurableScheduler {
+	a.scheduleMu.Lock()
+	defer a.scheduleMu.Unlock()
+	out := make(map[string]*schedule.DurableScheduler, len(a.goalSchedulers)+1)
+	for id, scheduler := range a.goalSchedulers {
+		if scheduler != nil {
+			out[id] = scheduler
+		}
+	}
+	if len(out) == 0 && a.goalScheduler != nil {
+		out[a.currentID] = a.goalScheduler
+	}
+	return out
+}
+
+// lockScheduleSession serializes the durable delivery edge for one owning
+// session. The scheduler ticker may inspect many sessions, while a turn's
+// pre-step injector may concurrently inspect the same session; a process-wide
+// lock would make unrelated sessions contend and would hide cross-session
+// ordering bugs.
+func (a *app) lockScheduleSession(sessionID string) func() {
+	a.scheduleSessionMu.Lock()
+	if a.scheduleSessionLocks == nil {
+		a.scheduleSessionLocks = make(map[string]*sync.Mutex)
+	}
+	lock := a.scheduleSessionLocks[sessionID]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		a.scheduleSessionLocks[sessionID] = lock
+	}
+	a.scheduleSessionMu.Unlock()
+	lock.Lock()
+	return lock.Unlock
+}
+
 func (a *app) runScheduledReminder(ctx context.Context) {
-	if a.goalScheduler == nil || !a.scheduleRunMu.TryLock() {
+	if a.shutdownStarted() {
 		return
 	}
-	defer a.scheduleRunMu.Unlock()
-	if a.currentID == "" {
+	schedulers := a.goalSchedulersSnapshot()
+	if len(schedulers) == 0 {
 		return
 	}
-	due, ok, err := a.goalScheduler.Due(ctx, time.Now())
-	if err != nil || !ok {
-		return
+	for sessionID, scheduler := range schedulers {
+		if sessionID == "" {
+			continue
+		}
+		unlock := a.lockScheduleSession(sessionID)
+		due, ok, err := scheduler.Due(ctx, time.Now())
+		if err != nil || !ok {
+			unlock()
+			continue
+		}
+		if a.agentRegistry != nil {
+			log, logErr := a.sessionLogForAgent(ctx, sessionID)
+			if logErr != nil {
+				unlock()
+				continue
+			}
+			handle, handleErr := a.sessionAgent(sessionID)
+			if handleErr != nil {
+				unlock()
+				continue
+			}
+			metadata := map[string]string{
+				"source":                 "schedule",
+				"schedule_occurrence_id": scheduleOccurrenceID(due),
+				"dedupe_key":             "schedule:" + scheduleOccurrenceID(due),
+			}
+			if durableScheduleReminderDelivered(log, due) {
+				// The claimed receipt remains a durable inbox splice. A replay
+				// must not append a second wake merely because the owner has
+				// already consumed the first reminder.
+			} else if err := handle.Followup(scheduleReminderPrompt(due), metadata); err != nil {
+				unlock()
+				continue
+			}
+			// The inbox journal is durable and carries the same occurrence
+			// dedupe key. Record the scheduler fire after the wake is durable so
+			// a crash between the two operations can replay safely: the next
+			// scheduler pass reuses the key and cannot enqueue a duplicate.
+			if !a.appendDurableScheduleFire(log, due) {
+				unlock()
+				continue
+			}
+			if err := scheduler.Dispatch(ctx, due); err != nil {
+				unlock()
+				continue
+			}
+			unlock()
+			continue
+		}
+		if sessionID != a.currentID {
+			unlock()
+			continue
+		}
+		log, logErr := a.sessionLogForAgent(ctx, sessionID)
+		if logErr != nil || !a.appendDurableScheduleFire(log, due) {
+			unlock()
+			continue
+		}
+		if err := a.runTurn(ctx, scheduleReminderPrompt(due), false); err != nil {
+			unlock()
+			continue
+		}
+		_ = a.runIdleGoal(ctx, false)
+		_ = scheduler.Dispatch(ctx, due)
+		unlock()
 	}
-	if err := a.runTurn(ctx, scheduleReminderPrompt(due), false); err != nil {
-		return
-	}
-	_ = a.runIdleGoal(ctx, false)
-	_ = a.goalScheduler.Dispatch(ctx, due)
 }
 
 func scheduleReminderPrompt(due schedule.DurableDue) string {
@@ -182,9 +392,13 @@ func scheduleReminderPrompt(due schedule.DurableDue) string {
 // It is appended after the skill injector in preStepInjectors so the ordering
 // is recall → compaction → skill → schedule.
 func (a *app) scheduleInjector() loop.PreStepInjector {
+	return loop.PreStepInjector{Name: "schedule", Inject: a.schedulePreStep, OncePerTurn: true}
+}
+
+func (a *app) scheduleInjectorFor(log *session.Log) loop.PreStepInjector {
 	return loop.PreStepInjector{
 		Name:        "schedule",
-		Inject:      a.schedulePreStep,
+		Inject:      func(ctx context.Context, text string) []llm.Message { return a.schedulePreStepFor(ctx, text, log) },
 		OncePerTurn: true,
 	}
 }
@@ -201,6 +415,21 @@ func (a *app) scheduleInjector() loop.PreStepInjector {
 // message: schedule/fire is log-only and the fired payload reaches the model
 // through the enqueued job's tool/result.
 func (a *app) schedulePreStep(ctx context.Context, _ string) []llm.Message {
+	return a.schedulePreStepFor(ctx, "", a.log)
+}
+
+func (a *app) schedulePreStepFor(ctx context.Context, _ string, log *session.Log) []llm.Message {
+	// SQLite-backed schedules are session-local projections, not the legacy
+	// process-wide engine. Resolve them from the runtime session even when the
+	// addressed session is not the REPL's currentID.
+	if a.store != nil && a.scheduleWake != nil {
+		scheduler, err := a.durableSchedulerFor(ctx)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "[schedule runtime unavailable]", err)
+			return nil
+		}
+		return a.durableSchedulePreStepFor(ctx, log, scheduler)
+	}
 	if a.schedules == nil {
 		return nil
 	}
@@ -225,7 +454,10 @@ func (a *app) schedulePreStep(ctx context.Context, _ string) []llm.Message {
 	}
 	for _, id := range fired {
 		payload := payloads[id]
-		if _, err := a.log.Append(session.EventScheduleFire, session.NewScheduleFire(id, payload)); err != nil {
+		if log == nil {
+			continue
+		}
+		if _, err := log.Append(session.EventScheduleFire, session.NewScheduleFire(id, payload)); err != nil {
 			fmt.Fprintln(os.Stderr, "pa: schedule/fire event:", err)
 		}
 		// Enqueue a background job executing the payload (D5: the fire event
@@ -236,7 +468,8 @@ func (a *app) schedulePreStep(ctx context.Context, _ string) []llm.Message {
 			if _, err := a.jobs.Start(ctx, jobs.JobStart{
 				Kind:         "schedule",
 				Label:        "schedule " + id + " fired",
-				OwnerSession: a.currentID,
+				OwnerSession: a.runtimeSessionID(ctx),
+				Correlation:  jobs.CorrelationFromContext(ctx),
 				Run:          scheduleFireRun(payload),
 			}); err != nil {
 				fmt.Fprintln(os.Stderr, "pa: enqueue schedule fire job:", err)
@@ -244,6 +477,103 @@ func (a *app) schedulePreStep(ctx context.Context, _ string) []llm.Message {
 		}
 	}
 	return nil
+}
+
+func (a *app) durableSchedulePreStepFor(ctx context.Context, log *session.Log, scheduler *schedule.DurableScheduler) []llm.Message {
+	sessionID := a.runtimeSessionID(ctx)
+	if sessionID == "" {
+		return nil
+	}
+	unlock := a.lockScheduleSession(sessionID)
+	defer unlock()
+	due, ok, err := scheduler.Due(ctx, time.Now())
+	if err != nil || !ok {
+		return nil
+	}
+	if log == nil {
+		return nil
+	}
+	if !a.appendDurableScheduleFire(log, due) {
+		return nil
+	}
+	if err := scheduler.Dispatch(ctx, due); err != nil {
+		fmt.Fprintln(os.Stderr, "pa: schedule dispatch:", err)
+		return nil
+	}
+	return []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text(scheduleReminderPrompt(due))}}}
+}
+
+func scheduleOccurrenceID(due schedule.DurableDue) string {
+	if len(due.Records) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, record := range due.Records {
+		if b.Len() > 0 {
+			b.WriteByte('|')
+		}
+		b.WriteString(record.ID)
+		b.WriteByte('@')
+		b.WriteString(record.ScheduledAt.UTC().Format(time.RFC3339Nano))
+	}
+	return b.String()
+}
+
+func durableScheduleReminderDelivered(log *session.Log, due schedule.DurableDue) bool {
+	if log == nil {
+		return false
+	}
+	key := "schedule:" + scheduleOccurrenceID(due)
+	if key == "schedule:" {
+		return false
+	}
+	inboxEvents, err := replaySessionInbox(log.Events())
+	if err != nil {
+		return false
+	}
+	for _, event := range inboxEvents {
+		for _, message := range event.Inserted {
+			if strings.TrimSpace(message.Metadata["dedupe_key"]) == key {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (a *app) appendDurableScheduleFire(log *session.Log, due schedule.DurableDue) bool {
+	if log == nil {
+		return false
+	}
+	for _, record := range due.Records {
+		if scheduleFireAlreadyRecorded(log, record.ID, record.ScheduledAt) {
+			continue
+		}
+		if _, err := log.Append(session.EventScheduleFire, session.NewScheduleFireAt(record.ID, record.Prompt, record.ScheduledAt)); err != nil {
+			fmt.Fprintln(os.Stderr, "pa: schedule/fire event:", err)
+			return false
+		}
+	}
+	return true
+}
+
+func scheduleFireAlreadyRecorded(log *session.Log, id string, occurrenceAt time.Time) bool {
+	if log == nil || id == "" || occurrenceAt.IsZero() {
+		return false
+	}
+	for _, event := range log.Events() {
+		if event.Type != session.EventScheduleFire {
+			continue
+		}
+		var data struct {
+			ID           string    `json:"id"`
+			OccurrenceAt time.Time `json:"occurrenceAt"`
+		}
+		if json.Unmarshal(event.Data, &data) == nil && data.ID == id && data.OccurrenceAt.Equal(occurrenceAt) {
+			return true
+		}
+	}
+	return false
 }
 
 // scheduleFireRun is the Run body of a fired schedule's background job

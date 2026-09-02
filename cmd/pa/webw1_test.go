@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jabing/shutu-agent/internal/agent"
 	"github.com/jabing/shutu-agent/internal/config"
 	"github.com/jabing/shutu-agent/internal/llm"
 	"github.com/jabing/shutu-agent/internal/prompt"
@@ -125,8 +126,8 @@ func TestRunTurnSerial(t *testing.T) {
 	if llm.calls != 5 {
 		t.Fatalf("LLM calls = %d, want 5", llm.calls)
 	}
-	if n := len(a.log.Events()); n != 36 { // one durable runtime snapshot + 5 normal turns
-		t.Fatalf("log events = %d, want 36", n)
+	if n := len(a.log.Events()); n != 40 { // one durable runtime snapshot + 5 canonical turns
+		t.Fatalf("log events = %d, want 40", n)
 	}
 }
 
@@ -227,6 +228,38 @@ func TestWebMessageResumesOtherSession(t *testing.T) {
 	}
 }
 
+func TestWebSessionManagerAgentPathDoesNotSwitchREPLSelection(t *testing.T) {
+	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "sessions.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	legacyLog := session.New()
+	a := &app{
+		store:         st,
+		currentID:     "repl-session",
+		log:           legacyLog,
+		agentRegistry: agent.NewRegistry(),
+		baseCtx:       context.Background(),
+		cfg:           config.Config{Workspace: config.WorkspaceConfig{DefaultDir: t.TempDir()}},
+	}
+	defer a.agentRegistry.CloseAll()
+
+	id, err := a.webSessionManager(context.Background(), "new", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id == "" || a.currentID != "repl-session" || a.log != legacyLog {
+		t.Fatalf("agent web new changed REPL selection: id=%q current=%q logChanged=%t", id, a.currentID, a.log != legacyLog)
+	}
+	if _, err := a.webSessionManager(context.Background(), "resume", id); err != nil {
+		t.Fatal(err)
+	}
+	if a.currentID != "repl-session" || a.log != legacyLog {
+		t.Fatal("agent web resume changed REPL selection")
+	}
+}
+
 // TestPruneBlankSessionOnSwitch verifies dsh's empty-session behavior: a session
 // with no events that the user leaves by switching to another session is
 // discarded from the store, while a session that has content is preserved.
@@ -319,6 +352,21 @@ func TestEventHubPublishSubscribe(t *testing.T) {
 	}
 }
 
+func TestEventHubSubscribeAllPreservesSessionIdentity(t *testing.T) {
+	h := NewEventHub()
+	ch, unsub := h.SubscribeAll()
+	defer unsub()
+	h.Publish("s-2", session.Event{Seq: 4, Type: session.EventTurnEnd})
+	select {
+	case got := <-ch:
+		if got.sessionID != "s-2" || got.event.Seq != 4 {
+			t.Fatalf("all-subscriber delivery = %+v, want session identity and event", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("all-subscriber did not receive the published event")
+	}
+}
+
 // TestEventHubDropsSlowSubscriber verifies the drop policy (dispatch-m10-web2
 // §2): publishing to a subscriber whose buffer is full never blocks the caller.
 func TestEventHubDropsSlowSubscriber(t *testing.T) {
@@ -356,6 +404,52 @@ func TestRegisterWebServerInjectsHandlers(t *testing.T) {
 // the capability gates are correct, the tool whitelist carries its count plus a
 // bounded list, and registerWebServer wires the provider into the webserver
 // (Handlers().Config non-nil).
+func TestWebConfigProjectsCanonicalToolCatalog(t *testing.T) {
+	a := &app{reg: tools.New()}
+	if err := a.reg.Register(tools.GetTime{}); err != nil {
+		t.Fatal(err)
+	}
+	a.reg.SetPolicy(tools.Policy{Profile: config.ModeStandard, Enabled: []string{"get_time"}})
+
+	names, manifest, err := a.webToolCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tools.ValidateCatalogManifest(manifest); err != nil {
+		t.Fatalf("web catalog manifest invalid: %v", err)
+	}
+	if len(names) != 1 || names[0] != "get_time" || manifest.Revision == 0 {
+		t.Fatalf("web catalog = %v/%+v", names, manifest)
+	}
+
+	configView := a.webConfig()
+	projected, ok := configView["tool_catalog"].(tools.CatalogManifest)
+	if !ok {
+		t.Fatalf("tool_catalog type = %T, want tools.CatalogManifest", configView["tool_catalog"])
+	}
+	if projected.Digest != manifest.Digest || projected.Revision != manifest.Revision || len(projected.Tools) != 1 {
+		t.Fatalf("projected catalog = %+v, want manifest %+v", projected, manifest)
+	}
+	if got := configView["tools_enabled_count"]; got != 1 {
+		t.Fatalf("tools_enabled_count = %v, want 1", got)
+	}
+
+	// A generation replacement must be observable by the next inventory read.
+	if err := a.reg.Unregister("get_time"); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.reg.RegisterWithInfo(tools.GetTime{}, tools.RegistrationInfo{Owner: "reload", Plugin: "demo", Generation: manifest.Revision + 1}); err != nil {
+		t.Fatal(err)
+	}
+	_, reloaded, err := a.webToolCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Revision <= manifest.Revision || reloaded.Digest == manifest.Digest {
+		t.Fatalf("reload manifest = %+v, want advanced revision and digest", reloaded)
+	}
+}
+
 func TestWebConfigRedacts(t *testing.T) {
 	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "t.db"))
 	if err != nil {

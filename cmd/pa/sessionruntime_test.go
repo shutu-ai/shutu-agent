@@ -10,11 +10,13 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/jabing/shutu-agent/internal/config"
+	"github.com/jabing/shutu-agent/internal/interact"
 	"github.com/jabing/shutu-agent/internal/llm"
 	"github.com/jabing/shutu-agent/internal/prompt"
 	"github.com/jabing/shutu-agent/internal/session"
@@ -25,6 +27,23 @@ import (
 // stubProvider is a minimal llm.Provider for routing tests; Stream always
 // errors so a turn can never accidentally use it.
 type stubProvider struct{ id string }
+
+type failingSessionConfigStore struct {
+	store.Store
+	err error
+}
+
+func (s failingSessionConfigStore) GetSessionConfig(context.Context, string) (store.SessionConfig, error) {
+	return store.SessionConfig{}, s.err
+}
+
+func (s failingSessionConfigStore) SetSessionConfig(context.Context, string, store.SessionConfig) error {
+	return s.err
+}
+
+func (s failingSessionConfigStore) UpdateSessionConfig(context.Context, string, string, string, string, string) error {
+	return s.err
+}
 
 func (s stubProvider) ID() string      { return s.id }
 func (s stubProvider) Available() bool { return true }
@@ -53,13 +72,16 @@ func TestLLMForRouting(t *testing.T) {
 	if got := a.llmFor("openai"); got != openai {
 		t.Fatalf("llmFor(openai) = %v, want the openai adapter", got)
 	}
-	if got := a.llmFor("nope"); got != global {
-		t.Fatalf("llmFor(unknown) = %v, want the global LLM (fail-open)", got)
+	if got := a.llmFor("nope"); got == global {
+		t.Fatal("llmFor(unknown) silently returned the global LLM")
+	}
+	if _, err := a.llmFor("nope").Stream(context.Background(), llm.ChatRequest{}); err == nil || !strings.Contains(err.Error(), "not registered") {
+		t.Fatalf("unknown provider dispatch error = %v, want fail-closed error", err)
 	}
 	// No registry at all → global.
 	a2 := &app{llm: global}
-	if got := a2.llmFor("openai"); got != global {
-		t.Fatalf("llmFor without registry = %v, want the global LLM", got)
+	if got := a2.llmFor("openai"); got == global {
+		t.Fatal("llmFor without registry silently returned the global LLM")
 	}
 }
 
@@ -94,6 +116,8 @@ func TestApplySessionRuntime(t *testing.T) {
 		prompt: prompt.New("You are a standard agent."),
 		store:  st,
 	}
+	a.interacts = interact.NewEngine(nil)
+	defer a.interacts.Close()
 	a.basePolicy = tools.Policy{Enabled: []string{}} // empty → reject-all
 	if err := a.reg.Register(tools.GetTime{}); err != nil {
 		t.Fatal(err)
@@ -151,6 +175,9 @@ func TestApplySessionRuntime(t *testing.T) {
 	if _, err := a.reg.Execute(ctx, "get_time", json.RawMessage("{}")); err != nil {
 		t.Fatalf("full tier should allow get_time: %v", err)
 	}
+	if got := a.interacts.(interact.PolicyController).SessionPolicy("s-full"); got != interact.PolicyNever {
+		t.Fatalf("full session approval policy = %q, want never", got)
+	}
 	restore()
 	if _, err := a.reg.Execute(ctx, "get_time", json.RawMessage("{}")); err == nil {
 		t.Fatalf("get_time must be rejected again after restore (base whitelist empty)")
@@ -162,6 +189,9 @@ func TestApplySessionRuntime(t *testing.T) {
 	_, restore = a.applySessionRuntime("s-ro")
 	if _, err := a.reg.Execute(ctx, "get_time", json.RawMessage("{}")); err != nil {
 		t.Fatalf("readonly tier must expose safe get_time: %v", err)
+	}
+	if got := a.interacts.(interact.PolicyController).SessionPolicy("s-ro"); got != interact.PolicyAsk {
+		t.Fatalf("readonly session approval policy = %q, want ask", got)
 	}
 	restore()
 }
@@ -224,6 +254,48 @@ func hasName(names []string, want string) bool {
 	return false
 }
 
+func TestApplySessionRuntimeStrictFailsClosedOnConfigReadError(t *testing.T) {
+	readErr := errors.New("session config unavailable")
+	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "pa.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	a := &app{
+		cfg:    config.Config{Model: "global-model", Mode: config.ModeStandard},
+		store:  failingSessionConfigStore{Store: st, err: readErr},
+		prompt: prompt.New("agent"),
+		reg:    tools.New(),
+	}
+
+	_, _, err = a.applySessionRuntimeOnStrict("session-1", session.New(), tools.New())
+	if err == nil || !strings.Contains(err.Error(), "load session runtime") {
+		t.Fatalf("strict runtime error = %v, want durable config read failure", err)
+	}
+}
+
+// TestLegacyHostRuntimeFailsClosed proves the compatibility-only CLI path no
+// longer swallows runtime assembly errors and silently turns into globals.
+func TestLegacyHostRuntimeFailsClosed(t *testing.T) {
+	readErr := errors.New("session config unavailable")
+	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "pa.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	a := &app{
+		cfg:    config.Config{Model: "global-model", Mode: config.ModeStandard},
+		store:  failingSessionConfigStore{Store: st, err: readErr},
+		prompt: prompt.New("agent"),
+		reg:    tools.New(),
+	}
+
+	_, _, err = a.applySessionRuntimeE("session-1")
+	if err == nil || !strings.Contains(err.Error(), "load session runtime") {
+		t.Fatalf("legacy host runtime error = %v, want fail-closed config error", err)
+	}
+}
+
 // TestSessionModeWireSurface verifies the dsh mode contract end to end: a
 // session's agent preset (locked at creation) owns BOTH the model-facing tool
 // array sent on the wire AND the execution whitelist. Standard never sees or
@@ -251,7 +323,7 @@ func TestSessionModeWireSurface(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	a.basePolicy = tools.Policy{Enabled: []string{"get_time", "read", "run_code", "str_replace_editor"}}
+	a.basePolicy = tools.Policy{Profile: config.ModeStandard, Enabled: []string{"get_time", "read", "run_code", "str_replace_editor"}}
 	a.reg.SetPolicy(a.basePolicy)
 
 	mustSession := func(id, preset string) {
@@ -270,6 +342,10 @@ func TestSessionModeWireSurface(t *testing.T) {
 	if err := a.newLoopFor(rt, false).Run(ctx, "hi"); err != nil {
 		t.Fatalf("standard turn: %v", err)
 	}
+	projected := toolSpecsForMode(config.ModeStandard, a.reg.VisibleSpecs())
+	if err := a.reg.ValidateProjection(config.ModeStandard, projected); err != nil {
+		t.Fatalf("standard transport projection: %v", err)
+	}
 	restore()
 	wire := rec.lastTools()
 	if hasName(wire, "run_code") {
@@ -280,6 +356,11 @@ func TestSessionModeWireSurface(t *testing.T) {
 	}
 	if !hasName(wire, "str_replace_editor") {
 		t.Fatalf("standard wire tools = %v, want str_replace_editor", wire)
+	}
+	for _, entry := range a.reg.Catalog() {
+		if entry.Profile != config.ModeStandard {
+			t.Fatalf("standard catalog profile = %+v", entry)
+		}
 	}
 	_, restore = a.applySessionRuntime("s-std")
 	if _, err := a.reg.Execute(ctx, "run_code", json.RawMessage(`{}`)); err == nil {
@@ -292,6 +373,10 @@ func TestSessionModeWireSurface(t *testing.T) {
 	rt, restore = a.applySessionRuntime("s-ptc")
 	if err := a.newLoopFor(rt, false).Run(ctx, "hi"); err != nil {
 		t.Fatalf("PTC turn: %v", err)
+	}
+	projected = toolSpecsForMode(config.ModeCode, a.reg.VisibleSpecs())
+	if err := a.reg.ValidateProjection(config.ModeCode, projected); err != nil {
+		t.Fatalf("PTC transport projection: %v", err)
 	}
 	restore()
 	wire = rec.lastTools()
@@ -315,6 +400,10 @@ func TestSessionModeWireSurface(t *testing.T) {
 	rt, restore = a.applySessionRuntime("s-min")
 	if err := a.newLoopFor(rt, false).Run(ctx, "hi"); err != nil {
 		t.Fatalf("minimal turn: %v", err)
+	}
+	projected = toolSpecsForMode(config.ModeMinimal, a.reg.VisibleSpecs())
+	if err := a.reg.ValidateProjection(config.ModeMinimal, projected); err != nil {
+		t.Fatalf("minimal transport projection: %v", err)
 	}
 	restore()
 	wire = rec.lastTools()

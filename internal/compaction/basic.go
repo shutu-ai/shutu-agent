@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/jabing/shutu-agent/internal/llm"
+	"github.com/jabing/shutu-agent/internal/projection"
 	"github.com/jabing/shutu-agent/internal/session"
 )
 
@@ -29,10 +30,17 @@ type TokenEstimator func(text string) int
 type BasicOpts struct {
 	// Tokenizer estimates tokens; nil uses the built-in len(bytes)/4 proxy.
 	Tokenizer TokenEstimator
+	// Meter is the canonical replacement-aware surface measurement. When set,
+	// pressure and retainTokens use its totals/nodes, while Tokenizer remains
+	// the fallback for summaries and standalone callers.
+	Meter SurfaceMeter
 	// LLM generates summaries. Required for any compaction that produces a
 	// summary; a nil LLM makes every compaction attempt fail with an error
 	// (fail-open is the wiring's concern).
 	LLM llm.LLM
+	// SessionID is the durable session identity used for provider attribution
+	// on internal compaction requests. Empty preserves standalone callers.
+	SessionID string
 	// Model is the summary model name (advisory; the adapter owns the
 	Model string
 	// TokenThreshold is the pressure trigger: CompactIfNeeded compacts when the
@@ -100,7 +108,11 @@ func NewBasic(opts BasicOpts) *BasicEngine {
 // reduction even below the threshold. It returns nil, nil when nothing needs to
 // (or can) be compacted.
 func (e *BasicEngine) CompactIfNeeded(ctx context.Context, sess SessionLike, trigger Trigger) (*Result, error) {
-	over := e.opts.TokenThreshold > 0 && e.estimateTokens(sess) > e.opts.TokenThreshold
+	tokens, err := e.estimateTokens(sess)
+	if err != nil {
+		return nil, err
+	}
+	over := e.opts.TokenThreshold > 0 && tokens > e.opts.TokenThreshold
 	if !over && trigger == TriggerPressure {
 		return nil, nil
 	}
@@ -162,10 +174,24 @@ func (e *BasicEngine) doCompact(ctx context.Context, sess SessionLike, r [2]int6
 		storedSummary = frameSummary(summary)
 	}
 	shadowedTokens := e.estimateMessages(msgs)
+	var measurement SurfaceMeasurement
+	if e.opts.Meter != nil {
+		measurement = e.opts.Meter(sess)
+		if measured := measuredRangeTokens(measurement, start, end); measured >= 0 {
+			shadowedTokens = measured
+		}
+	}
 	if e.opts.RequireSmallerSummary && e.est(storedSummary) >= shadowedTokens {
 		return nil, fmt.Errorf("compaction: summary is not smaller (%d >= %d tokens)", e.est(storedSummary), shadowedTokens)
 	}
-	if _, err := sess.Append(session.EventUserMessage, session.NewUserMessageReplace(storedSummary, start, end)); err != nil {
+	sourceSeqs := make([]uint64, len(seqs))
+	for index, seq := range seqs {
+		if seq < 0 {
+			return nil, fmt.Errorf("compaction: invalid shadowed sequence %d", seq)
+		}
+		sourceSeqs[index] = uint64(seq)
+	}
+	if _, err := sess.Append(session.EventUserMessage, session.NewUserMessageReplaceWithSources(storedSummary, start, end, sourceSeqs)); err != nil {
 		return nil, fmt.Errorf("compaction: append summary marker: %w", err)
 	}
 	return &Result{
@@ -174,7 +200,38 @@ func (e *BasicEngine) doCompact(ctx context.Context, sess SessionLike, r [2]int6
 		ShadowedRange:  [2]int64{start, end},
 		ShadowedSeqs:   seqs,
 		ShadowedTokens: shadowedTokens,
+		Measurement:    measurement,
 	}, nil
+}
+
+// measuredRangeTokens returns the exact provider-supplied price for the
+// current folded surface range. A negative result means the meter did not
+// expose a complete matching node projection, so callers can use the legacy
+// message estimator without inventing prices for non-surface events.
+func (e *BasicEngine) measuredRangeTokens(sess SessionLike, start, end int64) int {
+	if e.opts.Meter == nil {
+		return -1
+	}
+	return measuredRangeTokens(e.opts.Meter(sess), start, end)
+}
+
+func measuredRangeTokens(measurement SurfaceMeasurement, start, end int64) int {
+	if len(measurement.Nodes) == 0 {
+		return -1
+	}
+	total := 0
+	found := false
+	for _, node := range measurement.Nodes {
+		seq := int64(node.Seq)
+		if seq >= start && seq <= end {
+			total += node.Tokens
+			found = true
+		}
+	}
+	if !found {
+		return -1
+	}
+	return total
 }
 
 // choosePrefixRange picks the shadowable prefix: from the log start up to the
@@ -235,6 +292,11 @@ func (e *BasicEngine) choosePrefixRange(sess SessionLike) ([2]int64, []int64, bo
 // surface backwards until the retained tail reaches its token budget, then
 // expand the tail backwards until its start is outside a tool pair.
 func (e *BasicEngine) choosePrefixByTokens(sess SessionLike, events []session.Event) ([2]int64, []int64, bool) {
+	if e.opts.Meter != nil {
+		if selected, ok := e.choosePrefixByMeasuredTokens(sess, events); ok {
+			return selected, seqsInRange(events, selected[0], selected[1]), true
+		}
+	}
 	keepFrom := len(events) - 1
 	retained := 0
 	for keepFrom >= 0 && retained < e.opts.RetainTokens {
@@ -261,6 +323,42 @@ func (e *BasicEngine) choosePrefixByTokens(sess SessionLike, events []session.Ev
 		}
 	}
 	return [2]int64{}, nil, false
+}
+
+// choosePrefixByMeasuredTokens mirrors the reference positional selection:
+// retain the newest priced surface nodes until the tail budget is met, then
+// move the boundary backward until it is outside a tool pair. It returns
+// false when the supplied measurement is empty/incomplete, allowing the
+// standalone estimator path to remain useful.
+func (e *BasicEngine) choosePrefixByMeasuredTokens(sess SessionLike, events []session.Event) ([2]int64, bool) {
+	measurement := e.opts.Meter(sess)
+	if len(measurement.Nodes) == 0 {
+		return [2]int64{}, false
+	}
+	keepFrom := len(measurement.Nodes)
+	retained := 0
+	for index := len(measurement.Nodes) - 1; index >= 0; index-- {
+		retained += measurement.Nodes[index].Tokens
+		keepFrom = index
+		if retained >= e.opts.RetainTokens {
+			break
+		}
+	}
+	if keepFrom == 0 {
+		return [2]int64{}, false
+	}
+	for keepFrom > 0 && !ToolPairingBalancedBefore(sess, int64(measurement.Nodes[keepFrom].Seq)) {
+		keepFrom--
+	}
+	if keepFrom == 0 {
+		return [2]int64{}, false
+	}
+	start := int64(measurement.Nodes[0].Seq)
+	end := int64(measurement.Nodes[keepFrom-1].Seq)
+	if !rangeHasUser(events, start, end) {
+		return [2]int64{}, false
+	}
+	return [2]int64{start, end}, true
 }
 
 // correctRegionRange clamps [start, end] to the log, pushes Start forward to
@@ -321,8 +419,21 @@ func (e *BasicEngine) correctRegionRange(sess SessionLike, start, end int64) ([2
 
 // estimateTokens estimates the current model-visible surface size (the whole
 // derived history, tool call arguments included).
-func (e *BasicEngine) estimateTokens(sess SessionLike) int {
-	return e.estimateMessages(sess.DeriveHistory())
+func (e *BasicEngine) estimateTokens(sess SessionLike) (int, error) {
+	if e.opts.Meter != nil {
+		measurement := e.opts.Meter(sess)
+		if measurement.TotalTokens >= 0 {
+			return measurement.TotalTokens, nil
+		}
+	}
+	if sess == nil {
+		return 0, errors.New("compaction: session projection unavailable")
+	}
+	snapshot, err := projection.Build(sess.Events())
+	if err != nil {
+		return 0, fmt.Errorf("compaction history projection: %w", err)
+	}
+	return e.estimateMessages(snapshot.History), nil
 }
 
 func (e *BasicEngine) estimateMessages(msgs []llm.Message) int {
@@ -460,7 +571,7 @@ func (e *BasicEngine) summarizeDirect(ctx context.Context, msgs []llm.Message) (
 	full := make([]llm.Message, 0, len(msgs)+1)
 	full = append(full, msgs...)
 	full = append(full, llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text(dshCompactionInstruction)}})
-	reader, err := e.opts.LLM.Stream(ctx, llm.ChatRequest{Model: e.opts.Model, Messages: full})
+	reader, err := e.opts.LLM.Stream(ctx, llm.ChatRequest{Model: e.opts.Model, SessionID: e.opts.SessionID, Purpose: "compaction", Messages: full})
 	if err != nil {
 		return "", err
 	}

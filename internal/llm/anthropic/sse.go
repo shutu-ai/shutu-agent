@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -70,15 +69,18 @@ func (d *sseDecoder) Next() (sseEvent, error) {
 // tool calls and reasoning. The response body is closed once the stream is
 // terminal (finish or error), releasing the connection.
 type streamReader struct {
-	dec  *sseDecoder
-	resp *http.Response
-	done bool
+	dec             *sseDecoder
+	resp            *http.Response
+	done            bool
+	credentialLease llm.CredentialLease
 
 	stopReason string
 	reasoning  strings.Builder // accumulated thinking deltas (M8)
 	toolCalls  []llm.ToolCall  // in first-seen wire block order
 	toolIndex  map[int]int     // wire block index -> position in toolCalls
 	usage      llm.TokenUsage
+	sawContent bool
+	parseErr   error
 }
 
 func newStreamReader(resp *http.Response) *streamReader {
@@ -101,10 +103,10 @@ func (r *streamReader) Next() (llm.StreamEvent, error) {
 			// (dispatch-m8-2b §2.2 流终止).
 			if errors.Is(err, io.EOF) {
 				r.close()
-				return llm.StreamEvent{}, fmt.Errorf("anthropic: stream ended without message_stop")
+				return llm.StreamEvent{}, llm.NewFailureError("anthropic: stream ended without message_stop", "STREAM_CLOSED", err)
 			}
 			r.close()
-			return llm.StreamEvent{}, err
+			return llm.StreamEvent{}, llm.NewFailureError("anthropic: stream read failed: "+err.Error(), "STREAM_CLOSED", err)
 		}
 		switch ev.event {
 		case "message_start":
@@ -120,8 +122,17 @@ func (r *streamReader) Next() (llm.StreamEvent, error) {
 		case "message_delta":
 			r.onMessageDelta(ev.data)
 		case "message_stop":
+			if r.parseErr != nil {
+				err := r.parseErr
+				r.close()
+				return llm.StreamEvent{}, llm.NewFailureError("anthropic: malformed SSE payload: "+err.Error(), "MALFORMED_RESPONSE", err)
+			}
 			r.done = true
 			r.close()
+			if !r.sawContent && (r.stopReason == "" || mapStopReason(r.stopReason) == "stop") {
+				failure := llm.Failure{Message: "anthropic: completed stream contained no content", Code: "EMPTY_RESPONSE"}
+				return llm.StreamEvent{Kind: llm.StreamFinish, FinishReason: "stop", Failure: &failure, Usage: r.usage}, nil
+			}
 			return llm.StreamEvent{
 				Kind:         llm.StreamFinish,
 				FinishReason: mapStopReason(r.stopReason),
@@ -131,9 +142,14 @@ func (r *streamReader) Next() (llm.StreamEvent, error) {
 			}, nil
 		case "error":
 			r.close()
-			return llm.StreamEvent{}, fmt.Errorf("anthropic: provider error: %s", eventErrorMessage(ev.data))
+			return llm.StreamEvent{}, llm.NewFailureError("anthropic: provider error: "+eventErrorMessage(ev.data), "SERVER", nil)
 		default:
 			// Unknown event type: ignore.
+		}
+		if r.parseErr != nil {
+			err := r.parseErr
+			r.close()
+			return llm.StreamEvent{}, llm.NewFailureError("anthropic: malformed SSE payload: "+err.Error(), "MALFORMED_RESPONSE", err)
 		}
 	}
 }
@@ -148,17 +164,23 @@ func (r *streamReader) onMessageStart(data string) {
 			} `json:"usage"`
 		} `json:"message"`
 	}
-	if json.Unmarshal([]byte(data), &start) != nil {
+	if err := json.Unmarshal([]byte(data), &start); err != nil {
+		r.parseErr = err
 		return
 	}
 	r.usage.InputTokens = start.Message.Usage.InputTokens
-	r.usage.CachedInputTokens = start.Message.Usage.CacheCreationInputTokens + start.Message.Usage.CacheReadInputTokens
+	r.usage.CacheWriteTokens = start.Message.Usage.CacheCreationInputTokens
+	r.usage.CacheReadTokens = start.Message.Usage.CacheReadInputTokens
 }
 
 // close releases the response body. Safe to call multiple times.
 func (r *streamReader) close() {
 	if r.resp != nil && r.resp.Body != nil {
 		r.resp.Body.Close()
+	}
+	if r.credentialLease != nil {
+		r.credentialLease.Release()
+		r.credentialLease = nil
 	}
 }
 
@@ -173,12 +195,14 @@ func (r *streamReader) onContentBlockStart(data string) {
 			Name string `json:"name"`
 		} `json:"content_block"`
 	}
-	if json.Unmarshal([]byte(data), &start) != nil {
+	if err := json.Unmarshal([]byte(data), &start); err != nil {
+		r.parseErr = err
 		return
 	}
 	if start.ContentBlock.Type != "tool_use" {
 		return
 	}
+	r.sawContent = true
 	r.toolIndex[start.Index] = len(r.toolCalls)
 	r.toolCalls = append(r.toolCalls, llm.ToolCall{ID: start.ContentBlock.ID, Name: start.ContentBlock.Name})
 }
@@ -198,7 +222,8 @@ func (r *streamReader) onContentBlockDelta(data string) (llm.StreamEvent, bool) 
 			PartialJSON string `json:"partial_json"`
 		} `json:"delta"`
 	}
-	if json.Unmarshal([]byte(data), &delta) != nil {
+	if err := json.Unmarshal([]byte(data), &delta); err != nil {
+		r.parseErr = err
 		return llm.StreamEvent{}, false
 	}
 	switch delta.Delta.Type {
@@ -206,11 +231,13 @@ func (r *streamReader) onContentBlockDelta(data string) (llm.StreamEvent, bool) 
 		if delta.Delta.Text == "" {
 			return llm.StreamEvent{}, false
 		}
+		r.sawContent = true
 		return llm.StreamEvent{Kind: llm.StreamTextDelta, Text: delta.Delta.Text}, true
 	case "thinking_delta":
 		if delta.Delta.Thinking == "" {
 			return llm.StreamEvent{}, false
 		}
+		r.sawContent = true
 		r.reasoning.WriteString(delta.Delta.Thinking)
 		return llm.StreamEvent{Kind: llm.StreamReasoningDelta, Text: delta.Delta.Thinking}, true
 	case "input_json_delta":
@@ -247,7 +274,8 @@ func (r *streamReader) onMessageDelta(data string) {
 			OutputTokens int `json:"output_tokens"`
 		} `json:"usage"`
 	}
-	if json.Unmarshal([]byte(data), &md) != nil {
+	if err := json.Unmarshal([]byte(data), &md); err != nil {
+		r.parseErr = err
 		return
 	}
 	if md.Delta.StopReason != nil {

@@ -108,6 +108,10 @@ func TestStreamRequestWire(t *testing.T) {
 	})
 
 	reader, err := p.Stream(context.Background(), llm.ChatRequest{
+		Model:       "request-selected-model",
+		MaxTokens:   123,
+		Temperature: func() *float64 { v := 0.2; return &v }(),
+		Stop:        []string{"END"},
 		Messages: []llm.Message{
 			{Role: llm.RoleSystem, Content: []llm.ContentBlock{llm.Text("You are helpful.")}},
 			{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("what time")}},
@@ -139,11 +143,18 @@ func TestStreamRequestWire(t *testing.T) {
 	if gotAccept != "application/json" {
 		t.Errorf("accept = %q", gotAccept)
 	}
-	if gotBody["model"] != "claude-sonnet-4-5" {
+	if gotBody["model"] != "request-selected-model" {
 		t.Errorf("model = %v", gotBody["model"])
 	}
-	if gotBody["max_tokens"] != float64(4096) {
+	if gotBody["max_tokens"] != float64(123) {
 		t.Errorf("max_tokens = %v", gotBody["max_tokens"])
+	}
+	if gotBody["temperature"] != float64(0.2) {
+		t.Errorf("temperature = %v", gotBody["temperature"])
+	}
+	stops, _ := gotBody["stop_sequences"].([]any)
+	if len(stops) != 1 || stops[0] != "END" {
+		t.Errorf("stop_sequences = %v", gotBody["stop_sequences"])
 	}
 	if gotBody["stream"] != true {
 		t.Errorf("stream = %v", gotBody["stream"])
@@ -423,5 +434,43 @@ func TestStreamRedirectBlocked(t *testing.T) {
 	_, err := p.Stream(context.Background(), llm.ChatRequest{})
 	if err == nil || !strings.Contains(err.Error(), "redirect blocked") {
 		t.Fatalf("err = %v, want the redirect-blocked error", err)
+	}
+}
+
+func TestStreamUsesExplicitModelDefaultMaxTokens(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(sseEvents(sseEventLine("message_start", `{"type":"message_start","message":{"id":"m"}}`), sseEventLine("message_stop", `{"type":"message_stop"}`))))
+	}))
+	defer srv.Close()
+	p := New(Config{BaseURL: srv.URL, APIKey: "test-key", ModelCatalog: []llm.ModelInfo{{ID: "model", DefaultMaxTokens: 777}}})
+	reader, err := p.Stream(context.Background(), llm.ChatRequest{Model: "model", Messages: []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("hi")}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	drain(t, reader)
+	if got["max_tokens"] != float64(777) {
+		t.Fatalf("max_tokens = %#v, want 777", got["max_tokens"])
+	}
+}
+
+func TestStreamUsesReferenceRouteDefaultMaxTokens(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(sseEvents(sseEventLine("message_start", `{"type":"message_start","message":{"id":"m"}}`), sseEventLine("message_stop", `{"type":"message_stop"}`))))
+	}))
+	defer srv.Close()
+	p := New(Config{BaseURL: srv.URL, APIKey: "test-key"})
+	reader, err := p.Stream(context.Background(), llm.ChatRequest{Model: "unlisted", Messages: []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("hi")}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	drain(t, reader)
+	if got["max_tokens"] != float64(32768) {
+		t.Fatalf("max_tokens = %#v, want reference route default 32768", got["max_tokens"])
 	}
 }

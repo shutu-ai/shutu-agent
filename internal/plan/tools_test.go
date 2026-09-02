@@ -3,8 +3,11 @@ package plan
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 )
 
 // eventRec is one event emitted through the PlanTools onEvent sink.
@@ -96,6 +99,26 @@ func TestPlanGoalToolCreatesAndEmits(t *testing.T) {
 	}](t, (*recs)[0])
 	if d.Scope != "goal" || d.ID != "goal-1" || d.Title != "Ship the agent" {
 		t.Fatalf("plan/create payload = %+v, want scope goal/id goal-1/title", d)
+	}
+}
+
+func TestDSHCreateGoalReturnsDurableEventFailure(t *testing.T) {
+	e := NewEngine(nil)
+	t.Cleanup(func() { e.Close() })
+	pt := NewDSHTools(e, nil)
+	want := errors.New("event store unavailable")
+	ctx := runtimectx.With(context.Background(), runtimectx.Runtime{
+		SessionID: "session-plan-failure",
+		Emit:      func(string, any) error { return want },
+	})
+
+	_, err := pt.CreateGoal().Execute(ctx, json.RawMessage(`{"objective":"ship it"}`))
+	if err == nil || !strings.Contains(err.Error(), "create_goal: persist event") || !errors.Is(err, want) {
+		t.Fatalf("CreateGoal error = %v, want durable event failure %v", err, want)
+	}
+	goals, getErr := e.List(ctx)
+	if getErr != nil || len(goals) != 1 {
+		t.Fatalf("goal state = %d goals, err:%v, want the current documented non-atomic mutation boundary", len(goals), getErr)
 	}
 }
 

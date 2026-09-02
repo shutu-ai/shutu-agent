@@ -21,6 +21,7 @@ import (
 	"github.com/jabing/shutu-agent/internal/eval"
 	"github.com/jabing/shutu-agent/internal/interact"
 	"github.com/jabing/shutu-agent/internal/llm"
+	"github.com/jabing/shutu-agent/internal/runtimectx"
 )
 
 // registerEval wires the task-evaluation seam (ADR 2026-08-20-eval-seam.md)
@@ -68,15 +69,30 @@ const judgeOutputMax = 6000
 // parses the model's JSON verdict, tolerantly mapping unrecognized output to
 // manual.
 func (a *app) evalJudge() eval.JudgeFunc {
-	model := llmProviderModel(a.cfg, a.cfg.LLM.Provider)
 	return func(ctx context.Context, output string, llmCriteria []string) (eval.Verdict, string, error) {
+		provider, model := "", ""
+		if sessionID := runtimectx.SessionID(ctx); sessionID != "" {
+			var err error
+			provider, model, err = a.sessionProviderModelStrict(sessionID)
+			if err != nil {
+				return eval.VerdictManual, "", err
+			}
+		} else {
+			cfg := a.providerConfigSnapshot()
+			provider = cfg.LLM.Provider
+			model = llmProviderModel(cfg, provider)
+		}
 		head := runeHead(output, judgeOutputMax)
 		user := "Deliverable:\n" + head + "\n\nAcceptance criteria to judge:\n" + strings.Join(llmCriteria, "\n")
 		msgs := []llm.Message{
 			{Role: llm.RoleSystem, Content: []llm.ContentBlock{llm.Text(evalJudgeSystemPrompt)}},
 			{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text(user)}},
 		}
-		reader, err := a.currentLLM().Stream(ctx, llm.ChatRequest{Model: model, Messages: msgs})
+		providerLLM := a.llmFor(provider)
+		if providerLLM == nil {
+			return eval.VerdictManual, "", errors.New("eval: selected LLM is unavailable")
+		}
+		reader, err := providerLLM.Stream(ctx, llm.ChatRequest{Model: model, Messages: msgs})
 		if err != nil {
 			return eval.VerdictManual, "", err
 		}
@@ -143,11 +159,31 @@ func (a *app) evalManual() eval.ManualFunc {
 			promptText += "任务：" + taskID + "\n"
 		}
 		promptText += "验收标准：\n" + strings.Join(manualCriteria, "\n") + "\n交付摘要：\n" + runeHead(output, 2000)
-		req, err := a.interacts.Request(ctx, promptText, "eval_manual", runeHead(output, 2000))
+		var req interact.Request
+		var err error
+		sessionID := runtimectx.SessionID(ctx)
+		if sessionID != "" {
+			if requester, ok := a.interacts.(interact.SessionRequester); ok {
+				req, err = requester.RequestForSession(ctx, sessionID, promptText, "eval_manual", runeHead(output, 2000))
+			} else {
+				err = errors.New("eval: interact engine lacks session-scoped requests")
+			}
+		} else {
+			req, err = a.interacts.Request(ctx, promptText, "eval_manual", runeHead(output, 2000))
+		}
 		if err != nil {
 			return eval.VerdictManual, "", err
 		}
-		res, err := a.interacts.Await(ctx, req.ID)
+		var res interact.Request
+		if sessionID != "" {
+			awaiter, ok := a.interacts.(interact.SessionAwaiter)
+			if !ok {
+				return eval.VerdictManual, "", errors.New("eval: interact engine lacks session-scoped waiting")
+			}
+			res, err = awaiter.AwaitForSession(ctx, sessionID, req.ID)
+		} else {
+			res, err = a.interacts.Await(ctx, req.ID)
+		}
 		if err != nil {
 			return eval.VerdictManual, "", err
 		}

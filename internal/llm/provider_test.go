@@ -11,6 +11,16 @@ type fakeProvider struct {
 	available bool
 }
 
+type closeableFakeProvider struct {
+	fakeProvider
+	closed bool
+}
+
+func (f *closeableFakeProvider) Close() error {
+	f.closed = true
+	return nil
+}
+
 func (f *fakeProvider) ID() string      { return f.id }
 func (f *fakeProvider) Available() bool { return f.available }
 func (f *fakeProvider) Stream(context.Context, ChatRequest) (StreamReader, error) {
@@ -83,5 +93,19 @@ func TestRegistryGetMissing(t *testing.T) {
 func TestRegistryListEmpty(t *testing.T) {
 	if got := NewRegistry().List(); len(got) != 0 {
 		t.Fatalf("empty registry List = %v, want none", got)
+	}
+}
+
+func TestRegistryCloseDisposesCloseableProviders(t *testing.T) {
+	r := NewRegistry()
+	provider := &closeableFakeProvider{fakeProvider: fakeProvider{id: "secret"}}
+	if err := r.Register(provider); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if !provider.closed {
+		t.Fatal("registry Close did not dispose closeable provider")
 	}
 }

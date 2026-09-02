@@ -325,9 +325,12 @@ mcp:
   # neither registered nor whitelisted, and no server is bridged
   # (默认关闭，不初始化).
   enabled: true
-  # Configured MCP servers (stdio, newline-delimited JSON-RPC). Each server's
-  # tools are bridged at startup under the mcp.<server>.<tool> prefix. Empty by
-  # default; enabling mcp with no servers still registers the mcp_* tools.
+  # Configured MCP servers (stdio or streamable-http). Each server's tools are
+  # bridged at startup under the mcp.<server>.<tool> prefix. Empty by default;
+  # enabling mcp with no servers still registers the mcp_* tools.
+  # stdio entries may set env/cwd and a per-call tools/call timeout. Explicit
+  # env values are added after credential-shaped ambient variables are scrubbed.
+  # fail_on_startup_error defaults false; set true when startup must be strict.
   servers: []
   # servers:
   #   - name: filesystem
