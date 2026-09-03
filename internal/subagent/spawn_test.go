@@ -21,8 +21,21 @@ import (
 // call per step), then EOF — the subagent-test counterpart of the loop's
 // scriptedLLM.
 type scriptedLLM struct {
+	mu    sync.Mutex
 	steps [][]llm.StreamEvent
 	calls []llm.ChatRequest
+}
+
+func (s *scriptedLLM) callCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.calls)
+}
+
+func (s *scriptedLLM) call(index int) llm.ChatRequest {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls[index]
 }
 
 type captureMaxTokensLLM struct {
@@ -38,12 +51,16 @@ func (m *captureMaxTokensLLM) Stream(ctx context.Context, req llm.ChatRequest) (
 }
 
 func (s *scriptedLLM) Stream(ctx context.Context, req llm.ChatRequest) (llm.StreamReader, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.calls = append(s.calls, req)
 	if len(s.steps) == 0 {
 		return &scriptedReader{}, nil
 	}
 	events := s.steps[0]
 	s.steps = s.steps[1:]
+	s.mu.Unlock()
+	defer s.mu.Lock()
 	return &scriptedReader{events: events}, nil
 }
 
@@ -553,33 +570,34 @@ func TestSpawnContinuableSend(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 	deadline := time.Now().Add(time.Second)
-	for len(model.calls) < 1 && time.Now().Before(deadline) {
+	for model.callCount() < 1 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if len(model.calls) != 1 {
-		t.Fatalf("initial turn calls = %d, want 1", len(model.calls))
+	if got := model.callCount(); got != 1 {
+		t.Fatalf("initial turn calls = %d, want 1", got)
 	}
 	if err := run.SendQuiet(context.Background(), "background context"); err != nil {
 		t.Fatalf("quiet send: %v", err)
 	}
 	time.Sleep(30 * time.Millisecond)
-	if len(model.calls) != 1 {
-		t.Fatalf("quiet send woke child: calls = %d, want 1", len(model.calls))
+	if got := model.callCount(); got != 1 {
+		t.Fatalf("quiet send woke child: calls = %d, want 1", got)
 	}
 	if err := run.Send(context.Background(), "follow up"); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 	deadline = time.Now().Add(time.Second)
-	for len(model.calls) < 2 && time.Now().Before(deadline) {
+	for model.callCount() < 2 && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	if err := run.Cancel("done"); err != nil {
 		t.Fatalf("cancel: %v", err)
 	}
-	if len(model.calls) < 2 {
-		t.Fatalf("follow-up calls = %d, want 2", len(model.calls))
+	if got := model.callCount(); got < 2 {
+		t.Fatalf("follow-up calls = %d, want 2", got)
 	}
-	last := model.calls[1].Messages[len(model.calls[1].Messages)-1].Text()
+	call := model.call(1)
+	last := call.Messages[len(call.Messages)-1].Text()
 	if !strings.Contains(last, "background context") || !strings.Contains(last, "follow up") {
 		t.Fatalf("waking turn did not receive quiet context and follow-up: %q", last)
 	}

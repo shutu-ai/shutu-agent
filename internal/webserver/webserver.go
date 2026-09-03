@@ -104,6 +104,7 @@ type Server struct {
 	nativeConnMu  sync.Mutex
 	nativeConns   map[io.Closer]struct{}
 	nativeClosing bool
+	nativeDone    sync.WaitGroup
 	// nativeQueueUpdateFn accepts the DSH action vocabulary. The legacy queue
 	// callback above intentionally remains text/action-only for the REST API;
 	// this seam carries the native edit payload without weakening that API.
@@ -643,6 +644,7 @@ func (s *Server) Close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	err := s.srv.Shutdown(ctx)
+	s.nativeDone.Wait()
 	if done != nil {
 		close(done)
 	}
@@ -659,6 +661,7 @@ func (s *Server) trackNativeConnection(conn io.Closer) bool {
 		_ = conn.Close()
 		return false
 	}
+	s.nativeDone.Add(1)
 	if s.nativeConns == nil {
 		s.nativeConns = make(map[io.Closer]struct{})
 	}
@@ -674,6 +677,7 @@ func (s *Server) untrackNativeConnection(conn io.Closer) {
 	s.nativeConnMu.Lock()
 	delete(s.nativeConns, conn)
 	s.nativeConnMu.Unlock()
+	s.nativeDone.Done()
 }
 
 // SetMessageHandler wires the message dispatch API (POST

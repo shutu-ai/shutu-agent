@@ -5165,3 +5165,98 @@ Evidence: `internal/code/local.go`, `internal/code/windows_acl.go`,
 `internal/code/process_tree_windows_test.go`,
 `internal/code/process_tree_unix_test.go`, and
 `internal/code/code_test.go`.
+
+## 2026-09-03 A8.3 selected/optional profile contract closure
+
+- The profile registry now has explicit enforcing and replay descriptors for the
+  selected SQLite storage, local filesystem, and durable session-reference
+  profiles. The same authority marks e2b, Python, Cordis dynamic runner, and
+  Cordis inspect unsupported with concrete reasons; `Registry.Use` rejects each
+  one with `ErrProfileUnsupported`.
+- Native Web RPC regression covers `runtime.profiles`, selected
+  `runtime.profile`, unsupported `runtime.profile`, and both Cordis methods.
+  Optional capability inventory remains aligned to the same unsupported
+  descriptors and returns `capability-unsupported`, while unknown capabilities
+  remain `capability-unknown`.
+- The dependency issue in the old A8.3 note is stale in a useful way only
+  historically: A3.2 is now done. The registered A8.3 command passes across all
+  `internal/...` packages and `cmd/pa`.
+
+Evidence: `internal/profile/profile.go`,
+`internal/profile/profile_test.go`,
+`internal/profile/classification_test.go`, and
+`internal/webserver/runtime_profile_test.go`. A8.3 is done. Required blockers
+are now only A9.3-A9.5.
+
+## 2026-09-03 A9.3 fault/security matrix closure
+
+- The registered A9.3 command passes on Windows and Linux. The Linux run uses
+  cross-compiled `internal/contractfixture`, `internal/persistence`,
+  `internal/store`, and `internal/code` test binaries in Ubuntu 22.04 WSL with
+  bubblewrap and Node 24.19.0.
+- Verbose Windows and Linux runs confirm the parent matrices execute SQLite
+  death recovery, workspace symlink escape, HTTP cross-origin denial, JSONL
+  disk-full/process-death recovery, credential rotation, plugin generation
+  reload, MCP reconnect, and the hostile Code Mode oversized-frame oracle. The
+  only SKIP rows are direct invocations of helper-process test entry points; the
+  parent tests launch those helpers.
+- Combined with A3.1, real process oracles now include bounded POSIX fork bombs,
+  owned process-group teardown, and Windows Job Object CPU/active-process/memory
+  termination.
+
+Evidence: `internal/contractfixture/fault_security_matrix_test.go`,
+`internal/contractfixture/generation_release_matrix_test.go`,
+`internal/contractfixture/hostile_worker_matrix_test.go`,
+`internal/persistence/jsonl_test.go`,
+`internal/store/sqlite_test.go`,
+`internal/process_tree_unix_test.go`, and
+`internal/process_tree_windows_test.go`. A9.3 is done. Required blockers are
+now only A9.4-A9.5.
+
+## 2026-09-03 A9.4 strict race and cleanup-gate closure
+
+- The registered strict race command now passes on Windows and Linux with
+  `CGO_ENABLED=1`. Windows uses the local CGO toolchain; Linux uses Ubuntu
+  22.04 WSL with Go 1.26.7, gcc 11.4, bubblewrap, and Node 24.19.0. Both runs
+  execute every package with `-count=1`.
+- The race matrix exposed four real defects. `programCallGate` now wakes the
+  next waiting call after safe admission, not only after release; without that
+  wakeup, independently safe Code Mode bindings could serialize depending on
+  goroutine scheduling. `scriptedLLM` in the subagent tests now serializes call
+  and step mutation. The Unix persistent terminal uses non-interactive Bash
+  with process-group ownership and platform-correct command submission. ACP/SDK
+  transports ignore only SIGPIPE so a closed peer stdout returns EPIPE through
+  normal shutdown instead of killing the process.
+- Additional closures from the cross-platform run: `RunCommand` drains stdout
+  and stderr before `cmd.Wait`, preventing `Wait` from closing `StdoutPipe`
+  while capture is still reading; the native host WebSocket server now tracks
+  handler completion and waits during `Close`; skill project-root discovery
+  accepts an explicit test boundary; and the SQLite dependency is upgraded to
+  modernc.org/sqlite v1.50.0 to eliminate intermittent Windows close/handle
+  retention.
+- Existing owning-package oracles continue to prove bounded goroutines, file
+  descriptors, child processes, Code Mode workers, temporary files, SQLite
+  locks, provider generations, and credential drain/wipe. A9.4 is done; A9.5 is
+  the only remaining required register blocker.
+
+## 2026-09-03 A9.5 final capability-equivalence release gate
+
+- The final release prerequisites passed on the current worktree: full Go
+  tests, `go vet ./...`, `go build ./...`, Web tests/build/manifest
+  verification, Windows/Linux strict race, and the pinned reference replay.
+- The audit reference root points to a repository-local ignored checkout at
+  `.gocache/reference/deepseek-harness`, pinned to
+  `141eb6fef83422698aef7a981029e843e8161534` (`dsh-v0.1.0-rc.8`). This avoids
+  mutating the user-owned rc.7 checkout while supplying the exact Web tool
+  dependencies required by the production-style replay/build harness.
+- The final gate reaches catalog export but is blocked by the host machine-level
+  Windows Error Reporting LocalDumps policy before the user/administrator
+  directly removed that empty local machine policy key; its export is retained
+  outside version control at `.gocache/WER-LocalDumps-backup.reg`. The default
+  `crash_dump_policy: disabled` then started normally, without using the
+  non-equivalent `external` profile to bypass the gate.
+- With that external state corrected, the complete equivalence gate passed:
+  register lint/report agreement, diff/format, full Go tests, vet/build,
+  production catalog export/verify, Web tests/build/manifest, Linux/Windows
+  cross-builds, strict CGO race, and pinned reference replay. The manifest is
+  now `status: pass`, `claimAllowed: true`, with no required open blockers.

@@ -99,15 +99,24 @@ func TestCwdPersists(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EvalSymlinks(temp) error = %v", err)
 	}
-	if _, err := s.Write("cd /d \""+dir+"\"", true); err != nil {
+	var changeCommand, printCommand, want string
+	if runtime.GOOS == "windows" {
+		changeCommand = `cd /d "` + dir + `"`
+		printCommand = "cd"
+		want = strings.ReplaceAll(dir, "/", "\\")
+	} else {
+		changeCommand = "cd '" + dir + "'"
+		printCommand = "pwd"
+		want = dir
+	}
+	if _, err := s.Write(changeCommand, true); err != nil {
 		t.Fatalf("Write(cd dir) error = %v", err)
 	}
-	res, err := s.Write("cd", true) // bare `cd` prints the current directory
+	res, err := s.Write(printCommand, true)
 	if err != nil {
 		t.Fatalf("Write(cd) error = %v", err)
 	}
 
-	want := strings.ReplaceAll(dir, "/", "\\")
 	if !strings.Contains(strings.ToLower(res.Viewport), strings.ToLower(want)) &&
 		!waitViewport(s, want, 5*time.Second) {
 		t.Errorf("Viewport = %q, want contains %q", res.Viewport, want)
@@ -124,7 +133,11 @@ func TestReadConsume(t *testing.T) {
 	// Write drains the buffer into its own Viewport, so Read/Consume are tested
 	// against output that arrives asynchronously after Write returns: the ping
 	// is silent (>nul) and "pong" is echoed only ~1s later.
-	if _, err := s.Write("ping -n 2 127.0.0.1 >nul & echo pong", true); err != nil {
+	command := "sleep 2; echo pong"
+	if runtime.GOOS == "windows" {
+		command = "ping -n 2 127.0.0.1 >nul & echo pong"
+	}
+	if _, err := s.Write(command, true); err != nil {
 		t.Fatalf("Write() error = %v", err)
 	}
 
@@ -173,7 +186,11 @@ func TestWriteTimeout(t *testing.T) {
 	}
 	defer s.Close()
 
-	res, err := s.Write("ping -n 10 127.0.0.1", true)
+	command := "while true; do echo tick; sleep 0.1; done"
+	if runtime.GOOS == "windows" {
+		command = "ping -n 10 127.0.0.1"
+	}
+	res, err := s.Write(command, true)
 	if err != nil {
 		t.Fatalf("Write() error = %v", err)
 	}

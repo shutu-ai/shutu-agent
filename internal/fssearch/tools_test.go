@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -56,10 +57,18 @@ func TestSearchCancellationClassification(t *testing.T) {
 // header, per-file "path\nLine N: text" sections (paths relative to cwd,
 // slash-normalized), and the defaulted root mapping.
 func TestGrepExecuteFormatsHits(t *testing.T) {
-	tool, f := newFakeTool(`C:\work`, func(ctx context.Context, pattern string, opts Options) ([]Hit, error) {
+	cwd := `C:\work`
+	pathA := `C:\work\a.txt`
+	pathB := `C:\work\sub\b.go`
+	if runtime.GOOS != "windows" {
+		cwd = "/work"
+		pathA = "/work/a.txt"
+		pathB = "/work/sub/b.go"
+	}
+	tool, f := newFakeTool(cwd, func(ctx context.Context, pattern string, opts Options) ([]Hit, error) {
 		return []Hit{
-			{Path: `C:\work\a.txt`, Line: 2, Text: "needle one"},
-			{Path: `C:\work\sub\b.go`, Line: 5, Text: "needle two"},
+			{Path: pathA, Line: 2, Text: "needle one"},
+			{Path: pathB, Line: 5, Text: "needle two"},
 		}, nil
 	})
 	out, err := tool.Execute(context.Background(), json.RawMessage(`{"pattern":"needle"}`))
@@ -75,7 +84,7 @@ func TestGrepExecuteFormatsHits(t *testing.T) {
 	if f.pattern != "needle" {
 		t.Errorf("pattern = %q, want needle", f.pattern)
 	}
-	if f.opts.Path != `C:\work` {
+	if f.opts.Path != cwd {
 		t.Errorf("opts.Path = %q, want the tool cwd", f.opts.Path)
 	}
 	if f.opts.MaxResults != DefaultMaxResults {
@@ -358,14 +367,24 @@ func TestSearchToolsRejectSymlinkOutsideInjectedRoot(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("secret"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	link := filepath.Join(root, "linked")
-	if err := os.Symlink(outside, link); err != nil {
+	grepLink := filepath.Join(root, "linked")
+	if err := os.Symlink(outside, grepLink); err != nil {
+		t.Skipf("symlink unavailable in this environment: %v", err)
+	}
+	if _, err := os.Lstat(grepLink); err != nil {
 		t.Skipf("symlink unavailable in this environment: %v", err)
 	}
 	grep := NewGrepTool(root)
 	grep.RootContextFunc = func(context.Context) string { return root }
 	if _, err := grep.Execute(context.Background(), json.RawMessage(`{"pattern":"secret","path":"linked"}`)); err == nil || !strings.Contains(err.Error(), "escapes workspace root") {
 		t.Fatalf("grep symlink error = %v, want workspace rejection", err)
+	}
+	globLink := filepath.Join(root, "linked")
+	if err := os.Symlink(outside, globLink); err != nil {
+		t.Skipf("symlink unavailable in this environment: %v", err)
+	}
+	if _, err := os.Lstat(globLink); err != nil {
+		t.Skipf("symlink unavailable in this environment: %v", err)
 	}
 	glob := NewGlobTool(root)
 	glob.RootContextFunc = func(context.Context) string { return root }

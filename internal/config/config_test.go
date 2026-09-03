@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -234,6 +235,12 @@ func TestLoadToolsDefaultsWhenAbsent(t *testing.T) {
 
 func TestLoadParsesToolsSection(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
+	workdir := "/tmp/work"
+	runCommand := "workdir: /tmp/work"
+	if runtime.GOOS == "windows" {
+		workdir = `C:\work`
+		runCommand = `workdir: C:\work`
+	}
 	content := `
 tools:
   enabled: [read]
@@ -242,7 +249,7 @@ tools:
   run_command:
     enabled: true
     timeout: 1m
-    workdir: C:\work
+    workdir: ` + runCommand[len("workdir: "):] + `
 `
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
@@ -251,9 +258,15 @@ tools:
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	want := append([]string{"read", "bash"}, defaultOnCaps()...)
+	want := []string{"read", "bash"}
+	for _, name := range defaultOnCaps() {
+		if runtime.GOOS != "windows" && name == "bash" {
+			continue
+		}
+		want = append(want, name)
+	}
 	if !reflect.DeepEqual(cfg.Tools.Enabled, want) {
-		t.Errorf("enabled = %v", cfg.Tools.Enabled)
+		t.Errorf("enabled = %v, want %v", cfg.Tools.Enabled, want)
 	}
 	if cfg.Tools.Timeout.Duration != 5*time.Second {
 		t.Errorf("timeout = %v", cfg.Tools.Timeout)
@@ -267,7 +280,7 @@ tools:
 	if cfg.Tools.RunCommand.Timeout.Duration != time.Minute {
 		t.Errorf("run_command.timeout = %v", cfg.Tools.RunCommand.Timeout)
 	}
-	if cfg.Tools.RunCommand.Workdir != `C:\work` {
+	if cfg.Tools.RunCommand.Workdir != workdir {
 		t.Errorf("run_command.workdir = %q", cfg.Tools.RunCommand.Workdir)
 	}
 }

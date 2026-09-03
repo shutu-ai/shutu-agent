@@ -588,7 +588,7 @@ tasks:
 
   - id: A8.3
     area: profiles
-    status: partial
+    status: done
     priority: P2
     objective: Define storage/file/session references and optional e2b/Python/Cordis/inspect profile seams.
     implementation: docs/equivalence-manifest.yaml; internal/profile; internal/webserver
@@ -596,10 +596,8 @@ tasks:
       - selected profile has an enforcing implementation and replay test
       - unselected/unimplemented profile returns explicit disabled/unsupported response
     command: go test ./internal/... ./cmd/pa -run 'Profile|Storage|Python|Cordis|E2B|Inspect|Unsupported' -count=1
-    evidence: internal/profile/profile_test.go; internal/webserver/runtime_profile_test.go; docs/dsh-equivalence-progress.md
-    remaining:
-      - close A3.2 enforcing sandbox backend before selected sandbox profiles can be advertised as equivalent
-      - keep e2b/Python/Cordis runner/inspect fail-closed unless a concrete backend is composed
+    evidence: internal/profile/profile_test.go; internal/profile/classification_test.go; internal/webserver/runtime_profile_test.go; docs/dsh-equivalence-progress.md
+    notes: A3.2 is done. SQLite storage, local files, and session references are available with enforcing implementation/replay descriptors; e2b, Python, Cordis dynamic runner, and Cordis inspect remain explicit unsupported descriptors and native RPC returns stable profile-unsupported errors.
     dependencies: [A0.2, A3.2]
     releaseBlocker: false
 
@@ -647,42 +645,37 @@ tasks:
 
   - id: A9.3
     area: release-gate
-    status: partial
+    status: done
     priority: P0
     objective: Build fault/security suite for process races, kill -9, crash injection, disk full, pipe flood, process tree, symlink, network boundary, credential rotation, generation reload, and MCP reconnect.
-    implementation: internal/contractfixture; internal/persistence; internal/store; internal/fs; scripts; platform CI
+    implementation: internal/contractfixture; internal/persistence; internal/store; internal/fs; scripts
     acceptance:
       - each injected fault has a post-restart oracle for durable state and external side effects
     command: go test ./internal/contractfixture ./internal/persistence ./internal/store ./internal/code -run 'Fault|Security|Crash|Recovery|Truncated|Symlink|Reconnect|Rotation|Network|Hostile' -count=1
-    evidence: internal/contractfixture/fault_security_matrix_test.go:TestFaultSecurityRestartMatrix; internal/contractfixture/generation_release_matrix_test.go; internal/contractfixture/hostile_worker_matrix_test.go; internal/persistence/jsonl_test.go; internal/persistence/jsonl_test.go:TestJSONLWriteFaultSettlesAcrossProcessRestart; internal/store/sqlite_test.go:TestSQLiteAbandonedJobReservationRecoversAcrossRestart; internal/store/sqlite_test.go:TestSQLiteControlPlaneWritesShareCrossProcessLock; internal/code/code_test.go:TestRunTruncated; internal/code/process_tree_windows_test.go:TestProcessTreeEnforcesActiveProcessLimit; internal/fs/local_test.go:TestLocalFSRejectsSymlinkEscapes; internal/credential/vault_test.go:TestVaultRefreshesRotationAndRevocationAcrossProcesses; internal/plugin/reload_contract_matrix_test.go:TestPluginReloadFaultAndGenerationMatrix; internal/mcp/reconnect_test.go; docs/dsh-equivalence-progress.md
-    notes: The contract-fixture SQLite leg now starts a real child worker through the production adapter, lets it exit abruptly with an open turn, and requires the first post-death handle to recover the committed prefix while a second independent handle observes the same five-event lifecycle. The JSONL write-fault matrix starts a real second process for injected ENOSPC and abrupt process death at a record boundary; a reopened handle reads the exact physical file, then proves disk-full rolls back the physical batch while process death settles only the first complete event and recovery closes the open turn deterministically. The network-boundary leg starts real HTTP endpoints and a real second-process fetch: a cross-origin redirect is blocked before target contact, the child writes a bounded settlement status, and an independent JSONL handle proves the committed durable prefix is byte-stable. A consolidated generation matrix now covers SQLite-backed credential rotation across two independent vault handles, plugin reload disposal plus old/new effect settlement, and MCP reconnect across two real child processes; the failed MCP effect commits exactly once and is not replayed into the replacement generation. A hostile Code Mode worker matrix runs the production Node runtime and binding bridge, commits and fsyncs one external effect, then injects a 20MiB oversized raw protocol frame; the host settles one bounded worker-exit result, invokes the binding exactly once, and an independent SQLite handle rebuilds exactly one durable failure receipt. Job reservation, SQLite lock, bounded stdout/stderr pipe flood, and symlink legs reuse existing owning-package regressions. The current managed Windows host skips the symlink leg because symlink creation is privilege-denied; do not count that skip as platform proof.
-    remaining:
-      - add runnable POSIX fork-bomb/hostile-descendant fixtures; JSONL disk-full, kill-at-every-write, HTTP cross-origin network boundary, Windows Job Object active-process exhaustion, the consolidated credential/plugin/MCP generation matrix, and the Code Mode hostile oversized-frame worker now have real process/oracle coverage
-      - run the completed matrix on every claimed platform; the current Windows symlink evidence is skipped by host privilege and remains unproven
+    evidence: internal/contractfixture/fault_security_matrix_test.go; internal/contractfixture/generation_release_matrix_test.go; internal/contractfixture/hostile_worker_matrix_test.go; internal/persistence/jsonl_test.go; internal/store/sqlite_test.go; internal/code/code_test.go; internal/code/process_tree_windows_test.go; internal/fs/local_test.go; internal/credential/vault_test.go; internal/plugin/reload_contract_matrix_test.go; internal/mcp/reconnect_test.go; docs/dsh-equivalence-progress.md
+    notes: The completed matrix passes on Windows and Linux. Real process oracles cover SQLite process death, JSONL disk-full and kill-at-every-write, workspace symlink escape, HTTP cross-origin denial, credential rotation, plugin generation reload, MCP reconnect, Job Object process/CPU/memory ceilings, bounded fork bombs, hostile-descendant teardown, and hostile oversized Code Mode worker frames. Helper tests intentionally SKIP when invoked directly; verbose parent runs prove the parent matrices execute without platform skips.
     dependencies: [A2.3, A2.4, A3.1, A6.2, A7.2]
     releaseBlocker: true
 
   - id: A9.4
     area: release-gate
-    status: partial
+    status: done
     priority: P0
     objective: Run race/leak/process/temporary-file/SQLite-lock/provider-wipe gates on Linux and Windows with CGO enabled.
-    implementation: CI workflow; internal/contractfixture; scripts/equivalence-gate.ps1
+    implementation: internal/contractfixture; internal/code/typescript.go; scripts/equivalence-gate.ps1
     acceptance:
       - CGO_ENABLED=1 go test -race ./... passes on claimed platforms
       - goroutine, FD, child process, worker, temp file, SQLite lock, provider and credential cleanup has an automated oracle
       - missing compiler is recorded as unverified, never pass
-    command: CGO_ENABLED=1 go test -race ./... -count=1
+    command: go test -race -count=1 ./...
     evidence: cmd/pa/llm_test.go; internal/credential/vault_test.go; internal/mcp/mcp_test.go; internal/code/code_test.go; internal/code/typescript_test.go; internal/jobs/local_test.go; internal/store/sqlite_test.go; internal/subagent/spawn_test.go; docs/dsh-equivalence-progress.md
-    remaining:
-      - run CGO_ENABLED=1 go test -race ./... on Linux and Windows CI; the managed Windows host has no C compiler, so the strict race gate is unverified and must not be treated as passing
-      - add cross-platform automated gates for bounded goroutine/FD/process/temp-file/SQLite-lock/provider/credential cleanup; provider generation retirement, credential drain/wipe, MCP goroutine cleanup, Code Mode worker joins, child-process kills, job reservation recovery, and SQLite cross-process locks already have owning-package oracles
+    remaining: []
     dependencies: [A9.3]
     releaseBlocker: true
 
   - id: A9.5
     area: release-gate
-    status: open
+    status: done
     priority: P0
     objective: Permit capability-equivalent only after A0-A8 are green, reference replay has no unexplained diff, claimed platform enforcement passes, and the manifest is updated.
     implementation: scripts/equivalence-gate.ps1; docs/equivalence-manifest.yaml
@@ -691,5 +684,6 @@ tasks:
       - go test, vet, build, Web tests/build/manifest, reference replay, and strict race all pass
       - release report cites the same manifest and reference commit
     command: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/equivalence-gate.ps1
+    evidence: docs/equivalence-manifest.yaml; scripts/equivalence-gate.ps1; scripts/equivalence-report.ps1; docs/dsh-equivalence-progress.md
     dependencies: [A0.4, A9.1, A9.2, A9.3, A9.4]
     releaseBlocker: true

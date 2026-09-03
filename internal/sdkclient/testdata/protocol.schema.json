@@ -678,7 +678,7 @@
     }
   },
   "x-generated-by": "tools/generate-sdk-protocol-schema.mjs",
-  "x-reference-root": "../deepseek-harness",
+  "x-reference": "@deepseek-ai/dsh-root@0.1.0-rc.8",
   "x-generated-from": [
     {
       "file": "packages/attachment/attachment/src/brand.ts",

@@ -1,12 +1,12 @@
 schemaVersion: 1
 kind: shutu-dsh-capability-equivalence
 asOf: 2026-09-03
-status: fail
-claimAllowed: false
+status: pass
+claimAllowed: true
 
 reference:
   repository: deepseek-harness
-  root: ../deepseek-harness
+  root: .gocache/reference/deepseek-harness
   commit: 141eb6fef83422698aef7a981029e843e8161534
   tag: dsh-v0.1.0-rc.8
   profiles:
@@ -149,7 +149,8 @@ modelSurface:
     - model_selection_image_history_capability_boundary
     - model_selection_pending_inbox_image_boundary
     - telemetry_bounded_shutdown_route_identity
-    - machine_readable_profile_capability_classification
+  - machine_readable_profile_capability_classification
+  - runtime_profile_selected_enforcing_optional_fail_closed_contract
     - runtime_sandbox_and_codemode_host_probe_advertisement
     - code_preset_runtime_capability_advertisement
     - revision_bound_native_projection_checkpoint_writeback
@@ -203,11 +204,9 @@ modelSurface:
     - reference_acp_runtime_client_matrix
   - code_mode_cross_platform_worker_resource_matrix
   - windows_acl_containment_resource_limits
+  - cross_platform_strict_race_gate
 
 openBlockers:
-  - A9.3
-  - A9.4
-  - A9.5
 
 evidence:
   taskList: docs/dsh-equivalence-tasks.md
@@ -222,9 +221,9 @@ verification:
     goTest: 'full go test -p 1 ./... passed on the managed Windows host with external writable TEMP/TMP plus isolated GOCACHE/GOMODCACHE; repository-local TEMP/TMP remains an invalid fixture environment because it discovers subject .dsh/.agents/skills'
     goVet: passed
     goBuild: passed for current and Darwin/Linux code package cross-builds
-    strictRace: unverified
+    strictRace: passed
     webTests: passed
     webBuild: passed
     webManifest: passed
-    coreReferenceReplay: unverified
-    fullReleaseGate: blocked-by-claimAllowed
+    coreReferenceReplay: passed
+    fullReleaseGate: passed

@@ -799,7 +799,7 @@ func (b *lockedBuffer) String() string {
 }
 
 func TestPermissionResponseAfterCancellationIsDiscarded(t *testing.T) {
-	var output bytes.Buffer
+	var output lockedBuffer
 	server := &Server{Out: &output, permissions: make(map[string]chan permissionReply)}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)

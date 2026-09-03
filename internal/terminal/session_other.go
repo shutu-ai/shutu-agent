@@ -4,6 +4,7 @@ package terminal
 
 import (
 	"os/exec"
+	"path/filepath"
 )
 
 // shellCommand 返回配置好 shell 的 *exec.Cmd（尚未 Start）：/bin/sh，
@@ -11,9 +12,21 @@ import (
 func shellCommand(opts SessionOpts) *exec.Cmd {
 	shell := opts.Shell
 	if shell == "" {
-		shell = "/bin/sh"
+		// Bash provides a reliable stdin command loop when stdout/stderr are
+		// pipes. Keep it non-interactive: interactive mode performs terminal
+		// job-control operations that conflict with owned process groups.
+		if bash, err := exec.LookPath("bash"); err == nil {
+			shell = bash
+		} else {
+			shell = "/bin/sh"
+		}
 	}
-	args := append(append([]string{}, opts.Args...), "-i")
+	var args []string
+	if base := filepath.Base(shell); base == "bash" {
+		args = append(append([]string{}, opts.Args...), "--norc", "--noprofile")
+	} else {
+		args = append(append([]string{}, opts.Args...), "-i")
+	}
 	return exec.Command(shell, args...)
 }
 

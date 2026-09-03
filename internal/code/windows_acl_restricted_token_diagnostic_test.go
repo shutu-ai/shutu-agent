@@ -23,6 +23,9 @@ type restrictedTokenDiagnosticCase struct {
 }
 
 func TestCreateRestrictedTokenParameterMatrix(t *testing.T) {
+	if raceDetectorEnabled {
+		t.Skip("diagnostic logging dereferences token-owned SID structures that checkptr cannot validate")
+	}
 	current, err := openWindowsACLCurrentToken()
 	if err != nil {
 		t.Fatalf("open existing token: %v", err)
@@ -267,11 +270,11 @@ func createRestrictedTokenInfoBytesDiagnostic(token windows.Token, class uint32)
 	if needed == 0 {
 		needed = 1024
 	}
-	buffer := make([]byte, needed)
-	if err := windows.GetTokenInformation(token, class, &buffer[0], uint32(len(buffer)), &needed); err != nil {
+	buffer := make([]uint64, (int(needed)+7)/8)
+	if err := windows.GetTokenInformation(token, class, (*byte)(unsafe.Pointer(&buffer[0])), uint32(len(buffer)*8), &needed); err != nil {
 		return nil, err
 	}
-	return buffer[:needed], nil
+	return unsafe.Slice((*byte)(unsafe.Pointer(&buffer[0])), int(needed)), nil
 }
 
 func tokenTypeDiagnostic(t *testing.T, token windows.Token) string {

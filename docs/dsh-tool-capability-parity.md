@@ -3,22 +3,7 @@
 ## Authoritative equivalence blocker index
 
 `docs/equivalence-manifest.yaml` is the only release-status authority. Its
-current release-blocking IDs are:
-
-- A3.1
-- A3.2
-- A3.3
-- A4.4
-- A6.3
-- A7.1
-- A7.2
-- A7.3
-- A8.1
-- A9.1
-- A9.2
-- A9.3
-- A9.4
-- A9.5
+current release-blocking IDs are: none.
 
 目标：在不修改 `deepseek-harness` 源目录的前提下，使 `shutu-agent` 的模型可见工具不仅名称一致，能力、参数协议、生命周期和异常行为也与 DSH 对齐。
 

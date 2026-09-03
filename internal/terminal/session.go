@@ -262,7 +262,7 @@ func (s *Session) WriteContext(ctx context.Context, text string, submit bool) (W
 
 	payload := text
 	if submit {
-		payload += "\r\n"
+		payload += submitNewline()
 	}
 	writeDone := make(chan error, 1)
 	go func() {

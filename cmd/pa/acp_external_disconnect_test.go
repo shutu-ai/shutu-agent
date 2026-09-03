@@ -1668,6 +1668,7 @@ func TestACPProductionExternalOutputLossHelper(t *testing.T) {
 	if os.Getenv(acpOutputLossHelperEnv) != "1" {
 		t.Skip("ACP production output-loss helper")
 	}
+	ignoreTransportBrokenPipe()
 	st, err := store.OpenSQLite(os.Getenv("SHUTU_ACP_OUTPUT_LOSS_DB"))
 	if err != nil {
 		t.Fatal(err)

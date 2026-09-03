@@ -13,6 +13,7 @@ const referenceRoot = resolve(
 )
 const requireFromReference = createRequire(join(referenceRoot, 'package.json'))
 const ts = requireFromReference('typescript')
+const referencePackage = JSON.parse(readFileSync(join(referenceRoot, 'package.json'), 'utf8'))
 
 const protocolSource = join(
   referenceRoot,
@@ -470,7 +471,7 @@ const schema = {
   $schema: 'https://json-schema.org/draft/2020-12/schema',
   $defs: Object.fromEntries([...definitions].filter(([name]) => name !== 'Record')),
   'x-generated-by': 'tools/generate-sdk-protocol-schema.mjs',
-  'x-reference-root': relative(repoRoot, referenceRoot).replaceAll('\\', '/'),
+  'x-reference': `${referencePackage.name}@${referencePackage.version}`,
   'x-generated-from': generatedFrom.sort((left, right) => left.file.localeCompare(right.file)),
 }
 

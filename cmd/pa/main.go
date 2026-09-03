@@ -71,6 +71,9 @@ func main() {
 		fmt.Fprintln(os.Stderr, "pa: --acp and --sdk are mutually exclusive")
 		os.Exit(2)
 	}
+	if *acpMode || *sdkMode {
+		ignoreTransportBrokenPipe()
+	}
 	if *catalogManifestPath != "" && *verifyCatalogManifestPath != "" {
 		fmt.Fprintln(os.Stderr, "pa: --catalog-manifest and --verify-catalog-manifest are mutually exclusive")
 		os.Exit(2)

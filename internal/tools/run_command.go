@@ -211,10 +211,13 @@ func (t RunCommand) runForeground(ctx context.Context, command, workdir string, 
 	// deadline). The capture goroutines continue draining until the owned
 	// process group has exited.
 	stop := monitorCtx(execCtx, cmd)
-	waitErr := cmd.Wait()
-	stop()
 	stdoutCopyErr := <-stdoutDone
 	stderrCopyErr := <-stderrDone
+	// StdoutPipe's parent end is closed by Wait, so drain both capture
+	// goroutines first. Waiting before this point can race their final reads
+	// and turn a successful command into "file already closed".
+	waitErr := cmd.Wait()
+	stop()
 	if stdoutCopyErr != nil && ctx.Err() == nil && execCtx.Err() == nil {
 		return "", fmt.Errorf("run_command: read output: %w", stdoutCopyErr)
 	}

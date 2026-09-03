@@ -403,8 +403,8 @@ func setWindowsACLDefaultDACL(token windows.Token, sid *windows.SID) error {
 	if needed < uint32(unsafe.Sizeof(tokenDefaultDACL{})) {
 		return fmt.Errorf("invalid TokenDefaultDacl size %d", needed)
 	}
-	buffer := make([]byte, needed)
-	if err := windows.GetTokenInformation(token, windows.TokenDefaultDacl, &buffer[0], uint32(len(buffer)), &needed); err != nil {
+	buffer := make([]uint64, (int(needed)+7)/8)
+	if err := windows.GetTokenInformation(token, windows.TokenDefaultDacl, (*byte)(unsafe.Pointer(&buffer[0])), uint32(len(buffer)*8), &needed); err != nil {
 		return err
 	}
 	old := *(*tokenDefaultDACL)(unsafe.Pointer(&buffer[0]))
@@ -877,13 +877,13 @@ func windowsManagementSIDs() ([]*windows.SID, error) {
 	if copied, err := user.User.Sid.Copy(); err == nil {
 		management = append(management, copied)
 	}
-	restrictedBuffer := make([]byte, 64*1024)
+	restrictedBuffer := make([]uint64, 8192)
 	var returned uint32
 	if err := windows.GetTokenInformation(
 		token,
 		windows.TokenRestrictedSids,
-		&restrictedBuffer[0],
-		uint32(len(restrictedBuffer)),
+		(*byte)(unsafe.Pointer(&restrictedBuffer[0])),
+		uint32(len(restrictedBuffer)*8),
 		&returned,
 	); err != nil {
 		return nil, fmt.Errorf("query restricted SIDs: %w", err)

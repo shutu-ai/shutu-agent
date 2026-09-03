@@ -252,7 +252,7 @@ func TestFilesystemProjectRootWalk(t *testing.T) {
 			t.Fatalf("mkdir .git: %v", err)
 		}
 		// Start deep below the repo root; the provider must walk up to repo.
-		f, err := NewFilesystem(FSOpts{ProjectRoot: filepath.Join(proj, "sub", "deep"), UserHome: filepath.Join(tmp, "home")})
+		f, err := NewFilesystem(FSOpts{ProjectRoot: filepath.Join(proj, "sub", "deep"), UserHome: filepath.Join(tmp, "home"), RootBoundary: tmp})
 		if err != nil {
 			t.Fatalf("NewFilesystem: %v", err)
 		}
@@ -268,14 +268,14 @@ func TestFilesystemProjectRootWalk(t *testing.T) {
 	t.Run("no .git ancestor falls back to start", func(t *testing.T) {
 		nogit := filepath.Join(tmp, "nogit")
 		writeFile(t, filepath.Join(nogit, ".dsh", "skills", "solo.md"), "solo")
-		f, err := NewFilesystem(FSOpts{ProjectRoot: nogit, UserHome: filepath.Join(tmp, "home")})
+		f, err := NewFilesystem(FSOpts{ProjectRoot: nogit, UserHome: filepath.Join(tmp, "home"), RootBoundary: tmp})
 		if err != nil {
 			t.Fatalf("NewFilesystem: %v", err)
 		}
 		if f.roots[0].path != filepath.Join(nogit, ".dsh", "skills") {
 			t.Fatalf("project-dsh root = %q, want %q", f.roots[0].path, filepath.Join(nogit, ".dsh", "skills"))
 		}
-		if _, err := NewFilesystem(FSOpts{UserHome: filepath.Join(tmp, "home")}); err != nil {
+		if _, err := NewFilesystem(FSOpts{UserHome: filepath.Join(tmp, "home"), RootBoundary: tmp}); err != nil {
 			t.Fatalf("empty ProjectRoot must fall back to the working directory: %v", err)
 		}
 	})
@@ -285,7 +285,7 @@ func TestFilesystemProjectRootWalk(t *testing.T) {
 // rather than an error.
 func TestFilesystemMissingRoots(t *testing.T) {
 	tmp := t.TempDir()
-	f, err := NewFilesystem(FSOpts{ProjectRoot: filepath.Join(tmp, "none"), UserHome: filepath.Join(tmp, "nohome")})
+	f, err := NewFilesystem(FSOpts{ProjectRoot: filepath.Join(tmp, "none"), UserHome: filepath.Join(tmp, "nohome"), RootBoundary: tmp})
 	if err != nil {
 		t.Fatalf("NewFilesystem: %v", err)
 	}

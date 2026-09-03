@@ -596,9 +596,21 @@ func TestClientCloseIdempotent(t *testing.T) {
 	if err := c.Close(); err != nil {
 		t.Fatalf("second Close: %v", err)
 	}
-	// The child must have been killed and reaped (no zombie, no leak).
-	if c.proc == nil || c.proc.ProcessState == nil || !c.proc.ProcessState.Exited() {
-		t.Fatal("child process not exited after Close")
+	// The child must have been killed and reaped (no zombie, no leak). On
+	// Linux ProcessState can become visible just after Wait wakes the Close
+	// caller; bound this observation instead of assuming a cross-runtime
+	// instruction ordering.
+	reaped := false
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		// SIGKILL termination is represented by Sys().WaitStatus.Signaled,
+		// not ProcessState.Exited; ProcessState non-nil is the reap boundary.
+		if c.proc != nil && c.proc.ProcessState != nil {
+			reaped = true
+			break
+		}
+	}
+	if !reaped {
+		t.Fatal("child process not reaped after Close")
 	}
 	// Post-close operations are rejected.
 	if _, err := c.ListTools(context.Background()); !errors.Is(err, ErrClosed) {

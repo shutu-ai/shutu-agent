@@ -342,18 +342,28 @@ func TestTypeScriptRuntimeAllowsIndependentBindingsToOverlap(t *testing.T) {
 	defer runtime.Close()
 
 	var active, maxActive int32
+	secondStarted := make(chan struct{})
 	result, err := runtime.RunProgram(context.Background(), ProgramRequest{
 		Code:      `const values = await Promise.all([tools.echo({ value: 1 }), tools.echo({ value: 2 })]); return values`,
 		Cwd:       t.TempDir(),
 		Timeout:   5 * time.Second,
 		MaxOutput: 16 * 1024,
-		Binding: func(_ context.Context, request ProgramBindingRequest) (any, error) {
+		Binding: func(ctx context.Context, request ProgramBindingRequest) (any, error) {
+			value := request.Args.(map[string]any)["value"]
 			current := atomic.AddInt32(&active, 1)
 			for previous := atomic.LoadInt32(&maxActive); current > previous && !atomic.CompareAndSwapInt32(&maxActive, previous, current); previous = atomic.LoadInt32(&maxActive) {
 			}
-			time.Sleep(400 * time.Millisecond)
+			if value == float64(1) {
+				select {
+				case <-secondStarted:
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+			} else {
+				close(secondStarted)
+			}
 			atomic.AddInt32(&active, -1)
-			return request.Args.(map[string]any)["value"], nil
+			return value, nil
 		},
 	})
 	if err != nil {

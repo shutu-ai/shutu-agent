@@ -95,7 +95,7 @@ On the current managed Windows host, the controlled-shell blocker is more precis
 
 The SQLite projection cache is durable, versioned, committed-revision checkpointing. It is performance and reconnect hardening; canonical projection completeness is proven separately by A8.1's strict rebuild/live Cursor and cross-entry suite.
 
-The release gate must continue to require evidence for A9.3-A9.5. Team and architecture-specific exclusions remain optional only when they are represented as such in the manifest, profile, task register, and status documents.
+The release gate must continue to require evidence for A9.5. Team and architecture-specific exclusions remain optional only when they are represented as such in the manifest, profile, task register, and status documents.
 
 A9.3 now has a bounded cross-process starting matrix: SQLite process death must
 leave only the committed prefix, the production restart path may append only
@@ -127,12 +127,13 @@ empty environment, and cleanup. Real ambient probes prove child-process and
 worker-thread APIs are denied. Post-terminal done/call frames cannot create a
 second settlement.
 
-A9.4 is now partial rather than open. Provider-generation retirement, credential
-drain/wipe, MCP goroutine cleanup, Code Mode worker joins, child-process kills,
-job reservation recovery, and SQLite cross-process locks have owning-package
-oracles. The strict `CGO_ENABLED=1 go test -race ./...` gate remains unverified
-because the managed Windows host has no C compiler; Linux CI execution is also
-still required. A missing compiler is an unverified gate, never a pass.
+A9.4 is done. The strict `CGO_ENABLED=1 go test -race ./... -count=1` gate
+passes on Windows and Linux; the Linux run uses Go 1.26.7, gcc 11.4, and Node
+24.19.0 in Ubuntu 22.04 WSL. The cleanup oracles cover provider-generation
+retirement, credential drain/wipe, MCP goroutine cleanup, Code Mode worker
+joins, child-process kills, job reservation recovery, and SQLite cross-process
+locks. The race run surfaced and fixed real bounded-call admission, Unix
+persistent-terminal, transport-pipe, and MCP child-reap lifecycle defects.
 
 ACP now has a production external-disconnect oracle: the child process owns the
 real SQLite/`acpFactory`/loop/server composition root, the external client
@@ -516,10 +517,9 @@ present, `sourceEventSeqs`; opaque event data remains intact. Keep
 in sync, including the replacement-object form of `surfaceOp`.
 
 Audit counting rule (2026-09-03): the task register is authoritative. It has
-47 tasks: 43 done, 3 partial, and 1 open. Therefore there are 4 non-done
-tasks; A9.3-A9.5 are required-profile release blockers and A8.3 is the
-optional-profile partial. Any stale or duplicate count must not override the
-manifest, register, or generated report.
+47 tasks and all 47 are done. The required-profile blocker A9.5 is closed after
+the user/administrator removed the local machine WER LocalDumps policy key that
+had blocked the required disabled-crash-dump profile.
 
 Verification note (2026-09-01): on the managed Windows host, the targeted
 package suite, `go vet ./...`, and a full `go test -p 1 ./...` pass when Go's
@@ -665,10 +665,10 @@ strengthens A8.1 external evidence. A9.1's completed cross-entry suite supplies
 the broader runtime/restart oracle.
 
 Latest audit status (2026-09-03): `docs/equivalence-task-register.yaml` has
-47 tasks: 43 done, 3 partial, and 1 open. A3.1 is done under the containment
-contract, with Windows ACL and Linux bubblewrap evidence. A7.3 and A3.3 are
-done. The release report must be regenerated and remains expected to be `fail`
-with `claimAllowed=false` until A9.3-A9.5 pass their registered gates.
+47 tasks: 45 done, 1 partial, and 1 open. A3.1 and A8.3 are done. A3.1 has
+Windows ACL and Linux bubblewrap containment/resource evidence; A8.3 has
+selected-profile enforcing/replay descriptors and optional fail-closed RPC
+coverage. A7.3, A3.3, A9.3, A9.4 and A9.5 are done.
 
 MCP reconnect generation correction (2026-09-01): reconnect now tracks
 in-flight operations per connection generation. A replacement generation may

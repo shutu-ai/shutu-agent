@@ -2,6 +2,7 @@ package terminal
 
 import (
 	"strings"
+	"sync"
 	"unicode/utf8"
 )
 
@@ -16,6 +17,7 @@ import (
 //     Consume 返回自上次 Consume 以来的 delta 并清空缓冲、重置 truncated。
 //   - maxBytes<=0 视为无限；maxLines<=0 视为不限行。
 type BoundedTextBuffer struct {
+	mu        sync.Mutex
 	buf       string
 	maxBytes  int
 	maxLines  int
@@ -32,6 +34,8 @@ func (b *BoundedTextBuffer) Append(text string) {
 	if text == "" {
 		return
 	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	b.buf += text
 
 	// 1) 先按行数上限裁剪：只保留最后 maxLines 行。
@@ -52,11 +56,15 @@ func (b *BoundedTextBuffer) Append(text string) {
 
 // Snapshot 返回当前全量文本及是否发生过截断（dropped 标记）。
 func (b *BoundedTextBuffer) Snapshot() (text string, truncated bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	return b.buf, b.truncated
 }
 
 // Consume 返回自上次 Consume 以来的增量文本，并把缓冲清空、truncated 重置为 false。
 func (b *BoundedTextBuffer) Consume() (text string, truncated bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	text, truncated = b.buf, b.truncated
 	b.buf = ""
 	b.truncated = false
@@ -65,6 +73,8 @@ func (b *BoundedTextBuffer) Consume() (text string, truncated bool) {
 
 // Empty 返回缓冲是否为空。
 func (b *BoundedTextBuffer) Empty() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	return b.buf == ""
 }
 

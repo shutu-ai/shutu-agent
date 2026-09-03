@@ -45,9 +45,16 @@ func makeTermAppWithJobs(enabled bool) *app {
 
 // termPolicy whitelists pwsh, mirroring what config.applyDefaults does when
 // terminal.enabled is true.
+func modelShellToolName() string {
+	if runtime.GOOS == "windows" {
+		return "pwsh"
+	}
+	return "bash"
+}
+
 func termPolicy() tools.Policy {
 	return tools.Policy{
-		Enabled: []string{"pwsh"},
+		Enabled: []string{modelShellToolName()},
 		Timeout: time.Minute,
 	}
 }
@@ -60,7 +67,7 @@ func execTerm(t *testing.T, app *app, args map[string]any) (tools.ToolResult, er
 	if err != nil {
 		t.Fatalf("marshal args: %v", err)
 	}
-	return app.reg.Execute(context.Background(), "pwsh", b)
+	return app.reg.Execute(context.Background(), modelShellToolName(), b)
 }
 
 // TestRegisterTerminalDisabledRegistersNothing verifies the gate: with
@@ -70,8 +77,8 @@ func TestRegisterTerminalDisabledRegistersNothing(t *testing.T) {
 	if err := app.registerTerminal(); err != nil {
 		t.Fatalf("registerTerminal: %v", err)
 	}
-	if containsStr(specNames(app.reg), "pwsh") {
-		t.Fatal("pwsh registered while terminal disabled")
+	if containsStr(specNames(app.reg), modelShellToolName()) {
+		t.Fatal("model shell registered while terminal disabled")
 	}
 }
 
@@ -84,8 +91,8 @@ func TestModelTerminalCancellationClassification(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, entry := range app.reg.Catalog() {
-		if entry.Name == "pwsh" && !entry.Cancellable {
-			t.Fatal("fresh-process pwsh must declare foreground cooperative cancellation")
+		if entry.Name == modelShellToolName() && !entry.Cancellable {
+			t.Fatal("fresh-process model shell must declare foreground cooperative cancellation")
 		}
 		if strings.HasPrefix(entry.Name, "terminal_") && entry.Cancellable != (entry.Name == "terminal_send") {
 			t.Fatalf("%s catalog cancellable = %v, want write-only contract", entry.Name, entry.Cancellable)
@@ -96,15 +103,15 @@ func TestModelTerminalCancellationClassification(t *testing.T) {
 // TestRegisterTerminalEnabledRegistersPwsh verifies the enabled path: the
 // fresh-process pwsh tool lands in the registry, and run_in_background is
 // advertised exactly when jobs is wired (app.jobs non-nil).
-func TestRegisterTerminalEnabledRegistersPwsh(t *testing.T) {
+func TestRegisterTerminalEnabledRegistersModelShell(t *testing.T) {
 	app := makeTermApp(true)
 	if err := app.registerTerminal(); err != nil {
 		t.Fatalf("registerTerminal: %v", err)
 	}
-	if !containsStr(specNames(app.reg), "pwsh") {
-		t.Fatalf("registered tools %v lack %q", specNames(app.reg), "pwsh")
+	if !containsStr(specNames(app.reg), modelShellToolName()) {
+		t.Fatalf("registered tools %v lack %q", specNames(app.reg), modelShellToolName())
 	}
-	schema, _ := json.Marshal(toolSchema(app.reg, "pwsh"))
+	schema, _ := json.Marshal(toolSchema(app.reg, modelShellToolName()))
 	if strings.Contains(string(schema), "run_in_background") {
 		t.Fatalf("schema without jobs must not advertise run_in_background: %s", schema)
 	}
@@ -113,7 +120,7 @@ func TestRegisterTerminalEnabledRegistersPwsh(t *testing.T) {
 	if err := app.registerTerminal(); err != nil {
 		t.Fatalf("registerTerminal: %v", err)
 	}
-	schema, _ = json.Marshal(toolSchema(app.reg, "pwsh"))
+	schema, _ = json.Marshal(toolSchema(app.reg, modelShellToolName()))
 	if !strings.Contains(string(schema), "run_in_background") {
 		t.Fatalf("schema with jobs must advertise run_in_background: %s", schema)
 	}
@@ -166,7 +173,7 @@ func TestPersistentTerminalToolsMatchDshSurface(t *testing.T) {
 	if err := app.registerTerminal(); err != nil {
 		t.Fatalf("registerTerminal: %v", err)
 	}
-	app.reg.SetPolicy(tools.Policy{Enabled: []string{"pwsh", "terminal_open", "terminal_list", "terminal_read", "terminal_send", "terminal_signal", "terminal_close"}, Timeout: time.Minute})
+	app.reg.SetPolicy(tools.Policy{Enabled: []string{modelShellToolName(), "terminal_open", "terminal_list", "terminal_read", "terminal_send", "terminal_signal", "terminal_close"}, Timeout: time.Minute})
 	opened, err := app.reg.Execute(context.Background(), "terminal_open", json.RawMessage(`{"type":"shell","name":"dsh-test"}`))
 	if err != nil {
 		t.Fatalf("terminal_open: %v", err)
@@ -418,8 +425,14 @@ func TestPwshFreshProcessNoSession(t *testing.T) {
 	if err := app.registerTerminal(); err != nil {
 		t.Fatalf("registerTerminal: %v", err)
 	}
+	setStateCommand := `export PA_PWSH_STATE=leak`
+	readStateCommand := `if [ -n "$PA_PWSH_STATE" ]; then printf %s "$PA_PWSH_STATE"; else echo fresh; fi`
+	if runtime.GOOS == "windows" {
+		setStateCommand = `$env:PA_PWSH_STATE = "leak"`
+		readStateCommand = `if ($env:PA_PWSH_STATE) { $env:PA_PWSH_STATE } else { "fresh" }`
+	}
 	if _, err := execTerm(t, app, map[string]any{
-		"command":     `$env:PA_PWSH_STATE = "leak"`,
+		"command":     setStateCommand,
 		"description": "set a variable",
 	}); err != nil {
 		t.Fatalf("pwsh: %v", err)
@@ -428,7 +441,7 @@ func TestPwshFreshProcessNoSession(t *testing.T) {
 		t.Fatal("the fresh-process pwsh tool must never start the M9 session")
 	}
 	res, err := execTerm(t, app, map[string]any{
-		"command":     `if ($env:PA_PWSH_STATE) { $env:PA_PWSH_STATE } else { "fresh" }`,
+		"command":     readStateCommand,
 		"description": "read the variable",
 	})
 	if err != nil {
@@ -469,8 +482,12 @@ func TestPwshExitCodeMarker(t *testing.T) {
 	if err := app.registerTerminal(); err != nil {
 		t.Fatalf("registerTerminal: %v", err)
 	}
+	exitCommand := "exit 3"
+	if runtime.GOOS == "windows" {
+		exitCommand = "exit 3"
+	}
 	res, err := execTerm(t, app, map[string]any{
-		"command":     "exit 3",
+		"command":     exitCommand,
 		"description": "fail with code 3",
 	})
 	if err != nil {
@@ -491,25 +508,30 @@ func TestPwshBackgroundE2E(t *testing.T) {
 	if err := app.registerTerminal(); err != nil {
 		t.Fatalf("registerTerminal: %v", err)
 	}
+	outputCommand := "echo bg-composed"
+	if runtime.GOOS == "windows" {
+		outputCommand = "Write-Output bg-composed"
+	}
 	res, err := execTerm(t, app, map[string]any{
-		"command":           "Write-Output bg-composed",
+		"command":           outputCommand,
 		"description":       "background echo",
 		"run_in_background": true,
 	})
 	if err != nil {
 		t.Fatalf("pwsh: %v", err)
 	}
-	if !strings.Contains(res.Output, "started background job pwsh-1") {
+	wantJobID := modelShellToolName() + "-1"
+	if !strings.Contains(res.Output, "started background job "+wantJobID) {
 		t.Fatalf("ack = %q, want the job id", res.Output)
 	}
-	snap, err := app.jobs.Wait(context.Background(), "pwsh-1", "s-term", 10*time.Second)
+	snap, err := app.jobs.Wait(context.Background(), wantJobID, "s-term", 10*time.Second)
 	if err != nil {
 		t.Fatalf("wait: %v", err)
 	}
 	if snap.Status != jobs.StatusCompleted {
 		t.Fatalf("status = %s, want completed", snap.Status)
 	}
-	got, _, err := app.jobs.Read(context.Background(), "pwsh-1", "s-term")
+	got, _, err := app.jobs.Read(context.Background(), wantJobID, "s-term")
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}

@@ -670,6 +670,8 @@ func (g *programCallGate) acquire(ctx context.Context, index int64, safe bool) e
 			} else {
 				g.exclusive = true
 			}
+			close(g.changed)
+			g.changed = make(chan struct{})
 			g.mu.Unlock()
 			return nil
 		}

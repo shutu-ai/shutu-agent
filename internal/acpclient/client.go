@@ -136,13 +136,13 @@ type Client struct {
 	notify    chan Notification
 	onRequest PermissionHandler
 
-	startOnce sync.Once
-	closeOnce sync.Once
-	started   atomic.Bool
-	closed    chan struct{}
-	readDone  chan struct{}
+	startOnce  sync.Once
+	closeOnce  sync.Once
+	started    atomic.Bool
+	closed     chan struct{}
+	readDone   chan struct{}
 	closeErrMu sync.Mutex
-	closeErr  error
+	closeErr   error
 
 	writeMu sync.Mutex
 	pendMu  sync.Mutex

@@ -32,6 +32,11 @@ type FSOpts struct {
 	// UserHome is the user's home directory whose .dsh/skills is the user-dsh
 	// root. Empty defaults to os.UserHomeDir().
 	UserHome string
+	// RootBoundary optionally stops the project-root walk at a known
+	// directory. This makes tests deterministic when their fixtures are nested
+	// beneath a host-level repository; production callers normally leave it
+	// empty and search to the volume root.
+	RootBoundary string
 	// Dirs are additional custom skill directories (source "custom", rank 300),
 	// scanned in order.
 	Dirs []string
@@ -69,7 +74,15 @@ func NewFilesystem(opts FSOpts) (*Filesystem, error) {
 	if err != nil {
 		return nil, fmt.Errorf("skill: resolve project root %q: %w", start, err)
 	}
-	projectRoot := findProjectRoot(abs)
+	boundary := ""
+	if opts.RootBoundary != "" {
+		absBoundary, boundaryErr := filepath.Abs(opts.RootBoundary)
+		if boundaryErr != nil {
+			return nil, fmt.Errorf("skill: resolve root boundary %q: %w", opts.RootBoundary, boundaryErr)
+		}
+		boundary = absBoundary
+	}
+	projectRoot := findProjectRoot(abs, boundary)
 
 	userHome := opts.UserHome
 	if userHome == "" {
@@ -351,16 +364,37 @@ func frontmatterBool(meta map[string]any, key string) (bool, bool) {
 
 // findProjectRoot walks from start upward to the nearest ancestor containing a
 // .git entry (directory or file); with no such ancestor it returns start.
-func findProjectRoot(start string) string {
+func findProjectRoot(start, boundary string) string {
+	if boundary != "" {
+		boundary = filepath.Clean(boundary)
+	}
 	cur := start
 	for {
 		if _, err := os.Stat(filepath.Join(cur, ".git")); err == nil {
 			return cur
 		}
+		if boundary != "" && pathEquals(cur, boundary) {
+			return start
+		}
 		parent := filepath.Dir(cur)
+		if boundary != "" && !pathWithin(parent, boundary) {
+			return start
+		}
 		if parent == cur {
 			return start
 		}
 		cur = parent
 	}
+}
+
+func pathEquals(a, b string) bool {
+	return filepath.Clean(a) == filepath.Clean(b)
+}
+
+func pathWithin(child, parent string) bool {
+	rel, err := filepath.Rel(parent, child)
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }

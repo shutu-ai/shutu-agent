@@ -215,6 +215,15 @@ $equivalenceWebRoot = Join-Path $equivalenceRoot 'web'
 if (-not (Test-Path -LiteralPath $equivalenceWebRoot -PathType Container)) {
     throw "web contract root does not exist: $equivalenceWebRoot"
 }
+$equivalenceReferenceRootForWeb = [regex]::Match(
+    $equivalenceManifest,
+    '(?m)^  root:\s*(\S+)'
+).Groups[1].Value
+$equivalenceDshRootForWeb = Join-Path $equivalenceRoot $equivalenceReferenceRootForWeb
+if (-not (Test-Path -LiteralPath (Join-Path $equivalenceDshRootForWeb 'apps/web/node_modules/vitest/vitest.mjs') -PathType Leaf)) {
+    throw "reference web tool dependencies are missing: $equivalenceDshRootForWeb"
+}
+$env:SHUTU_DSH_ROOT = (Resolve-Path -LiteralPath $equivalenceDshRootForWeb).Path
 Push-Location $equivalenceWebRoot
 try {
     Invoke-Required 'web tests' { pnpm.cmd test }

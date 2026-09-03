@@ -2,6 +2,7 @@ package terminal
 
 import (
 	"strings"
+	"sync"
 	"testing"
 	"unicode/utf8"
 )
@@ -223,5 +224,35 @@ func TestEmpty(t *testing.T) {
 	b.Append("")
 	if !b.Empty() {
 		t.Fatal("empty append should not change emptiness")
+	}
+}
+
+func TestBoundedTextBufferIsSafeForConcurrentAppendAndConsume(t *testing.T) {
+	b := NewBoundedTextBuffer(4096, 64)
+	const workers = 8
+	const iterations = 100
+	var wg sync.WaitGroup
+	wg.Add(workers * 2)
+	for worker := 0; worker < workers; worker++ {
+		go func() {
+			defer wg.Done()
+			for index := 0; index < iterations; index++ {
+				b.Append("terminal-output\n")
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for index := 0; index < iterations; index++ {
+				text, _ := b.Consume()
+				if !utf8.ValidString(text) {
+					t.Errorf("invalid UTF-8 consumed: %q", text)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if text, truncated := b.Snapshot(); utf8.ValidString(text) == false || truncated && len(text) > 4096 {
+		t.Fatalf("buffer after concurrent access: len=%d truncated=%v", len(text), truncated)
 	}
 }

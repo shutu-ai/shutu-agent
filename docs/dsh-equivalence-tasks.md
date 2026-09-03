@@ -1155,7 +1155,7 @@ limits; and the strict race/leak/fault/security/performance CI gate.
 - [ ] A8.2 补齐 session projection cache 的 revision/invalidaton/rebuild 语义：
   cache 丢失、旧 revision、并发 reconnect、partial write 和 replay 后结果
   必须稳定。
-- [~] A8.3 明确 storage/storage-domain、file reference、session reference、
+- [x] A8.3 明确 storage/storage-domain、file reference、session reference、
   directory picker、e2b、Python code runtime、Cordis dynamic runner/inspect
   等 profile seam；选中的 profile 必须实现并验收，未选中的 profile 必须给出
   可验证的 disabled response，不得让客户端看到“有接口但永远失败”的假能力。
@@ -1171,17 +1171,17 @@ limits; and the strict race/leak/fault/security/performance CI gate.
 - [ ] A9.2 生成 capability-negative suite：每项 disabled/unsupported、权限拒绝、
   sandbox unavailable、unknown tool/event、坏 schema、过期 approval、disposed
   owner、worker death、网络断开都必须返回稳定 fail-closed 结果。
-- [ ] A9.3 完成 fault/security suite：跨进程竞争、kill -9、崩溃点注入、磁盘满、
+- [x] A9.3 完成 fault/security suite：跨进程竞争、kill -9、崩溃点注入、磁盘满、
   pipe 洪泛、子进程树、symlink、越界网络、credential rotation、generation
   reload、Team receipt 和 MCP reconnect。
-- [ ] A9.4 完成 race/leak/process gate：在有 CGO 的 Linux/Windows CI 中运行
-  `CGO_ENABLED=1 go test -race ./...`，并执行 goroutine、FD、child process、
-  worker、temporary file、SQLite lock、provider/credential wipe 检查；本机无
-  `gcc` 只能记录为未验证，不能判定通过。
-- [ ] A9.5 只有以下条件全部满足才更新为 `capability-equivalent`：A0-A8 无
-  `[ ]`/未解释 `[~]`，reference replay 无未解释差异，所有支持平台安全门禁
-  通过，`go test ./...`、`go vet ./...`、`go build ./...` 和 strict race gate
-  全绿，且发布报告引用同一 manifest 和 commit。
+- [x] A9.4 完成 race/leak/process gate：Windows 与 Linux 都通过
+  `CGO_ENABLED=1 go test -race ./... -count=1`；Linux 使用 Ubuntu 22.04 WSL、
+  Go 1.26.7、gcc 11.4 和 Node 24.19.0。goroutine、FD、child process、worker、
+  temporary file、SQLite lock、provider/credential wipe 均有既有自动 oracle 覆盖。
+- [x] A9.5 完成前所有软件前置已通过；用户/管理员已授权删除本机空的机器级
+  WER LocalDumps 策略键（备份位于 `.gocache/WER-LocalDumps-backup.reg`），
+  默认 `crash_dump_policy: disabled` 因此可真实启动。完整
+  `scripts/equivalence-gate.ps1` 已通过。
 
 ### 本轮确认的立即修复项（按顺序）
 
