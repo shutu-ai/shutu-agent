@@ -13,7 +13,7 @@
 
 ## 1. 背景与范围
 
-github.com/jabing/shutu-agent 需要联网能力。M7 定 DeepSeek 官方搜索：通过 DeepSeek **Anthropic 兼容 Messages API**（`POST /anthropic/v1/messages`）发起一次携带原生 `web_search_20250305` server tool 的模型调用，DeepSeek 服务器端执行搜索并返回**结构化** `web_search_tool_result` blocks——不爬散文。复用 `DEEPSEEK_API_KEY`（env-only，纪律 6）。
+github.com/shutu-ai/shutu-agent 需要联网能力。M7 定 DeepSeek 官方搜索：通过 DeepSeek **Anthropic 兼容 Messages API**（`POST /anthropic/v1/messages`）发起一次携带原生 `web_search_20250305` server tool 的模型调用，DeepSeek 服务器端执行搜索并返回**结构化** `web_search_tool_result` blocks——不爬散文。复用 `DEEPSEEK_API_KEY`（env-only，纪律 6）。
 
 **本 half 交付**（`internal/web/`）：
 1. `service.go`：seam 契约（SearchProvider / FetchProvider 接口 + 注册表 + Engine + `WebError` sentinel）+ `WebSearchRequest`/`WebSearchResult`/`WebSearchSource`/`WebFetchRequest`/`WebFetchResult`/`WebFetchBody` 类型。

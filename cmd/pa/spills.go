@@ -20,9 +20,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/jabing/shutu-agent/internal/config"
-	"github.com/jabing/shutu-agent/internal/session"
-	"github.com/jabing/shutu-agent/internal/spill"
+	"github.com/shutu-ai/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/spill"
 )
 
 // registerSpills creates the configured durable Provider + Engine and registers
@@ -44,7 +44,7 @@ func (a *app) registerSpills() error {
 		var err error
 		prov, err = spill.NewFileProvider(filepath.Join(a.cfg.DataDir, "memory.json"))
 		if err != nil {
-			return fmt.Errorf("pa: open memory store: %w", err)
+			return fmt.Errorf("sta: open memory store: %w", err)
 		}
 	}
 	eng := spill.NewEngine(prov)
@@ -109,7 +109,7 @@ func (a *app) spillAutoSpillFor(ctx context.Context, sessionID string, log *sess
 			continue
 		}
 		if _, err := log.Append(session.EventSpillWrite, session.NewSpillWrite(m.ID, m.Content)); err != nil {
-			fmt.Fprintln(os.Stderr, "pa: spill/write event:", err)
+			fmt.Fprintln(os.Stderr, "sta: spill/write event:", err)
 		}
 	}
 }

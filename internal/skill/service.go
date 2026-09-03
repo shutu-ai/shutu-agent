@@ -321,7 +321,7 @@ func (r *registry) snapshotProviders() []*indexedProvider {
 // collect merges every provider's catalog into rank-resolved winners: sort all
 // candidates by (rank asc, provider registration order asc, local order asc),
 // then keep the first candidate for each name. A provider failure or an
-// invalid candidate is a hard error (fail-closed; a personal agent's skill
+// invalid candidate is a hard error (fail-closed; a Shutu Agent's skill
 // roots are static and the filesystem provider treats missing roots as empty,
 // so day-to-day discovery never errors).
 func (r *registry) collect(ctx context.Context, providers []*indexedProvider) ([]winner, error) {

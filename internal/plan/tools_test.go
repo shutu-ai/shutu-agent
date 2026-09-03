@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jabing/shutu-agent/internal/runtimectx"
+	"github.com/shutu-ai/shutu-agent/internal/runtimectx"
 )
 
 // eventRec is one event emitted through the PlanTools onEvent sink.
@@ -85,7 +85,7 @@ func eventTypes(recs []eventRec) []string {
 
 func TestPlanGoalToolCreatesAndEmits(t *testing.T) {
 	_, pt, recs := newPlanToolsWithEvents(t)
-	out := mustExec(t, pt.Goal(), `{"title":"Ship the agent","objective":"Make the personal agent usable end to end"}`)
+	out := mustExec(t, pt.Goal(), `{"title":"Ship the agent","objective":"Make the Shutu Agent usable end to end"}`)
 	if !strings.Contains(out, "created goal goal-1") {
 		t.Fatalf("plan_goal output = %q, want created goal goal-1", out)
 	}

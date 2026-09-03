@@ -23,7 +23,7 @@ import (
 
 	"github.com/santhosh-tekuri/jsonschema/v5"
 
-	"github.com/jabing/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
 )
 
 // Tool is the complete dsh-style definition of one capability. Arguments have

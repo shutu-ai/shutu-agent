@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/session"
-	"github.com/jabing/shutu-agent/internal/store"
+	"github.com/shutu-ai/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/store"
 )
 
 // SQLiteProvider is the durable approval backend used by the application when

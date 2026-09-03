@@ -9,14 +9,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/agent"
-	"github.com/jabing/shutu-agent/internal/config"
-	"github.com/jabing/shutu-agent/internal/jobs"
-	"github.com/jabing/shutu-agent/internal/observability"
-	"github.com/jabing/shutu-agent/internal/runtimectx"
-	"github.com/jabing/shutu-agent/internal/session"
-	"github.com/jabing/shutu-agent/internal/store"
-	"github.com/jabing/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/agent"
+	"github.com/shutu-ai/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/jobs"
+	"github.com/shutu-ai/shutu-agent/internal/observability"
+	"github.com/shutu-ai/shutu-agent/internal/runtimectx"
+	"github.com/shutu-ai/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/store"
+	"github.com/shutu-ai/shutu-agent/internal/tools"
 )
 
 // makeJobsApp builds a minimal app for registerJobs tests: only the fields

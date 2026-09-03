@@ -3,8 +3,8 @@ package meter
 import (
 	"encoding/json"
 
-	"github.com/jabing/shutu-agent/internal/llm"
-	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/session"
 )
 
 // UsageProjection is the durable, cumulative provider-usage view. The four

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/lsp"
+	"github.com/shutu-ai/shutu-agent/internal/lsp"
 )
 
 func (a *app) registerLSP() error {
@@ -18,7 +18,7 @@ func (a *app) registerLSP() error {
 		return nil
 	}
 	if strings.TrimSpace(a.cfg.LSP.Command) == "" {
-		return fmt.Errorf("pa: lsp.command is required when lsp.enabled=true")
+		return fmt.Errorf("sta: lsp.command is required when lsp.enabled=true")
 	}
 	root := func() string {
 		if a.currentID != "" {
@@ -41,7 +41,7 @@ func (a *app) registerLSP() error {
 		return a.sessionCWDFor(a.runtimeSessionID(ctx))
 	})
 	if err := a.reg.Register(tool); err != nil {
-		return fmt.Errorf("pa: register %s: %w", tool.Name(), err)
+		return fmt.Errorf("sta: register %s: %w", tool.Name(), err)
 	}
 	return nil
 }

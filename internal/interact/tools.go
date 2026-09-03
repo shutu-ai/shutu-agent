@@ -25,12 +25,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/jabing/shutu-agent/internal/runtimectx"
-	agenttools "github.com/jabing/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/runtimectx"
+	agenttools "github.com/shutu-ai/shutu-agent/internal/tools"
 	"strings"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/session"
 )
 
 // Tool names (whitelisted when interact.enabled; see config.interactToolNames).

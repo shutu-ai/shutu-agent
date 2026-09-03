@@ -18,7 +18,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/runtimectx"
+	"github.com/shutu-ai/shutu-agent/internal/runtimectx"
 )
 
 // Status is a job's lifecycle state (dsh jobs JobStatus): running, optionally

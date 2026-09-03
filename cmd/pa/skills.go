@@ -20,11 +20,11 @@ import (
 	"os"
 	"strings"
 
-	"github.com/jabing/shutu-agent/internal/config"
-	"github.com/jabing/shutu-agent/internal/llm"
-	"github.com/jabing/shutu-agent/internal/loop"
-	"github.com/jabing/shutu-agent/internal/session"
-	"github.com/jabing/shutu-agent/internal/skill"
+	"github.com/shutu-ai/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/loop"
+	"github.com/shutu-ai/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/skill"
 )
 
 // registerSkills creates the filesystem provider + skill Registry and
@@ -49,7 +49,7 @@ func (a *app) registerSkills() error {
 	}
 	reg := skill.NewRegistry()
 	if err := reg.RegisterProvider(prov); err != nil {
-		return fmt.Errorf("pa: register skill provider: %w", err)
+		return fmt.Errorf("sta: register skill provider: %w", err)
 	}
 	a.skills = reg
 	// D3 event sink: skill/* events are appended to the active session log.
@@ -59,12 +59,12 @@ func (a *app) registerSkills() error {
 	// same way as the other session-bound event wiring.
 	onEvent := func(typ string, data any) {
 		if _, err := a.log.Append(typ, data); err != nil {
-			fmt.Fprintln(os.Stderr, "pa: "+typ+" event:", err)
+			fmt.Fprintln(os.Stderr, "sta: "+typ+" event:", err)
 		}
 	}
 	load := skill.NewSkillTools(reg, a.cfg.Skill.BodyMaxChars, onEvent).Load()
 	if err := a.reg.Register(load); err != nil {
-		return fmt.Errorf("pa: register %s: %w", load.Name(), err)
+		return fmt.Errorf("sta: register %s: %w", load.Name(), err)
 	}
 	return nil
 }
@@ -147,7 +147,7 @@ func (a *app) skillInvocationPreStepFor(ctx context.Context, userText string, lo
 			continue
 		}
 		if _, err := log.Append(session.EventSkillLoad, session.NewSkillLoad(def.Name, def.Source, body)); err != nil {
-			fmt.Fprintln(os.Stderr, "pa: skill/load event:", err)
+			fmt.Fprintln(os.Stderr, "sta: skill/load event:", err)
 		}
 		messages = append(messages, llm.Message{
 			Role:    llm.RoleUser,
@@ -218,7 +218,7 @@ func (a *app) skillCatalogPreStepFor(ctx context.Context, _ string, log *session
 	// even though dsh publishes the initial catalog for every session.
 	if log != nil && skillCatalogEventVersion(log) != version {
 		if _, err := log.Append(session.EventSkillCatalog, session.NewSkillCatalog(len(modelCands), version)); err != nil {
-			fmt.Fprintln(os.Stderr, "pa: skill/catalog event:", err)
+			fmt.Fprintln(os.Stderr, "sta: skill/catalog event:", err)
 		}
 	}
 	return []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text(text)}}}

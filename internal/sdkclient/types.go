@@ -9,7 +9,7 @@ import (
 	"os"
 	"sync"
 
-	"github.com/jabing/shutu-agent/internal/projection"
+	"github.com/shutu-ai/shutu-agent/internal/projection"
 )
 
 // ImageAttachmentRef is the reference SDK's durable image metadata shape.

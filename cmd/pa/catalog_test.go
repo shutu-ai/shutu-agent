@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jabing/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/tools"
 )
 
 func TestToolCatalogManifestArtifactRoundTrip(t *testing.T) {

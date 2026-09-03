@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/jabing/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/tools"
 )
 
 const structuredOutputToolName = "structured_output"

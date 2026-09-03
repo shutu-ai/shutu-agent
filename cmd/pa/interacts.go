@@ -27,12 +27,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/config"
-	"github.com/jabing/shutu-agent/internal/interact"
-	"github.com/jabing/shutu-agent/internal/runtimectx"
-	"github.com/jabing/shutu-agent/internal/session"
-	"github.com/jabing/shutu-agent/internal/store"
-	"github.com/jabing/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/interact"
+	"github.com/shutu-ai/shutu-agent/internal/runtimectx"
+	"github.com/shutu-ai/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/store"
+	"github.com/shutu-ai/shutu-agent/internal/tools"
 )
 
 type webApprovalContextKey struct{}
@@ -66,13 +66,13 @@ func (a *app) registerInteracts() error {
 		var err error
 		prov, err = interact.NewSQLiteProvider(backend)
 		if err != nil {
-			return fmt.Errorf("pa: approval provider: %w", err)
+			return fmt.Errorf("sta: approval provider: %w", err)
 		}
 	}
 	eng := interact.NewEngine(prov)
 	if controller, ok := interface{}(eng).(interact.PolicyController); ok && a.cfg.Interact.Policy != "" {
 		if err := controller.SetDefaultPolicy(interact.ApprovalPolicy(a.cfg.Interact.Policy)); err != nil {
-			return fmt.Errorf("pa: approval policy: %w", err)
+			return fmt.Errorf("sta: approval policy: %w", err)
 		}
 	}
 	if auditor, ok := interface{}(eng).(interact.ExpiryAuditor); ok {
@@ -84,10 +84,10 @@ func (a *app) registerInteracts() error {
 		// live CAS/index, not a second authority: this also removes orphan rows
 		// from a crash between provider mutation and audit-event append.
 		if err := a.restoreInteractions(context.Background(), eng); err != nil {
-			return fmt.Errorf("pa: restore interactions: %w", err)
+			return fmt.Errorf("sta: restore interactions: %w", err)
 		}
 		if err := a.indexLiveInteractions(context.Background(), eng); err != nil {
-			return fmt.Errorf("pa: index interactions: %w", err)
+			return fmt.Errorf("sta: index interactions: %w", err)
 		}
 	}
 	// D3 event sink: interact/* events are appended to the active session log.
@@ -111,7 +111,7 @@ func (a *app) registerInteracts() error {
 	}
 	onEvent := func(typ string, data any) {
 		if err := onEventErr(typ, data); err != nil {
-			fmt.Fprintln(os.Stderr, "pa: "+typ+" event:", err)
+			fmt.Fprintln(os.Stderr, "sta: "+typ+" event:", err)
 		}
 	}
 	st := interact.NewInteractToolsWithSessionAndErrorSink(eng, onEvent, onEventErr, func() string { return a.currentID })
@@ -121,7 +121,7 @@ func (a *app) registerInteracts() error {
 	st.SetSessionLogResolver(a.interactionLogFor)
 	for _, t := range []tools.Tool{st.AskUserQuestion()} {
 		if err := a.reg.Register(t); err != nil {
-			return fmt.Errorf("pa: register %s: %w", t.Name(), err)
+			return fmt.Errorf("sta: register %s: %w", t.Name(), err)
 		}
 	}
 	// Sensitive-tool gate: install the registry pre-execution gate when
@@ -629,13 +629,13 @@ func (a *app) emitInteractionEventWithErrorSink(ctx context.Context, fallback fu
 		if runtimectx.SessionID(ctx) != "" {
 			if canonical, value, projected := session.CanonicalApprovalEvent(typ, data); projected {
 				if _, err := log.Append(canonical, value); err != nil {
-					return fmt.Errorf("pa: persist %s event: %w", canonical, err)
+					return fmt.Errorf("sta: persist %s event: %w", canonical, err)
 				}
 			} else if _, err := log.Append(typ, data); err != nil {
-				return fmt.Errorf("pa: persist %s event: %w", typ, err)
+				return fmt.Errorf("sta: persist %s event: %w", typ, err)
 			}
 		} else if _, err := log.Append(typ, data); err != nil {
-			return fmt.Errorf("pa: persist %s event: %w", typ, err)
+			return fmt.Errorf("sta: persist %s event: %w", typ, err)
 		}
 		return nil
 	}

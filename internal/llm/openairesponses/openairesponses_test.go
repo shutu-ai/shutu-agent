@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jabing/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
 )
 
 // newTestProvider starts a fake Responses endpoint and returns a provider

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/runtimectx"
+	"github.com/shutu-ai/shutu-agent/internal/runtimectx"
 )
 
 // Compile-time assertion: Local implements the Registry Service.

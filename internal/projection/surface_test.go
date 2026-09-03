@@ -3,8 +3,8 @@ package projection
 import (
 	"testing"
 
-	"github.com/jabing/shutu-agent/internal/llm"
-	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/session"
 )
 
 func TestClassifyEventSurfacesMatchesCanonicalReplacementFold(t *testing.T) {

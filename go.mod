@@ -1,4 +1,4 @@
-module github.com/jabing/shutu-agent
+module github.com/shutu-ai/shutu-agent
 
 go 1.25.0
 

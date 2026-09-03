@@ -15,10 +15,10 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/jabing/shutu-agent/internal/config"
-	"github.com/jabing/shutu-agent/internal/plan"
-	"github.com/jabing/shutu-agent/internal/runtimectx"
-	"github.com/jabing/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/plan"
+	"github.com/shutu-ai/shutu-agent/internal/runtimectx"
+	"github.com/shutu-ai/shutu-agent/internal/tools"
 )
 
 // registerPlans creates the event-replayable Provider + Engine and registers
@@ -45,7 +45,7 @@ func (a *app) registerPlans() error {
 	onEvent := func(typ string, data any) {
 		_, appendErr := a.log.Append(typ, data)
 		if appendErr != nil {
-			fmt.Fprintln(os.Stderr, "pa: "+typ+" event:", appendErr)
+			fmt.Fprintln(os.Stderr, "sta: "+typ+" event:", appendErr)
 		}
 		if appendErr == nil && typ == "plan/create" {
 			var fact struct {
@@ -81,7 +81,7 @@ func (a *app) registerPlans() error {
 		pt.TodoWrite(),
 	} {
 		if err := a.reg.Register(t); err != nil {
-			return fmt.Errorf("pa: register %s: %w", t.Name(), err)
+			return fmt.Errorf("sta: register %s: %w", t.Name(), err)
 		}
 	}
 	return nil
@@ -170,7 +170,7 @@ func (a *app) restorePlans() error {
 	}
 	r, ok := a.plans.(plan.EventRestorer)
 	if !ok {
-		return fmt.Errorf("pa: plan engine cannot restore session events")
+		return fmt.Errorf("sta: plan engine cannot restore session events")
 	}
 	return r.Restore(a.log.Events())
 }

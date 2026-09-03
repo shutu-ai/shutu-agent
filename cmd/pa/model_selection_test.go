@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"github.com/jabing/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/config"
 )
 
 func TestPersistedModelSelectionRoundTrip(t *testing.T) {

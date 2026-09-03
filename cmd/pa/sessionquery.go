@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/runtimectx"
-	"github.com/jabing/shutu-agent/internal/sessionquery"
-	"github.com/jabing/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/runtimectx"
+	"github.com/shutu-ai/shutu-agent/internal/sessionquery"
+	"github.com/shutu-ai/shutu-agent/internal/tools"
 )
 
 func (a *app) registerSessionQuery() error {
@@ -22,7 +22,7 @@ func (a *app) registerSessionQuery() error {
 	}, a.cfg.SessionQuery.MaxResults, time.Duration(a.cfg.SessionQuery.SearchTimeoutMS)*time.Millisecond)
 	for _, tool := range []tools.Tool{query.Search(), query.EventSearch(), query.Trace(), query.EventTrace(), query.Read()} {
 		if err := a.reg.Register(tool); err != nil {
-			return fmt.Errorf("pa: register session-query tool: %w", err)
+			return fmt.Errorf("sta: register session-query tool: %w", err)
 		}
 	}
 	return nil

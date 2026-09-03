@@ -86,7 +86,7 @@ func buildWorkerPrompt(objective string, round int, prevBrief string) string
 ```
   prompt 内容（契约原文）：
 ```
-你是 github.com/jabing/shutu-agent 的 fresh 工作代理。目标（不可变）：
+你是 github.com/shutu-ai/shutu-agent 的 fresh 工作代理。目标（不可变）：
 <objective>
 
 这是第 <round> 轮。上一轮进展摘要（第一轮为「无」）：

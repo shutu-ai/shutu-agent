@@ -23,11 +23,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/fs"
-	"github.com/jabing/shutu-agent/internal/persistence"
-	"github.com/jabing/shutu-agent/internal/session"
-	"github.com/jabing/shutu-agent/internal/store"
-	"github.com/jabing/shutu-agent/internal/web"
+	"github.com/shutu-ai/shutu-agent/internal/fs"
+	"github.com/shutu-ai/shutu-agent/internal/persistence"
+	"github.com/shutu-ai/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/store"
+	"github.com/shutu-ai/shutu-agent/internal/web"
 )
 
 func TestFaultSecurityRestartMatrix(t *testing.T) {

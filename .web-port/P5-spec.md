@@ -1,6 +1,6 @@
 # P5 移植规格：消息反馈（👍/👎）+ 附件（图片）+ 主题跟随系统
 
-> 目标：把 dsh web 的「消息条操作（复制/反馈）」「附件（图片）」「主题三态（light/dark/system）」三块 UI 移植到 github.com/jabing/shutu-agent（Go 单体、vanilla JS 无构建、零依赖、中文文案）。
+> 目标：把 dsh web 的「消息条操作（复制/反馈）」「附件（图片）」「主题三态（light/dark/system）」三块 UI 移植到 github.com/shutu-ai/shutu-agent（Go 单体、vanilla JS 无构建、零依赖、中文文案）。
 > 现实约束：消息无 id（只有 seq）、无反馈后端、`internal/attachment` 已存在但未接 web、config.yaml 只读。
 > 本规格是「可照抄」的实现参考：文件清单 → 一句话要点 + DOM 草图 → 数据映射 → 配色/尺寸 → 文案 → API 缺口 → P5 最小闭环。
 
@@ -44,7 +44,7 @@
 - `packages/client/ui-layout/src/client/theme-presenter.ts`（DOM 应用：`html color-scheme` + body 属性 + 内联 token + `meta[name=theme-color]`）
 - `packages/client/ui-theme/src/styles/design-platform.css`、`gradient-shadow-text.css`（mask / contrast / shadow-lv3 / `--dsw-mask-blur` 取值）
 
-### 对照阅读的 github.com/jabing/shutu-agent（非 dsh，仅映射约束）
+### 对照阅读的 github.com/shutu-ai/shutu-agent（非 dsh，仅映射约束）
 - `internal/webserver/static/index.html`（composer / 设置页结构）、`app.js`（renderEvent / addUserMsg / addAssistant / addToolEvent / 主题）、`style.css`（`--dsw-*` 全量 token，见 §4）
 - `internal/webserver/webserver.go`（`eventView`、`handleMessage`、路由表、`writeJSON`）
 - `internal/attachment/attachment.go`（`Store.SaveImage/Read`、`SupportedMediaTypes`、`MediaTypeForExtension`）
@@ -116,9 +116,9 @@ div.settings-row.appearance
 
 ## 3. 逐元素数据映射
 
-### 3.1 反馈（dsh ↔ github.com/jabing/shutu-agent，无后端 → 前端 localStorage）
+### 3.1 反馈（dsh ↔ github.com/shutu-ai/shutu-agent，无后端 → 前端 localStorage）
 
-| dsh 元素 | github.com/jabing/shutu-agent 现状 | 状态 | 降级方案 |
+| dsh 元素 | github.com/shutu-ai/shutu-agent 现状 | 状态 | 降级方案 |
 |---|---|---|---|
 | 消息定位 `messageId`（Host 持久消息 id） | **无消息 id**，只有事件 `seq` | **缺** | 反馈键 = `` `${sessionId}:${seq}` ``；`data-seq` 标注在 actions 行；渲染/点击都用 seq |
 | 会话级反馈列表 `list()`（懒加载） | 无反馈后端 | **缺** | 渲染时同步读 `localStorage.pa_feedback`（无异步，无需懒加载） |
@@ -132,9 +132,9 @@ div.settings-row.appearance
 | 分支按钮（`onBranch`，仅完成轮最后一条） | 无 fork API | **缺** | **P5 隐藏**（不做分支） |
 | hover 显现时间（`data-time-hover-root`，`@media (hover:hover)` 才隐藏） | `.msg-time` 恒显 | 部分 | P5 保持恒显（不学 hover 显现），减少动画复杂度 |
 
-### 3.2 附件（dsh ↔ github.com/jabing/shutu-agent，UI 可照抄，后端三件套要补）
+### 3.2 附件（dsh ↔ github.com/shutu-ai/shutu-agent，UI 可照抄，后端三件套要补）
 
-| dsh 元素 | github.com/jabing/shutu-agent 现状 | 状态 | 降级方案 |
+| dsh 元素 | github.com/shutu-ai/shutu-agent 现状 | 状态 | 降级方案 |
 |---|---|---|---|
 | 草稿 `ComposerAttachment{kind,id,file,previewUrl}` | 无 | ✅ 可直接照抄 | `id = crypto.randomUUID()`、`previewUrl = URL.createObjectURL(file)`，仅存内存 Map |
 | 拖拽准入：document-level dragenter/over/leave/drop + `dragDepth` 计数 + `dropEffect=copy/none` | 无 | ✅ 照抄 | `canAcceptDrop` = 会话就绪且非 running 锁定时 |
@@ -148,9 +148,9 @@ div.settings-row.appearance
 | 全屏 drop 遮罩（`--dsw-alias-bg-mask-drop` + blur(10px) + 插画） | 无 | ✅ 照抄 | **需新增 token**（§4.2） |
 | 上传进度 | dsh **本就没有进度条**（小文件本地快） | ✅ 不实现 | 发送时整批 await；失败走 toast 恢复草稿 |
 
-### 3.3 主题（dsh ↔ github.com/jabing/shutu-agent）
+### 3.3 主题（dsh ↔ github.com/shutu-ai/shutu-agent）
 
-| dsh 元素 | github.com/jabing/shutu-agent 现状 | 状态 | 降级方案 |
+| dsh 元素 | github.com/shutu-ai/shutu-agent 现状 | 状态 | 降级方案 |
 |---|---|---|---|
 | 三态 `light/dark/system`（默认 system） | `pa_theme` 只有 light/dark，默认 dark | 部分缺 | 新增 `"system"` 值；未设置时仍默认 dark（保持现状，不强制 system） |
 | `system` 解析：`matchMedia('(prefers-color-scheme: dark)')` | 无 | **缺** | `applyTheme()` 内三态分支 + `change` 监听重算（§7） |
@@ -158,14 +158,14 @@ div.settings-row.appearance
 | `body[data-ds-dark-theme]`（PA 语义 `="true"/"false"`） | ✅ 已有 | ✅ | **保持 PA 的 `"true"/"false"` 值语义**（style.css 有 3 处 `="false"` 选择器，不迁移为 presence，避免误伤） |
 | `meta[name=theme-color]` | 无 | **缺**（可选） | 取 `getComputedStyle(body).backgroundColor` 写入；P5 可加 |
 | 外观行三 cube（浅色/深色/跟随系统） | 现有两 cube（浅色/深色） | 部分 | 加第三个「跟随系统」cube |
-| 内联 token 覆盖层（第三方主题 overrideTokens） | 无动态主题 | **缺** | P5 不做（github.com/jabing/shutu-agent 只需内建两套 palette，无第三方主题） |
+| 内联 token 覆盖层（第三方主题 overrideTokens） | 无动态主题 | **缺** | P5 不做（github.com/shutu-ai/shutu-agent 只需内建两套 palette，无第三方主题） |
 | 主题偏好持久化（user-settings 文档） | `localStorage.pa_theme` | ✅ | 沿用 localStorage（config.yaml 只读，不可写设置） |
 
 ---
 
 ## 4. 配色 / 尺寸（token 具体值，深浅两套）
 
-> github.com/jabing/shutu-agent `style.css` 已按同一 dsh 来源定义 `--dsw-*` 全量变量（`:root` 深色基座 + `body[data-ds-dark-theme="false"]` 浅色覆盖），P5 全部复用，仅需新增 3 个缺失 token（见 §4.2）。以下「浅/深」列即 PA 现有值（与 dsh 对齐）。
+> github.com/shutu-ai/shutu-agent `style.css` 已按同一 dsh 来源定义 `--dsw-*` 全量变量（`:root` 深色基座 + `body[data-ds-dark-theme="false"]` 浅色覆盖），P5 全部复用，仅需新增 3 个缺失 token（见 §4.2）。以下「浅/深」列即 PA 现有值（与 dsh 对齐）。
 
 ### 4.1 反馈按钮（照抄 `MessageIconActions.module.css` / `MessageFeedbackActions.module.css`）
 
@@ -259,7 +259,7 @@ div.settings-row.appearance
 | image.modelUnsupported / subagentUnsupported | 当前模型不支持图片，请切换支持图片的模型 / 子智能体会话暂不支持图片 |
 | **image.sendFailed** | 图片发送失败（{reason}），请重新添加图片后再试 |
 
-github.com/jabing/shutu-agent 新增（dsh 无现成词）：
+github.com/shutu-ai/shutu-agent 新增（dsh 无现成词）：
 
 | 用途 | 中文 |
 |---|---|
@@ -280,7 +280,7 @@ github.com/jabing/shutu-agent 新增（dsh 无现成词）：
 
 ---
 
-## 6. github.com/jabing/shutu-agent API 缺口清单（后端要补什么）
+## 6. github.com/shutu-ai/shutu-agent API 缺口清单（后端要补什么）
 
 > config.yaml 只读：所有新能力走「新端点 + 前端默认值」，不新增配置项（限额硬编码默认值，见 §3.2）。
 

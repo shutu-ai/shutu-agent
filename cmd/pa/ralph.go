@@ -16,9 +16,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/jabing/shutu-agent/internal/config"
-	"github.com/jabing/shutu-agent/internal/ralph"
-	"github.com/jabing/shutu-agent/internal/subagent"
+	"github.com/shutu-ai/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/ralph"
+	"github.com/shutu-ai/shutu-agent/internal/subagent"
 )
 
 // registerRalph wires the fresh-agent loop seam (D-GAP-3) when ralph.enabled
@@ -63,11 +63,11 @@ func (a *app) registerRalph() error {
 	}
 	onEvent := func(typ string, data any) {
 		if _, err := a.log.Append(typ, data); err != nil {
-			fmt.Fprintln(os.Stderr, "pa: "+typ+" event:", err)
+			fmt.Fprintln(os.Stderr, "sta: "+typ+" event:", err)
 		}
 	}
 	if err := a.reg.Register(ralph.NewRalphTool(eng, onEvent)); err != nil {
-		return fmt.Errorf("pa: register %s: %w", ralph.RalphToolName, err)
+		return fmt.Errorf("sta: register %s: %w", ralph.RalphToolName, err)
 	}
 	return nil
 }

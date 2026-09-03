@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/contractfixture"
-	"github.com/jabing/shutu-agent/internal/meter"
-	"github.com/jabing/shutu-agent/internal/projection"
-	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/contractfixture"
+	"github.com/shutu-ai/shutu-agent/internal/meter"
+	"github.com/shutu-ai/shutu-agent/internal/projection"
+	"github.com/shutu-ai/shutu-agent/internal/session"
 )
 
 func TestNativeProjectionBaselineIncludesMountedDSHKeys(t *testing.T) {

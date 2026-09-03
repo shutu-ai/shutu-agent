@@ -19,11 +19,11 @@ import (
 	"sort"
 	"strconv"
 
-	"github.com/jabing/shutu-agent/internal/compaction"
-	"github.com/jabing/shutu-agent/internal/config"
-	"github.com/jabing/shutu-agent/internal/llm"
-	"github.com/jabing/shutu-agent/internal/loop"
-	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/compaction"
+	"github.com/shutu-ai/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/loop"
+	"github.com/shutu-ai/shutu-agent/internal/session"
 )
 
 // compactedNotice is the short "context was compacted" hint injected by the

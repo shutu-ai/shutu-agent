@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/config"
 )
 
 // M3 defaults (design.md §5 / dispatch-m3). The shipped configuration always

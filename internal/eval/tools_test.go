@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jabing/shutu-agent/internal/runtimectx"
-	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/runtimectx"
+	"github.com/shutu-ai/shutu-agent/internal/session"
 )
 
 // Compile-time assertions: the three eval_* tools implement the tool method set

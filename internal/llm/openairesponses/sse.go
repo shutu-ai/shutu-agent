@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/jabing/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
 )
 
 // sseDecoder decodes an SSE byte stream into event data payloads. It yields

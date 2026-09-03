@@ -17,11 +17,11 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/jabing/shutu-agent/internal/config"
-	"github.com/jabing/shutu-agent/internal/runtimectx"
-	"github.com/jabing/shutu-agent/internal/subagent"
-	"github.com/jabing/shutu-agent/internal/workflow"
-	nodeworkflow "github.com/jabing/shutu-agent/internal/workflow/node"
+	"github.com/shutu-ai/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/runtimectx"
+	"github.com/shutu-ai/shutu-agent/internal/subagent"
+	"github.com/shutu-ai/shutu-agent/internal/workflow"
+	nodeworkflow "github.com/shutu-ai/shutu-agent/internal/workflow/node"
 )
 
 // registerWorkflow wires the task-DAG orchestration seam (D-GAP-2) when
@@ -89,7 +89,7 @@ func (a *app) registerWorkflow() error {
 	})
 	onEvent := func(typ string, data any) {
 		if _, err := a.log.Append(typ, data); err != nil {
-			fmt.Fprintln(os.Stderr, "pa: "+typ+" event:", err)
+			fmt.Fprintln(os.Stderr, "sta: "+typ+" event:", err)
 		}
 	}
 	tool := workflow.NewWorkflowRunToolWithScriptContext(eng, scriptRunner, startAgent, func(ctx context.Context) string {
@@ -107,7 +107,7 @@ func (a *app) registerWorkflow() error {
 		return err
 	})
 	if err := a.reg.Register(tool); err != nil {
-		return fmt.Errorf("pa: register %s: %w", workflow.WorkflowRunToolName, err)
+		return fmt.Errorf("sta: register %s: %w", workflow.WorkflowRunToolName, err)
 	}
 	return nil
 }

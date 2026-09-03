@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/jabing/shutu-agent/internal/interact"
-	"github.com/jabing/shutu-agent/internal/runtimectx"
-	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/interact"
+	"github.com/shutu-ai/shutu-agent/internal/runtimectx"
+	"github.com/shutu-ai/shutu-agent/internal/session"
 )
 
 func (a *app) clearSessionApprovalPolicy(sessionID string) {
@@ -18,7 +18,7 @@ func (a *app) clearSessionApprovalPolicy(sessionID string) {
 	if canceler, ok := a.interacts.(interact.SessionCanceler); ok {
 		cancelled, err := canceler.CancelForSession(context.Background(), sessionID)
 		if err != nil && !errors.Is(err, interact.ErrEngineClosed) {
-			fmt.Fprintf(os.Stderr, "pa: cancel approvals for session %q: %v\n", sessionID, err)
+			fmt.Fprintf(os.Stderr, "sta: cancel approvals for session %q: %v\n", sessionID, err)
 		}
 		if len(cancelled) > 0 {
 			log := a.log
@@ -30,7 +30,7 @@ func (a *app) clearSessionApprovalPolicy(sessionID string) {
 				if resolved, logErr := a.sessionLogForAgent(context.Background(), sessionID); logErr == nil {
 					log = resolved
 				} else {
-					fmt.Fprintf(os.Stderr, "pa: approval cancellation log %q: %v\n", sessionID, logErr)
+					fmt.Fprintf(os.Stderr, "sta: approval cancellation log %q: %v\n", sessionID, logErr)
 					log = nil
 				}
 			}
@@ -41,7 +41,7 @@ func (a *app) clearSessionApprovalPolicy(sessionID string) {
 						payload["callId"] = request.CallID
 					}
 					if _, appendErr := log.Append(session.EventApprovalDecided, payload); appendErr != nil {
-						fmt.Fprintf(os.Stderr, "pa: approval cancellation event %q: %v\n", sessionID, appendErr)
+						fmt.Fprintf(os.Stderr, "sta: approval cancellation event %q: %v\n", sessionID, appendErr)
 					}
 				}
 			}

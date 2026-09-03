@@ -17,13 +17,13 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/jabing/shutu-agent/internal/agent"
-	"github.com/jabing/shutu-agent/internal/config"
-	"github.com/jabing/shutu-agent/internal/llm"
-	"github.com/jabing/shutu-agent/internal/prompt"
-	"github.com/jabing/shutu-agent/internal/session"
-	"github.com/jabing/shutu-agent/internal/subagent"
-	"github.com/jabing/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/agent"
+	"github.com/shutu-ai/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/prompt"
+	"github.com/shutu-ai/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/subagent"
+	"github.com/shutu-ai/shutu-agent/internal/tools"
 )
 
 // registerSubagent creates the SpawnProvider + Runtime and registers the
@@ -118,10 +118,10 @@ func (a *app) registerSubagent() error {
 	prov := subagent.NewSpawnProvider(deps)
 	rt := subagent.NewRuntime()
 	if err := rt.RegisterProvider(prov); err != nil {
-		return fmt.Errorf("pa: register subagent provider: %w", err)
+		return fmt.Errorf("sta: register subagent provider: %w", err)
 	}
 	if err := rt.RegisterProvider(subagent.NewForkProvider(deps)); err != nil {
-		return fmt.Errorf("pa: register fork provider: %w", err)
+		return fmt.Errorf("sta: register fork provider: %w", err)
 	}
 	// D-GAP-4: optional external subagent backends (codex / claude-code).
 	// Register one provider per enabled config entry; a failed registration
@@ -138,7 +138,7 @@ func (a *app) registerSubagent() error {
 			providerName = "claude-code"
 		}
 		if err := rt.RegisterProvider(subagent.NewExternalProvider(providerName, ep.Command)); err != nil {
-			return fmt.Errorf("pa: register external subagent provider %q: %w", name, err)
+			return fmt.Errorf("sta: register external subagent provider %q: %w", name, err)
 		}
 	}
 	a.subagents = rt
@@ -150,7 +150,7 @@ func (a *app) registerSubagent() error {
 	// /resume) is honored the same way as the other session-bound event wiring.
 	onEvent := func(typ string, data any) {
 		if _, err := a.log.Append(typ, data); err != nil {
-			fmt.Fprintln(os.Stderr, "pa: "+typ+" event:", err)
+			fmt.Fprintln(os.Stderr, "sta: "+typ+" event:", err)
 		}
 	}
 	st := subagent.NewSubagentToolsWithContinuableContext(rt, a.cfg.Subagent.MaxDepth, func(ctx context.Context) string {
@@ -207,7 +207,7 @@ func (a *app) registerSubagent() error {
 		st.ListAgents(),
 	} {
 		if err := a.reg.Register(t); err != nil {
-			return fmt.Errorf("pa: register %s: %w", t.Name(), err)
+			return fmt.Errorf("sta: register %s: %w", t.Name(), err)
 		}
 	}
 	return nil

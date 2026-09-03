@@ -1,4 +1,4 @@
-// One-shot repo rename: github.com/jabing/shutu-agent module path -> github.com/jabing/shutu-agent.
+// One-shot repo rename: github.com/shutu-ai/shutu-agent module path -> github.com/shutu-ai/shutu-agent.
 // Uses Node fs (UTF-8 strict, no BOM, preserves LF/CRLF as read) so non-ASCII
 // comments/docs are never re-encoded by the shell. config.yaml is excluded
 // here and handled separately (its User-Agent string takes the bare name).
@@ -23,8 +23,8 @@ function walk(dir) {
       if (!TEXT.has(ext)) continue
       let c
       try { c = fs.readFileSync(p, 'utf8') } catch { continue }
-      if (!c.includes('github.com/jabing/shutu-agent')) continue
-      fs.writeFileSync(p, c.replaceAll('github.com/jabing/shutu-agent', 'github.com/jabing/shutu-agent'), 'utf8')
+      if (!c.includes('github.com/shutu-ai/shutu-agent')) continue
+      fs.writeFileSync(p, c.replaceAll('github.com/shutu-ai/shutu-agent', 'github.com/shutu-ai/shutu-agent'), 'utf8')
       replaced++
     }
   }

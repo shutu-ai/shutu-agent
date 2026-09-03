@@ -17,10 +17,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/acp"
-	"github.com/jabing/shutu-agent/internal/contractfixture"
-	"github.com/jabing/shutu-agent/internal/mcp"
-	"github.com/jabing/shutu-agent/internal/sdkclient"
+	"github.com/shutu-ai/shutu-agent/internal/acp"
+	"github.com/shutu-ai/shutu-agent/internal/contractfixture"
+	"github.com/shutu-ai/shutu-agent/internal/mcp"
+	"github.com/shutu-ai/shutu-agent/internal/sdkclient"
 )
 
 func TestCrossEntryProtocolLifecycleFixture(t *testing.T) {

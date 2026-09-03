@@ -15,12 +15,12 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/jabing/shutu-agent/internal/code"
-	"github.com/jabing/shutu-agent/internal/config"
-	"github.com/jabing/shutu-agent/internal/llm"
-	"github.com/jabing/shutu-agent/internal/runtimectx"
-	"github.com/jabing/shutu-agent/internal/store"
-	"github.com/jabing/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/code"
+	"github.com/shutu-ai/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/runtimectx"
+	"github.com/shutu-ai/shutu-agent/internal/store"
+	"github.com/shutu-ai/shutu-agent/internal/tools"
 )
 
 // Kept as a seam so startup tests can exercise the unsupported-runtime
@@ -33,7 +33,7 @@ var probeTypeScriptRuntimeStatus = code.TypeScriptRuntimeStatus
 // registerJobs/registerPlans/registerSpills/registerInteracts).
 func (a *app) registerCode() error {
 	if err := code.RecoverWindowsACLSandboxes(); err != nil {
-		return fmt.Errorf("pa: recover Windows ACL sandbox state: %w", err)
+		return fmt.Errorf("sta: recover Windows ACL sandbox state: %w", err)
 	}
 	if !config.Enabled(a.cfg.Code.Enabled) {
 		return nil
@@ -59,13 +59,13 @@ func (a *app) registerCode() error {
 	// (/new, /resume) is honored the same way as the other register* wiring.
 	onEvent := func(typ string, data any) {
 		if _, err := a.log.Append(typ, data); err != nil {
-			fmt.Fprintln(os.Stderr, "pa: "+typ+" event:", err)
+			fmt.Fprintln(os.Stderr, "sta: "+typ+" event:", err)
 		}
 	}
 	ct := code.NewCodeToolsWithRuntime(runtime, onEvent)
 	ct.SetErrorSink(func(typ string, data any) error {
 		if a.log == nil {
-			return fmt.Errorf("pa: no session log for %s event", typ)
+			return fmt.Errorf("sta: no session log for %s event", typ)
 		}
 		_, err := a.log.Append(typ, data)
 		return err
@@ -94,7 +94,7 @@ func (a *app) registerCode() error {
 		return a.sessionCWDFor(runtimectx.SessionID(ctx))
 	}
 	if err := a.reg.Register(ct.Run()); err != nil {
-		return fmt.Errorf("pa: register run_code: %w", err)
+		return fmt.Errorf("sta: register run_code: %w", err)
 	}
 	return nil
 }

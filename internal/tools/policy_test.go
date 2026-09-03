@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/config"
 )
 
 func TestDefaultPolicyUsesDshRunCommandTimeout(t *testing.T) {

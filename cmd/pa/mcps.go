@@ -16,17 +16,17 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	agenttools "github.com/jabing/shutu-agent/internal/tools"
+	agenttools "github.com/shutu-ai/shutu-agent/internal/tools"
 	"strings"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/attachment"
-	"github.com/jabing/shutu-agent/internal/config"
-	"github.com/jabing/shutu-agent/internal/llm"
-	"github.com/jabing/shutu-agent/internal/mcp"
-	"github.com/jabing/shutu-agent/internal/runtimectx"
-	"github.com/jabing/shutu-agent/internal/session"
-	"github.com/jabing/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/attachment"
+	"github.com/shutu-ai/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/mcp"
+	"github.com/shutu-ai/shutu-agent/internal/runtimectx"
+	"github.com/shutu-ai/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/tools"
 )
 
 // registerMcps creates the stdio Factory, registers the mcp_* tools and bridges
@@ -41,10 +41,10 @@ func (a *app) registerMcps() error {
 	for _, srv := range a.cfg.Mcp.Servers {
 		mapped := mcp.McpServer{Name: srv.Name, Transport: srv.Transport, Cmd: srv.Cmd, Args: srv.Args, URL: srv.URL, Headers: srv.Headers, Env: srv.Env, Cwd: srv.Cwd, ToolCallTimeout: time.Duration(srv.ToolCallTimeoutMS) * time.Millisecond}
 		if err := mcp.ValidateServer(mapped); err != nil {
-			return fmt.Errorf("pa: invalid mcp server %q: %w", srv.Name, err)
+			return fmt.Errorf("sta: invalid mcp server %q: %w", srv.Name, err)
 		}
 		if _, exists := seen[srv.Name]; exists {
-			return fmt.Errorf("pa: mcp server %q is configured more than once", srv.Name)
+			return fmt.Errorf("sta: mcp server %q is configured more than once", srv.Name)
 		}
 		seen[srv.Name] = struct{}{}
 	}
@@ -61,12 +61,12 @@ func (a *app) registerMcps() error {
 			return
 		}
 		if _, err := a.log.Append(typ, data); err != nil {
-			fmt.Printf("pa: %s event: %v\n", typ, err)
+			fmt.Printf("sta: %s event: %v\n", typ, err)
 		}
 	})
 	mt.SetErrorSink(func(typ string, data any) error {
 		if a.log == nil {
-			return fmt.Errorf("pa: no session log for %s event", typ)
+			return fmt.Errorf("sta: no session log for %s event", typ)
 		}
 		_, err := a.log.Append(typ, data)
 		return err
@@ -75,7 +75,7 @@ func (a *app) registerMcps() error {
 	mt.SetImageAdmission(a.mcpImageAdmission)
 	for _, tl := range []tools.Tool{mt.List(), mt.Call()} {
 		if err := a.reg.RegisterWithInfo(tl, agenttools.RegistrationInfo{Owner: "mcp", Plugin: "builtin-mcp"}); err != nil {
-			return fmt.Errorf("pa: register %s: %w", tl.Name(), err)
+			return fmt.Errorf("sta: register %s: %w", tl.Name(), err)
 		}
 	}
 	// D3 event sink: mcp/list and mcp/call are appended to the active session
@@ -92,7 +92,7 @@ func (a *app) registerMcps() error {
 			// available for a later foreground recovery attempt, but do not
 			// prevent the host from starting because one server is down. The
 			// bridge already closed the failed client before returning.
-			fmt.Printf("pa: MCP server %q unavailable at startup: %v\n", srv.Name, redactMCPError(err, srv))
+			fmt.Printf("sta: MCP server %q unavailable at startup: %v\n", srv.Name, redactMCPError(err, srv))
 		}
 	}
 	return nil
@@ -111,7 +111,7 @@ func (a *app) bridgeMcpServer(ctx context.Context, f mcp.Factory, srv config.Mcp
 	server := mcp.McpServer{Name: srv.Name, Transport: srv.Transport, Cmd: srv.Cmd, Args: srv.Args, URL: srv.URL, Headers: srv.Headers, Env: srv.Env, Cwd: srv.Cwd, ToolCallTimeout: time.Duration(srv.ToolCallTimeoutMS) * time.Millisecond}
 	client, err := mcp.NewClientForServer(ctx, f, server)
 	if err != nil {
-		return fmt.Errorf("pa: create mcp server %q: %w", srv.Name, err)
+		return fmt.Errorf("sta: create mcp server %q: %w", srv.Name, err)
 	}
 	// stdio transports expose a connection-loss signal, so promote them to a
 	// supervised client. A failed tools/call is never replayed here because its
@@ -133,7 +133,7 @@ func (a *app) bridgeMcpServer(ctx context.Context, f mcp.Factory, srv config.Mcp
 	if reconnecting, ok := client.(mcp.ReconnectedHandler); ok {
 		reconnecting.SetReconnectedHandler(func() {
 			if err := a.resyncMCPServer(context.Background(), srv.Name, client); err != nil {
-				fmt.Printf("pa: MCP tool-list refresh after reconnect %q: %v\n", srv.Name, redactMCPError(err, srv))
+				fmt.Printf("sta: MCP tool-list refresh after reconnect %q: %v\n", srv.Name, redactMCPError(err, srv))
 			}
 		})
 	}
@@ -146,14 +146,14 @@ func (a *app) bridgeMcpServer(ctx context.Context, f mcp.Factory, srv config.Mcp
 		if srv.FailOnStartupError || !a.adoptRecoveringMCPLifecycle(srv.Name, client) {
 			_ = client.Close()
 		}
-		return fmt.Errorf("pa: start mcp server %q: %w", srv.Name, err)
+		return fmt.Errorf("sta: start mcp server %q: %w", srv.Name, err)
 	}
 	tools, err := client.ListTools(ctx)
 	if err != nil {
 		if srv.FailOnStartupError || !a.adoptRecoveringMCPLifecycle(srv.Name, client) {
 			_ = client.Close()
 		}
-		return fmt.Errorf("pa: list tools of mcp server %q: %w", srv.Name, err)
+		return fmt.Errorf("sta: list tools of mcp server %q: %w", srv.Name, err)
 	}
 	if a.mcpToolNames == nil {
 		a.mcpToolNames = make(map[string][]string)
@@ -163,7 +163,7 @@ func (a *app) bridgeMcpServer(ctx context.Context, f mcp.Factory, srv config.Mcp
 		name := mcp.PublicToolName(srv.Name, tl.Name)
 		if previous, exists := names[name]; exists {
 			_ = client.Close()
-			return fmt.Errorf("pa: mcp server %q advertised tools %q and %q under the same public name %q", srv.Name, previous, tl.Name, name)
+			return fmt.Errorf("sta: mcp server %q advertised tools %q and %q under the same public name %q", srv.Name, previous, tl.Name, name)
 		}
 		names[name] = tl.Name
 	}
@@ -186,7 +186,7 @@ func (a *app) bridgeMcpServer(ctx context.Context, f mcp.Factory, srv config.Mcp
 			imageAdmission: a.mcpImageAdmission,
 			onEvent: func(typ string, data any) error {
 				if a.log == nil {
-					return errors.New("pa: no session log for MCP event")
+					return errors.New("sta: no session log for MCP event")
 				}
 				_, err := a.log.Append(typ, data)
 				return err
@@ -198,7 +198,7 @@ func (a *app) bridgeMcpServer(ctx context.Context, f mcp.Factory, srv config.Mcp
 			}
 			delete(a.mcpToolNames, srv.Name)
 			_ = client.Close()
-			return fmt.Errorf("pa: register bridged mcp tool %q: %w", name, err)
+			return fmt.Errorf("sta: register bridged mcp tool %q: %w", name, err)
 		}
 		// Bridged names are dynamic — config.applyDefaults cannot whitelist
 		// them (their names are only known at runtime), so the whitelist is
@@ -217,7 +217,7 @@ func (a *app) bridgeMcpServer(ctx context.Context, f mcp.Factory, srv config.Mcp
 	if notifier, ok := client.(mcp.ToolListChangedHandler); ok {
 		notifier.SetToolListChangedHandler(func() {
 			if err := a.resyncMCPServer(context.Background(), srv.Name, client); err != nil {
-				fmt.Printf("pa: MCP tool-list refresh %q: %v\n", srv.Name, redactMCPError(err, srv))
+				fmt.Printf("sta: MCP tool-list refresh %q: %v\n", srv.Name, redactMCPError(err, srv))
 			}
 		})
 	}
@@ -346,7 +346,7 @@ func (a *app) resyncMCPServer(ctx context.Context, server string, client mcp.Cli
 			imageAdmission: a.mcpImageAdmission,
 			onEvent: func(typ string, data any) error {
 				if a.log == nil {
-					return errors.New("pa: no session log for MCP event")
+					return errors.New("sta: no session log for MCP event")
 				}
 				_, err := a.log.Append(typ, data)
 				return err

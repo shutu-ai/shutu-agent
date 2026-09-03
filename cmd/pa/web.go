@@ -15,10 +15,10 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/jabing/shutu-agent/internal/config"
-	"github.com/jabing/shutu-agent/internal/runtimectx"
-	"github.com/jabing/shutu-agent/internal/tools"
-	"github.com/jabing/shutu-agent/internal/web"
+	"github.com/shutu-ai/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/runtimectx"
+	"github.com/shutu-ai/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/web"
 )
 
 // registerWeb 在 web.enabled 时创建 Engine + provider + 注册 web_* 工具（白名单
@@ -44,12 +44,12 @@ func (a *app) registerWeb() error {
 			log := a.runtimeLog(ctx)
 			if log == nil {
 				if _, runtimeOwned := runtimectx.Get(ctx); runtimeOwned {
-					return fmt.Errorf("pa: no Agent-owned session log for web search request")
+					return fmt.Errorf("sta: no Agent-owned session log for web search request")
 				}
 				log = a.log
 			}
 			if log == nil {
-				return fmt.Errorf("pa: no session log for web search request")
+				return fmt.Errorf("sta: no session log for web search request")
 			}
 			if _, err := log.Append("web/search-request", ev); err != nil {
 				return err
@@ -66,7 +66,7 @@ func (a *app) registerWeb() error {
 			OnRequestContext: onReq,
 		})
 		if err := engine.RegisterSearchProvider(sp); err != nil {
-			return fmt.Errorf("pa: register DeepSeek search provider: %w", err)
+			return fmt.Errorf("sta: register DeepSeek search provider: %w", err)
 		}
 	}
 	fp := web.NewHttpFetchProvider(web.FetchLimits{
@@ -78,7 +78,7 @@ func (a *app) registerWeb() error {
 		UserAgent:        a.cfg.Web.FetchUserAgent,
 	})
 	if err := engine.RegisterFetchProvider(fp); err != nil {
-		return fmt.Errorf("pa: register HTTP fetch provider: %w", err)
+		return fmt.Errorf("sta: register HTTP fetch provider: %w", err)
 	}
 	// SearchID/FetchID 留空 → NewWebTools 落到 provider 的稳定 id
 	// (deepseek-official / http)，与上面注册的 id 一致（单一事实来源）。
@@ -91,7 +91,7 @@ func (a *app) registerWeb() error {
 	}, nil)
 	for _, tl := range []tools.Tool{wt.Search(), wt.Fetch()} {
 		if err := a.reg.Register(tl); err != nil {
-			return fmt.Errorf("pa: register %s: %w", tl.Name(), err)
+			return fmt.Errorf("sta: register %s: %w", tl.Name(), err)
 		}
 	}
 	a.web = engine

@@ -9,8 +9,8 @@ package openai
 import (
 	"context"
 
-	"github.com/jabing/shutu-agent/internal/llm"
-	"github.com/jabing/shutu-agent/internal/llm/deepseek"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/llm/deepseek"
 )
 
 const (

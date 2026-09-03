@@ -1,4 +1,4 @@
-# Personal Agent runtime configuration.
+# Shutu Agent runtime configuration.
 # All values shown are the defaults; an omitted field uses its default.
 # API keys are NEVER stored here — they only come from environment variables.
 

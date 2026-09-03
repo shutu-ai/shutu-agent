@@ -19,10 +19,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/jabing/shutu-agent/internal/attachment"
-	"github.com/jabing/shutu-agent/internal/config"
-	"github.com/jabing/shutu-agent/internal/llm"
-	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/attachment"
+	"github.com/shutu-ai/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/session"
 )
 
 // multimodalEnabled reports whether the image-attachment capability is on
@@ -54,7 +54,7 @@ func (a *app) registerAttachments() error {
 		MaxImageDimension:    cfg.LLM.Multimodal.MaxImageDimension,
 	})
 	if err != nil {
-		return fmt.Errorf("pa: register attachments: %w", err)
+		return fmt.Errorf("sta: register attachments: %w", err)
 	}
 	a.attachStore = st
 	return nil

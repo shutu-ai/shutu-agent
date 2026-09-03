@@ -13,13 +13,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	agenttools "github.com/jabing/shutu-agent/internal/tools"
+	agenttools "github.com/shutu-ai/shutu-agent/internal/tools"
 	"strings"
 	"sync/atomic"
 	"unicode/utf8"
 
-	"github.com/jabing/shutu-agent/internal/runtimectx"
-	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/runtimectx"
+	"github.com/shutu-ai/shutu-agent/internal/session"
 )
 
 // WorkflowRunToolName is the task-DAG orchestration tool name (D-GAP-2).

@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/jabing/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/config"
 )
 
 func TestNativeAgentPresetStoreCopyReadListRemove(t *testing.T) {

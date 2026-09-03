@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"strings"
 
-	goalservice "github.com/jabing/shutu-agent/internal/goal"
-	"github.com/jabing/shutu-agent/internal/plan"
-	"github.com/jabing/shutu-agent/internal/runtimectx"
-	"github.com/jabing/shutu-agent/internal/session"
+	goalservice "github.com/shutu-ai/shutu-agent/internal/goal"
+	"github.com/shutu-ai/shutu-agent/internal/plan"
+	"github.com/shutu-ai/shutu-agent/internal/runtimectx"
+	"github.com/shutu-ai/shutu-agent/internal/session"
 )
 
 // runIdleGoal advances the newest unfinished goal belonging to the current

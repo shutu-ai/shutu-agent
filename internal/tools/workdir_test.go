@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jabing/shutu-agent/internal/pathsecure"
+	"github.com/shutu-ai/shutu-agent/internal/pathsecure"
 )
 
 func TestConstrainWorkdirRejectsOutsideAndAcceptsChild(t *testing.T) {

@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/session"
-	"github.com/jabing/shutu-agent/internal/store"
+	"github.com/shutu-ai/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/store"
 )
 
 // SessionPersistence is the backend-independent transcript contract. Header

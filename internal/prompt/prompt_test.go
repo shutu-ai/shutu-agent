@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/jabing/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
 )
 
 func TestBuildSingleSection(t *testing.T) {

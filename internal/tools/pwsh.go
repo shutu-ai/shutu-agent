@@ -31,9 +31,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/jobs"
-	"github.com/jabing/shutu-agent/internal/llm"
-	"github.com/jabing/shutu-agent/internal/runtimectx"
+	"github.com/shutu-ai/shutu-agent/internal/jobs"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/runtimectx"
 )
 
 // pwshToolName is the model-facing tool name (dsh: pwsh). The registry

@@ -9,14 +9,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/agent"
-	"github.com/jabing/shutu-agent/internal/config"
-	"github.com/jabing/shutu-agent/internal/llm"
-	"github.com/jabing/shutu-agent/internal/session"
-	"github.com/jabing/shutu-agent/internal/store"
-	"github.com/jabing/shutu-agent/internal/subagent"
-	"github.com/jabing/shutu-agent/internal/team"
-	"github.com/jabing/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/agent"
+	"github.com/shutu-ai/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/store"
+	"github.com/shutu-ai/shutu-agent/internal/subagent"
+	"github.com/shutu-ai/shutu-agent/internal/team"
+	"github.com/shutu-ai/shutu-agent/internal/tools"
 )
 
 // registerTeam wires the session-scoped task/mailbox surface alongside the
@@ -85,10 +85,10 @@ func (a *app) registerTeam() error {
 	for _, item := range adapter.Tools() {
 		tool, ok := item.(tools.Tool)
 		if !ok {
-			return fmt.Errorf("pa: team tool %T does not implement tools.Tool", item)
+			return fmt.Errorf("sta: team tool %T does not implement tools.Tool", item)
 		}
 		if err := a.reg.RegisterWithInfo(tool, tools.RegistrationInfo{Owner: "agent-teams", Plugin: "builtin-team", SessionID: registrationSession}); err != nil {
-			return fmt.Errorf("pa: register %s: %w", tool.Name(), err)
+			return fmt.Errorf("sta: register %s: %w", tool.Name(), err)
 		}
 	}
 	if a.subagentTools != nil {

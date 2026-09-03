@@ -13,9 +13,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/jobs"
-	"github.com/jabing/shutu-agent/internal/llm"
-	"github.com/jabing/shutu-agent/internal/runtimectx"
+	"github.com/shutu-ai/shutu-agent/internal/jobs"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/runtimectx"
 )
 
 // runCommandName is the single execution-class tool (design.md §5 / D10 落地).

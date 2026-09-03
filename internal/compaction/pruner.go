@@ -11,7 +11,7 @@ import (
 	"strconv"
 	"unicode/utf8"
 
-	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/session"
 )
 
 // PruneResult reports which tool/result events are oversized and how many bytes

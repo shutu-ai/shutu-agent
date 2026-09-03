@@ -18,13 +18,13 @@ import (
 	"os"
 	"strings"
 
-	"github.com/jabing/shutu-agent/internal/agent"
-	"github.com/jabing/shutu-agent/internal/config"
-	"github.com/jabing/shutu-agent/internal/jobs"
-	"github.com/jabing/shutu-agent/internal/observability"
-	"github.com/jabing/shutu-agent/internal/session"
-	"github.com/jabing/shutu-agent/internal/store"
-	"github.com/jabing/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/agent"
+	"github.com/shutu-ai/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/jobs"
+	"github.com/shutu-ai/shutu-agent/internal/observability"
+	"github.com/shutu-ai/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/store"
+	"github.com/shutu-ai/shutu-agent/internal/tools"
 )
 
 // registerJobs creates the Local registry and registers the dsh job tools when
@@ -53,7 +53,7 @@ func (a *app) registerJobs() error {
 	// same way as the other session-bound event wiring.
 	onEvent := func(typ string, data any) {
 		if _, err := a.appendRuntimeEvent(a.log, typ, data); err != nil {
-			fmt.Fprintln(os.Stderr, "pa: "+typ+" event:", err)
+			fmt.Fprintln(os.Stderr, "sta: "+typ+" event:", err)
 		}
 	}
 	jt := jobs.NewJobToolsWithContext(a.jobs, func(ctx context.Context) string {
@@ -67,7 +67,7 @@ func (a *app) registerJobs() error {
 		jt.DshList(),
 	} {
 		if err := a.reg.Register(t); err != nil {
-			return fmt.Errorf("pa: register %s: %w", t.Name(), err)
+			return fmt.Errorf("sta: register %s: %w", t.Name(), err)
 		}
 	}
 	return nil
@@ -136,7 +136,7 @@ func (a *app) onJobSettled(snap jobs.JobSnapshot, output string) {
 	}
 	log, err := a.sessionLogForAgent(context.Background(), owner)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "pa: job completion log:", err)
+		fmt.Fprintln(os.Stderr, "sta: job completion log:", err)
 		return
 	}
 	// A completion observer runs even when no model-facing job_wait/status call
@@ -145,7 +145,7 @@ func (a *app) onJobSettled(snap jobs.JobSnapshot, output string) {
 	// scan makes this compatible with the synchronous job-tool path, which may
 	// already have emitted the same job/done row.
 	if err := a.ensureJobDone(log, snap, output); err != nil {
-		fmt.Fprintln(os.Stderr, "pa: job completion event:", err)
+		fmt.Fprintln(os.Stderr, "sta: job completion event:", err)
 		return
 	}
 	// The durable terminal fact is committed even when shutdown admission has
@@ -157,7 +157,7 @@ func (a *app) onJobSettled(snap jobs.JobSnapshot, output string) {
 	}
 	handle, err := a.sessionAgent(owner)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "pa: job completion agent:", err)
+		fmt.Fprintln(os.Stderr, "sta: job completion agent:", err)
 		return
 	}
 	prompt := fmt.Sprintf("[JOB COMPLETION]\njob_id: %s\nkind: %s\nstatus: %s\ndetail: %s\noutput:\n%s",
@@ -172,12 +172,12 @@ func (a *app) onJobSettled(snap jobs.JobSnapshot, output string) {
 	// which completions remain quiet until another user-authored turn arrives.
 	deliverErr := a.deliverJobCompletionWake(handle, owner, prompt, metadata)
 	if deliverErr != nil && !errors.Is(deliverErr, agent.ErrAgentClosed) {
-		fmt.Fprintln(os.Stderr, "pa: job completion delivery:", deliverErr)
+		fmt.Fprintln(os.Stderr, "sta: job completion delivery:", deliverErr)
 		// job/done is already durable. Retry the missing inbox receipt from
 		// that event so a transient journal/agent failure does not lose the
 		// completion notification until the next process restart.
 		if recoveryErr := a.recoverJobCompletionWakes(log, handle); recoveryErr != nil {
-			fmt.Fprintln(os.Stderr, "pa: job completion recovery:", recoveryErr)
+			fmt.Fprintln(os.Stderr, "sta: job completion recovery:", recoveryErr)
 		}
 	}
 }

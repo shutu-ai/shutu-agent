@@ -69,7 +69,8 @@ API key 示例：
 
 ```powershell
 $env:DEEPSEEK_API_KEY = "..."
-go run ./cmd/pa
+go build -o sta.exe ./cmd/pa
+.\sta.exe
 ```
 
 Windows 目标环境的发布、部署和回滚验证按
@@ -458,7 +459,7 @@ session-local error without taking down the SDK/Web/ACP composition root.
 Actual session opening keeps the strict lifecycle and interrupted-tail
 recovery boundary.
 
-A rebuilt `pa --sdk` executable has also completed initialize -> shutdown
+A rebuilt `sta --sdk` executable has also completed initialize -> shutdown
 against the existing default SQLite data directory. This proves only startup
 and lifecycle wiring, not model streaming or full cross-entry parity.
 

@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/contractfixture"
-	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/contractfixture"
+	"github.com/shutu-ai/shutu-agent/internal/session"
 )
 
 func TestNativeProjectionReplaysTheSharedCoreFixture(t *testing.T) {

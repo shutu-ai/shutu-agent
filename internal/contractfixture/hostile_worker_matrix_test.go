@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/code"
-	"github.com/jabing/shutu-agent/internal/projection"
-	"github.com/jabing/shutu-agent/internal/session"
-	"github.com/jabing/shutu-agent/internal/store"
-	"github.com/jabing/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/code"
+	"github.com/shutu-ai/shutu-agent/internal/projection"
+	"github.com/shutu-ai/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/store"
+	"github.com/shutu-ai/shutu-agent/internal/tools"
 )
 
 // TestHostileCodeWorkerFaultMatrix models the reference Code Mode rule that

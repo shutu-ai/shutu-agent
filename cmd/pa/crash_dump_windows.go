@@ -18,7 +18,7 @@ type registryOpener func(registry.Key, string, uint32) (registryKeyHandle, error
 
 // preventOSCoreDumps fail-closes the Windows user-mode dump seam. Go cannot
 // revoke a machine policy, so an enabled WER LocalDumps key (including a
-// pa.exe per-application key) is an explicit refusal to start the disabled
+// sta.exe per-application key) is an explicit refusal to start the disabled
 // profile rather than a silent false claim.
 func preventOSCoreDumps() error {
 	app := strings.ToLower(filepath.Base(os.Args[0]))

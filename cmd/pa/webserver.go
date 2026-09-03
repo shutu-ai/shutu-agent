@@ -26,19 +26,19 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/compaction"
-	"github.com/jabing/shutu-agent/internal/config"
-	"github.com/jabing/shutu-agent/internal/interact"
-	"github.com/jabing/shutu-agent/internal/llm"
-	"github.com/jabing/shutu-agent/internal/meter"
-	"github.com/jabing/shutu-agent/internal/plan"
-	"github.com/jabing/shutu-agent/internal/projection"
-	"github.com/jabing/shutu-agent/internal/runtimectx"
-	"github.com/jabing/shutu-agent/internal/session"
-	"github.com/jabing/shutu-agent/internal/spill"
-	"github.com/jabing/shutu-agent/internal/store"
-	"github.com/jabing/shutu-agent/internal/tools"
-	"github.com/jabing/shutu-agent/internal/webserver"
+	"github.com/shutu-ai/shutu-agent/internal/compaction"
+	"github.com/shutu-ai/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/interact"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/meter"
+	"github.com/shutu-ai/shutu-agent/internal/plan"
+	"github.com/shutu-ai/shutu-agent/internal/projection"
+	"github.com/shutu-ai/shutu-agent/internal/runtimectx"
+	"github.com/shutu-ai/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/spill"
+	"github.com/shutu-ai/shutu-agent/internal/store"
+	"github.com/shutu-ai/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/webserver"
 )
 
 // eventHub is the real-time event broadcaster (ADR D-WEB2-B): attachSink
@@ -322,7 +322,7 @@ func (a *app) registerWebServer() error {
 	a.webserver = srv
 	go func() {
 		if err := srv.Serve(); err != nil {
-			fmt.Fprintln(os.Stderr, "pa: web server:", err)
+			fmt.Fprintln(os.Stderr, "sta: web server:", err)
 		}
 	}()
 	return nil
@@ -1713,7 +1713,7 @@ func (a *app) persistDefaultModelSelection(ctx context.Context, provider, model,
 	}
 	raw, err := encodePersistedModelSelection(provider, model, effort)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "pa: encode default model selection: %v\n", err)
+		fmt.Fprintf(os.Stderr, "sta: encode default model selection: %v\n", err)
 		return
 	}
 	persistCtx := ctx
@@ -1724,7 +1724,7 @@ func (a *app) persistDefaultModelSelection(ctx context.Context, provider, model,
 		// DSH keeps the accepted session selection when its settings write fails;
 		// report the failure without turning a valid model switch into a false
 		// selection error.
-		fmt.Fprintf(os.Stderr, "pa: persist default model selection: %v\n", err)
+		fmt.Fprintf(os.Stderr, "sta: persist default model selection: %v\n", err)
 	}
 }
 
@@ -1781,7 +1781,7 @@ func (a *app) webConfig() map[string]any {
 	if err != nil {
 		// The legacy config endpoint has no error return. A broken canonical
 		// inventory must not silently look like an empty deployment.
-		panic(fmt.Sprintf("pa: build web tool catalog: %v", err))
+		panic(fmt.Sprintf("sta: build web tool catalog: %v", err))
 	}
 	a.providerMu.RLock()
 	cfg := a.cfg

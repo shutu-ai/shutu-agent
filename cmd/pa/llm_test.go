@@ -19,16 +19,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/config"
-	"github.com/jabing/shutu-agent/internal/credential"
-	"github.com/jabing/shutu-agent/internal/llm"
-	"github.com/jabing/shutu-agent/internal/llm/anthropic"
-	"github.com/jabing/shutu-agent/internal/llm/deepseek"
-	"github.com/jabing/shutu-agent/internal/llm/google"
-	"github.com/jabing/shutu-agent/internal/llm/openai"
-	"github.com/jabing/shutu-agent/internal/llm/openairesponses"
-	llmretry "github.com/jabing/shutu-agent/internal/llm/retry"
-	"github.com/jabing/shutu-agent/internal/store"
+	"github.com/shutu-ai/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/credential"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/llm/anthropic"
+	"github.com/shutu-ai/shutu-agent/internal/llm/deepseek"
+	"github.com/shutu-ai/shutu-agent/internal/llm/google"
+	"github.com/shutu-ai/shutu-agent/internal/llm/openai"
+	"github.com/shutu-ai/shutu-agent/internal/llm/openairesponses"
+	llmretry "github.com/shutu-ai/shutu-agent/internal/llm/retry"
+	"github.com/shutu-ai/shutu-agent/internal/store"
 )
 
 type generationTestProvider struct {

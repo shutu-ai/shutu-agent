@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/agent"
-	"github.com/jabing/shutu-agent/internal/credential"
-	"github.com/jabing/shutu-agent/internal/mcp"
-	"github.com/jabing/shutu-agent/internal/plugin"
-	"github.com/jabing/shutu-agent/internal/store"
-	"github.com/jabing/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/agent"
+	"github.com/shutu-ai/shutu-agent/internal/credential"
+	"github.com/shutu-ai/shutu-agent/internal/mcp"
+	"github.com/shutu-ai/shutu-agent/internal/plugin"
+	"github.com/shutu-ai/shutu-agent/internal/store"
+	"github.com/shutu-ai/shutu-agent/internal/tools"
 )
 
 // TestGenerationRotationReloadAndReconnectMatrix consolidates the three

@@ -1,6 +1,6 @@
 # P4 移植规格：子代理列表 + 后台任务列表面板
 
-> 目标：把 dsh web 的「子代理目录」「后台任务」两类只读列表 UI 移植到 github.com/jabing/shutu-agent（Go 单体、vanilla JS 无构建、零依赖、中文文案）。
+> 目标：把 dsh web 的「子代理目录」「后台任务」两类只读列表 UI 移植到 github.com/shutu-ai/shutu-agent（Go 单体、vanilla JS 无构建、零依赖、中文文案）。
 > 数据源：`GET /api/subagents`、`GET /api/jobs`（只读快照，无 RPC 控制）。
 > 本规格是「可照抄」的实现参考，包含数据映射、配色、文案与缺口清单。
 
@@ -29,7 +29,7 @@
 - `packages/client/ui-theme/src/styles/gradient-shadow-text.css`（`--dsw-shadow-lv3`）
 - `packages/client/ui-theme/src/styles/base.css`（字体族）
 
-对照阅读的 github.com/jabing/shutu-agent 文件（非 dsh，仅用于映射约束）：
+对照阅读的 github.com/shutu-ai/shutu-agent 文件（非 dsh，仅用于映射约束）：
 - `internal/webserver/static/index.html`、`app.js`、`style.css`
 - `internal/webserver/webserver.go`（`handleSubagents` / `handleJobs` / `writeJSON`）
 - `cmd/pa/webserver.go`（`webSubagents` / `webJobs` 洗白层）
@@ -84,7 +84,7 @@ div.root
 
 ### 2.3 两类的容器说明
 
-两者**不是独立页面**，都是「会话头部 actions 槽位（`conversation.session.header.actions`）」里的弹出触发器，视觉上是 336px 浮层菜单（`--dsw-specific-menu` 底 + `--dsw-shadow-lv3` 阴影），随会话存在与否出现/消失。github.com/jabing/shutu-agent 没有按会话的头部 actions 槽位，且 `/api/subagents`、`/api/jobs` 是**全局快照**（当前 agent / 当前 owner），所以移植应做成**全局面板**（见 §7 位置建议），而不是每个会话一份。
+两者**不是独立页面**，都是「会话头部 actions 槽位（`conversation.session.header.actions`）」里的弹出触发器，视觉上是 336px 浮层菜单（`--dsw-specific-menu` 底 + `--dsw-shadow-lv3` 阴影），随会话存在与否出现/消失。github.com/shutu-ai/shutu-agent 没有按会话的头部 actions 槽位，且 `/api/subagents`、`/api/jobs` 是**全局快照**（当前 agent / 当前 owner），所以移植应做成**全局面板**（见 §7 位置建议），而不是每个会话一份。
 
 ---
 
@@ -92,7 +92,7 @@ div.root
 
 ### 3.1 子代理行（dsh catalog row ↔ `GET /api/subagents` 项 `{id,label,running}`）
 
-| dsh 元素 | github.com/jabing/shutu-agent 字段 | 状态 | 降级方案 |
+| dsh 元素 | github.com/shutu-ai/shutu-agent 字段 | 状态 | 降级方案 |
 |---|---|---|---|
 | 行点击 → 打开子代理会话（`openChild(address)`） | 无（只读快照，无会话跳转） | **缺** | 行不做可点击跳转；仅展示。P4 隐藏整行交互 |
 | 展开箭头（递归子树，`hasChildren` / 后代计数） | 无（扁平行，无 parentId/children） | **缺** | 去掉 disclosure，保留 14px 占位或无；扁平列表 |
@@ -106,7 +106,7 @@ div.root
 
 ### 3.2 任务行（dsh job row ↔ `GET /api/jobs` 项 `{id,kind,label,status,detail,started_at,finished_at}`）
 
-| dsh 元素 | github.com/jabing/shutu-agent 字段 | 状态 | 降级方案 |
+| dsh 元素 | github.com/shutu-ai/shutu-agent 字段 | 状态 | 降级方案 |
 |---|---|---|---|
 | `StateDot(dotState(status))` | `status`：running→ongoing / stopping→warning / completed→done / killed→warning / failed→error | ✅ **1:1**（两端 status 字符串完全一致，见 `internal/jobs/service.go`） | — |
 | kind 徽标（`.kind`） | `kind` | ✅ | kind 空则隐藏徽标 |
@@ -117,7 +117,7 @@ div.root
 | 触发器计数（liveCount / totalCount） | `Σ(running|stopping)` / `len` | ✅ | — |
 | 触发器「无任务不渲染」（`jobs.length===0 → null`） | 空数组同理 | ✅ | 面板分区空态显示「暂无后台任务」 |
 
-> 注：dsh 任务 UI **没有进度条**——状态呈现全靠 StateDot（+ duration 计时）。github.com/jabing/shutu-agent 无需发明进度条；状态列已表达全部语义。
+> 注：dsh 任务 UI **没有进度条**——状态呈现全靠 StateDot（+ duration 计时）。github.com/shutu-ai/shutu-agent 无需发明进度条；状态列已表达全部语义。
 
 ---
 
@@ -132,10 +132,10 @@ div.root
 | warning（等待/停止中/已取消） | `--dsw-alias-state-warn-primary = --dsw-static-amber-500` | `rgb(245,158,11)` `#F59E0B` | `#F59E0B` | 琥珀 |
 | error（失败） | `--dsw-alias-state-error-primary` | 浅 `--dsw-static-red-600` `rgb(236,19,19)` `#EC1313` | 深 `--dsw-static-red-400` `rgb(242,90,90)` `#F25A5A` | 红 |
 
-**StateDot 造型**（github.com/jabing/shutu-agent 可整段照抄为纯 CSS）：
+**StateDot 造型**（github.com/shutu-ai/shutu-agent 可整段照抄为纯 CSS）：
 - done/warning/error：10×10 圆，`::before` 同色 `opacity:.10` 光晕层（inset:0, radius:50%），`::after` 6×6 实心核（inset:20%）。
 - ongoing：3×3 网格上 8 个 2×2 像素矩形，`@keyframes dsh-state-dot-chase 1s infinite`，亮度阶梯 1→0.6→0.35→0.15（各段 12.5%），每格 `animation-delay: index*-125ms` 形成顺时针追逐。
-- github.com/jabing/shutu-agent 现有会话行 `.si-dot` 是简化 6px 实心圆（`data-state=running/done/idle`），风格一致；P4 面板推荐用完整 10px halo 版（忠实 dsh），也允许复用简化版（§7 权衡）。
+- github.com/shutu-ai/shutu-agent 现有会话行 `.si-dot` 是简化 6px 实心圆（`data-state=running/done/idle`），风格一致；P4 面板推荐用完整 10px halo 版（忠实 dsh），也允许复用简化版（§7 权衡）。
 
 ### 4.2 其余语义 token（面板所需，深浅主题取值）
 
@@ -153,7 +153,7 @@ div.root
 | 错误文案 | `--dsw-alias-state-error-primary` | `#EC1313` | `#F25A5A` |
 | 滚动条 | `--dsw-alias-scrollbar-bg-l2` / `-hover-l2` | `#D0D0D0` / `#E5E5E5` | `#545557` / `#3C3C3D` |
 
-> github.com/jabing/shutu-agent `style.css` 已按同一来源定义这些 `--dsw-alias-*`（深浅两套），面板直接用现有变量即可，仅需补 `--dsw-alias-fill-l2`（用 `bg-layer-2` 代替）与像素追逐动画 keyframes。
+> github.com/shutu-ai/shutu-agent `style.css` 已按同一来源定义这些 `--dsw-alias-*`（深浅两套），面板直接用现有变量即可，仅需补 `--dsw-alias-fill-l2`（用 `bg-layer-2` 代替）与像素追逐动画 keyframes。
 
 ---
 
@@ -192,7 +192,7 @@ div.root
 | mode.oneShot / mode.continuable | 一次性 / 可继续（**当前无数据源，P4 隐藏**） |
 | diagnostic.* | 会话记录损坏 / 子代理记录版本不受支持 / 会话记录暂不可用（**无对应后端，P4 不实现**） |
 
-### 5.3 github.com/jabing/shutu-agent 新增/微调文案（dsh 没有现成词，需自拟）
+### 5.3 github.com/shutu-ai/shutu-agent 新增/微调文案（dsh 没有现成词，需自拟）
 
 | 用途 | 中文 |
 |---|---|
@@ -206,11 +206,11 @@ div.root
 | 加载失败 | 加载失败：`{msg}` |
 | 面板关闭（title） | 关闭 |
 
-> 会话行复用现有：`进行中` / `空闲` / `已完成` / `{n} 个子代理运行中`（`ui-workspace/locales.ts`，github.com/jabing/shutu-agent 会话行已部分使用，保持词表一致）。
+> 会话行复用现有：`进行中` / `空闲` / `已完成` / `{n} 个子代理运行中`（`ui-workspace/locales.ts`，github.com/shutu-ai/shutu-agent 会话行已部分使用，保持词表一致）。
 
 ---
 
-## 6. github.com/jabing/shutu-agent API 缺口清单
+## 6. github.com/shutu-ai/shutu-agent API 缺口清单
 
 ### 后端需要补 / 改（可选，尽量不动后端）
 

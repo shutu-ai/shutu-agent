@@ -4,13 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	agenttools "github.com/jabing/shutu-agent/internal/tools"
+	agenttools "github.com/shutu-ai/shutu-agent/internal/tools"
 	"strings"
 	"sync"
 
-	"github.com/jabing/shutu-agent/internal/config"
-	"github.com/jabing/shutu-agent/internal/session"
-	"github.com/jabing/shutu-agent/internal/terminal"
+	"github.com/shutu-ai/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/terminal"
 )
 
 const (

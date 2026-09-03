@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/jabing/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/config"
 )
 
 // defaultModelSettingKey mirrors DSH's agent-default-model Settings section.

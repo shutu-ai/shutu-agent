@@ -43,15 +43,15 @@ func TestWERLocalDumpsEnabledCoversGlobalAndPerAppKeys(t *testing.T) {
 	existing := map[string]bool{
 		strings.ToLower(werLocalDumpsPath): true,
 	}
-	enabled, err := werLocalDumpsEnabledWith(registry.CURRENT_USER, "pa.exe", fakeRegistryOpener(existing))
+	enabled, err := werLocalDumpsEnabledWith(registry.CURRENT_USER, "sta.exe", fakeRegistryOpener(existing))
 	if err != nil || !enabled {
 		t.Fatalf("global LocalDumps detection = %v, %v; want true,nil", enabled, err)
 	}
 
 	existing = map[string]bool{
-		strings.ToLower(werLocalDumpsPath + `\pa.exe`): true,
+		strings.ToLower(werLocalDumpsPath + `\sta.exe`): true,
 	}
-	enabled, err = werLocalDumpsEnabledWith(registry.CURRENT_USER, "pa.exe", fakeRegistryOpener(existing))
+	enabled, err = werLocalDumpsEnabledWith(registry.CURRENT_USER, "sta.exe", fakeRegistryOpener(existing))
 	if err != nil || !enabled {
 		t.Fatalf("per-app LocalDumps detection = %v, %v; want true,nil", enabled, err)
 	}

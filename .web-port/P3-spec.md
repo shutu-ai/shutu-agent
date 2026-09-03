@@ -1,20 +1,20 @@
-# dsh Web 工作台 P3 页移植规格（github.com/jabing/shutu-agent · 设置 + 模型选择）
+# dsh Web 工作台 P3 页移植规格（github.com/shutu-ai/shutu-agent · 设置 + 模型选择）
 
-> 目标：参照 dsh web（deepseek-harness `packages/client/*`）把 github.com/jabing/shutu-agent 的设置页 + 模型选择做成「像 dsh 一样」。
+> 目标：参照 dsh web（deepseek-harness `packages/client/*`）把 github.com/shutu-ai/shutu-agent 的设置页 + 模型选择做成「像 dsh 一样」。
 > 本规格只研究 dsh 源码，可照此用零依赖 vanilla JS + CSS 写出等价页面。**不修改 dsh 源码**。
 >
 > 源码基线：`D:\dev-projects\Agent\deepseek-harness\packages\client\`
 > 覆盖包：`ui-settings`（设置域基座/槽契约）、`ui-settings-general`（设置壳 + 通用段）、`ui-settings-models`（模型段）、`ui-model-selection`（对话输入栏模型选择器）、`ui-theme`（token + 外观行）、`ui-agent-preset`（通用段行的行样式参考）。
 >
-> 架构红线（github.com/jabing/shutu-agent）：config.yaml 只读、无运行时热改（ADR D-WEB2-D）；单 LLM provider（deepseek），模型来自 config.model，**无模型列表配置**；零依赖 vanilla JS、无构建；中文文案。所有「开关/输入」只读展示，附「修改 config.yaml 后重启生效」。
+> 架构红线（github.com/shutu-ai/shutu-agent）：config.yaml 只读、无运行时热改（ADR D-WEB2-D）；单 LLM provider（deepseek），模型来自 config.model，**无模型列表配置**；零依赖 vanilla JS、无构建；中文文案。所有「开关/输入」只读展示，附「修改 config.yaml 后重启生效」。
 
 ---
 
 ## 0. 结论摘要（一句话版）
 
 - **设置 = 一个居中面板，左 188px 导航轨 + 右内容列**（dsh `SettingsRoot`）：导航行（图标+文字，选中底 `#43454A`/浅 `#EBEEF2`）、内容列顶部 54px 头（标题/动作 + 关闭钮）、下方滚动 options 区。
-- **模型段 = provider 行卡**（dsh `ModelsSection`）：一行「名称 + 状态点/标签 + 右侧胶囊按钮」；展开时是 `bg-module-platform` 填充编辑器。github.com/jabing/shutu-agent 只读 ⇒ 行卡只展示「模型 · provider · base_url · mode」，编辑钮禁用或隐藏。
-- **模型选择器 = 输入栏的一个 28px 圆角 chip**（dsh `ModelSelect`），点开是二级下拉：根菜单（模型 / 推理等级）→ 按 provider 分组的模型列表，当前模型右侧打 ✓。github.com/jabing/shutu-agent 单模型 ⇒ 下拉固定为「DeepSeek」单组、单模型、默认选中 + ✓，整卡 disabled。
+- **模型段 = provider 行卡**（dsh `ModelsSection`）：一行「名称 + 状态点/标签 + 右侧胶囊按钮」；展开时是 `bg-module-platform` 填充编辑器。github.com/shutu-ai/shutu-agent 只读 ⇒ 行卡只展示「模型 · provider · base_url · mode」，编辑钮禁用或隐藏。
+- **模型选择器 = 输入栏的一个 28px 圆角 chip**（dsh `ModelSelect`），点开是二级下拉：根菜单（模型 / 推理等级）→ 按 provider 分组的模型列表，当前模型右侧打 ✓。github.com/shutu-ai/shutu-agent 单模型 ⇒ 下拉固定为「DeepSeek」单组、单模型、默认选中 + ✓，整卡 disabled。
 - **主题**：沿用 P1/P2 已移植的 `body[data-ds-dark-theme]` token 体系；设置页需要额外解出的 token（nav 选中/hover、菜单面、输入面、阴影/遮罩）见 §5。
 - **API 缺口很小**：`GET /api/config` 已覆盖全部要展示字段；只有「模型显示名」「config.yaml 路径」两个可选后端补充，其余全部前端静态映射/降级（§7）。
 
@@ -58,15 +58,15 @@
 
 **通用段「行」样式参考（ui-agent-preset）**
 - `ui-agent-preset/src/client/AgentPresetRow.tsx` + `.module.css` — 标题+说明+右侧选择胶囊的「行」范式（P3 的只读行照它排）
-- `ui-agent-preset/src/client/index.ts` — 段注册（agent-presets order 20，**github.com/jabing/shutu-agent 排除**）
+- `ui-agent-preset/src/client/index.ts` — 段注册（agent-presets order 20，**github.com/shutu-ai/shutu-agent 排除**）
 
-**对照的 github.com/jabing/shutu-agent 现状（只读）**
-- `github.com/jabing/shutu-agent/internal/webserver/static/index.html`（#/settings 页骨架、topbar `model-label`/`mode-badge`）
-- `github.com/jabing/shutu-agent/internal/webserver/static/app.js`（`loadConfig()`、`renderSettings()` 分组表格、路由）
-- `github.com/jabing/shutu-agent/internal/webserver/static/style.css`（:root token 表 + settings 段样式）
-- `github.com/jabing/shutu-agent/cmd/pa/webserver.go`（`webConfig()` — GET /api/config 字段）
-- `github.com/jabing/shutu-agent/internal/webserver/webserver.go`（`handleConfig`、`requireAuth`）
-- `github.com/jabing/shutu-agent/.web-port/P1-spec.md`、`P2-spec.md`（已移植的布局/token/侧栏，P3 引用其主题机制与 token 值）
+**对照的 github.com/shutu-ai/shutu-agent 现状（只读）**
+- `github.com/shutu-ai/shutu-agent/internal/webserver/static/index.html`（#/settings 页骨架、topbar `model-label`/`mode-badge`）
+- `github.com/shutu-ai/shutu-agent/internal/webserver/static/app.js`（`loadConfig()`、`renderSettings()` 分组表格、路由）
+- `github.com/shutu-ai/shutu-agent/internal/webserver/static/style.css`（:root token 表 + settings 段样式）
+- `github.com/shutu-ai/shutu-agent/cmd/pa/webserver.go`（`webConfig()` — GET /api/config 字段）
+- `github.com/shutu-ai/shutu-agent/internal/webserver/webserver.go`（`handleConfig`、`requireAuth`）
+- `github.com/shutu-ai/shutu-agent/.web-port/P1-spec.md`、`P2-spec.md`（已移植的布局/token/侧栏，P3 引用其主题机制与 token 值）
 
 ---
 
@@ -76,19 +76,19 @@
 
 dsh 设置是一个**全屏遮罩 + 居中模态面板**（800×min(800,100vh-48)，r24，`bg-layer-2` + `shadow-lv3`），面板内是「188px 导航轨（图标+文字行，选中实底高亮）+ 内容列（54px 头：标题/动作 + 关闭钮；下方滚动区叠当前段）」，每个「段」是插件注册进 `settings.section` 列表槽的一张页面，导航行就是段列表。
 
-### 2.2 DOM 结构草图（dsh SettingsRoot → github.com/jabing/shutu-agent 映射）
+### 2.2 DOM 结构草图（dsh SettingsRoot → github.com/shutu-ai/shutu-agent 映射）
 
 ```
 body[data-ds-dark-theme]                     ← 主题开关（已有 P1/P2）
-└─ #settings.settings-page（github.com/jabing/shutu-agent 沿用 #/settings 路由整页，见 §8）
+└─ #settings.settings-page（github.com/shutu-ai/shutu-agent 沿用 #/settings 路由整页，见 §8）
    └─ .settings-panel                       ← dsh 面板：800px、r24、bg-layer-2、shadow-lv3
       ├─ nav.settings-nav（188px，列，gap18，pad 22/12/0）
       │  ├─ .navTitle「设置」（16/500/24，pad 0 12）
       │  └─ .navList（列 gap4）
       │     ├─ button.navCell[aria-current]  ⚙  通用设置     ← general order 0
       │     ├─ button.navCell.active        ◈  模型         ← models order 10（当前高亮）
-      │     ├─ button.navCell               ⚡  能力开关     ← github.com/jabing/shutu-agent 自定义段
-      │     └─ button.navCell               🧰  工具         ← github.com/jabing/shutu-agent 自定义段
+      │     ├─ button.navCell               ⚡  能力开关     ← github.com/shutu-ai/shutu-agent 自定义段
+      │     └─ button.navCell               🧰  工具         ← github.com/shutu-ai/shutu-agent 自定义段
       └─ .settings-content（列，flex1）
          ├─ .settings-header（54px，justify-between）
          │  ├─ .actions [「打开配置文件」动作 ← 可选，§7] 
@@ -101,11 +101,11 @@ body[data-ds-dark-theme]                     ← 主题开关（已有 P1/P2）
                └─ （段内容：行卡/列表/白名单徽标，见 §3）
 ```
 
-**要点差异（github.com/jabing/shutu-agent 与 dsh 的取舍）**：
+**要点差异（github.com/shutu-ai/shutu-agent 与 dsh 的取舍）**：
 
-1. **整页 vs 模态**：dsh 是从侧栏脚触发、遮罩盖在工作台上。github.com/jabing/shutu-agent 已是 `#/settings` 路由整页（P2 已做侧栏脚「⚙ 设置」链接 + 顶部「← 返回聊天」）。**P3 建议保留整页路由**，把页面内容做成 dsh 面板观感（居中面板 + 内部两栏），不加遮罩——这保住现有路由/返回/顶部主题切换，改动最小。若追求「连遮罩都像」，可把面板包进 `.overlay`（fixed inset0 + mask + blur2px）并在 Esc/点遮罩关闭，但会绕开「返回」按钮，不推荐首版做。
-2. **导航行图标**：dsh 用 16px outline 图标集（ui-primitives）。github.com/jabing/shutu-agent 零依赖 ⇒ 用内联 SVG（1.5px stroke、currentColor）或沿用现有 emoji（⚙/◈/⚡/🧰）；规格只约束几何（16px、gap8、40px 行）。
-3. **段列表**：dsh 的「插件」「智能体预设」段是架构排除项（ADR D-WEB2-I），P3 不显示；用「能力开关」「工具」两段承接 github.com/jabing/shutu-agent 的 19 个 `*_enabled` 与工具白名单。
+1. **整页 vs 模态**：dsh 是从侧栏脚触发、遮罩盖在工作台上。github.com/shutu-ai/shutu-agent 已是 `#/settings` 路由整页（P2 已做侧栏脚「⚙ 设置」链接 + 顶部「← 返回聊天」）。**P3 建议保留整页路由**，把页面内容做成 dsh 面板观感（居中面板 + 内部两栏），不加遮罩——这保住现有路由/返回/顶部主题切换，改动最小。若追求「连遮罩都像」，可把面板包进 `.overlay`（fixed inset0 + mask + blur2px）并在 Esc/点遮罩关闭，但会绕开「返回」按钮，不推荐首版做。
+2. **导航行图标**：dsh 用 16px outline 图标集（ui-primitives）。github.com/shutu-ai/shutu-agent 零依赖 ⇒ 用内联 SVG（1.5px stroke、currentColor）或沿用现有 emoji（⚙/◈/⚡/🧰）；规格只约束几何（16px、gap8、40px 行）。
+3. **段列表**：dsh 的「插件」「智能体预设」段是架构排除项（ADR D-WEB2-I），P3 不显示；用「能力开关」「工具」两段承接 github.com/shutu-ai/shutu-agent 的 19 个 `*_enabled` 与工具白名单。
 
 ### 2.3 行/卡结构范式（dsh → P3）
 
@@ -126,15 +126,15 @@ ul.rows（列 gap8，mt12）> li.rowCard（border l2，r12，pad 12 14，列 gap
 ├─ .rowHead（flex center gap10）
 │  ├─ .rowIdentity（inline-flex gap6）
 │  │  ├─ .rowName「DeepSeek」（14/500/22 label-primary）
-│  │  ├─ .rowTag「只读」（11px，border l3，r4，label-secondary）   ← github.com/jabing/shutu-agent 加，替代「自定义」标签
-│  │  └─ .credentialDot（8px 圆点；configured=绿 success / missing=红 error）← github.com/jabing/shutu-agent 无凭证概念，隐藏
+│  │  ├─ .rowTag「只读」（11px，border l3，r4，label-secondary）   ← github.com/shutu-ai/shutu-agent 加，替代「自定义」标签
+│  │  └─ .credentialDot（8px 圆点；configured=绿 success / missing=红 error）← github.com/shutu-ai/shutu-agent 无凭证概念，隐藏
 │  └─ .rowActions（margin-left auto，gap4）
 │     ├─ button.secondaryButton「编辑」（28px r14 12px，disabled）  ← 只读：禁用
 │     └─ button.dangerButton「删除」（不存在 → 隐藏）
-└─ （展开区 .editor：bg-module-platform r12 pad 14 16 —— github.com/jabing/shutu-agent 不需要，隐藏）
+└─ （展开区 .editor：bg-module-platform r12 pad 14 16 —— github.com/shutu-ai/shutu-agent 不需要，隐藏）
 ```
 
-**范式 C — 能力开关/工具只读徽标行（github.com/jabing/shutu-agent 自定义，沿用范式 A 的行 + 状态徽标）**：
+**范式 C — 能力开关/工具只读徽标行（github.com/shutu-ai/shutu-agent 自定义，沿用范式 A 的行 + 状态徽标）**：
 
 ```
 .row > .rowText(title+desc) + .badge（r14 胶囊：开=绿底绿字 / 关=透明+label-caption 字「关」）
@@ -142,15 +142,15 @@ ul.rows（列 gap8，mt12）> li.rowCard（border l2，r12，pad 12 14，列 gap
 
 ---
 
-## 3. 各分组面板的逐元素数据映射（字段名 ↔ github.com/jabing/shutu-agent config 键）
+## 3. 各分组面板的逐元素数据映射（字段名 ↔ github.com/shutu-ai/shutu-agent config 键）
 
 数据源：`GET /api/config`（`cmd/pa/webserver.go` `webConfig()`），snake_case；前端 `config` 全局缓存（`app.js` `loadConfig()` 已填）。
 
 ### 3.1 段：通用设置（nav「通用设置」）
 
-| 元素（dsh 对应） | dsh 字段/来源 | github.com/jabing/shutu-agent 键 | 说明 |
+| 元素（dsh 对应） | dsh 字段/来源 | github.com/shutu-ai/shutu-agent 键 | 说明 |
 |---|---|---|---|
-| 外观行（AppearanceRow） | 主题偏好（前端 store，localStorage） | 前端 `toggleTheme()` + `localStorage`（P1 已有） | 照 dsh 三立方：浅色/深色/跟随系统；「跟随系统」github.com/jabing/shutu-agent 现为两态切换，**首版可只做浅/深两立方 + 隐藏「跟随系统」**，或加 matchMedia 跟随（P1 已研究，可选） |
+| 外观行（AppearanceRow） | 主题偏好（前端 store，localStorage） | 前端 `toggleTheme()` + `localStorage`（P1 已有） | 照 dsh 三立方：浅色/深色/跟随系统；「跟随系统」github.com/shutu-ai/shutu-agent 现为两态切换，**首版可只做浅/深两立方 + 隐藏「跟随系统」**，或加 matchMedia 跟随（P1 已研究，可选） |
 | 会话模式 | 无（dsh 是 cordis 预设，不在通用段） | `mode`（standard/minimal/code） | 展示为行：值徽标 + 说明「改 config.yaml 重启生效」；topbar `mode-badge` 已有同数据 |
 | Web 服务地址 | 无 | `web_server_addr` | 行：值只读（`http://127.0.0.1:PORT`） |
 | 打开配置文件动作 | `settings.action` 头部按钮（Host 打开文件） | **缺**（无后端；见 §7） | 首版隐藏；或降级为只读文案「配置文件：`config.yaml`（项目根，改后重启生效）」 |
@@ -158,9 +158,9 @@ ul.rows（列 gap8，mt12）> li.rowCard（border l2，r12，pad 12 14，列 gap
 
 ### 3.2 段：模型（nav「模型」）
 
-dsh 是「多 provider 行卡 + 每行可展开编辑」；github.com/jabing/shutu-agent 单 provider ⇒ 一行为「当前模型」。
+dsh 是「多 provider 行卡 + 每行可展开编辑」；github.com/shutu-ai/shutu-agent 单 provider ⇒ 一行为「当前模型」。
 
-| 元素（dsh 对应） | dsh 字段 | github.com/jabing/shutu-agent 键 | 说明 |
+| 元素（dsh 对应） | dsh 字段 | github.com/shutu-ai/shutu-agent 键 | 说明 |
 |---|---|---|---|
 | 段标题（h2.title） | `title`=模型 | 固定文案 | — |
 | 段引言（p.intro） | `intro` | 固定文案（适配） | 见 §6 |
@@ -168,14 +168,14 @@ dsh 是「多 provider 行卡 + 每行可展开编辑」；github.com/jabing/shu
 | 行卡名称（rowName） | `displayName`（适配器目录） | `llm_provider`（deepseek）→ 显示「DeepSeek」 | 静态映射：`deepseek → DeepSeek`；未知 provider 显示原值 |
 | 行卡当前模型 | 模型目录 current（provider+model id） | `model`（如 `deepseek-chat`） | 展示为行内次级文本或编辑展开区的一行「模型 ID：deepseek-chat」 |
 | 行卡 provider 标签 | `rowTag`「自定义」 | **不用** | 改放「只读」tag（见 §2.3 范式 B） |
-| 凭证点（credentialDot） | 密钥 configured/missing | **缺/隐藏** | github.com/jabing/shutu-agent 密钥走 env、config 无密钥字段 ⇒ 隐藏 |
+| 凭证点（credentialDot） | 密钥 configured/missing | **缺/隐藏** | github.com/shutu-ai/shutu-agent 密钥走 env、config 无密钥字段 ⇒ 隐藏 |
 | 编辑/删除按钮 | edit/remove（可写） | — | 只读 ⇒ 「编辑」disabled（或隐藏）、「删除」不渲染 |
 | 模型显示名/描述 | `model.name` / `model.description` | **缺**（见 §7） | 前端静态映射 `deepseek-chat→DeepSeek Chat` 等，兜底显示原始 id |
 | base_url | ProviderEditor 字段 | `base_url` | 行或展开区只读展示；空则显示「（默认）」 |
-| 模型目录编辑（ModelListEditor） | 目录 CRUD | **缺/无** | github.com/jabing/shutu-agent 无模型列表配置 ⇒ 整块隐藏（§8） |
+| 模型目录编辑（ModelListEditor） | 目录 CRUD | **缺/无** | github.com/shutu-ai/shutu-agent 无模型列表配置 ⇒ 整块隐藏（§8） |
 | 推理等级（effort） | ModelReasoningEffort | **缺/无** | 无 reasoning 元数据 ⇒ 隐藏（§4） |
 
-### 3.3 段：能力开关（nav「能力开关」，github.com/jabing/shutu-agent 自定义）
+### 3.3 段：能力开关（nav「能力开关」，github.com/shutu-ai/shutu-agent 自定义）
 
 遍历 `Object.keys(config)` 中以 `_enabled` 结尾的键（`cmd/pa` 共 19 个），每键一行「中文名 + 开/关徽标」。
 
@@ -203,9 +203,9 @@ dsh 是「多 provider 行卡 + 每行可展开编辑」；github.com/jabing/shu
 
 > 键不固定：**建议按 `Object.keys(config)` 动态扫描 `_enabled` 后缀**（现 `renderSettings` 已这么做），未知键用 `key.replace(/_enabled$/,'')` 兜底显示，避免后端加能力开关时前端失配。
 
-### 3.4 段：工具（nav「工具」，github.com/jabing/shutu-agent 自定义）
+### 3.4 段：工具（nav「工具」，github.com/shutu-ai/shutu-agent 自定义）
 
-| 元素 | github.com/jabing/shutu-agent 键 | 说明 |
+| 元素 | github.com/shutu-ai/shutu-agent 键 | 说明 |
 |---|---|---|
 | 段标题 | 固定文案「工具白名单」 | — |
 | 计数行 | `tools_enabled_count` | 「已启用 N 个工具」 |
@@ -222,7 +222,7 @@ dsh 是「多 provider 行卡 + 每行可展开编辑」；github.com/jabing/shu
 
 ---
 
-## 4. 模型选择器交互细节 + 适配方案（github.com/jabing/shutu-agent 只读时怎么呈现）
+## 4. 模型选择器交互细节 + 适配方案（github.com/shutu-ai/shutu-agent 只读时怎么呈现）
 
 ### 4.1 dsh 交互细节（ModelSelect）
 
@@ -233,9 +233,9 @@ dsh 是「多 provider 行卡 + 每行可展开编辑」；github.com/jabing/shu
 - **加载/失败**：列表内 status 行「正在刷新模型列表…」；加载失败红色 strip +「重试」。
 - **选中语义**：radio（`menuitemradio` + `aria-checked`），不是复选。
 
-### 4.2 github.com/jabing/shutu-agent 只读适配方案（推荐：单模型单组 + 全禁用）
+### 4.2 github.com/shutu-ai/shutu-agent 只读适配方案（推荐：单模型单组 + 全禁用）
 
-github.com/jabing/shutu-agent 无模型列表、无 provider 目录、无 reasoning ⇒ 不引入「真实切换」。**两种呈现，二选一或叠加**：
+github.com/shutu-ai/shutu-agent 无模型列表、无 provider 目录、无 reasoning ⇒ 不引入「真实切换」。**两种呈现，二选一或叠加**：
 
 **方案 A（推荐，最贴 dsh 观感）——只读下拉「只看得见选中的那个」**：
 - 触发器：展示当前 `model · provider`（如 `deepseek-chat · DeepSeek`），复用 P2 顶部 `model-label` 的拼法（`config.model + " · " + config.llm_provider`）；`disabled`（`label-dimmed` + 不触发打开），chevron 保留但整 chip 灰化。
@@ -246,13 +246,13 @@ github.com/jabing/shutu-agent 无模型列表、无 provider 目录、无 reason
 - 不画下拉；模型段 rowCard 直接展示：名称 `DeepSeek`、次级行 `模型 ID：deepseek-chat`、`API 地址：…`、`会话模式：standard`；右侧「编辑」disabled。
 - 交互为 0（无点击路径），最诚实。
 
-**建议**：首版做 **B（模型段静态行卡）**，把 **A 的下拉 chip 作为可选项**——因为 github.com/jabing/shutu-agent 对话输入栏目前没有模型 chip（`#model-label` 只在 topbar 展示），为了 P3 最小闭环先不做输入栏芯片，只在设置模型段展示（§8）。若要同时在输入栏显示 chip，把方案 A 的只读触发放入 composer 即可（零后端）。
+**建议**：首版做 **B（模型段静态行卡）**，把 **A 的下拉 chip 作为可选项**——因为 github.com/shutu-ai/shutu-agent 对话输入栏目前没有模型 chip（`#model-label` 只在 topbar 展示），为了 P3 最小闭环先不做输入栏芯片，只在设置模型段展示（§8）。若要同时在输入栏显示 chip，把方案 A 的只读触发放入 composer 即可（零后端）。
 
 ---
 
 ## 5. 暗/浅色主题 token（ui-theme/design-platform.css + gradient-shadow-text.css 解析）
 
-主题机制沿用 P1/P2：默认暗色，`body[data-ds-dark-theme]` 切换；github.com/jabing/shutu-agent `style.css :root` 已移植暗色表。下表为**设置页实际用到的 token 最终色值**（未在 P1/P2 列出或需核对的部分全列出）：
+主题机制沿用 P1/P2：默认暗色，`body[data-ds-dark-theme]` 切换；github.com/shutu-ai/shutu-agent `style.css :root` 已移植暗色表。下表为**设置页实际用到的 token 最终色值**（未在 P1/P2 列出或需核对的部分全列出）：
 
 ### 5.1 面板 / 遮罩 / 阴影
 
@@ -322,7 +322,7 @@ github.com/jabing/shutu-agent 无模型列表、无 provider 目录、无 reason
 
 ### 6.2 模型段（dsh `settings.models` ns，照抄 + 适配标注）
 
-| 键 | dsh 中文 | github.com/jabing/shutu-agent 采用 |
+| 键 | dsh 中文 | github.com/shutu-ai/shutu-agent 采用 |
 |---|---|---|
 | nav / title | 模型 | ✓ 同 |
 | intro | 填入各提供方的 API 密钥即可使用其模型。 | 改为「仅展示当前使用的模型与提供方。修改 `config.yaml` 后重启生效。」 |
@@ -364,7 +364,7 @@ github.com/jabing/shutu-agent 无模型列表、无 provider 目录、无 reason
 | appearance.dark | 深色 |
 | appearance.system | 跟随系统 |
 
-### 6.5 github.com/jabing/shutu-agent 自定义（非 dsh，需自拟）
+### 6.5 github.com/shutu-ai/shutu-agent 自定义（非 dsh，需自拟）
 
 | 位置 | 文案 |
 |---|---|
@@ -379,7 +379,7 @@ github.com/jabing/shutu-agent 无模型列表、无 provider 目录、无 reason
 
 ---
 
-## 7. github.com/jabing/shutu-agent API 缺口清单（后端补 vs 前端降级）
+## 7. github.com/shutu-ai/shutu-agent API 缺口清单（后端补 vs 前端降级）
 
 ### 7.1 建议后端补（小、可选，非首版阻塞）
 
@@ -394,7 +394,7 @@ github.com/jabing/shutu-agent 无模型列表、无 provider 目录、无 reason
 
 | 项 | 处理 |
 |---|---|
-| 只读标记（writable） | 前端常量 `true`（dsh 由 `!writable` 驱动禁用；github.com/jabing/shutu-agent 恒只读） |
+| 只读标记（writable） | 前端常量 `true`（dsh 由 `!writable` 驱动禁用；github.com/shutu-ai/shutu-agent 恒只读） |
 | 主题（外观行） | 复用 `toggleTheme()` + localStorage（P1/P2 已有）；设置页加三立方行 |
 | 能力开关中文名 | 前端静态映射表（§3.3），未知键 `key.replace(/_enabled$/,'')` 兜底 |
 | 工具白名单渲染 | 前端遍历 `tools_enabled`（后端已截断至 30 + `…`） |
@@ -403,7 +403,7 @@ github.com/jabing/shutu-agent 无模型列表、无 provider 目录、无 reason
 
 ### 7.3 架构排除（不补）
 
-- 模型列表/切换、provider 目录、推理等级 → github.com/jabing/shutu-agent 无此配置（config.model 单值），后端不造列表。
+- 模型列表/切换、provider 目录、推理等级 → github.com/shutu-ai/shutu-agent 无此配置（config.model 单值），后端不造列表。
 - 插件段、智能体预设段 → ADR D-WEB2-I 排除，P3 不显示。
 - 配置热改/写接口 → ADR D-WEB2-D 明确只读；前端只给「重启生效」提示。
 
@@ -423,7 +423,7 @@ github.com/jabing/shutu-agent 无模型列表、无 provider 目录、无 reason
 
 ### 首版隐藏 / 不做
 
-- **输入栏模型 chip**（方案 A 下拉）：github.com/jabing/shutu-agent 输入栏无模型座位，首版不做；若做，用 §4.2 方案 A 只读 chip（零后端）。
+- **输入栏模型 chip**（方案 A 下拉）：github.com/shutu-ai/shutu-agent 输入栏无模型座位，首版不做；若做，用 §4.2 方案 A 只读 chip（零后端）。
 - 模态遮罩/浮层形态（保留整页路由）。
 - 模型目录编辑、添加/删除 provider、fetch models、推理等级、凭证点。
 - 「打开配置文件」动作（无后端）——降级为配置说明行。
@@ -438,7 +438,7 @@ github.com/jabing/shutu-agent 无模型列表、无 provider 目录、无 reason
 
 ---
 
-## 附：实现落点（github.com/jabing/shutu-agent 文件）
+## 附：实现落点（github.com/shutu-ai/shutu-agent 文件）
 
 | 文件 | 改动 |
 |---|---|

@@ -6,7 +6,7 @@
 
 ## 背景
 
-对照 dsh `standard` 预设（`apps/cli/config/agent-presets/standard/agent.cordis.yml`），github.com/jabing/shutu-agent 缺四项：文件内容检索（dsh `tool-fs-search`）、多 agent 编排（dsh `tool-workflow`）、fresh-agent 循环（dsh `tool-ralph`）、subagent 外部 provider 变体（dsh `subagent_codex`/`subagent_claude_code`）。全部按编译期接缝实现（config 驱动、重启生效、零新依赖、CGO-free、loop.go 不动 D4）。
+对照 dsh `standard` 预设（`apps/cli/config/agent-presets/standard/agent.cordis.yml`），github.com/shutu-ai/shutu-agent 缺四项：文件内容检索（dsh `tool-fs-search`）、多 agent 编排（dsh `tool-workflow`）、fresh-agent 循环（dsh `tool-ralph`）、subagent 外部 provider 变体（dsh `subagent_codex`/`subagent_claude_code`）。全部按编译期接缝实现（config 驱动、重启生效、零新依赖、CGO-free、loop.go 不动 D4）。
 
 ## 决策
 

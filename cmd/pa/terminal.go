@@ -18,11 +18,11 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/jabing/shutu-agent/internal/config"
-	"github.com/jabing/shutu-agent/internal/jobs"
-	"github.com/jabing/shutu-agent/internal/runtimectx"
-	"github.com/jabing/shutu-agent/internal/terminal"
-	"github.com/jabing/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/jobs"
+	"github.com/shutu-ai/shutu-agent/internal/runtimectx"
+	"github.com/shutu-ai/shutu-agent/internal/terminal"
+	"github.com/shutu-ai/shutu-agent/internal/tools"
 )
 
 // registerTerminal wires the pwsh tool and the /term REPL seam when
@@ -54,7 +54,7 @@ func (a *app) registerTerminal() error {
 			})()
 		}
 		if err := a.reg.Register(bash); err != nil {
-			return fmt.Errorf("pa: register %s: %w", bash.Name(), err)
+			return fmt.Errorf("sta: register %s: %w", bash.Name(), err)
 		}
 		return a.registerModelTerminalTools()
 	}
@@ -90,7 +90,7 @@ func (a *app) registerTerminal() error {
 		},
 	})
 	if err := a.reg.Register(pwsh); err != nil {
-		return fmt.Errorf("pa: register %s: %w", pwsh.Name(), err)
+		return fmt.Errorf("sta: register %s: %w", pwsh.Name(), err)
 	}
 	return a.registerModelTerminalTools()
 }

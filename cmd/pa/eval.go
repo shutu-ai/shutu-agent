@@ -17,11 +17,11 @@ import (
 	"io"
 	"strings"
 
-	"github.com/jabing/shutu-agent/internal/config"
-	"github.com/jabing/shutu-agent/internal/eval"
-	"github.com/jabing/shutu-agent/internal/interact"
-	"github.com/jabing/shutu-agent/internal/llm"
-	"github.com/jabing/shutu-agent/internal/runtimectx"
+	"github.com/shutu-ai/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/eval"
+	"github.com/shutu-ai/shutu-agent/internal/interact"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/runtimectx"
 )
 
 // registerEval wires the task-evaluation seam (ADR 2026-08-20-eval-seam.md)
@@ -49,7 +49,7 @@ func (a *app) registerEval() error {
 	}
 	eng, err := eval.NewEngine(eval.EngineOpts{Evaluator: composite, MaxRecords: a.cfg.Eval.MaxRecords})
 	if err != nil {
-		return fmt.Errorf("pa: eval engine: %w", err)
+		return fmt.Errorf("sta: eval engine: %w", err)
 	}
 	a.evalEng = eng
 	// DSH standard does not expose eval_* as model tools. The evaluator stays

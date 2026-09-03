@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/session"
 )
 
 // Compile-time assertions: engine implements the Engine Service and memProvider
@@ -49,7 +49,7 @@ func getPlan(t *testing.T, e *engine, id string) Plan {
 func TestEngineCreateGoalPlanTodo(t *testing.T) {
 	e := newTestEngine(t)
 
-	g, err := e.CreateGoal(context.Background(), "Ship the agent", "Make the personal agent usable end to end")
+	g, err := e.CreateGoal(context.Background(), "Ship the agent", "Make the Shutu Agent usable end to end")
 	if err != nil {
 		t.Fatalf("CreateGoal: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestEngineCreateGoalPlanTodo(t *testing.T) {
 	if g.Status != StatusPending {
 		t.Errorf("new goal status = %q, want %q", g.Status, StatusPending)
 	}
-	if g.Objective != "Make the personal agent usable end to end" {
+	if g.Objective != "Make the Shutu Agent usable end to end" {
 		t.Errorf("goal objective = %q, want the given objective", g.Objective)
 	}
 	if len(g.Plans) != 0 {

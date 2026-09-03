@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jabing/shutu-agent/internal/contractfixture"
-	"github.com/jabing/shutu-agent/internal/mcp"
+	"github.com/shutu-ai/shutu-agent/internal/contractfixture"
+	"github.com/shutu-ai/shutu-agent/internal/mcp"
 )
 
 // TestExternalMCPHelper is launched by TestExternalMCPClientContract through

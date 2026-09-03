@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/jabing/shutu-agent/internal/pathsecure"
+	"github.com/shutu-ai/shutu-agent/internal/pathsecure"
 )
 
 // localFS is the default FileService backend (ADR 决策 M6f / dispatch-m6f-3

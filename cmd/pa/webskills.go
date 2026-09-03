@@ -16,9 +16,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/jabing/shutu-agent/internal/config"
-	"github.com/jabing/shutu-agent/internal/skill"
-	"github.com/jabing/shutu-agent/internal/webserver"
+	"github.com/shutu-ai/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/skill"
+	"github.com/shutu-ai/shutu-agent/internal/webserver"
 )
 
 // webSkillManager returns the lazily-created skill Manager, building it from

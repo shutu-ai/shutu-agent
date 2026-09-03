@@ -13,13 +13,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/llm"
-	llmretry "github.com/jabing/shutu-agent/internal/llm/retry"
-	"github.com/jabing/shutu-agent/internal/observability"
-	"github.com/jabing/shutu-agent/internal/prompt"
-	"github.com/jabing/shutu-agent/internal/runtimectx"
-	"github.com/jabing/shutu-agent/internal/session"
-	"github.com/jabing/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
+	llmretry "github.com/shutu-ai/shutu-agent/internal/llm/retry"
+	"github.com/shutu-ai/shutu-agent/internal/observability"
+	"github.com/shutu-ai/shutu-agent/internal/prompt"
+	"github.com/shutu-ai/shutu-agent/internal/runtimectx"
+	"github.com/shutu-ai/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/tools"
 )
 
 // scriptedLLM returns a fixed per-step sequence of stream events, one Stream

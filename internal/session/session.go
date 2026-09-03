@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
 )
 
 const EventScheduleChange = "schedule/change"

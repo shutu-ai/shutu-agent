@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/jabing/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
 )
 
 var ErrInboxClosed = errors.New("agent inbox is closed")

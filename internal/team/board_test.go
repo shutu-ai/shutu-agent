@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/agent"
-	"github.com/jabing/shutu-agent/internal/llm"
-	"github.com/jabing/shutu-agent/internal/store"
+	"github.com/shutu-ai/shutu-agent/internal/agent"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/store"
 )
 
 func TestTeamEventsUseReferenceWireShapes(t *testing.T) {

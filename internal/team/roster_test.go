@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/jabing/shutu-agent/internal/agent"
+	"github.com/shutu-ai/shutu-agent/internal/agent"
 )
 
 func TestRosterProvisionsDirectAgentAndAuthorizesMembers(t *testing.T) {

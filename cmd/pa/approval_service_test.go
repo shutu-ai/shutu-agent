@@ -5,9 +5,9 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/jabing/shutu-agent/internal/agent"
-	"github.com/jabing/shutu-agent/internal/interact"
-	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/agent"
+	"github.com/shutu-ai/shutu-agent/internal/interact"
+	"github.com/shutu-ai/shutu-agent/internal/session"
 )
 
 func TestApprovalAnswererScopesAndCommitsForAllSurfaces(t *testing.T) {

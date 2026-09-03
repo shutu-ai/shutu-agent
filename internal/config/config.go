@@ -388,7 +388,7 @@ type RalphConfig struct {
 }
 
 // WorkflowConfig is the dsh-compatible workflow policy. The capability is
-// default on through Enabled(nil), matching the personal-agent/dsh opt-out
+// default on through Enabled(nil), matching the Shutu Agent/dsh opt-out
 // posture; minimal mode still disables it. The Go DAG and external Node
 // JavaScript runner both use the subagent Runtime for child agents.
 type WorkflowConfig struct {

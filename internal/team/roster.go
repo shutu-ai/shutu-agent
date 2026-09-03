@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/jabing/shutu-agent/internal/agent"
+	"github.com/shutu-ai/shutu-agent/internal/agent"
 )
 
 // MemberPhase is the durable provisioning lifecycle. Names remain reserved

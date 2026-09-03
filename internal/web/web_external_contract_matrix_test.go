@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	agenttools "github.com/jabing/shutu-agent/internal/tools"
+	agenttools "github.com/shutu-ai/shutu-agent/internal/tools"
 )
 
 // TestRemoteWebProviderFaultMatrix pins the real provider/client contract for

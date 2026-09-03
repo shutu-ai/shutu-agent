@@ -20,7 +20,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/jabing/shutu-agent/internal/pathsecure"
+	"github.com/shutu-ai/shutu-agent/internal/pathsecure"
 	"golang.org/x/sys/windows"
 )
 

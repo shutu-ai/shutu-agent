@@ -10,12 +10,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jabing/shutu-agent/internal/llm"
-	"github.com/jabing/shutu-agent/internal/llm/anthropic"
-	"github.com/jabing/shutu-agent/internal/llm/deepseek"
-	"github.com/jabing/shutu-agent/internal/llm/google"
-	"github.com/jabing/shutu-agent/internal/llm/openai"
-	"github.com/jabing/shutu-agent/internal/llm/openairesponses"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/llm/anthropic"
+	"github.com/shutu-ai/shutu-agent/internal/llm/deepseek"
+	"github.com/shutu-ai/shutu-agent/internal/llm/google"
+	"github.com/shutu-ai/shutu-agent/internal/llm/openai"
+	"github.com/shutu-ai/shutu-agent/internal/llm/openairesponses"
 )
 
 // TestEveryProviderHeaderReplay is the shared external-HTTP boundary replay

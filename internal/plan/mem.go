@@ -7,7 +7,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/session"
 )
 
 // memProvider is the default in-memory Provider (ADR 决策 M6b). It is a

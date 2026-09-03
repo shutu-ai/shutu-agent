@@ -33,15 +33,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/attachment"
-	"github.com/jabing/shutu-agent/internal/crashboundary"
-	"github.com/jabing/shutu-agent/internal/interact"
-	"github.com/jabing/shutu-agent/internal/llm"
-	"github.com/jabing/shutu-agent/internal/meter"
-	"github.com/jabing/shutu-agent/internal/profile"
-	"github.com/jabing/shutu-agent/internal/projection"
-	"github.com/jabing/shutu-agent/internal/session"
-	"github.com/jabing/shutu-agent/internal/store"
+	"github.com/shutu-ai/shutu-agent/internal/attachment"
+	"github.com/shutu-ai/shutu-agent/internal/crashboundary"
+	"github.com/shutu-ai/shutu-agent/internal/interact"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/meter"
+	"github.com/shutu-ai/shutu-agent/internal/profile"
+	"github.com/shutu-ai/shutu-agent/internal/projection"
+	"github.com/shutu-ai/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/store"
 )
 
 // maxSummary is the rune cap on the bounded per-event summary the events API
@@ -1094,7 +1094,7 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 		sw := &panicSafeWriter{ResponseWriter: w}
 		defer func() {
 			if rec := recover(); rec != nil {
-				log.Printf("pa: web handler panic: %v\n%s", rec, debug.Stack())
+				log.Printf("sta: web handler panic: %v\n%s", rec, debug.Stack())
 				if !sw.wrote {
 					writeJSON(sw, http.StatusInternalServerError, map[string]any{"error": fmt.Sprintf("internal error: %v", rec)})
 				}

@@ -1,4 +1,4 @@
-// Command pa is the personal agent REPL (M1鈫扢3). It wires the thin core 鈥?llm,
+// Command sta is the Shutu Agent REPL (M1鈫扢3). It wires the thin core 鈥?llm,
 // session, tools, prompt, loop 鈥?plus the durable store (design.md D8) and
 // drives turns from stdin. Sessions persist to data_dir/pa.db and are resumed
 // across restarts; /new, /list and /resume manage multiple sessions. M3 adds
@@ -25,38 +25,38 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/acp"
-	"github.com/jabing/shutu-agent/internal/agent"
-	"github.com/jabing/shutu-agent/internal/attachment"
-	"github.com/jabing/shutu-agent/internal/code"
-	"github.com/jabing/shutu-agent/internal/compaction"
-	"github.com/jabing/shutu-agent/internal/config"
-	"github.com/jabing/shutu-agent/internal/credential"
-	"github.com/jabing/shutu-agent/internal/eval"
-	"github.com/jabing/shutu-agent/internal/fs"
-	hookrunner "github.com/jabing/shutu-agent/internal/hooks"
-	"github.com/jabing/shutu-agent/internal/interact"
-	"github.com/jabing/shutu-agent/internal/jobs"
-	"github.com/jabing/shutu-agent/internal/lifecycle"
-	"github.com/jabing/shutu-agent/internal/llm"
-	"github.com/jabing/shutu-agent/internal/loop"
-	"github.com/jabing/shutu-agent/internal/mcp"
-	"github.com/jabing/shutu-agent/internal/meter"
-	"github.com/jabing/shutu-agent/internal/observability"
-	"github.com/jabing/shutu-agent/internal/plan"
-	"github.com/jabing/shutu-agent/internal/plugin"
-	"github.com/jabing/shutu-agent/internal/prompt"
-	"github.com/jabing/shutu-agent/internal/schedule"
-	"github.com/jabing/shutu-agent/internal/session"
-	"github.com/jabing/shutu-agent/internal/skill"
-	"github.com/jabing/shutu-agent/internal/spill"
-	"github.com/jabing/shutu-agent/internal/store"
-	"github.com/jabing/shutu-agent/internal/subagent"
-	"github.com/jabing/shutu-agent/internal/team"
-	"github.com/jabing/shutu-agent/internal/terminal"
-	"github.com/jabing/shutu-agent/internal/tools"
-	"github.com/jabing/shutu-agent/internal/web"
-	"github.com/jabing/shutu-agent/internal/webserver"
+	"github.com/shutu-ai/shutu-agent/internal/acp"
+	"github.com/shutu-ai/shutu-agent/internal/agent"
+	"github.com/shutu-ai/shutu-agent/internal/attachment"
+	"github.com/shutu-ai/shutu-agent/internal/code"
+	"github.com/shutu-ai/shutu-agent/internal/compaction"
+	"github.com/shutu-ai/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/credential"
+	"github.com/shutu-ai/shutu-agent/internal/eval"
+	"github.com/shutu-ai/shutu-agent/internal/fs"
+	hookrunner "github.com/shutu-ai/shutu-agent/internal/hooks"
+	"github.com/shutu-ai/shutu-agent/internal/interact"
+	"github.com/shutu-ai/shutu-agent/internal/jobs"
+	"github.com/shutu-ai/shutu-agent/internal/lifecycle"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/loop"
+	"github.com/shutu-ai/shutu-agent/internal/mcp"
+	"github.com/shutu-ai/shutu-agent/internal/meter"
+	"github.com/shutu-ai/shutu-agent/internal/observability"
+	"github.com/shutu-ai/shutu-agent/internal/plan"
+	"github.com/shutu-ai/shutu-agent/internal/plugin"
+	"github.com/shutu-ai/shutu-agent/internal/prompt"
+	"github.com/shutu-ai/shutu-agent/internal/schedule"
+	"github.com/shutu-ai/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/skill"
+	"github.com/shutu-ai/shutu-agent/internal/spill"
+	"github.com/shutu-ai/shutu-agent/internal/store"
+	"github.com/shutu-ai/shutu-agent/internal/subagent"
+	"github.com/shutu-ai/shutu-agent/internal/team"
+	"github.com/shutu-ai/shutu-agent/internal/terminal"
+	"github.com/shutu-ai/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/web"
+	"github.com/shutu-ai/shutu-agent/internal/webserver"
 )
 
 func main() {
@@ -68,41 +68,41 @@ func main() {
 	verifyCatalogManifestPath := flag.String("verify-catalog-manifest", "", "verify a tool catalog manifest against this runtime and exit")
 	flag.Parse()
 	if *acpMode && *sdkMode {
-		fmt.Fprintln(os.Stderr, "pa: --acp and --sdk are mutually exclusive")
+		fmt.Fprintln(os.Stderr, "sta: --acp and --sdk are mutually exclusive")
 		os.Exit(2)
 	}
 	if *acpMode || *sdkMode {
 		ignoreTransportBrokenPipe()
 	}
 	if *catalogManifestPath != "" && *verifyCatalogManifestPath != "" {
-		fmt.Fprintln(os.Stderr, "pa: --catalog-manifest and --verify-catalog-manifest are mutually exclusive")
+		fmt.Fprintln(os.Stderr, "sta: --catalog-manifest and --verify-catalog-manifest are mutually exclusive")
 		os.Exit(2)
 	}
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "pa:", err)
+		fmt.Fprintln(os.Stderr, "sta:", err)
 		os.Exit(1)
 	}
 	if err := enforceCrashDumpPolicy(cfg.Security.CrashDumpPolicy); err != nil {
-		fmt.Fprintln(os.Stderr, "pa:", err)
+		fmt.Fprintln(os.Stderr, "sta:", err)
 		os.Exit(1)
 	}
 	cfg.WebServer.DistDir = resolveFrontendDist(*configPath, cfg.WebServer.DistDir)
 
 	st, err := store.OpenSQLite(filepath.Join(cfg.DataDir, "pa.db"))
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "pa:", err)
+		fmt.Fprintln(os.Stderr, "sta:", err)
 		os.Exit(1)
 	}
 	shutdown := lifecycle.New()
 	if err := shutdown.Register("store", st.Close); err != nil {
-		fmt.Fprintln(os.Stderr, "pa: shutdown:", err)
+		fmt.Fprintln(os.Stderr, "sta: shutdown:", err)
 		os.Exit(1)
 	}
 	defer func() {
 		if err := shutdown.Close(); err != nil {
-			fmt.Fprintln(os.Stderr, "pa: shutdown:", err)
+			fmt.Fprintln(os.Stderr, "sta: shutdown:", err)
 		}
 	}()
 
@@ -114,7 +114,7 @@ func main() {
 	// execution whitelist after registration (see below).
 	settings, err := st.GetSettings(context.Background())
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "pa: settings:", err)
+		fmt.Fprintln(os.Stderr, "sta: settings:", err)
 		os.Exit(1)
 	}
 	if raw := settings["mcp.servers"]; raw != "" {
@@ -208,30 +208,30 @@ func main() {
 	// execution. The execution-class tool is registered only when enabled
 	// (榛樿鍏抽棴, D10).
 	if err := reg.Register(tools.GetTime{}); err != nil {
-		fmt.Fprintln(os.Stderr, "pa:", err)
+		fmt.Fprintln(os.Stderr, "sta:", err)
 		os.Exit(1)
 	}
 	if !config.Enabled(cfg.Fs.Enabled) {
 		if err := reg.Register(tools.NewReadFileForRoot(sessionRoot)); err != nil {
-			fmt.Fprintln(os.Stderr, "pa:", err)
+			fmt.Fprintln(os.Stderr, "sta:", err)
 			os.Exit(1)
 		}
 	}
 	promptBuilder, err := buildPrompt(cfg.Mode, cfg.PromptsDir)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "pa:", err)
+		fmt.Fprintln(os.Stderr, "sta:", err)
 		os.Exit(1)
 	}
 	promptBuilder.SetTools(func() []llm.ToolSchema { return toolSpecsForMode(cfg.Mode, reg.VisibleSpecs()) })
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	if err := shutdown.Register("signal", func() error { stop(); return nil }); err != nil {
-		fmt.Fprintln(os.Stderr, "pa: shutdown:", err)
+		fmt.Fprintln(os.Stderr, "sta: shutdown:", err)
 		os.Exit(1)
 	}
 	telemetry, err := observability.NewSessionTelemetryExporterFromEnvAt(cfg.DataDir)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "pa: telemetry:", err)
+		fmt.Fprintln(os.Stderr, "sta: telemetry:", err)
 		os.Exit(1)
 	}
 
@@ -266,25 +266,25 @@ func main() {
 			defer cancel()
 			return telemetry.Shutdown(shutdownCtx)
 		}); err != nil {
-			fmt.Fprintln(os.Stderr, "pa: shutdown:", err)
+			fmt.Fprintln(os.Stderr, "sta: shutdown:", err)
 			os.Exit(1)
 		}
 	}
 	credentialBackend := store.CredentialRecordStore(st)
 	credentialVault, err := credential.New(context.Background(), credentialBackend)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "pa: credentials:", err)
+		fmt.Fprintln(os.Stderr, "sta: credentials:", err)
 		os.Exit(1)
 	}
 	app.credentials = credentialVault
 	if err := shutdown.Register("credentials", credentialVault.Close); err != nil {
-		fmt.Fprintln(os.Stderr, "pa: shutdown:", err)
+		fmt.Fprintln(os.Stderr, "sta: shutdown:", err)
 		os.Exit(1)
 	}
 	runtimeApp = app
 	registerShutdown := func(name string, closeFn func() error) {
 		if err := shutdown.Register(name, closeFn); err != nil {
-			fmt.Fprintln(os.Stderr, "pa: shutdown:", err)
+			fmt.Fprintln(os.Stderr, "sta: shutdown:", err)
 			os.Exit(1)
 		}
 	}
@@ -316,7 +316,7 @@ func main() {
 	for provider, value := range legacyCredentialKeys {
 		if strings.TrimSpace(value) == "" {
 			if err := st.DeleteSetting(context.Background(), "llm.key."+provider); err != nil {
-				fmt.Fprintln(os.Stderr, "pa: migrate empty credential:", err)
+				fmt.Fprintln(os.Stderr, "sta: migrate empty credential:", err)
 				os.Exit(1)
 			}
 			continue
@@ -324,12 +324,12 @@ func main() {
 		reference := llmKeyEnv(provider)
 		if !credentialVault.Has(reference) {
 			if err := credentialVault.Set(context.Background(), reference, value); err != nil {
-				fmt.Fprintln(os.Stderr, "pa: migrate credential:", err)
+				fmt.Fprintln(os.Stderr, "sta: migrate credential:", err)
 				os.Exit(1)
 			}
 		}
 		if err := st.DeleteSetting(context.Background(), "llm.key."+provider); err != nil {
-			fmt.Fprintln(os.Stderr, "pa: remove legacy credential setting:", err)
+			fmt.Fprintln(os.Stderr, "sta: remove legacy credential setting:", err)
 			os.Exit(1)
 		}
 	}
@@ -347,12 +347,12 @@ func main() {
 	// M8-2: registerLLM builds the provider registry and injects the selected
 	// provider into a.llm 鈥?the single llm.LLM the loop, compaction, subagent
 	if err := app.registerLLM(); err != nil {
-		fmt.Fprintln(os.Stderr, "pa:", err)
+		fmt.Fprintln(os.Stderr, "sta:", err)
 		os.Exit(1)
 	}
 	// M8-3: wire the image-attachment store 鈥?under <data_dir>/attachments/ 鈥?	// when llm.multimodal.enabled (榛樿鍏?D10). disabled 鈬?/attach unavailable.
 	if err := app.registerAttachments(); err != nil {
-		fmt.Fprintln(os.Stderr, "pa:", err)
+		fmt.Fprintln(os.Stderr, "sta:", err)
 		os.Exit(1)
 	}
 	// to nothing itself; config.applyDefaults already whitelisted them when
@@ -362,7 +362,7 @@ func main() {
 	// deferred Close cancels and awaits every live background job at shutdown
 	// so no goroutine leaks (lifecycle reversible, ADR 鍐崇瓥 鈶?.
 	if err := app.registerJobs(); err != nil {
-		fmt.Fprintln(os.Stderr, "pa:", err)
+		fmt.Fprintln(os.Stderr, "sta:", err)
 		os.Exit(1)
 	}
 	// M5b-2: wire the subagent seam 鈥?spawn provider + Runtime + the four
@@ -372,14 +372,14 @@ func main() {
 	// live child at shutdown so no background goroutine leaks (lifecycle
 	// reversible, ADR 鍐崇瓥 鈶?.
 	if err := app.registerSubagent(); err != nil {
-		fmt.Fprintln(os.Stderr, "pa:", err)
+		fmt.Fprintln(os.Stderr, "sta:", err)
 		os.Exit(1)
 	}
 	if app.subagents != nil {
 		registerShutdown("subagents", app.subagents.Close)
 	}
 	if err := app.registerTeam(); err != nil {
-		fmt.Fprintln(os.Stderr, "pa:", err)
+		fmt.Fprintln(os.Stderr, "sta:", err)
 		os.Exit(1)
 	}
 	// GAP-2: wire the ralph fresh-agent loop seam (ADR
@@ -391,7 +391,7 @@ func main() {
 	// Close. Each round spawns a fresh child and blocks until it settles on the
 	// serial tool path (D5); the loop's turn/step structure is untouched (D4).
 	if err := app.registerRalph(); err != nil {
-		fmt.Fprintln(os.Stderr, "pa:", err)
+		fmt.Fprintln(os.Stderr, "sta:", err)
 		os.Exit(1)
 	}
 	// GAP-3: wire the task-DAG orchestration seam (ADR
@@ -404,7 +404,7 @@ func main() {
 	// blocks until it settles on the serial tool path (D5); the loop's
 	// turn/step structure is untouched (D4).
 	if err := app.registerWorkflow(); err != nil {
-		fmt.Fprintln(os.Stderr, "pa:", err)
+		fmt.Fprintln(os.Stderr, "sta:", err)
 		os.Exit(1)
 	}
 	// M5c-2b: wire the compaction seam 鈥?BasicEngine for the /compact command
@@ -415,7 +415,7 @@ func main() {
 	// the whole gate. The engine shares the caller-owned LLM and holds no
 	// closable resources, so there is no deferred Close.
 	if err := app.registerCompaction(); err != nil {
-		fmt.Fprintln(os.Stderr, "pa:", err)
+		fmt.Fprintln(os.Stderr, "sta:", err)
 		os.Exit(1)
 	}
 	if app.compaction != nil {
@@ -428,7 +428,7 @@ func main() {
 	// registry and its providers at shutdown (lifecycle reversible, ADR
 	// 鍐崇瓥 鈶?.
 	if err := app.registerSkills(); err != nil {
-		fmt.Fprintln(os.Stderr, "pa:", err)
+		fmt.Fprintln(os.Stderr, "sta:", err)
 		os.Exit(1)
 	}
 	if app.skills != nil {
@@ -443,7 +443,7 @@ func main() {
 	// ticker: the loop's per-turn "schedule" pre-step injector advances the
 	// clock on the serial path (D5).
 	if err := app.registerSchedules(); err != nil {
-		fmt.Fprintln(os.Stderr, "pa:", err)
+		fmt.Fprintln(os.Stderr, "sta:", err)
 		os.Exit(1)
 	}
 	if app.schedules != nil {
@@ -457,7 +457,7 @@ func main() {
 	// 鍐崇瓥 M6b). The plan tree is a planning model only 鈥?execution delegation
 	// to subagents is deferred to M6c+.
 	if err := app.registerPlans(); err != nil {
-		fmt.Fprintln(os.Stderr, "pa:", err)
+		fmt.Fprintln(os.Stderr, "sta:", err)
 		os.Exit(1)
 	}
 	if app.plans != nil {
@@ -472,7 +472,7 @@ func main() {
 	// turn-completion path (after each completed turn in the REPL, D5); there
 	// is no background goroutine.
 	if err := app.registerSpills(); err != nil {
-		fmt.Fprintln(os.Stderr, "pa:", err)
+		fmt.Fprintln(os.Stderr, "sta:", err)
 		os.Exit(1)
 	}
 	if app.spills != nil {
@@ -486,7 +486,7 @@ func main() {
 	// rejects further runs at shutdown (lifecycle reversible, ADR 鍐崇瓥 M6e).
 	// run_code executes on the serial tool path (D5) 鈥?no background goroutine.
 	if err := app.registerCode(); err != nil {
-		fmt.Fprintln(os.Stderr, "pa:", err)
+		fmt.Fprintln(os.Stderr, "sta:", err)
 		os.Exit(1)
 	}
 	if app.code != nil {
@@ -503,7 +503,7 @@ func main() {
 	// mcp_* tools execute on the serial tool path (D5) 鈥?no background
 	// goroutine.
 	if err := app.registerMcps(); err != nil {
-		fmt.Fprintln(os.Stderr, "pa:", err)
+		fmt.Fprintln(os.Stderr, "sta:", err)
 		os.Exit(1)
 	}
 	if len(app.mcpClients()) > 0 {
@@ -527,7 +527,7 @@ func main() {
 	// resources) at shutdown (lifecycle reversible, ADR 鍐崇瓥 M6f). The fs_*
 	// tools execute on the serial tool path (D5) 鈥?no background goroutine.
 	if err := app.registerFs(); err != nil {
-		fmt.Fprintln(os.Stderr, "pa:", err)
+		fmt.Fprintln(os.Stderr, "sta:", err)
 		os.Exit(1)
 	}
 	if app.fs != nil {
@@ -540,20 +540,20 @@ func main() {
 	// root is the agent working directory (os.Getwd, like internal/code and
 	// internal/skill). They execute on the serial tool path (D5).
 	if err := app.registerFsSearch(); err != nil {
-		fmt.Fprintln(os.Stderr, "pa:", err)
+		fmt.Fprintln(os.Stderr, "sta:", err)
 		os.Exit(1)
 	}
 	// P2 session-query: wire five read-only history tools when enabled.
 	if err := app.registerSessionQuery(); err != nil {
-		fmt.Fprintln(os.Stderr, "pa:", err)
+		fmt.Fprintln(os.Stderr, "sta:", err)
 		os.Exit(1)
 	}
 	if err := app.registerLSP(); err != nil {
-		fmt.Fprintln(os.Stderr, "pa:", err)
+		fmt.Fprintln(os.Stderr, "sta:", err)
 		os.Exit(1)
 	}
 	if err := app.registerHooks(); err != nil {
-		fmt.Fprintln(os.Stderr, "pa:", err)
+		fmt.Fprintln(os.Stderr, "sta:", err)
 		os.Exit(1)
 	}
 	registerShutdown("hooks", func() error { app.closeHooks(); return nil })
@@ -566,7 +566,7 @@ func main() {
 	// web/search-request is logged by the provider's OnRequest (D3); the web_*
 	// tools execute on the serial tool path (D5) 鈥?no background goroutine.
 	if err := app.registerWeb(); err != nil {
-		fmt.Fprintln(os.Stderr, "pa:", err)
+		fmt.Fprintln(os.Stderr, "sta:", err)
 		os.Exit(1)
 	}
 	// M9/dsh: wire the pwsh seam 鈥?the fresh-process pwsh tool (dsh
@@ -576,7 +576,7 @@ func main() {
 	// pwsh when terminal.enabled was true. The deferred cleanup closes the
 	// active /term session at shutdown so no child process leaks.
 	if err := app.registerTerminal(); err != nil {
-		fmt.Fprintln(os.Stderr, "pa:", err)
+		fmt.Fprintln(os.Stderr, "sta:", err)
 		os.Exit(1)
 	}
 	registerShutdown("terminals", func() error {
@@ -596,7 +596,7 @@ func main() {
 	// 鍐崇瓥 M6d). The gate reads the user's y/n answer on the CLI serial path
 	// (D5) 鈥?no background goroutine.
 	if err := app.registerInteracts(); err != nil {
-		fmt.Fprintln(os.Stderr, "pa:", err)
+		fmt.Fprintln(os.Stderr, "sta:", err)
 		os.Exit(1)
 	}
 	if app.interacts != nil {
@@ -604,7 +604,7 @@ func main() {
 	}
 	if config.Enabled(app.cfg.Plan.Enabled) {
 		if err := app.reg.Register(exitPlanModeTool{app: app}); err != nil {
-			fmt.Fprintln(os.Stderr, "pa:", err)
+			fmt.Fprintln(os.Stderr, "sta:", err)
 			os.Exit(1)
 		}
 	}
@@ -624,7 +624,7 @@ func main() {
 	// the /eval-status command + the D3 event sink 鈥?when eval.enabled (榛樿鍏?	// D10). config.applyDefaults already whitelisted the eval_* names when
 	// eval.enabled was true. The engine is in-memory; Close is idempotent.
 	if err := app.registerEval(); err != nil {
-		fmt.Fprintln(os.Stderr, "pa:", err)
+		fmt.Fprintln(os.Stderr, "sta:", err)
 		os.Exit(1)
 	}
 	if app.evalEng != nil {
@@ -664,14 +664,14 @@ func main() {
 	})
 	if *catalogManifestPath != "" {
 		if err := writeToolCatalogManifest(app.reg, *catalogManifestPath); err != nil {
-			fmt.Fprintln(os.Stderr, "pa:", err)
+			fmt.Fprintln(os.Stderr, "sta:", err)
 			os.Exit(1)
 		}
 		return
 	}
 	if *verifyCatalogManifestPath != "" {
 		if err := verifyToolCatalogManifest(app.reg, *verifyCatalogManifestPath); err != nil {
-			fmt.Fprintln(os.Stderr, "pa:", err)
+			fmt.Fprintln(os.Stderr, "sta:", err)
 			os.Exit(1)
 		}
 		fmt.Println("tool catalog manifest verified")
@@ -688,7 +688,7 @@ func main() {
 			AgentVersion: "0.1",
 		}
 		if err := server.Run(ctx); err != nil {
-			fmt.Fprintln(os.Stderr, "pa: acp:", err)
+			fmt.Fprintln(os.Stderr, "sta: acp:", err)
 			os.Exit(1)
 		}
 		return
@@ -697,20 +697,20 @@ func main() {
 		registerShutdown("admission", func() error { app.beginShutdown(); return nil })
 		server := newSDKServer(app, os.Stdin, os.Stdout)
 		if err := server.run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			fmt.Fprintln(os.Stderr, "pa: sdk:", err)
+			fmt.Fprintln(os.Stderr, "sta: sdk:", err)
 			os.Exit(1)
 		}
 		return
 	}
 	if err := app.registerWebServer(); err != nil {
-		fmt.Fprintln(os.Stderr, "pa:", err)
+		fmt.Fprintln(os.Stderr, "sta:", err)
 		os.Exit(1)
 	}
 	if app.webserver != nil {
 		registerShutdown("webserver", app.webserver.Close)
 	}
 	if err := app.startup(ctx); err != nil {
-		fmt.Fprintln(os.Stderr, "pa:", err)
+		fmt.Fprintln(os.Stderr, "sta:", err)
 		os.Exit(1)
 	}
 	app.startGoalScheduler(ctx)
@@ -723,7 +723,7 @@ func main() {
 	// deferred webserver.Close shuts the listener so no port lingers.
 	if *webOnly {
 		if app.webserver == nil {
-			fmt.Fprintln(os.Stderr, "pa: --web-only requires web_server.enabled=true in config")
+			fmt.Fprintln(os.Stderr, "sta: --web-only requires web_server.enabled=true in config")
 			os.Exit(1)
 		}
 		<-ctx.Done()
@@ -1057,7 +1057,7 @@ func (a *app) pruneBlankCurrent(ctx context.Context) {
 		return
 	}
 	if err := a.store.DeleteSession(ctx, a.currentID); err != nil {
-		fmt.Fprintf(os.Stderr, "pa: prune blank session %q: %v\n", a.currentID, err)
+		fmt.Fprintf(os.Stderr, "sta: prune blank session %q: %v\n", a.currentID, err)
 	}
 }
 
@@ -1086,7 +1086,7 @@ func (a *app) newSession(ctx context.Context) error {
 	defer a.sessionStateMu.Unlock()
 	id, err := store.GenerateReservedID(ctx, a.store, "session", newSessionID)
 	if err != nil {
-		return fmt.Errorf("pa: generate session id: %w", err)
+		return fmt.Errorf("sta: generate session id: %w", err)
 	}
 	// dsh: starting a fresh session discards an abandoned blank one.
 	a.pruneBlankCurrent(ctx)
@@ -1377,7 +1377,7 @@ func (a *app) buildLoopBoundWithProvider(onText func(string), onError func(error
 			}
 			resolved := a.providerRuntimeSnapshot(requested)
 			if resolved.selectedID == "" {
-				return nil, fmt.Errorf("pa: llm provider %q is not registered", requested)
+				return nil, fmt.Errorf("sta: llm provider %q is not registered", requested)
 			}
 			return resolved.selected, nil
 		},
@@ -1503,7 +1503,7 @@ func (a *app) applySessionRuntimeOnMode(id string, log *session.Log, registry *t
 	if scs, ok := a.store.(store.SessionConfigStore); ok && id != "" {
 		cfg, err := scs.GetSessionConfig(context.Background(), id)
 		if err != nil && strict && !errors.Is(err, store.ErrNotFound) {
-			return sessionRuntime{}, func() {}, fmt.Errorf("pa: load session runtime %q: %w", id, err)
+			return sessionRuntime{}, func() {}, fmt.Errorf("sta: load session runtime %q: %w", id, err)
 		}
 		if err == nil {
 			if cfg.Provider != "" {
@@ -1530,7 +1530,7 @@ func (a *app) applySessionRuntimeOnMode(id string, log *session.Log, registry *t
 		if controller, ok := a.interacts.(interact.PolicyController); ok {
 			_, _, _, approvalPolicy := permissionBundle(perm)
 			if err := controller.SetSessionPolicy(id, interact.ApprovalPolicy(approvalPolicy)); err != nil && strict {
-				return sessionRuntime{}, func() {}, fmt.Errorf("pa: set session approval policy %q: %w", id, err)
+				return sessionRuntime{}, func() {}, fmt.Errorf("sta: set session approval policy %q: %w", id, err)
 			}
 		}
 	}
@@ -1540,7 +1540,7 @@ func (a *app) applySessionRuntimeOnMode(id string, log *session.Log, registry *t
 		toolMode = a.agentPresets.Mode(mode)
 	}
 	if toolMode == config.ModeCode && a.codeUnavailableReason != "" {
-		return sessionRuntime{}, func() {}, fmt.Errorf("pa: code mode unavailable: %s", a.codeUnavailableReason)
+		return sessionRuntime{}, func() {}, fmt.Errorf("sta: code mode unavailable: %s", a.codeUnavailableReason)
 	}
 	// DSH persona sections resolve model and working-directory placeholders at
 	// prompt render time. Clone per turn so one shared base builder remains safe
@@ -1552,7 +1552,7 @@ func (a *app) applySessionRuntimeOnMode(id string, log *session.Log, registry *t
 	if log != nil {
 		planActive, err := currentPlanModeActive(log)
 		if err != nil {
-			return sessionRuntime{}, func() {}, fmt.Errorf("pa: read plan mode for session %q: %w", id, err)
+			return sessionRuntime{}, func() {}, fmt.Errorf("sta: read plan mode for session %q: %w", id, err)
 		}
 		if planActive {
 			rt.prompt = rt.prompt.Clone().Add(prompt.Section{Name: "plan-mode", Order: 900, Text: planModeSection})
@@ -1572,7 +1572,7 @@ func (a *app) applySessionRuntimeOnMode(id string, log *session.Log, registry *t
 	registry.SetPolicy(pol)
 	if strict {
 		if err := registry.ValidateProjection(toolMode, toolSpecsForMode(toolMode, registry.VisibleSpecs())); err != nil {
-			return sessionRuntime{}, func() {}, fmt.Errorf("pa: validate canonical tool projection for session %q: %w", id, err)
+			return sessionRuntime{}, func() {}, fmt.Errorf("sta: validate canonical tool projection for session %q: %w", id, err)
 		}
 	}
 	// PTC exposes only run_code to the model, but its TypeScript program may
@@ -1830,7 +1830,7 @@ func (a *app) runTurnContentForLegacy(ctx context.Context, sessionID string, con
 // repl drives turns from stdin, handling the session commands.
 func (a *app) repl(ctx context.Context) {
 	scanner := bufio.NewScanner(os.Stdin)
-	fmt.Println("pa 鈥?personal agent REPL. Type /help for the command table.")
+	fmt.Println("sta - Shutu Agent REPL. Type /help for the command table.")
 	for {
 		fmt.Print("\n> ")
 		if !scanner.Scan() {
@@ -1845,7 +1845,7 @@ func (a *app) repl(ctx context.Context) {
 		}
 		if strings.HasPrefix(line, "/") {
 			if err := a.command(ctx, line); err != nil {
-				fmt.Fprintln(os.Stderr, "pa:", err)
+				fmt.Fprintln(os.Stderr, "sta:", err)
 			}
 			continue
 		}
@@ -1872,7 +1872,7 @@ func (a *app) repl(ctx context.Context) {
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		fmt.Fprintln(os.Stderr, "pa:", err)
+		fmt.Fprintln(os.Stderr, "sta:", err)
 		os.Exit(1)
 	}
 }

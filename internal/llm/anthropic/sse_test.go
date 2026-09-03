@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jabing/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
 )
 
 // TestStreamToolUseAndReasoning verifies the SSE → StreamEvent mapping

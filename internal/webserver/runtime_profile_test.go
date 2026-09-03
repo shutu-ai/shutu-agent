@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/jabing/shutu-agent/internal/profile"
+	"github.com/shutu-ai/shutu-agent/internal/profile"
 )
 
 func TestNativeRuntimeProfilesFailClosed(t *testing.T) {

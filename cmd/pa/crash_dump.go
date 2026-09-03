@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/jabing/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/config"
 )
 
 // enforceCrashDumpPolicy is the A6.4 OS-boundary gate. The default disabled

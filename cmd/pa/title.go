@@ -6,9 +6,9 @@ import (
 	"io"
 	"strings"
 
-	"github.com/jabing/shutu-agent/internal/llm"
-	"github.com/jabing/shutu-agent/internal/projection"
-	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/projection"
+	"github.com/shutu-ai/shutu-agent/internal/session"
 )
 
 // session-title alignment with @shutu-ai/dsh-session-title (full alignment,

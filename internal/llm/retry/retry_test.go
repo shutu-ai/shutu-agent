@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
 )
 
 type fakeProvider struct {

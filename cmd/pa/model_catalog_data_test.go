@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/jabing/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/config"
 )
 
 // TestDeepSeekReferenceCatalogMetadata pins the first-party facts disclosed by

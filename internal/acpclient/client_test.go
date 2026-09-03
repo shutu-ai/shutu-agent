@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/acp"
-	"github.com/jabing/shutu-agent/internal/acpclient"
+	"github.com/shutu-ai/shutu-agent/internal/acp"
+	"github.com/shutu-ai/shutu-agent/internal/acpclient"
 )
 
 type simpleSession struct{}

@@ -20,16 +20,16 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/jabing/shutu-agent/internal/config"
-	"github.com/jabing/shutu-agent/internal/credential"
-	"github.com/jabing/shutu-agent/internal/llm"
-	"github.com/jabing/shutu-agent/internal/llm/anthropic"
-	"github.com/jabing/shutu-agent/internal/llm/deepseek"
-	"github.com/jabing/shutu-agent/internal/llm/google"
-	"github.com/jabing/shutu-agent/internal/llm/openai"
-	"github.com/jabing/shutu-agent/internal/llm/openairesponses"
-	"github.com/jabing/shutu-agent/internal/llm/retry"
-	"github.com/jabing/shutu-agent/internal/store"
+	"github.com/shutu-ai/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/credential"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/llm/anthropic"
+	"github.com/shutu-ai/shutu-agent/internal/llm/deepseek"
+	"github.com/shutu-ai/shutu-agent/internal/llm/google"
+	"github.com/shutu-ai/shutu-agent/internal/llm/openai"
+	"github.com/shutu-ai/shutu-agent/internal/llm/openairesponses"
+	"github.com/shutu-ai/shutu-agent/internal/llm/retry"
+	"github.com/shutu-ai/shutu-agent/internal/store"
 )
 
 type unavailableLLM struct{ err error }
@@ -113,13 +113,13 @@ type leasedLLM struct {
 
 func (l *leasedLLM) Stream(ctx context.Context, req llm.ChatRequest) (llm.StreamReader, error) {
 	if l == nil || l.inner == nil {
-		return nil, errors.New("pa: nil LLM")
+		return nil, errors.New("sta: nil LLM")
 	}
 	if l.held || l.gen == nil {
 		return l.inner.Stream(ctx, req)
 	}
 	if !l.gen.acquire() {
-		return nil, errors.New("pa: provider generation retired")
+		return nil, errors.New("sta: provider generation retired")
 	}
 	reader, err := l.inner.Stream(ctx, req)
 	if err != nil {
@@ -148,11 +148,11 @@ type routedLLM struct {
 
 func (r *routedLLM) Stream(ctx context.Context, req llm.ChatRequest) (llm.StreamReader, error) {
 	if r == nil || r.resolve == nil {
-		return nil, errors.New("pa: provider route unavailable")
+		return nil, errors.New("sta: provider route unavailable")
 	}
 	provider := r.resolve()
 	if provider == nil {
-		return nil, errors.New("pa: provider route unavailable")
+		return nil, errors.New("sta: provider route unavailable")
 	}
 	return provider.Stream(ctx, req)
 }
@@ -217,7 +217,7 @@ func (a *app) providerRuntimeSnapshot(requested string) providerRuntimeSnapshot 
 	}
 	a.llmMu.RUnlock()
 	if selected == nil {
-		selected = unavailableLLM{err: fmt.Errorf("pa: llm provider %q is not registered", provider)}
+		selected = unavailableLLM{err: fmt.Errorf("sta: llm provider %q is not registered", provider)}
 	} else if err := llmRouteAvailable(provider, selected); err != nil {
 		selected = unavailableLLM{err: err}
 	} else {
@@ -299,12 +299,12 @@ func (a *app) registerLLMUnlocked() error {
 	a.providerMu.RUnlock()
 	for provider, profile := range profiles {
 		if err := validateCustomModels(profile.Models); err != nil {
-			return fmt.Errorf("pa: invalid model catalog for provider %q: %w", provider, err)
+			return fmt.Errorf("sta: invalid model catalog for provider %q: %w", provider, err)
 		}
 	}
 	for _, profile := range customProviders {
 		if err := validateCustomModels(profile.Models); err != nil {
-			return fmt.Errorf("pa: invalid model catalog for provider %q: %w", profile.ID, err)
+			return fmt.Errorf("sta: invalid model catalog for provider %q: %w", profile.ID, err)
 		}
 	}
 	reg := llm.NewRegistry()
@@ -354,7 +354,7 @@ func (a *app) registerLLMUnlocked() error {
 		SupportsImages:          strings.Contains(cfg.LLM.ModelInputModalities, "image"),
 		MaxRequestImageBytes:    cfg.LLM.Multimodal.MaxRequestImageBytes, // 默认 20MiB 由 New 兜底
 	}), &cfg)); err != nil {
-		return fmt.Errorf("pa: register deepseek provider: %w", err)
+		return fmt.Errorf("sta: register deepseek provider: %w", err)
 	}
 
 	// The openai provider is registered only when its credential is present
@@ -374,7 +374,7 @@ func (a *app) registerLLMUnlocked() error {
 			SupportsImages:          strings.Contains(cfg.LLM.ModelInputModalities, "image"),
 			MaxRequestImageBytes:    cfg.LLM.Multimodal.MaxRequestImageBytes, // 默认 20MiB 由 New 兜底
 		}), &cfg)); err != nil {
-			return fmt.Errorf("pa: register openai provider: %w", err)
+			return fmt.Errorf("sta: register openai provider: %w", err)
 		}
 	}
 
@@ -395,7 +395,7 @@ func (a *app) registerLLMUnlocked() error {
 			SupportsImages:          strings.Contains(cfg.LLM.ModelInputModalities, "image"),
 			MaxRequestImageBytes:    cfg.LLM.Multimodal.MaxRequestImageBytes, // 默认 20MiB 由 New 兜底
 		}), &cfg)); err != nil {
-			return fmt.Errorf("pa: register anthropic provider: %w", err)
+			return fmt.Errorf("sta: register anthropic provider: %w", err)
 		}
 	}
 
@@ -426,7 +426,7 @@ func (a *app) registerLLMUnlocked() error {
 	for _, cp := range customProviders {
 		model := effectiveCustomProviderModel(cp)
 		if model == "" {
-			return fmt.Errorf("pa: custom provider %q has no model", cp.ID)
+			return fmt.Errorf("sta: custom provider %q has no model", cp.ID)
 		}
 		bp := builtinProvider{
 			id:       cp.ID,
@@ -438,7 +438,7 @@ func (a *app) registerLLMUnlocked() error {
 			bp.protocol = protocolCompletions
 		}
 		if err := registerBuiltinByProtocol(reg, bp, providerKeyFromSnapshot(keys, cp.ID), &cfg, providerModelCatalogInfos(cp.ID, profiles, customProviders), cp.DefaultMaxTokens, a.credentialProvider(cp.ID), a.credentialLeaseProvider(cp.ID)); err != nil {
-			return fmt.Errorf("pa: register custom provider %q: %w", cp.ID, err)
+			return fmt.Errorf("sta: register custom provider %q: %w", cp.ID, err)
 		}
 	}
 
@@ -446,10 +446,10 @@ func (a *app) registerLLMUnlocked() error {
 	// (dispatch-m8-2 §5/§6).
 	p, err := reg.Get(cfg.LLM.Provider)
 	if err != nil {
-		return fmt.Errorf("pa: %w (llm.provider=%q; registered: %s)", err, cfg.LLM.Provider, llmProviderIDs(reg))
+		return fmt.Errorf("sta: %w (llm.provider=%q; registered: %s)", err, cfg.LLM.Provider, llmProviderIDs(reg))
 	}
 	if !p.Available() {
-		return fmt.Errorf("pa: llm provider %q is not available (missing %s or invalid base_url)", p.ID(), llmCredentialEnv(p.ID()))
+		return fmt.Errorf("sta: llm provider %q is not available (missing %s or invalid base_url)", p.ID(), llmCredentialEnv(p.ID()))
 	}
 
 	a.llmMu.Lock()
@@ -521,7 +521,7 @@ func (a *app) llmFor(provider string) llm.LLM {
 			return &routedLLM{resolve: func() llm.LLM { return a.resolvePublishedLLM(provider) }}
 		}
 	}
-	return unavailableLLM{err: fmt.Errorf("pa: llm provider %q is not registered", provider)}
+	return unavailableLLM{err: fmt.Errorf("sta: llm provider %q is not registered", provider)}
 }
 
 func (a *app) resolvePublishedLLM(provider string) llm.LLM {
@@ -542,11 +542,11 @@ func (a *app) resolvePublishedLLM(provider string) llm.LLM {
 		return a.wrapPublishedLLM(a.llm, a.providerGeneration)
 	}
 	if a.llmReg == nil {
-		return unavailableLLM{err: fmt.Errorf("pa: llm provider %q is not registered", provider)}
+		return unavailableLLM{err: fmt.Errorf("sta: llm provider %q is not registered", provider)}
 	}
 	p, err := a.llmReg.Get(provider)
 	if err != nil {
-		return unavailableLLM{err: fmt.Errorf("pa: llm provider %q is not registered", provider)}
+		return unavailableLLM{err: fmt.Errorf("sta: llm provider %q is not registered", provider)}
 	}
 	if err := llmRouteAvailable(provider, p); err != nil {
 		return unavailableLLM{err: err}
@@ -605,7 +605,7 @@ func (a *app) providerRuntimeSnapshotPinned(requested string) providerRuntimeSna
 	}
 	a.llmMu.RUnlock()
 	if selected == nil {
-		return providerRuntimeSnapshot{cfg: cfg, provider: provider, selected: unavailableLLM{err: fmt.Errorf("pa: llm provider %q is not registered", provider)}}
+		return providerRuntimeSnapshot{cfg: cfg, provider: provider, selected: unavailableLLM{err: fmt.Errorf("sta: llm provider %q is not registered", provider)}}
 	}
 	if err := llmRouteAvailable(provider, selected); err != nil {
 		return providerRuntimeSnapshot{cfg: cfg, provider: provider, selected: unavailableLLM{err: err}}
@@ -614,7 +614,7 @@ func (a *app) providerRuntimeSnapshotPinned(requested string) providerRuntimeSna
 		return providerRuntimeSnapshot{cfg: cfg, provider: provider, selected: selected, selectedID: provider}
 	}
 	if !generation.acquire() {
-		return providerRuntimeSnapshot{cfg: cfg, provider: provider, selected: unavailableLLM{err: fmt.Errorf("pa: llm provider %q generation is unavailable", provider)}}
+		return providerRuntimeSnapshot{cfg: cfg, provider: provider, selected: unavailableLLM{err: fmt.Errorf("sta: llm provider %q generation is unavailable", provider)}}
 	}
 	var once sync.Once
 	return providerRuntimeSnapshot{
@@ -723,7 +723,7 @@ func (a *app) sessionProviderModelStrict(sessionID string) (string, string, erro
 	if scs, ok := a.store.(store.SessionConfigStore); ok && sessionID != "" {
 		sessionCfg, err := scs.GetSessionConfig(context.Background(), sessionID)
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			return "", "", fmt.Errorf("pa: load session runtime %q: %w", sessionID, err)
+			return "", "", fmt.Errorf("sta: load session runtime %q: %w", sessionID, err)
 		}
 		if err == nil {
 			if sessionCfg.Provider != "" {
@@ -813,7 +813,7 @@ func registerBuiltinByProtocol(reg *llm.Registry, bp builtinProvider, key string
 			MaxRequestImageBytes:    maxBytes,
 		}), cfg))
 	default:
-		return fmt.Errorf("pa: provider %q: unknown protocol %q", bp.id, bp.protocol)
+		return fmt.Errorf("sta: provider %q: unknown protocol %q", bp.id, bp.protocol)
 	}
 }
 

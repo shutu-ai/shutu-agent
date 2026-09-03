@@ -19,13 +19,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/code"
-	"github.com/jabing/shutu-agent/internal/interact"
-	"github.com/jabing/shutu-agent/internal/persistence"
-	"github.com/jabing/shutu-agent/internal/profile"
-	"github.com/jabing/shutu-agent/internal/session"
-	"github.com/jabing/shutu-agent/internal/tools"
-	"github.com/jabing/shutu-agent/internal/web"
+	"github.com/shutu-ai/shutu-agent/internal/code"
+	"github.com/shutu-ai/shutu-agent/internal/interact"
+	"github.com/shutu-ai/shutu-agent/internal/persistence"
+	"github.com/shutu-ai/shutu-agent/internal/profile"
+	"github.com/shutu-ai/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/web"
 )
 
 func TestNegativeCapabilityMatrix(t *testing.T) {

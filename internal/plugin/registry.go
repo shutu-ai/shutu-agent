@@ -12,8 +12,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/jabing/shutu-agent/internal/agent"
-	"github.com/jabing/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/agent"
+	"github.com/shutu-ai/shutu-agent/internal/tools"
 )
 
 var (

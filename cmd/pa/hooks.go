@@ -6,7 +6,7 @@ import (
 	"os"
 	"time"
 
-	hookrunner "github.com/jabing/shutu-agent/internal/hooks"
+	hookrunner "github.com/shutu-ai/shutu-agent/internal/hooks"
 )
 
 func (a *app) registerHooks() error {
@@ -25,7 +25,7 @@ func (a *app) registerHooks() error {
 		WorkingDir: workingDir,
 	})
 	if err != nil {
-		return fmt.Errorf("pa: configure hooks: %w", err)
+		return fmt.Errorf("sta: configure hooks: %w", err)
 	}
 	a.hooks = runner
 	return nil

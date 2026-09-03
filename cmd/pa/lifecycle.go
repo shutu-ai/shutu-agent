@@ -4,7 +4,7 @@ import (
 	"errors"
 )
 
-var errAppShuttingDown = errors.New("pa: application is shutting down")
+var errAppShuttingDown = errors.New("sta: application is shutting down")
 
 // beginShutdown is idempotent and intentionally only closes admission. The
 // caller's deferred cleanup then drains each owned service in dependency

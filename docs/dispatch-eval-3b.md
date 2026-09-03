@@ -203,7 +203,7 @@ func (a *app) evalStatus() error {
 	// nil when eval disabled (D10).
 	evalEng eval.Engine
 ```
-（imports 加 `github.com/jabing/shutu-agent/internal/eval`）
+（imports 加 `github.com/shutu-ai/shutu-agent/internal/eval`）
 2. **注册调用**（`registerInteracts()` 块之后加）：
 ```go
 	// eval: wire the task-evaluation seam — the CompositeEvaluator (rule → LLM

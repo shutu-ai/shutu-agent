@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/session"
 )
 
 func TestSearchSessionsPageBoundsAndCWD(t *testing.T) {

@@ -15,9 +15,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jabing/shutu-agent/internal/config"
-	"github.com/jabing/shutu-agent/internal/fssearch"
-	"github.com/jabing/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/fssearch"
+	"github.com/shutu-ai/shutu-agent/internal/tools"
 )
 
 // makeFsSearchApp builds a minimal app for registerFsSearch tests: only the

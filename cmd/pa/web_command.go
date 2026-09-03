@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/session"
 )
 
 // webCommand handles one resolved Web slash command. It keeps the existing

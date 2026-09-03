@@ -19,12 +19,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/jobs"
-	"github.com/jabing/shutu-agent/internal/pathsecure"
-	"github.com/jabing/shutu-agent/internal/runtimectx"
-	"github.com/jabing/shutu-agent/internal/session"
-	"github.com/jabing/shutu-agent/internal/terminal"
-	"github.com/jabing/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/jobs"
+	"github.com/shutu-ai/shutu-agent/internal/pathsecure"
+	"github.com/shutu-ai/shutu-agent/internal/runtimectx"
+	"github.com/shutu-ai/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/terminal"
+	"github.com/shutu-ai/shutu-agent/internal/tools"
 )
 
 const minimalPersistentShellType = "minimal-persistent-shell"
@@ -438,7 +438,7 @@ func (a *app) registerModelTerminalTools() error {
 	}
 	for _, name := range []string{"terminal_open", "terminal_list", "terminal_read", "terminal_send", "terminal_signal", "terminal_close"} {
 		if err := a.reg.Register(modelTerminalTool{app: a, kind: name}); err != nil {
-			return fmt.Errorf("pa: register %s: %w", name, err)
+			return fmt.Errorf("sta: register %s: %w", name, err)
 		}
 	}
 	return nil

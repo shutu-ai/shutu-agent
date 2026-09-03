@@ -5,7 +5,7 @@ import (
 	"errors"
 	"sort"
 
-	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/session"
 )
 
 // EventSurface is the query-facing placement of one durable event.  It is

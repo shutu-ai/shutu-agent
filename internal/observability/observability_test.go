@@ -7,8 +7,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/jabing/shutu-agent/internal/llm"
-	"github.com/jabing/shutu-agent/internal/runtimectx"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/runtimectx"
 )
 
 func TestMetricsAreConcurrencySafeAndSnapshotCounters(t *testing.T) {

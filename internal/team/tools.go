@@ -13,8 +13,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/jabing/shutu-agent/internal/agent"
-	agenttools "github.com/jabing/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/agent"
+	agenttools "github.com/shutu-ai/shutu-agent/internal/tools"
 )
 
 const (

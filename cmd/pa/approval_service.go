@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"github.com/jabing/shutu-agent/internal/interact"
+	"github.com/shutu-ai/shutu-agent/internal/interact"
 )
 
 // approvalAnswerer is the application-owned answerer contract shared by the

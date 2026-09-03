@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/attachment"
-	"github.com/jabing/shutu-agent/internal/llm"
-	"github.com/jabing/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/attachment"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/tools"
 )
 
 // helperFactory is a Factory whose New returns a stdioClient pointed at this

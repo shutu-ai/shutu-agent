@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/store"
+	"github.com/shutu-ai/shutu-agent/internal/store"
 )
 
 var (

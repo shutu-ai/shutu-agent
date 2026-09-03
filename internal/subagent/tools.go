@@ -27,16 +27,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	agenttools "github.com/jabing/shutu-agent/internal/tools"
+	agenttools "github.com/shutu-ai/shutu-agent/internal/tools"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/jobs"
-	"github.com/jabing/shutu-agent/internal/runtimectx"
-	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/jobs"
+	"github.com/shutu-ai/shutu-agent/internal/runtimectx"
+	"github.com/shutu-ai/shutu-agent/internal/session"
 )
 
 func valueJSON(value any) string {

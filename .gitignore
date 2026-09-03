@@ -15,6 +15,7 @@ bin/
 dist/
 release/
 pa.exe
+sta.exe
 
 # 日志
 *.log

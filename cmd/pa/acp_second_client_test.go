@@ -13,14 +13,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/acp"
-	"github.com/jabing/shutu-agent/internal/acpclient"
-	"github.com/jabing/shutu-agent/internal/attachment"
-	"github.com/jabing/shutu-agent/internal/config"
-	"github.com/jabing/shutu-agent/internal/llm"
-	"github.com/jabing/shutu-agent/internal/session"
-	"github.com/jabing/shutu-agent/internal/store"
-	"github.com/jabing/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/acp"
+	"github.com/shutu-ai/shutu-agent/internal/acpclient"
+	"github.com/shutu-ai/shutu-agent/internal/attachment"
+	"github.com/shutu-ai/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/store"
+	"github.com/shutu-ai/shutu-agent/internal/tools"
 )
 
 const acpSecondClientHelperEnv = "SHUTU_ACP_SECOND_CLIENT_HELPER"

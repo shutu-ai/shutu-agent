@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/acp"
-	"github.com/jabing/shutu-agent/internal/contractfixture"
+	"github.com/shutu-ai/shutu-agent/internal/acp"
+	"github.com/shutu-ai/shutu-agent/internal/contractfixture"
 )
 
 const externalACPProcessHelperEnv = "SHUTU_ACP_EXTERNAL_PROCESS_HELPER"

@@ -16,9 +16,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/jabing/shutu-agent/internal/llm"
-	"github.com/jabing/shutu-agent/internal/projection"
-	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/projection"
+	"github.com/shutu-ai/shutu-agent/internal/session"
 )
 
 // TokenEstimator estimates the token count of one string. Providers accept it

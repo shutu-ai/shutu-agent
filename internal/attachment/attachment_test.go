@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jabing/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
 )
 
 // testPNG returns a small valid PNG fixture used by storage and admission tests.

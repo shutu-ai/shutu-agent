@@ -3,8 +3,8 @@ package main
 import (
 	"testing"
 
-	"github.com/jabing/shutu-agent/internal/config"
-	"github.com/jabing/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/tools"
 )
 
 func makeEvalApp(enabled bool) *app {

@@ -24,8 +24,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/pathsecure"
-	agenttools "github.com/jabing/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/pathsecure"
+	agenttools "github.com/shutu-ai/shutu-agent/internal/tools"
 )
 
 // Tool names — the dsh-aligned content/path search tools (whitelisted when

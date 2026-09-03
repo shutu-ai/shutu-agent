@@ -9,12 +9,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/agent"
-	"github.com/jabing/shutu-agent/internal/llm"
-	"github.com/jabing/shutu-agent/internal/loop"
-	"github.com/jabing/shutu-agent/internal/session"
-	"github.com/jabing/shutu-agent/internal/store"
-	"github.com/jabing/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/agent"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/loop"
+	"github.com/shutu-ai/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/store"
+	"github.com/shutu-ai/shutu-agent/internal/tools"
 )
 
 // sessionInboxJournal projects Agent queue mutations into the canonical
@@ -246,7 +246,7 @@ func (a *app) sessionAgent(sessionID string) (*agent.Handle, error) {
 		} else {
 			if log, err := a.sessionLogForAgent(context.Background(), sessionID); err == nil {
 				if err := a.recoverSessionCompletionWakes(log, handle); err != nil {
-					fmt.Fprintln(os.Stderr, "pa: subagent completion recovery:", err)
+					fmt.Fprintln(os.Stderr, "sta: subagent completion recovery:", err)
 				}
 			}
 			return handle, nil
@@ -326,7 +326,7 @@ func (a *app) sessionAgent(sessionID string) (*agent.Handle, error) {
 		// Recovery is best effort at this boundary. The terminal event remains
 		// durable and the next materialization/retry will attempt the wake
 		// again; do not discard an otherwise valid Agent publication.
-		fmt.Fprintln(os.Stderr, "pa: subagent completion recovery:", err)
+		fmt.Fprintln(os.Stderr, "sta: subagent completion recovery:", err)
 	}
 	return handle, nil
 }

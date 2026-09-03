@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/jabing/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/tools"
 )
 
 // writeToolCatalogManifest exports the release artifact's canonical tool

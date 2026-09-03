@@ -12,8 +12,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/jabing/shutu-agent/internal/config"
-	"github.com/jabing/shutu-agent/internal/fssearch"
+	"github.com/shutu-ai/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/fssearch"
 )
 
 // registerFsSearch wires the search seam (D-GAP-1) when fs_search.enabled
@@ -35,7 +35,7 @@ func (a *app) registerFsSearch() error {
 		return a.sessionCWDFor(a.runtimeSessionID(ctx))
 	}
 	if err := a.reg.Register(grep); err != nil {
-		return fmt.Errorf("pa: register %s: %w", fssearch.GrepToolName, err)
+		return fmt.Errorf("sta: register %s: %w", fssearch.GrepToolName, err)
 	}
 	glob := fssearch.NewGlobToolForCWD(a.sessionCWD)
 	glob.CwdContextFunc = func(ctx context.Context) string { return a.sessionCWDFor(a.runtimeSessionID(ctx)) }
@@ -46,7 +46,7 @@ func (a *app) registerFsSearch() error {
 		return a.sessionCWDFor(a.runtimeSessionID(ctx))
 	}
 	if err := a.reg.Register(glob); err != nil {
-		return fmt.Errorf("pa: register %s: %w", fssearch.GlobToolName, err)
+		return fmt.Errorf("sta: register %s: %w", fssearch.GlobToolName, err)
 	}
 	return nil
 }

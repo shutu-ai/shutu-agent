@@ -24,7 +24,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/jabing/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
 )
 
 // SupportedMediaTypes 是受支持的图片媒体类型（扩展名 → media type，dsh 同款）。

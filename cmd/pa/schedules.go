@@ -22,13 +22,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/config"
-	"github.com/jabing/shutu-agent/internal/jobs"
-	"github.com/jabing/shutu-agent/internal/llm"
-	"github.com/jabing/shutu-agent/internal/loop"
-	"github.com/jabing/shutu-agent/internal/schedule"
-	"github.com/jabing/shutu-agent/internal/session"
-	"github.com/jabing/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/jobs"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/loop"
+	"github.com/shutu-ai/shutu-agent/internal/schedule"
+	"github.com/shutu-ai/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/tools"
 )
 
 // registerSchedules creates the in-memory Provider + Engine and registers the
@@ -56,7 +56,7 @@ func (a *app) registerSchedules() error {
 		st := schedule.NewDurableScheduleToolsWithResolver(a.durableSchedulerFor, time.Now)
 		for _, t := range []tools.Tool{st.Create(), st.List(), st.Delete()} {
 			if err := a.reg.Register(t); err != nil {
-				return fmt.Errorf("pa: register %s: %w", t.Name(), err)
+				return fmt.Errorf("sta: register %s: %w", t.Name(), err)
 			}
 		}
 		return nil
@@ -71,7 +71,7 @@ func (a *app) registerSchedules() error {
 	// way as the other session-bound event wiring.
 	onEvent := func(typ string, data any) {
 		if _, err := a.log.Append(typ, data); err != nil {
-			fmt.Fprintln(os.Stderr, "pa: "+typ+" event:", err)
+			fmt.Fprintln(os.Stderr, "sta: "+typ+" event:", err)
 		}
 	}
 	st := schedule.NewScheduleTools(eng, onEvent)
@@ -81,7 +81,7 @@ func (a *app) registerSchedules() error {
 		st.Delete(),
 	} {
 		if err := a.reg.Register(t); err != nil {
-			return fmt.Errorf("pa: register %s: %w", t.Name(), err)
+			return fmt.Errorf("sta: register %s: %w", t.Name(), err)
 		}
 	}
 	return nil
@@ -458,7 +458,7 @@ func (a *app) schedulePreStepFor(ctx context.Context, _ string, log *session.Log
 			continue
 		}
 		if _, err := log.Append(session.EventScheduleFire, session.NewScheduleFire(id, payload)); err != nil {
-			fmt.Fprintln(os.Stderr, "pa: schedule/fire event:", err)
+			fmt.Fprintln(os.Stderr, "sta: schedule/fire event:", err)
 		}
 		// Enqueue a background job executing the payload (D5: the fire event
 		// is appended above on the serial path; the job goroutine only carries
@@ -472,7 +472,7 @@ func (a *app) schedulePreStepFor(ctx context.Context, _ string, log *session.Log
 				Correlation:  jobs.CorrelationFromContext(ctx),
 				Run:          scheduleFireRun(payload),
 			}); err != nil {
-				fmt.Fprintln(os.Stderr, "pa: enqueue schedule fire job:", err)
+				fmt.Fprintln(os.Stderr, "sta: enqueue schedule fire job:", err)
 			}
 		}
 	}
@@ -497,7 +497,7 @@ func (a *app) durableSchedulePreStepFor(ctx context.Context, log *session.Log, s
 		return nil
 	}
 	if err := scheduler.Dispatch(ctx, due); err != nil {
-		fmt.Fprintln(os.Stderr, "pa: schedule dispatch:", err)
+		fmt.Fprintln(os.Stderr, "sta: schedule dispatch:", err)
 		return nil
 	}
 	return []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text(scheduleReminderPrompt(due))}}}
@@ -550,7 +550,7 @@ func (a *app) appendDurableScheduleFire(log *session.Log, due schedule.DurableDu
 			continue
 		}
 		if _, err := log.Append(session.EventScheduleFire, session.NewScheduleFireAt(record.ID, record.Prompt, record.ScheduledAt)); err != nil {
-			fmt.Fprintln(os.Stderr, "pa: schedule/fire event:", err)
+			fmt.Fprintln(os.Stderr, "sta: schedule/fire event:", err)
 			return false
 		}
 	}

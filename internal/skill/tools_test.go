@@ -8,8 +8,8 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/jabing/shutu-agent/internal/session"
-	"github.com/jabing/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/tools"
 )
 
 // skillPolicy whitelists skill_load so the tools.Registry Execute gate can run

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/jobs"
+	"github.com/shutu-ai/shutu-agent/internal/jobs"
 )
 
 // requirePwsh skips the test when no PowerShell executable resolves (the

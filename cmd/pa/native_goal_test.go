@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jabing/shutu-agent/internal/plan"
-	"github.com/jabing/shutu-agent/internal/session"
-	"github.com/jabing/shutu-agent/internal/webserver"
+	"github.com/shutu-ai/shutu-agent/internal/plan"
+	"github.com/shutu-ai/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/webserver"
 )
 
 func TestNativeGoalMutationUsesAddressedSessionRuntime(t *testing.T) {

@@ -23,7 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/workflow"
+	"github.com/shutu-ai/shutu-agent/internal/workflow"
 )
 
 //go:embed runner.mjs

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/pathsecure"
+	"github.com/shutu-ai/shutu-agent/internal/pathsecure"
 )
 
 // testOpts returns short idle/timeout windows so the real-subprocess tests are

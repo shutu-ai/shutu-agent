@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/session"
-	agenttools "github.com/jabing/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/session"
+	agenttools "github.com/shutu-ai/shutu-agent/internal/tools"
 )
 
 func TestDurableSchedulerFoldAndDispatch(t *testing.T) {

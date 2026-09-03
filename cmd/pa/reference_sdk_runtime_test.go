@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/sdkclient"
+	"github.com/shutu-ai/shutu-agent/internal/sdkclient"
 )
 
 func fileURLForWindowsPath(path string) string {

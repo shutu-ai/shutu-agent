@@ -32,15 +32,15 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/jabing/shutu-agent/internal/attachment"
-	"github.com/jabing/shutu-agent/internal/runtimectx"
-	agenttools "github.com/jabing/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/attachment"
+	"github.com/shutu-ai/shutu-agent/internal/runtimectx"
+	agenttools "github.com/shutu-ai/shutu-agent/internal/tools"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/jabing/shutu-agent/internal/llm"
-	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/session"
 )
 
 // Tool names — the dsh-aligned file tools (whitelisted when fs.enabled; see

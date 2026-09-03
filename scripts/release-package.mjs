@@ -9,7 +9,7 @@ const version = git('rev-parse', '--short', 'HEAD') || 'local'
 const defaultOutput = join(root, 'release', `shutu-agent-${version}`)
 const outputArg = process.argv.indexOf('--output')
 const output = resolve(outputArg >= 0 ? process.argv[outputArg + 1] || defaultOutput : defaultOutput)
-const binaryName = process.platform === 'win32' ? 'shutu-agent.exe' : 'shutu-agent'
+const binaryName = process.platform === 'win32' ? 'sta.exe' : 'sta'
 
 function git(...args) {
   const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' })

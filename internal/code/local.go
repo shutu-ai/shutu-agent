@@ -16,7 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/pathsecure"
+	"github.com/shutu-ai/shutu-agent/internal/pathsecure"
 )
 
 // Defaults applied when the matching RunRequest field is zero.

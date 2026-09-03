@@ -1,6 +1,6 @@
-# dsh Web 工作台 P1 页移植规格（github.com/jabing/shutu-agent · vanilla JS + Go）
+# dsh Web 工作台 P1 页移植规格（github.com/shutu-ai/shutu-agent · vanilla JS + Go）
 
-> 目标：参照 dsh web（deepseek-harness `packages/client/*`）把 github.com/jabing/shutu-agent 的主工作台页面做到「像 dsh 一样」。
+> 目标：参照 dsh web（deepseek-harness `packages/client/*`）把 github.com/shutu-ai/shutu-agent 的主工作台页面做到「像 dsh 一样」。
 > 本规格只研究 dsh 源码，可照此用零依赖 vanilla JS + CSS 写出等价页面。**不修改 dsh 源码**。
 >
 > 源码基线：`D:\dev-projects\Agent\deepseek-harness\packages\client\`
@@ -640,7 +640,7 @@ div.root  /* display:block; text-align:center; max-width:748; padding:4 (clearan
 
 ## 6. 数据需求映射 + API 缺口清单
 
-github.com/jabing/shutu-agent 现有 API（节选自任务书）：
+github.com/shutu-ai/shutu-agent 现有 API（节选自任务书）：
 `GET /api/sessions`、`GET /api/sessions/{id}/events` → `[{seq,type,time,summary,reasoning?,tool_name?,tool_output?}]`、`POST /api/sessions`、`POST /api/sessions/{id}/resume`、`POST /api/sessions/{id}/message {text}`、`GET /api/sessions/{id}/events/stream`（SSE `data:{json}`，帧类型 user/message、assistant/chunk、assistant/message、tool/result、tool/error）、`GET /api/config`、`GET /api/subagents`、`GET /api/jobs`、`GET /api/health`。
 
 ### 6.1 UI 元素 → API 字段映射

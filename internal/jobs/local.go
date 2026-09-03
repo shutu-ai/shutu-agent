@@ -10,7 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/jabing/shutu-agent/internal/runtimectx"
+	"github.com/shutu-ai/shutu-agent/internal/runtimectx"
 )
 
 // defaultMaxConcurrentJobsPerOwner is the active-job cap applied when

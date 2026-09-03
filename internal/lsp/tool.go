@@ -12,7 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	agenttools "github.com/jabing/shutu-agent/internal/tools"
+	agenttools "github.com/shutu-ai/shutu-agent/internal/tools"
 	"io"
 	"net/url"
 	"os"

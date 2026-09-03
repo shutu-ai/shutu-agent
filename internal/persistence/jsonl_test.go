@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/session"
 )
 
 const jsonlCrashHelperEnv = "SHUTU_JSONL_WRITE_FAULT_HELPER"

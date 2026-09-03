@@ -23,7 +23,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/session"
 )
 
 // Memo is one conversation-derived memory row.

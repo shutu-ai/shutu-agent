@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	agenttools "github.com/jabing/shutu-agent/internal/tools"
+	agenttools "github.com/shutu-ai/shutu-agent/internal/tools"
 )
 
 func TestResolveInsideRejectsEscape(t *testing.T) {

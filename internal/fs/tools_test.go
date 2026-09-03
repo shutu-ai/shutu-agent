@@ -13,8 +13,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jabing/shutu-agent/internal/attachment"
-	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/attachment"
+	"github.com/shutu-ai/shutu-agent/internal/session"
 )
 
 func TestDecodeWebPConfigReadsVP8XCanvas(t *testing.T) {

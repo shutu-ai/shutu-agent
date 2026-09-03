@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jabing/shutu-agent/internal/runtimectx"
-	"github.com/jabing/shutu-agent/internal/session"
-	agenttools "github.com/jabing/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/runtimectx"
+	"github.com/shutu-ai/shutu-agent/internal/session"
+	agenttools "github.com/shutu-ai/shutu-agent/internal/tools"
 )
 
 // DSHTools is the model-facing goal/todo surface. It deliberately reuses the

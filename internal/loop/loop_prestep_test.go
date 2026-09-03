@@ -8,9 +8,9 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/jabing/shutu-agent/internal/llm"
-	"github.com/jabing/shutu-agent/internal/prompt"
-	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/prompt"
+	"github.com/shutu-ai/shutu-agent/internal/session"
 )
 
 func TestRunPreStepInjectorWithErrorStopsBeforeProvider(t *testing.T) {

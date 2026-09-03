@@ -13,10 +13,10 @@ import (
 	"strings"
 	"unicode/utf16"
 
-	"github.com/jabing/shutu-agent/internal/meter"
-	"github.com/jabing/shutu-agent/internal/projection"
-	"github.com/jabing/shutu-agent/internal/session"
-	"github.com/jabing/shutu-agent/internal/store"
+	"github.com/shutu-ai/shutu-agent/internal/meter"
+	"github.com/shutu-ai/shutu-agent/internal/projection"
+	"github.com/shutu-ai/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/store"
 )
 
 // Version 2 invalidates checkpoints written by the old session.list path,

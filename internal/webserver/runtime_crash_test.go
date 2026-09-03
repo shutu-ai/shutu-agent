@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/jabing/shutu-agent/internal/crashboundary"
+	"github.com/shutu-ai/shutu-agent/internal/crashboundary"
 )
 
 func TestNativeCrashBoundariesAreMachineReadable(t *testing.T) {

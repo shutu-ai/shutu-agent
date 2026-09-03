@@ -15,10 +15,10 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/jabing/shutu-agent/internal/attachment"
-	"github.com/jabing/shutu-agent/internal/config"
-	"github.com/jabing/shutu-agent/internal/fs"
-	"github.com/jabing/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/attachment"
+	"github.com/shutu-ai/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/fs"
+	"github.com/shutu-ai/shutu-agent/internal/tools"
 )
 
 // registerFs creates the local FileService (root = fs.root, defaulting to
@@ -43,7 +43,7 @@ func (a *app) registerFs() error {
 	// /resume) is honored the same way as the other register* wiring.
 	onEvent := func(typ string, data any) {
 		if _, err := a.log.Append(typ, data); err != nil {
-			fmt.Fprintln(os.Stderr, "pa: "+typ+" event:", err)
+			fmt.Fprintln(os.Stderr, "sta: "+typ+" event:", err)
 		}
 	}
 	ft := fs.NewFsTools(svc, onEvent)
@@ -55,7 +55,7 @@ func (a *app) registerFs() error {
 	}, a.cfg.LLM.Multimodal.MaxImageBytes)
 	ft.SetErrorSink(func(typ string, data any) error {
 		if a.log == nil {
-			return fmt.Errorf("pa: no session log for %s event", typ)
+			return fmt.Errorf("sta: no session log for %s event", typ)
 		}
 		_, err := a.log.Append(typ, data)
 		return err
@@ -68,7 +68,7 @@ func (a *app) registerFs() error {
 	}
 	for _, tl := range fileTools {
 		if err := a.reg.Register(tl); err != nil {
-			return fmt.Errorf("pa: register %s: %w", tl.Name(), err)
+			return fmt.Errorf("sta: register %s: %w", tl.Name(), err)
 		}
 	}
 	return nil

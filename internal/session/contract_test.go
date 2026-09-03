@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/jabing/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
 )
 
 func TestCanonicalApprovalProjectionUsesClosedOutcomeVocabulary(t *testing.T) {

@@ -9,9 +9,9 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/jabing/shutu-agent/internal/llm"
-	"github.com/jabing/shutu-agent/internal/session"
-	"github.com/jabing/shutu-agent/internal/team"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/team"
 )
 
 // Entity is the lossless, provider-neutral state of one durable record. Data

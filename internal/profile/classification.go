@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/jabing/shutu-agent/internal/code"
+	"github.com/shutu-ai/shutu-agent/internal/code"
 )
 
 // Classification is the release-composition class assigned by the pinned

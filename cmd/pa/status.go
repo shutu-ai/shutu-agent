@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/interact"
-	"github.com/jabing/shutu-agent/internal/store"
-	"github.com/jabing/shutu-agent/internal/webserver"
+	"github.com/shutu-ai/shutu-agent/internal/interact"
+	"github.com/shutu-ai/shutu-agent/internal/store"
+	"github.com/shutu-ai/shutu-agent/internal/webserver"
 )
 
 // sessionStatus returns the live sidebar status for one session (dsh

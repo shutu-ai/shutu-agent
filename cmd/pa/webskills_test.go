@@ -9,11 +9,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jabing/shutu-agent/internal/config"
-	"github.com/jabing/shutu-agent/internal/session"
-	"github.com/jabing/shutu-agent/internal/skill"
-	"github.com/jabing/shutu-agent/internal/tools"
-	"github.com/jabing/shutu-agent/internal/webserver"
+	"github.com/shutu-ai/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/skill"
+	"github.com/shutu-ai/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/webserver"
 )
 
 // skillWebFixture builds an app wired for the skill-page dispatcher with

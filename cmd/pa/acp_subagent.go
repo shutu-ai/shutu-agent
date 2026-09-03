@@ -7,11 +7,11 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/jabing/shutu-agent/internal/config"
-	"github.com/jabing/shutu-agent/internal/prompt"
-	"github.com/jabing/shutu-agent/internal/session"
-	"github.com/jabing/shutu-agent/internal/subagent"
-	"github.com/jabing/shutu-agent/internal/tools"
+	"github.com/shutu-ai/shutu-agent/internal/config"
+	"github.com/shutu-ai/shutu-agent/internal/prompt"
+	"github.com/shutu-ai/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/subagent"
+	"github.com/shutu-ai/shutu-agent/internal/tools"
 )
 
 // newACPSubagent creates the subagent runtime and tools owned by one ACP
@@ -80,7 +80,7 @@ func newACPSubagentWithConfig(a *app, id string, log *session.Log, registry *too
 			return
 		}
 		if _, err := log.Append(typ, data); err != nil {
-			fmt.Fprintln(os.Stderr, "pa: "+typ+" event:", err)
+			fmt.Fprintln(os.Stderr, "sta: "+typ+" event:", err)
 		}
 	}
 	st := subagent.NewSubagentToolsWithContinuable(rt, cfg.Subagent.MaxDepth, func() string { return id }, onEvent, true)

@@ -9,8 +9,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/jabing/shutu-agent/internal/plan"
-	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/plan"
+	"github.com/shutu-ai/shutu-agent/internal/session"
 )
 
 // dsh's default deployment cap. A Goal may carry a smaller durable cap.

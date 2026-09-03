@@ -3,8 +3,8 @@ package session
 import (
 	"testing"
 
-	"github.com/jabing/shutu-agent/internal/contractfixture"
-	"github.com/jabing/shutu-agent/internal/llm"
+	"github.com/shutu-ai/shutu-agent/internal/contractfixture"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
 )
 
 func TestCoreTurnReplayFixtureValidatesAndDerives(t *testing.T) {

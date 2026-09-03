@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jabing/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/session"
 )
 
 // TestSessionTelemetryRedactsHostileCredentialDiagnostics is the egress

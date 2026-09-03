@@ -1,10 +1,10 @@
-# dsh Web 工作台 P2 页移植规格（github.com/jabing/shutu-agent · 侧栏 + 会话管理）
+# dsh Web 工作台 P2 页移植规格（github.com/shutu-ai/shutu-agent · 侧栏 + 会话管理）
 
-> 目标：参照 dsh web 的**侧栏（`ui-sidebar`）+ 会话浏览区（`ui-workspace`）**，把 github.com/jabing/shutu-agent 的左侧栏做到「像 dsh 一样」，可用零依赖 vanilla JS + CSS 照此写出等价实现。
-> 本规格只研究 dsh 源码，**不修改 dsh 源码**，不写 github.com/jabing/shutu-agent 产品代码。
+> 目标：参照 dsh web 的**侧栏（`ui-sidebar`）+ 会话浏览区（`ui-workspace`）**，把 github.com/shutu-ai/shutu-agent 的左侧栏做到「像 dsh 一样」，可用零依赖 vanilla JS + CSS 照此写出等价实现。
+> 本规格只研究 dsh 源码，**不修改 dsh 源码**，不写 github.com/shutu-ai/shutu-agent 产品代码。
 >
 > 源码基线：`D:\dev-projects\Agent\deepseek-harness\packages\client\`
-> 覆盖包：`ui-sidebar`（侧栏壳）、`ui-workspace`（会话浏览区：节头/搜索/列表/行/菜单/弹窗）、`ui-layout`（折叠状态，P1 已实现，P2 只核对）、`ui-settings-general`（侧栏脚部「设置」触发行，仅外观）、`session-title`（标题生成规则，供对照 github.com/jabing/shutu-agent 的 title 语义）。
+> 覆盖包：`ui-sidebar`（侧栏壳）、`ui-workspace`（会话浏览区：节头/搜索/列表/行/菜单/弹窗）、`ui-layout`（折叠状态，P1 已实现，P2 只核对）、`ui-settings-general`（侧栏脚部「设置」触发行，仅外观）、`session-title`（标题生成规则，供对照 github.com/shutu-ai/shutu-agent 的 title 语义）。
 > 前置：P1 规格（`.web-port/P1-spec.md`）已实现三栏壳（侧栏默认 280px、可拖 264–420、<1024px 收 56px 轨）。P2 只做**侧栏内部内容 + 折叠交互**，不重做壳。
 
 ---
@@ -312,9 +312,9 @@ button.trigger          /* 42px 行, r12, gap8, padding 0 10px 0 8px, margin 4px
 
 ## 6. 数据映射 + API 缺口
 
-### 6.1 UI 元素 → github.com/jabing/shutu-agent API 字段映射
+### 6.1 UI 元素 → github.com/shutu-ai/shutu-agent API 字段映射
 
-| UI 元素 | 所需数据 | 来源（github.com/jabing/shutu-agent） | 状态 |
+| UI 元素 | 所需数据 | 来源（github.com/shutu-ai/shutu-agent） | 状态 |
 |---|---|---|---|
 | 会话行 id / 标题 | `id`、`title`（首条 user 消息，dsh 语义一致） | `GET /api/sessions` | ✅ |
 | 空会话占位行（标题「新会话」） | `blank` | `GET /api/sessions` | ✅ |
@@ -325,7 +325,7 @@ button.trigger          /* 42px 行, r12, gap8, padding 0 10px 0 8px, margin 4px
 | 切换会话 | — | `POST /api/sessions/{id}/resume` + `GET events` + SSE（P1 已接） | ✅ |
 | 运行中状态点（蓝） | `running` | — | ❌ **缺：列表 running 字段**（可尝试用 `GET /api/jobs` 关联 session 推断，见 §6.2-②） |
 | 完成未读绿点 | `completed`（运行结束未打开） | — | ❌ **缺：completed 字段**（P2 可不做该点） |
-| 等待交互琥珀点（审批/计划/回答） | `pendingInteraction` | — | ❌ **缺**（github.com/jabing/shutu-agent 无审批/计划模式 → P2 不做） |
+| 等待交互琥珀点（审批/计划/回答） | `pendingInteraction` | — | ❌ **缺**（github.com/shutu-ai/shutu-agent 无审批/计划模式 → P2 不做） |
 | 子代理运行计数 | `runningSubagentCount` | `GET /api/subagents` | ⚠️ 可关联推断，P2 可不做 |
 | 行菜单·重命名 | — | — | ❌ **缺：rename 端点** |
 | 行菜单·归档/删除 | — | — | ❌ **缺：delete/archive 端点** |
@@ -345,7 +345,7 @@ button.trigger          /* 42px 行, r12, gap8, padding 0 10px 0 8px, margin 4px
    - `POST /api/sessions/{id}/fork` → 分叉（P2 可不做）。
 2. **列表状态字段**：`GET /api/sessions` 增加 `running`、`completed`（可选 `pending_interaction`）；或提供全局会话事件推送（SSE/WS）让列表免轮询。
 3. **搜索**：`GET /api/sessions?q=…`（标题/内容匹配，分页）。P2 无该端点时可降级为**前端标题子串过滤**，并隐藏「内容搜索不可用」提示之外的离线痕迹。
-4. **Workspace 概念**：github.com/jabing/shutu-agent 无工作区；「按工作区分组」「添加工作区」在 P2 隐藏，固定单列表。
+4. **Workspace 概念**：github.com/shutu-ai/shutu-agent 无工作区；「按工作区分组」「添加工作区」在 P2 隐藏，固定单列表。
 5. **排序持久化**：无拖拽重排端点 → P2 仅 `updated_at` 降序。
 6. **拖拽**：不做（依赖排序端点）。
 7. **列表变更推送**：无 → 轮询刷新（动作后立即 + 定时兜底）。

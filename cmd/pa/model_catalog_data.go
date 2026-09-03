@@ -164,10 +164,10 @@ var builtinModelCatalog = map[string][]customModel{
 func init() {
 	var file generatedModelCatalogFile
 	if err := json.Unmarshal(generatedModelCatalogBytes, &file); err != nil {
-		panic(fmt.Sprintf("pa: decode generated model catalog: %v", err))
+		panic(fmt.Sprintf("sta: decode generated model catalog: %v", err))
 	}
 	if file.SchemaVersion != 1 || file.Source != generatedModelCatalogSource {
-		panic(fmt.Sprintf("pa: unsupported generated model catalog %s version %d, want %s version 1", file.Source, file.SchemaVersion, generatedModelCatalogSource))
+		panic(fmt.Sprintf("sta: unsupported generated model catalog %s version %d, want %s version 1", file.Source, file.SchemaVersion, generatedModelCatalogSource))
 	}
 	for _, provider := range file.Providers {
 		builtinModelCatalog[provider.ID] = append(builtinModelCatalog[provider.ID], provider.Models...)
