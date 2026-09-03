@@ -142,6 +142,64 @@ func TestProcessTreeEnforcesActiveProcessLimit(t *testing.T) {
 	}
 }
 
+func TestProcessTreeEnforcesProcessMemory(t *testing.T) {
+	if os.Getenv("SHUTU_MEMORY_HELPER") == "1" {
+		goFile := os.Getenv("SHUTU_MEMORY_GO")
+		for {
+			if _, err := os.Stat(goFile); err == nil {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+		data := make([]byte, 128*1024*1024)
+		for index := range data {
+			data[index] = byte(index)
+		}
+		if len(data) != 128*1024*1024 {
+			os.Exit(1)
+		}
+		return
+	}
+
+	goFile := t.TempDir() + `\go`
+	cmd := exec.Command(os.Args[0], "-test.run", "^TestProcessTreeEnforcesProcessMemory$")
+	cmd.Env = append(os.Environ(), "SHUTU_MEMORY_HELPER=1", "SHUTU_MEMORY_GO="+goFile)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start memory-bound child: %v", err)
+	}
+	tree, err := attachProcessTree(cmd, processTreeLimits{memoryBytes: 64 * 1024 * 1024})
+	if err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		t.Fatalf("attach memory-limited process tree: %v", err)
+	}
+	defer tree.Close()
+	var info windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+	if err := windows.QueryInformationJobObject(tree.job, windows.JobObjectExtendedLimitInformation, uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)), nil); err != nil {
+		t.Fatalf("query memory-limited job: %v", err)
+	}
+	if info.BasicLimitInformation.LimitFlags&windows.JOB_OBJECT_LIMIT_PROCESS_MEMORY == 0 ||
+		info.ProcessMemoryLimit != 64*1024*1024 {
+		t.Fatalf("job memory limit = flags 0x%x bytes %d, want flag and 64MiB", info.BasicLimitInformation.LimitFlags, info.ProcessMemoryLimit)
+	}
+	if err := os.WriteFile(goFile, []byte("go"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	wait := make(chan error, 1)
+	go func() { wait <- cmd.Wait() }()
+	select {
+	case err := <-wait:
+		if err == nil {
+			t.Fatal("memory-bound child exited successfully instead of hitting the job limit")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("memory-bound child was not terminated by the Job Object memory limit")
+	}
+}
+
 func TestProcessTreeActiveProcessLimitChild(t *testing.T) {
 	if os.Getenv("SHUTU_TREE_LIMIT_CHILD") != "1" {
 		t.Skip("process-tree active-limit child")

@@ -556,6 +556,15 @@ func recoverWindowsACLJournalFor(name string) error {
 	if err := json.Unmarshal(data, &state); err != nil {
 		return fmt.Errorf("journal %s is unreadable: %w", path, err)
 	}
+	if _, err := os.Stat(state.Path); errors.Is(err, os.ErrNotExist) {
+		// The workspace was already removed after the crash. There is no
+		// surviving object to restore and no grant can escape; finalize the
+		// journal instead of making startup depend on deleted test fixtures.
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
 	originalACL, err := base64.StdEncoding.DecodeString(state.OriginalACL)
 	if err != nil {
 		return fmt.Errorf("journal %s has an invalid DACL snapshot: %w", path, err)

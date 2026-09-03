@@ -5123,3 +5123,45 @@ Evidence: `internal/code/process_tree_unix_test.go`,
 `internal/profile/classification.go`, and
 `internal/profile/profile_test.go`. A3.3 is done. Required blockers are now
 A3.1 and A9.3-A9.5 plus optional A8.3.
+
+## 2026-09-03 A3.1 containment and resource closure
+
+- Windows ACL closure was retested on the replacement development host.
+  `CreateRestrictedToken` and its production read-only restricting-SID set pass,
+  the token has three zero-attribute restricting SIDs, native `DeleteFileW` /
+  `RemoveDirectoryW` pass in workspace, readonly/outside deletes return
+  `ERROR_ACCESS_DENIED`, timeout/cancel cleanup is idempotent, crash recovery
+  restores the exact raw security descriptor, and the three fault phases recover
+  idempotently. The restoration now persists the semantic DACL control word and
+  uses `SetFileSecurityW` only when `SetNamedSecurityInfoW` normalizes
+  `SE_DACL_AUTO_INHERITED`.
+- Linux bwrap hard resource limits now use `prlimit --as --fsize --nproc`
+  before exec instead of a second shell `ulimit` inside the namespace. A host
+  without `prlimit` no longer advertises controlled bwrap modes. Real Linux
+  fixtures cover read-only denial, network-interface hiding, file-size, memory,
+  bounded fork bomb, owned process-group teardown, credential-shaped
+  environment scrubbing, and the hostile oversized Node frame.
+- Windows Job Objects now enforce per-process memory in addition to CPU and
+  active-process ceilings. `TestProcessTreeEnforcesProcessMemory` starts a real
+  child, configures a 64 MiB ceiling, releases it to allocate/write 128 MiB, and
+  proves the kernel terminates it. A controlled-shell oracle proves a
+  credential-shaped parent variable does not enter either the Windows or Linux
+  child.
+- Startup recovery now treats a crash journal whose workspace path no longer
+  exists as a safe no-op and finalizes/removes the journal. This prevents a
+  deleted test or temporary fixture from blocking every later startup. The
+  regression is `TestWindowsACLRecoveryFinalizesMissingWorkspaceJournal`.
+- The Windows A3.1 registered command passes across `internal/...`; the Linux
+  cross-compiled `internal/code` A3.1 matrix passes in Ubuntu 22.04 WSL with
+  bubblewrap 0.6.1 and Node 24.19.0. The Windows backend remains explicitly
+  containment-only: strong/network isolation stays fail-closed rather than
+  being claimed. Overall equivalence remains fail-closed for A9.3-A9.5 plus
+  optional A8.3.
+
+Evidence: `internal/code/local.go`, `internal/code/windows_acl.go`,
+`internal/code/windows_acl_test.go`,
+`internal/code/windows_acl_delete_diagnostic_test.go`,
+`internal/code/windows_acl_restricted_token_diagnostic_test.go`,
+`internal/code/process_tree_windows_test.go`,
+`internal/code/process_tree_unix_test.go`, and
+`internal/code/code_test.go`.

@@ -15,4 +15,8 @@ type processTreeLimits struct {
 	// job, including the direct worker. Backends without an equivalent kernel
 	// primitive must reject the run rather than treat this as best effort.
 	maxProcesses int
+	// memoryBytes is the per-process commit/address-space ceiling. Windows
+	// Job Objects expose this as PROCESS_MEMORY_LIMIT; POSIX controlled shells
+	// install RLIMIT_AS before sandbox exec.
+	memoryBytes int64
 }

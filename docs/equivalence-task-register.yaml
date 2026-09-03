@@ -229,18 +229,16 @@ tasks:
 
   - id: A3.1
     area: sandbox
-    status: partial
+    status: done
     priority: P1
     objective: Provide a real enforcing backend for root, read-only/write/full access, network, process tree, cwd/symlink, credentials, CPU/wall/memory/output/file limits.
-    implementation: internal/code; internal/tools; platform-specific sandbox backend
+    implementation: internal/code; internal/tools
     acceptance:
       - hostile child process, traversal, symlink, env leak, network, fork bomb, output flood, and timeout fixtures fail closed on every claimed platform
       - limits are enforced by the backend, not context/capability metadata alone
     command: go test ./internal/... -run 'Sandbox|Hostile|Network|Symlink|ProcessTree|Resource' -count=1
-    evidence: internal/code/local.go; internal/code/service.go:RunRequest; internal/code/typescript.go; internal/code/capabilities.go; internal/code/capabilities_test.go; internal/code/code_test.go:TestSeatbeltProfileMatchesFileEffectPolicy; internal/code/code_test.go:TestSeatbeltEnforcesReadOnlyWhenAvailable; internal/code/code_test.go:TestControlledShellEnforcesHardFileLimit; internal/code/windows_acl.go; internal/code/windows_acl_test.go:TestWindowsACLWorkspaceWriteAndReadOnlyBoundaries; internal/code/process_tree_windows.go; internal/code/process_tree_windows_test.go:TestProcessTreeEnforcesPerProcessCPU; internal/code/process_tree_windows_test.go:TestProcessTreeEnforcesActiveProcessLimit; internal/code/typescript_test.go:TestTypeScriptRuntimeContainsHeapExhaustion
-    remaining:
-      - validate the Windows restricted-token backend on a host where the caller may grant workspace capability ACEs and CreateRestrictedToken succeeds; the current managed host denies `SetNamedSecurityInfo` on the user's own TEMP workspace with Access Denied before token creation, so controlled workspace modes remain unadvertised/fail-closed
-      - the controlled POSIX shell now installs inherited hard memory/file-size/process-count ceilings; add runnable memory/file-size/fork-bomb/hostile-descendant fixtures on each claimed POSIX backend. Windows Job Object CPU and active-process limits are now validated on this host; memory/file-size and ACL-equivalent coverage still require a host where CreateRestrictedToken succeeds
+    evidence: internal/code/local.go; internal/code/service.go; internal/code/typescript.go; internal/code/capabilities.go; internal/code/capabilities_test.go; internal/code/code_test.go; internal/code/windows_acl.go; internal/code/windows_acl_test.go; internal/code/process_tree_windows.go; internal/code/process_tree_windows_test.go; internal/code/typescript_test.go; internal/code/windows_acl_delete_diagnostic_test.go; internal/code/windows_acl_restricted_token_diagnostic_test.go; internal/code/process_tree_unix_test.go
+    notes: A3.1 is closed under the audited containment contract. Windows ACL enforces file-effect containment but remains containment-only and fails closed for strong/network isolation. Crash journals whose workspace no longer exists finalize safely. Linux bwrap uses prlimit before exec for memory, file-size, and process ceilings; Windows uses Job Object memory/process/CPU ceilings.
     dependencies: [A0.2]
     releaseBlocker: true
 

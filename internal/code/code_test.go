@@ -311,7 +311,7 @@ func TestEngineDefaultWorkspaceModeFailsClosedWithoutEnforcingBackend(t *testing
 	e := NewEngine(nil)
 	defer e.Close()
 	cap := e.prov.(capabilityReporter).Capabilities()
-	if cap.StrongIsolation {
+	if cap.StrongIsolation || hasSandboxMode(cap, SandboxWorkspaceWrite) {
 		t.Skip("host provides the enforcing workspace backend")
 	}
 	if _, err := e.Run(context.Background(), RunRequest{Code: "echo must-not-run", Cwd: testCwd(t)}); !errors.Is(err, ErrSandboxUnavailable) {
@@ -370,7 +370,7 @@ func TestEngineFailsClosedWhenIsolationIsRequired(t *testing.T) {
 	if _, err := e.Run(context.Background(), RunRequest{Code: "echo hi", AllowNetwork: true}); !errors.Is(err, ErrSandboxUnavailable) {
 		t.Fatalf("network access error = %v, want ErrSandboxUnavailable", err)
 	}
-	if cap.StrongIsolation {
+	if cap.StrongIsolation || hasSandboxMode(cap, SandboxReadOnly) {
 		root := t.TempDir()
 		cwd := filepath.Join(root, "cwd")
 		if err := os.Mkdir(cwd, 0o755); err != nil {
@@ -684,6 +684,40 @@ func TestControlledShellBlocksBoundedForkBomb(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(cwd, "cwd")); err != nil && !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("stat cwd: %v", err)
+	}
+}
+
+func TestControlledShellBlocksCredentialEnvLeak(t *testing.T) {
+	const probe = "SHUTU_TEST_API_KEY"
+	const secret = "must-not-reach-child"
+	t.Setenv(probe, secret)
+	p := newLocalProvider()
+	defer p.Close()
+	if !hasSandboxMode(p.Capabilities(), SandboxWorkspaceWrite) {
+		t.Skip("no enforcing controlled-shell backend on this host")
+	}
+	code := `if [ -n "$SHUTU_TEST_API_KEY" ]; then echo LEAKED; else echo CLEAN; fi`
+	if runtime.GOOS == "windows" {
+		code = `if defined SHUTU_TEST_API_KEY (echo LEAKED) else (echo CLEAN)`
+	}
+	cwd := t.TempDir()
+	result, err := p.Run(context.Background(), RunRequest{
+		Mode: SandboxWorkspaceWrite,
+		Root: cwd,
+		Cwd:  cwd,
+		Code: code,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if result.ExitCode != 0 || strings.Contains(result.Stdout, "LEAKED") {
+		t.Fatalf("credential-shaped environment leaked: %+v", result)
+	}
+	if !strings.Contains(result.Stdout, "CLEAN") {
+		t.Fatalf("environment probe did not run: %+v", result)
+	}
+	if strings.Contains(result.Stdout+result.Stderr, secret) {
+		t.Fatalf("secret materialized in child output: %+v", result)
 	}
 }
 

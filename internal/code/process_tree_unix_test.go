@@ -94,7 +94,10 @@ func TestProcessTreeKillsBoundedForkBombGroup(t *testing.T) {
 		if errors.Is(err, syscall.ESRCH) {
 			return
 		}
-		if err == nil || !errors.Is(err, syscall.EPERM) {
+		// A live-but-reparented descendant can briefly make the group check
+		// succeed. That still means teardown has not reached quiescence, so it
+		// is retryable exactly like an EPERM probe.
+		if err != nil && !errors.Is(err, syscall.EPERM) {
 			t.Fatalf("owned process group still addressable after kill: %v", err)
 		}
 		if time.Now().After(deadline) {

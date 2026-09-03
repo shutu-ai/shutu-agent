@@ -1,6 +1,6 @@
 schemaVersion: 1
 kind: shutu-dsh-capability-equivalence
-asOf: 2026-09-02
+asOf: 2026-09-03
 status: fail
 claimAllowed: false
 
@@ -201,11 +201,10 @@ modelSurface:
     - mcp_transport_close_interrupt_boundary
     - projection_cache_monotonic_concurrent_rebuild
     - reference_acp_runtime_client_matrix
-    - code_mode_cross_platform_worker_resource_matrix
+  - code_mode_cross_platform_worker_resource_matrix
+  - windows_acl_containment_resource_limits
 
 openBlockers:
-  - A3.1
-  - A8.3
   - A9.3
   - A9.4
   - A9.5

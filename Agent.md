@@ -95,7 +95,7 @@ On the current managed Windows host, the controlled-shell blocker is more precis
 
 The SQLite projection cache is durable, versioned, committed-revision checkpointing. It is performance and reconnect hardening; canonical projection completeness is proven separately by A8.1's strict rebuild/live Cursor and cross-entry suite.
 
-The release gate must continue to require evidence for A3.1 and A9.3-A9.5. Team and architecture-specific exclusions remain optional only when they are represented as such in the manifest, profile, task register, and status documents.
+The release gate must continue to require evidence for A9.3-A9.5. Team and architecture-specific exclusions remain optional only when they are represented as such in the manifest, profile, task register, and status documents.
 
 A9.3 now has a bounded cross-process starting matrix: SQLite process death must
 leave only the committed prefix, the production restart path may append only
@@ -515,11 +515,11 @@ present, `sourceEventSeqs`; opaque event data remains intact. Keep
 `session.WireEvent`, `sdkclient.SessionEvent`, and the generated protocol schema
 in sync, including the replacement-object form of `surfaceOp`.
 
-Audit counting rule (2026-09-02): the task register is authoritative. It has
-47 tasks: 42 done, 4 partial, and 1 open. Therefore there are 5 non-done
-tasks; 4 are required-profile release blockers and A8.3 is the optional-profile
-partial. Any display showing 16 is stale or is counting an optional/duplicate
-entry; it must not override the manifest, register, or generated report.
+Audit counting rule (2026-09-03): the task register is authoritative. It has
+47 tasks: 43 done, 3 partial, and 1 open. Therefore there are 4 non-done
+tasks; A9.3-A9.5 are required-profile release blockers and A8.3 is the
+optional-profile partial. Any stale or duplicate count must not override the
+manifest, register, or generated report.
 
 Verification note (2026-09-01): on the managed Windows host, the targeted
 package suite, `go vet ./...`, and a full `go test -p 1 ./...` pass when Go's
@@ -664,12 +664,11 @@ id, history, trajectory surface, and projection cursor. Evidence:
 strengthens A8.1 external evidence. A9.1's completed cross-entry suite supplies
 the broader runtime/restart oracle.
 
-Latest audit status (2026-09-02): `docs/equivalence-task-register.yaml` has
-47 tasks: 42 done, 4 partial, and 1 open. Therefore there are 5 non-done
-tasks, not 16; 4 are required release blockers and A8.3 is the optional
-profile task. A7.3 and A3.3 are done. The release report must be regenerated
-and remains expected to be `fail` with `claimAllowed=false` until A3.1 and
-A9.3-A9.5 pass their registered gates.
+Latest audit status (2026-09-03): `docs/equivalence-task-register.yaml` has
+47 tasks: 43 done, 3 partial, and 1 open. A3.1 is done under the containment
+contract, with Windows ACL and Linux bubblewrap evidence. A7.3 and A3.3 are
+done. The release report must be regenerated and remains expected to be `fail`
+with `claimAllowed=false` until A9.3-A9.5 pass their registered gates.
 
 MCP reconnect generation correction (2026-09-01): reconnect now tracks
 in-flight operations per connection generation. A replacement generation may

@@ -1050,7 +1050,7 @@ limits; and the strict race/leak/fault/security/performance CI gate.
 
 ### A3. P1 安全执行：sandbox 必须是实际 enforcement
 
-- [ ] A3.1 为每个支持平台提供可证明的 enforcing backend：workspace root、
+- [x] A3.1 为每个支持平台提供可证明的 enforcing backend：workspace root、
   read-only/workspace-write/full-access、network、process tree、cwd/symlink
   traversal、credential exposure、CPU/wall/memory/output/file limits 均由
   backend 强制，而不是只写入 context 或 capability 字段。

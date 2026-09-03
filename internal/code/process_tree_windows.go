@@ -30,6 +30,14 @@ func attachProcessTree(cmd *exec.Cmd, limits processTreeLimits) (processTree, er
 	}
 	info := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{}
 	info.BasicLimitInformation.LimitFlags = windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+	if limits.memoryBytes > 0 {
+		if limits.memoryBytes > int64(math.MaxInt) {
+			_ = windows.CloseHandle(job)
+			return processTree{}, fmt.Errorf("code: invalid process memory limit %d", limits.memoryBytes)
+		}
+		info.BasicLimitInformation.LimitFlags |= windows.JOB_OBJECT_LIMIT_PROCESS_MEMORY
+		info.ProcessMemoryLimit = uintptr(limits.memoryBytes)
+	}
 	if limits.perProcessCPU > 0 {
 		// Windows Job Object CPU limits use 100-nanosecond units, represented by
 		// a signed LARGE_INTEGER. Keep the conversion explicit and reject values

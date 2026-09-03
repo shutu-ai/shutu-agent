@@ -17,9 +17,11 @@
 //   - output quota: Stdout and Stderr are each capped at RunRequest.MaxOutput
 //     bytes (default 64KiB); overflow is truncated and Result.Truncated is
 //     set;
-//   - child resource ceilings: controlled POSIX shell runs inherit hard
-//     virtual-memory, file-size, and process-count limits; Windows uses the
-//     Job Object process-tree boundary where the host supports it;
+//   - child resource ceilings: Linux controlled shells use prlimit before
+//     sandbox exec to install hard virtual-memory, file-size, and
+//     process-count limits. macOS uses inherited shell hard limits. Windows
+//     uses Job Object per-process memory and active-process ceilings where the
+//     host supports it; Windows ACL does not claim a native per-file quota.
 //   - sandbox cwd: execution happens in an isolated working directory,
 //     defaulting to <cwd base>/.sandbox and created on demand;
 //   - default no network: on Linux, the bubblewrap backend is advertised as

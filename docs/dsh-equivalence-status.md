@@ -168,12 +168,6 @@
 `docs/equivalence-manifest.yaml` 是唯一 release-status source。当前 required
 blocker IDs 必须与下列列表一致：
 
-- A3.1
-- A3.3
-- A7.3
-- A8.1
-- A9.1
-- A9.2
 - A9.3
 - A9.4
 - A9.5

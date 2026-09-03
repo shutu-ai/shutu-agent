@@ -587,6 +587,34 @@ func TestWindowsACLCrashRecovery(t *testing.T) {
 	t.Log("09 recovery journal finalized")
 }
 
+func TestWindowsACLRecoveryFinalizesMissingWorkspaceJournal(t *testing.T) {
+	root := t.TempDir()
+	missing := filepath.Join(root, "removed-workspace")
+	capability, err := windows.StringToSid(workspaceWriteSID(missing))
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := windowsACLJournal{
+		Version:       1,
+		Path:          missing,
+		OriginalACL:   base64.StdEncoding.EncodeToString([]byte("missing-workspace")),
+		DACLProtected: true,
+		DACLControl:   windows.SE_DACL_PROTECTED,
+		TrusteeSID:    capability.String(),
+		CreatedAt:     time.Now().UTC().Format(time.RFC3339),
+	}
+	journalPath, err := writeWindowsACLJournal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := recoverWindowsACLJournalFor(filepath.Base(journalPath)); err != nil {
+		t.Fatalf("recovery with missing workspace: %v", err)
+	}
+	if _, err := os.Stat(journalPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing-workspace journal remains: %v", err)
+	}
+}
+
 func TestWindowsACLCrashRecoveryFaultMatrix(t *testing.T) {
 	requireWindowsACL(t)
 	for _, tc := range []struct {

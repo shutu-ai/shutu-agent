@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -65,6 +66,11 @@ type localProvider struct {
 	// namespace probe. A filesystem sandbox without this bit must not claim
 	// that it enforces the no-network policy.
 	bwrapNetwork bool
+	// prlimit is the Linux util-linux executor that installs hard rlimits
+	// before exec. It is required for controlled bwrap modes so memory,
+	// file-size, and process ceilings are kernel-enforced rather than left to
+	// shell-builtin behavior.
+	prlimit string
 	// seatbelt is the macOS file-effect backend. It intentionally does not
 	// advertise network isolation: the profile below mirrors DSH's file-only
 	// sandbox seam and leaves that policy unsupported on this backend.
@@ -135,12 +141,23 @@ func NewLocalProvider() Provider { return newLocalProvider() }
 
 func newLocalProvider() *localProvider {
 	bwrap, network := detectBwrap()
+	prlimit := ""
+	if bwrap != "" {
+		if found, err := exec.LookPath("prlimit"); err == nil {
+			prlimit = found
+		} else {
+			// A file-only bwrap backend is useful for accidental-write
+			// containment, but A3.1's controlled-shell contract also requires
+			// resource ceilings. Do not advertise a partial backend as strong.
+			bwrap, network = "", false
+		}
+	}
 	seatbelt := ""
 	if bwrap == "" {
 		seatbelt = detectSeatbelt()
 	}
 	return &localProvider{
-		bwrap: bwrap, bwrapNetwork: network, seatbelt: seatbelt,
+		bwrap: bwrap, bwrapNetwork: network, prlimit: prlimit, seatbelt: seatbelt,
 		windowsACL:        windowsACLBackendAvailable(),
 		active:            make(map[*exec.Cmd]chan struct{}),
 		aclWorkspaceLocks: make(map[string]*sync.Mutex),
@@ -187,7 +204,7 @@ func (p *localProvider) Capabilities() SandboxCapabilities {
 	case p.bwrap != "":
 		cap.Backend = "bubblewrap"
 		cap.IsolationLevel = IsolationStrong
-		cap.StrongIsolation = true
+		cap.StrongIsolation = p.prlimit != ""
 		cap.SupportedModes = []SandboxMode{SandboxReadOnly, SandboxWorkspaceWrite, SandboxFullAccess}
 		cap.NetworkIsolation = p.bwrapNetwork
 	case p.seatbelt != "":
@@ -387,16 +404,27 @@ func canonicalPolicyPath(path string) (string, error) {
 // retained only up to the per-stream quota.
 func (p *localProvider) exec(ctx context.Context, code, cwd, workspaceRoot string, mode SandboxMode, timeout time.Duration, maxOut int, limits shellResourceLimits) (Result, error) {
 	argv := p.diagnosticArgv
-	if argv == nil {
-		argv = shellCommandWithLimits(code, limits)
-	}
-	if mode != SandboxFullAccess {
+	if argv == nil && mode != SandboxFullAccess {
 		switch {
 		case p.bwrap != "":
-			argv = bwrapCommand(p.bwrap, workspaceRoot, mode, p.bwrapNetwork, argv)
+			// prlimit installs kernel rlimits before exec; bwrap and all of
+			// its descendants inherit them without shell-builtin quirks.
+			argv = prlimitCommand(
+				p.prlimit,
+				limits,
+				bwrapCommand(p.bwrap, workspaceRoot, mode, p.bwrapNetwork, shellCommand(code)),
+			)
 		case p.seatbelt != "":
-			argv = seatbeltCommand(p.seatbelt, workspaceRoot, mode, argv)
+			argv = shellCommandWithLimitsArgv(
+				seatbeltCommand(p.seatbelt, workspaceRoot, mode, shellCommand(code)),
+				limits,
+			)
+		default:
+			argv = shellCommandWithLimits(code, limits)
 		}
+	}
+	if argv == nil {
+		argv = shellCommand(code)
 	}
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -500,7 +528,10 @@ func (p *localProvider) exec(ctx context.Context, code, cwd, workspaceRoot strin
 	// Full-access runs receive zero resource limits above, so this stays zero
 	// there. Controlled modes get an explicit kernel-enforced concurrent
 	// process ceiling on Windows; POSIX shells inherit the ulimit spelling.
-	tree, err = attachProcessTree(cmd, processTreeLimits{maxProcesses: limits.processes})
+	tree, err = attachProcessTree(cmd, processTreeLimits{
+		maxProcesses: limits.processes,
+		memoryBytes:  limits.memoryBytes,
+	})
 	if err != nil {
 		p.mu.Unlock()
 		_ = cmd.Cancel()
@@ -745,12 +776,15 @@ func shellCommand(code string) []string {
 // shellCommandWithLimits puts hard POSIX resource limits in the shell that
 // owns the user command. Hard limits are inherited across fork/exec, so a
 // command cannot remove them with a later ulimit call and descendants remain
-// covered. Windows uses its Job Object process-tree boundary instead; the
-// restricted ACL backend is intentionally not widened by these advisory
-// fields.
+// covered. Linux bwrap uses the stronger prlimit exec boundary; Windows uses
+// its Job Object memory/process boundary instead.
 func shellCommandWithLimits(code string, limits shellResourceLimits) []string {
+	return shellCommandWithLimitsArgv(shellCommand(code), limits)
+}
+
+func shellCommandWithLimitsArgv(command []string, limits shellResourceLimits) []string {
 	if runtime.GOOS == "windows" || (limits.memoryBytes <= 0 && limits.fileSizeBytes <= 0 && limits.processes <= 0) {
-		return shellCommand(code)
+		return command
 	}
 	parts := make([]string, 0, 4)
 	if limits.memoryBytes > 0 {
@@ -763,20 +797,35 @@ func shellCommandWithLimits(code string, limits shellResourceLimits) []string {
 	if limits.processes > 0 {
 		parts = append(parts, fmt.Sprintf("ulimit -u %d", limits.processes))
 	}
-	// Use a hard-limit setting and fail before user code if a platform shell
-	// cannot install one of the requested controls. Quoting the original code
-	// as one argument preserves its exact /bin/sh -c semantics.
+	// Use a hard-limit setting and fail before the sandbox command if a
+	// platform shell cannot install one of the requested controls. Quote every
+	// argument so arbitrary sandbox argv remains one exact exec boundary.
 	for i := range parts {
 		// Set both soft and hard ceilings. The hard ceiling is what prevents
 		// model-authored shell code from raising the soft value later.
 		parts[i] = strings.Replace(parts[i], "ulimit -", "ulimit -S -H -", 1) + " || exit 125"
 	}
-	parts = append(parts, "exec /bin/sh -c "+shellSingleQuote(code))
+	quoted := make([]string, len(command))
+	for i, argument := range command {
+		quoted[i] = shellSingleQuote(argument)
+	}
+	parts = append(parts, "exec "+strings.Join(quoted, " "))
 	return []string{"/bin/sh", "-c", strings.Join(parts, "; ") + ";"}
 }
 
 func shellSingleQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+}
+
+func prlimitCommand(runner string, limits shellResourceLimits, command []string) []string {
+	argv := []string{
+		runner,
+		"--as=" + strconv.FormatInt(limits.memoryBytes, 10),
+		"--fsize=" + strconv.FormatInt((limits.fileSizeBytes+511)/512, 10),
+		"--nproc=" + strconv.Itoa(limits.processes),
+		"--",
+	}
+	return append(argv, command...)
 }
 
 // scrubbedEnv returns the parent environment minus credential-shaped entries.
