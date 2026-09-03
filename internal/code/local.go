@@ -76,6 +76,9 @@ type localProvider struct {
 	// would otherwise race grant/cleanup.
 	aclWorkspaceLocks   map[string]*sync.Mutex
 	aclWorkspaceLocksMu sync.Mutex
+	// diagnosticArgv is a test-only top-level argv override. It keeps native
+	// Windows API regressions independent of cmd.exe/PowerShell spawning.
+	diagnosticArgv []string
 }
 
 // boundedCapture drains a subprocess stream while retaining only its prefix.
@@ -383,7 +386,10 @@ func canonicalPolicyPath(path string) (string, error) {
 // tree is hard-killed and TimedOut is set. Output is continuously drained and
 // retained only up to the per-stream quota.
 func (p *localProvider) exec(ctx context.Context, code, cwd, workspaceRoot string, mode SandboxMode, timeout time.Duration, maxOut int, limits shellResourceLimits) (Result, error) {
-	argv := shellCommandWithLimits(code, limits)
+	argv := p.diagnosticArgv
+	if argv == nil {
+		argv = shellCommandWithLimits(code, limits)
+	}
 	if mode != SandboxFullAccess {
 		switch {
 		case p.bwrap != "":

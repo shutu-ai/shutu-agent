@@ -43,6 +43,7 @@ var (
 	procSetSecurityDescriptorDacl    = windows.NewLazySystemDLL("advapi32.dll").NewProc("SetSecurityDescriptorDacl")
 	procSetSecurityDescriptorOwner   = windows.NewLazySystemDLL("advapi32.dll").NewProc("SetSecurityDescriptorOwner")
 	procSetSecurityDescriptorGroup   = windows.NewLazySystemDLL("advapi32.dll").NewProc("SetSecurityDescriptorGroup")
+	procSetFileSecurityW             = windows.NewLazySystemDLL("advapi32.dll").NewProc("SetFileSecurityW")
 )
 
 type windowsACLJournal struct {
@@ -50,6 +51,7 @@ type windowsACLJournal struct {
 	Path          string `json:"path"`
 	OriginalACL   string `json:"originalAcl"`
 	DACLProtected bool   `json:"daclProtected"`
+	DACLControl   uint16 `json:"daclControl"`
 	TrusteeSID    string `json:"trusteeSid"`
 	CreatedAt     string `json:"createdAt"`
 }
@@ -74,6 +76,7 @@ type windowsACLRun struct {
 	workspaceOriginal    *windows.SECURITY_DESCRIPTOR
 	workspaceOriginalACL []byte
 	workspaceProtected   bool
+	workspaceDACLControl uint16
 	journalPath          string
 }
 
@@ -159,6 +162,10 @@ func prepareWindowsACLRun(mode SandboxMode, workspaceRoot string) (windowsACLHan
 		}
 		if !hasGrant {
 			run.workspaceOriginal = original
+			run.workspaceDACLControl, err = windowsACLControl(original)
+			if err != nil {
+				return cleanup(fmt.Errorf("code: inspect Windows ACL workspace control: %w", err))
+			}
 			run.workspaceOriginalACL, run.workspaceProtected, err = windowsACLBytes(original)
 			if err != nil {
 				return cleanup(fmt.Errorf("code: encode Windows ACL workspace snapshot: %w", err))
@@ -168,6 +175,7 @@ func prepareWindowsACLRun(mode SandboxMode, workspaceRoot string) (windowsACLHan
 				Path:          workspaceRoot,
 				OriginalACL:   base64.StdEncoding.EncodeToString(run.workspaceOriginalACL),
 				DACLProtected: run.workspaceProtected,
+				DACLControl:   run.workspaceDACLControl,
 				TrusteeSID:    run.workspaceSID.String(),
 				CreatedAt:     time.Now().UTC().Format(time.RFC3339),
 			}
@@ -196,33 +204,22 @@ func prepareWindowsACLRun(mode SandboxMode, workspaceRoot string) (windowsACLHan
 		_ = windows.CloseHandle(windows.Handle(current))
 		return cleanup(logonErr)
 	}
-	// Read-only tokens deliberately omit the logon SID from the restriction
-	// set. Management ACEs may grant the invoking logon cleanup access without
-	// turning the read-only child into a writer.
-	_ = worldSID
 	var restricting []windows.SIDAndAttributes
 	switch mode {
 	case SandboxWorkspaceWrite:
-		restricting = []windows.SIDAndAttributes{
-			{Sid: worldSID},
-			{Sid: run.workspaceSID},
-			{Sid: run.tempSID},
-		}
+		restricting = windowsACLRestrictingSIDs(mode, worldSID, logonSID, nil, run.workspaceSID, run.tempSID)
 	case SandboxReadOnly:
 		usersSID, sidErr := windows.CreateWellKnownSid(windows.WinBuiltinUsersSid)
 		if sidErr != nil {
 			return cleanup(fmt.Errorf("code: Windows ACL Users SID: %w", sidErr))
 		}
 		run.readSID = usersSID
-		restricting = []windows.SIDAndAttributes{
-			// Deny-only world gives the restricted-token check a valid fourth
-			// SID without granting readonly child Everyone's management Full.
-			{Sid: worldSID, Attributes: windows.SE_GROUP_USE_FOR_DENY_ONLY},
-			{Sid: logonSID, Attributes: windows.SE_GROUP_USE_FOR_DENY_ONLY},
-			{Sid: run.readSID},
-		}
+		restricting = windowsACLRestrictingSIDs(mode, worldSID, logonSID, run.readSID, run.workspaceSID, run.tempSID)
 	default:
-		restricting = []windows.SIDAndAttributes{{Sid: worldSID}}
+		return cleanup(fmt.Errorf("code: unsupported Windows ACL mode %q", mode))
+	}
+	if len(restricting) == 0 {
+		return cleanup(errors.New("code: Windows ACL restricting SID set is empty"))
 	}
 	run.token, err = createWindowsACLRestrictedToken(current, restricting)
 	_ = windows.CloseHandle(windows.Handle(current))
@@ -237,6 +234,28 @@ func prepareWindowsACLRun(mode SandboxMode, workspaceRoot string) (windowsACLHan
 		return cleanup(fmt.Errorf("code: set Windows ACL default DACL: %w", err))
 	}
 	return run, nil
+}
+
+func windowsACLRestrictingSIDs(mode SandboxMode, worldSID, logonSID, readSID, workspaceSID, tempSID *windows.SID) []windows.SIDAndAttributes {
+	switch mode {
+	case SandboxWorkspaceWrite:
+		return []windows.SIDAndAttributes{
+			{Sid: worldSID},
+			{Sid: workspaceSID},
+			{Sid: tempSID},
+		}
+	case SandboxReadOnly:
+		// CreateRestrictedToken requires Attributes == 0 for every
+		// SidsToRestrict entry. Deny-only attributes belong to
+		// SidsToDisable, not to the restricting SID list.
+		return []windows.SIDAndAttributes{
+			{Sid: worldSID},
+			{Sid: logonSID},
+			{Sid: readSID},
+		}
+	default:
+		return nil
+	}
 }
 
 func (run *windowsACLRun) configure(cmd *exec.Cmd) error {
@@ -273,7 +292,7 @@ func (run *windowsACLRun) close() error {
 	}
 	var failures []error
 	if run.workspaceGranted {
-		if err := restoreWindowsACLBytes(run.workspacePath, run.workspaceOriginalACL, run.workspaceProtected); err != nil {
+		if err := restoreWindowsACLBytes(run.workspacePath, run.workspaceOriginalACL, run.workspaceProtected, run.workspaceDACLControl); err != nil {
 			failures = append(failures, fmt.Errorf("restore workspace DACL: %w", err))
 		} else {
 			run.workspaceGranted = false
@@ -349,6 +368,14 @@ func createWindowsACLRestrictedToken(current windows.Token, restricting []window
 func createWindowsACLRestrictedTokenWithFlags(current windows.Token, restricting []windows.SIDAndAttributes, flags uintptr) (windows.Token, error) {
 	if len(restricting) == 0 {
 		return 0, errors.New("restricted token requires at least one SID")
+	}
+	for index, entry := range restricting {
+		if entry.Sid == nil || !entry.Sid.IsValid() {
+			return 0, fmt.Errorf("restricted token SID[%d] is invalid", index)
+		}
+		if entry.Attributes != 0 {
+			return 0, fmt.Errorf("restricted token SID[%d] has non-zero attributes 0x%x; SidsToRestrict requires Attributes == 0", index, entry.Attributes)
+		}
 	}
 	var restricted windows.Token
 	r1, _, callErr := createRestrictedTokenProc.Call(
@@ -533,7 +560,7 @@ func recoverWindowsACLJournalFor(name string) error {
 	if err != nil {
 		return fmt.Errorf("journal %s has an invalid DACL snapshot: %w", path, err)
 	}
-	if err := restoreWindowsACLBytes(state.Path, originalACL, state.DACLProtected); err != nil {
+	if err := restoreWindowsACLBytes(state.Path, originalACL, state.DACLProtected, state.DACLControl); err != nil {
 		return fmt.Errorf("journal %s could not be recovered: %w", path, err)
 	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -568,6 +595,17 @@ func windowsACLBytes(sd *windows.SECURITY_DESCRIPTOR) ([]byte, bool, error) {
 	control, _, err := sd.Control()
 	if err != nil {
 		return nil, false, err
+	}
+	if control&windows.SE_SELF_RELATIVE != 0 {
+		absolute, err := sd.ToAbsolute()
+		if err != nil {
+			return nil, false, fmt.Errorf("convert self-relative security descriptor: %w", err)
+		}
+		sd = absolute
+		control, _, err = sd.Control()
+		if err != nil {
+			return nil, false, err
+		}
 	}
 	dacl, _, err := sd.DACL()
 	if err != nil {
@@ -606,7 +644,27 @@ func windowsACLBytes(sd *windows.SECURITY_DESCRIPTOR) ([]byte, bool, error) {
 		control&windows.SE_DACL_PROTECTED != 0, nil
 }
 
-func restoreWindowsACLBytes(path string, rawACL []byte, protected bool) error {
+func windowsACLControl(sd *windows.SECURITY_DESCRIPTOR) (uint16, error) {
+	control, _, err := sd.Control()
+	if err != nil {
+		return 0, err
+	}
+	mask := windows.SECURITY_DESCRIPTOR_CONTROL(windows.SE_DACL_PRESENT | windows.SE_DACL_DEFAULTED |
+		windows.SE_DACL_AUTO_INHERIT_REQ | windows.SE_DACL_AUTO_INHERITED |
+		windows.SE_DACL_PROTECTED)
+	return uint16(control & mask), nil
+}
+
+func windowsACLControlForPath(path string) (uint16, error) {
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.GROUP_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return 0, err
+	}
+	return windowsACLControl(sd)
+}
+
+func restoreWindowsACLBytes(path string, rawACL []byte, protected bool, daclControl uint16) error {
 	if len(rawACL) == 0 {
 		return errors.New("original DACL snapshot is missing")
 	}
@@ -615,14 +673,103 @@ func restoreWindowsACLBytes(path string, rawACL []byte, protected bool) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _, _ = windows.LocalFree(windows.Handle(unsafe.Pointer(sd))) }()
+	if !sd.IsValid() {
+		return errors.New("restored Windows ACL security descriptor is invalid")
+	}
 	info := windows.SECURITY_INFORMATION(windows.DACL_SECURITY_INFORMATION)
 	if protected {
 		info |= windows.SECURITY_INFORMATION(windows.PROTECTED_DACL_SECURITY_INFORMATION)
 	} else {
 		info |= windows.SECURITY_INFORMATION(windows.UNPROTECTED_DACL_SECURITY_INFORMATION)
 	}
-	return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, info, nil, nil, dacl, nil)
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, info, nil, nil, dacl, nil); err != nil {
+		return err
+	}
+	if daclControl == 0 {
+		// Journals written before DACLControl was introduced did not preserve
+		// these bits. Restore their known DACL/protected state and do not
+		// invent an unknown control word.
+		return nil
+	}
+	if (daclControl&windows.SE_DACL_PROTECTED != 0) != protected {
+		return fmt.Errorf("original DACL control is inconsistent: protected=%v control=0x%04x", protected, daclControl)
+	}
+	actual, err := windowsACLControlForPath(path)
+	if err != nil {
+		return fmt.Errorf("verify restored Windows ACL control: %w", err)
+	}
+	if actual == daclControl {
+		return nil
+	}
+	if err := setWindowsFileSecurityControl(path, dacl, daclControl); err != nil {
+		return fmt.Errorf("restore Windows ACL control with SetFileSecurityW: %w", err)
+	}
+	actual, err = windowsACLControlForPath(path)
+	if err != nil {
+		return fmt.Errorf("verify Windows ACL control correction: %w", err)
+	}
+	if actual != daclControl {
+		return fmt.Errorf("Windows ACL control was not restored exactly: expected=0x%04x actual=0x%04x", daclControl, actual)
+	}
+	return nil
+}
+
+func setWindowsFileSecurityControl(path string, dacl *windows.ACL, daclControl uint16) error {
+	current, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.GROUP_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return err
+	}
+	current, err = current.ToAbsolute()
+	if err != nil {
+		return fmt.Errorf("convert current descriptor: %w", err)
+	}
+	owner, ownerDefaulted, err := current.Owner()
+	if err != nil {
+		return fmt.Errorf("read descriptor owner: %w", err)
+	}
+	group, groupDefaulted, err := current.Group()
+	if err != nil {
+		return fmt.Errorf("read descriptor group: %w", err)
+	}
+	protected := daclControl&windows.SE_DACL_PROTECTED != 0
+	sd, err := newWindowsSecurityDescriptorWithDACL(dacl, protected)
+	if err != nil {
+		return err
+	}
+	if err = sd.SetOwner(owner, ownerDefaulted); err != nil {
+		return fmt.Errorf("set descriptor owner: %w", err)
+	}
+	if err = sd.SetGroup(group, groupDefaulted); err != nil {
+		return fmt.Errorf("set descriptor group: %w", err)
+	}
+	// Presence is supplied by SetSecurityDescriptorDacl and cannot be passed
+	// to SetSecurityDescriptorControl. The two bits below are the mutable DACL
+	// state proven by TestWindowsACLRestoreControlSetFileSecurityDiagnostic.
+	mask := windows.SECURITY_DESCRIPTOR_CONTROL(windows.SE_DACL_AUTO_INHERITED | windows.SE_DACL_PROTECTED)
+	desired := windows.SECURITY_DESCRIPTOR_CONTROL(daclControl) & mask
+	if err = sd.SetControl(mask, desired); err != nil {
+		return fmt.Errorf("set descriptor control: %w", err)
+	}
+	pathPtr, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return err
+	}
+	r1, _, callErr := procSetFileSecurityW.Call(
+		uintptr(unsafe.Pointer(pathPtr)),
+		uintptr(windows.DACL_SECURITY_INFORMATION),
+		uintptr(unsafe.Pointer(sd)),
+	)
+	runtime.KeepAlive(current)
+	runtime.KeepAlive(sd)
+	runtime.KeepAlive(dacl)
+	if r1 == 0 {
+		if callErr == nil || callErr == syscall.Errno(0) {
+			callErr = windows.GetLastError()
+		}
+		return callErr
+	}
+	return nil
 }
 
 func newWindowsSecurityDescriptorWithDACL(dacl *windows.ACL, protected bool) (*windows.SECURITY_DESCRIPTOR, error) {
