@@ -111,7 +111,12 @@ export class WebStore {
     this.patch({ error: error instanceof Error ? error.message : String(error), authRequired: isUnauthorized(error) })
   }
 
-  async createSession(workspaceId = ''): Promise<void> {
+  private currentWorkspaceID(): string {
+    const selected = this.state.sessions.find(session => session.id === this.state.selectedId)
+    return selected?.workspace_id ?? ''
+  }
+
+  async createSession(workspaceId = this.currentWorkspaceID()): Promise<void> {
     const result = await this.api.createSession(workspaceId)
     await this.refreshSessions()
     await this.open(result.id)
@@ -284,9 +289,11 @@ export class WebStore {
     return this.api.listWorkspaces(signal)
   }
 
-  async createWorkspace(title: string, path = ''): Promise<void> {
-    await this.api.createWorkspace(title, path)
+  async createWorkspace(title: string, path = ''): Promise<{ id: string; title: string; path: string }> {
+    const workspace = await this.api.createWorkspace(title, path)
     await this.refreshSessions()
+    await this.createSession(workspace.id)
+    return workspace
   }
 
   async renameWorkspace(workspaceId: string, title: string): Promise<void> {

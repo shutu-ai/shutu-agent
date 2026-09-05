@@ -33,6 +33,9 @@ describe('WebStore', () => {
 
   it('loads a session and de-duplicates live events by sequence', async () => {
     let emitted = false
+    let workspaceCreated = false
+    const createdWorkspaceIds: string[] = []
+    const workspaceSession: SessionSummary = { ...session('new'), blank: true, event_count: 0, workspace_id: 'w1' }
     const api: WebApi = {
       getConfig: async () => ({}),
       getSettings: async () => ({}),
@@ -52,8 +55,13 @@ describe('WebStore', () => {
       exportSession: async () => new Blob(),
       listSubagents: async () => [],
       listJobs: async () => [],
-      listWorkspaces: async () => ({ workspaces: [], ungrouped_ids: ['one'] }),
-      createWorkspace: async (_title, path = '') => ({ id: 'w1', title: 'Workspace', path }),
+      listWorkspaces: async () => workspaceCreated
+        ? { workspaces: [{ id: 'w1', title: 'Workspace', session_ids: ['new'], created_at: 1 }], ungrouped_ids: ['one'] }
+        : { workspaces: [], ungrouped_ids: ['one'] },
+      createWorkspace: async (_title, path = '') => {
+        workspaceCreated = true
+        return { id: 'w1', title: 'Workspace', path }
+      },
       pickWorkspaceDirectory: async () => ({ path: '' }),
       listWorkspaceDirectories: async () => ({ path: '', home: '', crumbs: [], entries: [] }),
       createWorkspaceDirectory: async (_path, name) => ({ path: name }),
@@ -75,8 +83,11 @@ describe('WebStore', () => {
       deleteFeedback: async () => undefined,
       uploadAttachment: async () => ({ id: 'a', media_type: 'image/png', bytes: 1 }),
       loadAttachment: async () => new Blob(),
-      listSessions: async () => [session('one')],
-      createSession: async () => ({ id: 'new' }),
+      listSessions: async () => workspaceCreated ? [workspaceSession, session('one')] : [session('one')],
+      createSession: async workspaceId => {
+        createdWorkspaceIds.push(workspaceId ?? '')
+        return { id: 'new', workspace_id: workspaceId }
+      },
       resumeSession: async () => undefined,
       renameSession: async (_id, title) => ({ title }),
       archiveSession: async () => undefined,
@@ -102,6 +113,14 @@ describe('WebStore', () => {
 
     await store.open('other')
     expect(store.getSnapshot().events).toEqual([event(1)])
+
+    await store.createWorkspace('Workspace')
+    expect(createdWorkspaceIds).toEqual(['w1'])
+    expect(store.getSnapshot().selectedId).toBe('new')
+
+    await store.createSession()
+    expect(createdWorkspaceIds).toEqual(['w1', 'w1'])
+    expect(store.getSnapshot().selectedId).toBe('new')
   })
 
   it('ignores an older page that resolves after switching sessions', async () => {
