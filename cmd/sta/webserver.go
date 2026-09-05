@@ -3104,10 +3104,10 @@ func (a *app) applyNativeProviderSettingsRuntime(ctx context.Context, namespace 
 		a.builtinProfiles = oldProfiles
 		a.customProviders = oldCustom
 		a.providerMu.Unlock()
-	if rebuildErr := a.registerLLMUnlocked(); rebuildErr != nil {
-		rollbackErr = errors.Join(rollbackErr, fmt.Errorf("provider registry rollback: %w", rebuildErr))
-	}
-	return errors.Join(err, rollbackErr)
+		if rebuildErr := a.registerLLMUnlocked(); rebuildErr != nil {
+			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("provider registry rollback: %w", rebuildErr))
+		}
+		return errors.Join(err, rollbackErr)
 	}
 	a.providerStateMu.Unlock()
 	stateReleased = true
