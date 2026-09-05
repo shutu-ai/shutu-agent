@@ -15,11 +15,16 @@ import (
 	"github.com/shutu-ai/shutu-agent/sdk/extension"
 )
 
+type queuedEvent struct {
+	event extension.Event
+	done  chan struct{}
+}
+
 func (h *Host) startEventDelivery(item *managedExtension) {
 	if h == nil || item == nil || len(item.subscriptions) == 0 || item.eventQueue != nil {
 		return
 	}
-	item.eventQueue = make(chan extension.Event, h.config.EventQueueSize)
+	item.eventQueue = make(chan queuedEvent, h.config.EventQueueSize)
 	item.eventDone = make(chan struct{})
 	go h.dispatchEvents(item)
 }
@@ -36,11 +41,14 @@ func (h *Host) dispatchEvents(item *managedExtension) {
 		select {
 		case <-item.eventDone:
 			return
-		case event, ok := <-item.eventQueue:
+		case delivery, ok := <-item.eventQueue:
 			if !ok {
 				return
 			}
-			h.deliverEvent(item, event)
+			h.deliverEvent(item, delivery.event)
+			if delivery.done != nil {
+				close(delivery.done)
+			}
 		}
 	}
 }
@@ -94,18 +102,22 @@ func (h *Host) PublishEvent(event extension.Event) {
 		}
 		eventCopy := event
 		eventCopy.EventID = newEventID()
-		delivered := true
-		select {
-		case item.eventQueue <- eventCopy:
-		default:
-			delivered = false
-		}
+		delivered := h.enqueueEvent(item, queuedEvent{event: eventCopy})
 		h.observe(Event{
 			ExtensionID: item.manifest.ID, Capability: "events", Method: extension.MethodEvent,
-			Success: delivered, Delivered: delivered, Dropped: !delivered, EventType: event.Type,
+			Success: delivered, Delivered: delivered, Queued: delivered, Dropped: !delivered, EventType: event.Type,
 			QueueDepth: len(item.eventQueue), At: time.Now().UTC(),
 		})
 	}
+}
+
+// PublishSessionStarted is the composition-root seam for durable session
+// creation. It uses the same stable, payload-free envelope as projected turns.
+func (h *Host) PublishSessionStarted(sessionID string) {
+	if h == nil || sessionID == "" {
+		return
+	}
+	h.PublishEvent(newExtensionEvent(extension.EventSessionStarted, sessionID, "", "", 0, nil))
 }
 
 var nextEventID atomic.Uint64
@@ -118,7 +130,40 @@ func (h *Host) publishLifecycle(item *managedExtension, eventType string, payloa
 	if !subscribed(item, eventType) {
 		return
 	}
-	h.PublishEvent(newExtensionEvent(eventType, item.manifest.ID, "", "", 0, payload))
+	// Terminal events can be published while Host.Close has already marked the
+	// host closed. Queue directly and wait briefly so shutdown observations are
+	// not swallowed; ordinary PublishEvent remains closed to new traffic.
+	delivery := queuedEvent{event: newExtensionEvent(eventType, item.manifest.ID, "", "", 0, payload), done: make(chan struct{})}
+	if item.eventQueue == nil || item.eventDone == nil {
+		return
+	}
+	if !h.enqueueEvent(item, delivery) {
+		h.observe(Event{
+			ExtensionID: item.manifest.ID, Capability: "events", Method: extension.MethodEvent,
+			Success: false, Delivered: false, Dropped: true, EventType: delivery.event.Type,
+			QueueDepth: len(item.eventQueue), At: time.Now().UTC(),
+		})
+		return
+	}
+	timeout := timer(h.config.EventTimeout + 100*time.Millisecond)
+	defer timeout.Stop()
+	select {
+	case <-delivery.done:
+	case <-timeout.C:
+	}
+}
+
+func (h *Host) enqueueEvent(item *managedExtension, delivery queuedEvent) bool {
+	select {
+	case item.eventQueue <- delivery:
+		return true
+	default:
+		return false
+	}
+}
+
+func timer(timeout time.Duration) *time.Timer {
+	return time.NewTimer(timeout)
 }
 
 func newExtensionEvent(eventType, sessionID, turnID, stepID string, step int, payload map[string]any) extension.Event {

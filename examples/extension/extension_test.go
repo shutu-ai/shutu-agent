@@ -19,4 +19,7 @@ func TestExampleManifestIsValid(t *testing.T) {
 	if manifest.ID != "demo" || !manifest.Capabilities.ContextProvider || len(manifest.Tools.Definitions) != 1 {
 		t.Fatalf("example manifest = %#v", manifest)
 	}
+	if len(manifest.Events.Subscribe) == 0 {
+		t.Fatal("example does not declare an event subscription")
+	}
 }

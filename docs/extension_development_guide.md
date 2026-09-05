@@ -75,6 +75,22 @@ err := server.Run(ctx, os.Stdin, os.Stdout)
 
 Other languages implement the same JSON-RPC methods over stdio or HTTP.
 
+## Subscribe to events
+
+Declare an exact allow-list; the host never performs an unfiltered event fanout:
+
+```yaml
+capabilities:
+  events: true
+events:
+  subscribe:
+    - turn.started
+    - turn.completed
+    - tool.completed
+```
+
+Event handlers are observational. They must not attempt to mutate Agent state, change a model request, replace a tool result, or implement approval policy. Use a context provider for retrieval, a tool for action, and the existing approval path for authority.
+
 ## Tool approval
 
 Read-only tools can be dynamically enabled. Any other risk requires an explicit Agent whitelist entry:
@@ -93,4 +109,6 @@ The host also adds such names to `interact.sensitive_tools`. The extension canno
 2. Inspect the tool catalog for `ext__demo__echo`.
 3. Submit a user message and inspect durable context messages for the extension source.
 4. Open `/extensions/demo/`.
-5. Stop or kill the extension; verify the Agent remains responsive and restarts according to policy.
+5. Confirm `/api/extensions` contains the navigation contribution and the sidebar shows it.
+6. Inspect `extension_events.jsonl` for delivered event observations, queue depth and drops.
+7. Stop or kill the extension; verify the Agent remains responsive and restarts according to policy.

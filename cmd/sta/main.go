@@ -59,7 +59,6 @@ import (
 	"github.com/shutu-ai/shutu-agent/internal/tools"
 	"github.com/shutu-ai/shutu-agent/internal/web"
 	"github.com/shutu-ai/shutu-agent/internal/webserver"
-	extension "github.com/shutu-ai/shutu-agent/sdk/extension"
 )
 
 func main() {
@@ -1170,12 +1169,7 @@ func (a *app) newSession(ctx context.Context) error {
 	a.attachSink(ctx)
 	a.bindSpillOwner()
 	a.markSessionViewed(ctx, id)
-	if a.extensions != nil {
-		a.extensions.PublishEvent(extension.Event{
-			Type: extension.EventSessionStarted, Version: extension.EventVersion,
-			SessionID: id, OccurredAt: time.Now().UTC().Format(time.RFC3339Nano),
-		})
-	}
+	a.extensions.PublishSessionStarted(id)
 	return nil
 }
 

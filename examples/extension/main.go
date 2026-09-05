@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/shutu-ai/shutu-agent/sdk/extension"
 )
@@ -76,7 +78,18 @@ func main() {
 		CallTool: func(_ context.Context, request extension.ToolCallRequest) (extension.ToolCallResult, error) {
 			return extension.ToolCallResult{Value: request.Arguments["text"]}, nil
 		},
-		OnEvent: func(context.Context, extension.Event) error { return nil },
+		OnEvent: func(ctx context.Context, event extension.Event) error {
+			delay, _ := strconv.Atoi(os.Getenv("DEMO_EXTENSION_EVENT_DELAY_MS"))
+			if delay > 0 {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(time.Duration(delay) * time.Millisecond):
+				}
+			}
+			log.Printf("demo-extension observed %s", event.Type)
+			return nil
+		},
 	})
 	if err := server.Run(ctx, os.Stdin, os.Stdout); err != nil && ctx.Err() == nil {
 		log.Fatalf("demo-extension: %v", err)

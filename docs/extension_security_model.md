@@ -41,6 +41,8 @@ Providers contribute strings. They cannot rewrite history, replace the system pr
 
 The Web shell authenticates the user and proxies only the declared extension route. The Agent bearer token and browser cookies are stripped before proxying; the extension owns business authentication and authorization underneath its route. The backend URL is not published by `/api/extensions`.
 
+Event frames are observational and allow-listed. They carry identifiers, names, status values and counters; prompts, model output, tool arguments and tool output are deliberately excluded. Delivery failure, slowness or a full queue cannot change or stop an Agent turn.
+
 ## Persistence
 
 Agent state and extension state are separate. The Agent does not open an extension database or index. Extensions do not open the session database or private Agent runtime files.

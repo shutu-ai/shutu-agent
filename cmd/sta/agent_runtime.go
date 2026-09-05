@@ -494,6 +494,7 @@ func (a *app) newAgentSession(ctx context.Context) (string, error) {
 		return "", err
 	}
 	a.markSessionViewed(ctx, id)
+	a.extensions.PublishSessionStarted(id)
 	return id, nil
 }
 

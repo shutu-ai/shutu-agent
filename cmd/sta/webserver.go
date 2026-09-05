@@ -1814,6 +1814,7 @@ func (a *app) nativeCreateAgentSession(ctx context.Context, spec webserver.Nativ
 		return zero, errors.New("session store is unavailable")
 	}
 	sessionID := strings.TrimSpace(spec.SessionID)
+	createdSession := false
 	if sessionID != "" {
 		meta, err := a.store.GetSessionMeta(ctx, sessionID)
 		switch {
@@ -1903,6 +1904,7 @@ func (a *app) nativeCreateAgentSession(ctx context.Context, spec webserver.Nativ
 		if err != nil {
 			return zero, err
 		}
+		createdSession = true
 	} else {
 		if err := a.store.CreateSession(ctx, sessionID, created); err != nil {
 			return zero, err
@@ -1926,12 +1928,16 @@ func (a *app) nativeCreateAgentSession(ctx context.Context, spec webserver.Nativ
 			_ = a.store.DeleteSession(context.Background(), sessionID)
 			return zero, err
 		}
+		createdSession = true
 	}
 	if _, err := a.sessionLogForAgent(ctx, sessionID); err != nil {
 		_ = a.store.DeleteSession(context.Background(), sessionID)
 		return zero, err
 	}
 	a.markSessionViewed(ctx, sessionID)
+	if createdSession {
+		a.extensions.PublishSessionStarted(sessionID)
+	}
 	return webserver.NativeSessionCreateResult{
 		SessionID: sessionID, AgentPreset: spec.AgentPreset, CWD: spec.CWD,
 	}, nil

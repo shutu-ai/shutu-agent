@@ -72,6 +72,7 @@ type Event struct {
 	Restarts      int       `json:"restarts,omitempty"`
 	HealthReady   bool      `json:"healthReady,omitempty"`
 	Delivered     bool      `json:"delivered,omitempty"`
+	Queued        bool      `json:"queued,omitempty"`
 	Dropped       bool      `json:"dropped,omitempty"`
 	QueueDepth    int       `json:"queueDepth,omitempty"`
 	At            time.Time `json:"at"`
@@ -90,7 +91,7 @@ type managedExtension struct {
 	restarts       int
 	ready          atomic.Bool
 	webURL         string
-	eventQueue     chan extension.Event
+	eventQueue     chan queuedEvent
 	eventDone      chan struct{}
 	eventStop      sync.Once
 	subscriptions  map[string]struct{}

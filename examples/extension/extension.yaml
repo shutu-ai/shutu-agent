@@ -9,6 +9,21 @@ capabilities:
   web: true
   health: true
   events: true
+events:
+  subscribe:
+    - session.started
+    - turn.started
+    - turn.completed
+    - step.started
+    - step.completed
+    - tool.started
+    - tool.completed
+    - tool.failed
+    - context.requested
+    - context.injected
+    - extension.started
+    - extension.restarted
+    - extension.stopped
 transport:
   type: stdio
   command: demo-extension

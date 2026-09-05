@@ -12,16 +12,21 @@ import (
 )
 
 type fakeEventConnection struct {
-	mu       sync.Mutex
-	events   []extension.Event
-	delay    time.Duration
-	failures int
-	closed   bool
+	mu        sync.Mutex
+	events    []extension.Event
+	delay     time.Duration
+	failures  int
+	entered   chan struct{}
+	enterOnce sync.Once
+	closed    bool
 }
 
 func (c *fakeEventConnection) Call(ctx context.Context, method string, params, result any) error {
 	if method != extension.MethodEvent {
 		return nil
+	}
+	if c.entered != nil {
+		c.enterOnce.Do(func() { close(c.entered) })
 	}
 	if c.delay > 0 {
 		select {
@@ -32,6 +37,9 @@ func (c *fakeEventConnection) Call(ctx context.Context, method string, params, r
 	}
 	if c.failures > 0 {
 		c.failures--
+		if c.failures == 1 {
+			return ErrConnectionLost
+		}
 		return errors.New("invalid event response")
 	}
 	event, ok := params.(extension.Event)
@@ -164,6 +172,36 @@ func TestEventFailureIsObservedWithoutStoppingAgentPublishing(t *testing.T) {
 	t.Fatalf("failures=%d deliveries=%d", failures, deliveries)
 }
 
+func TestEventQueueOverflowIsObservedAndDropped(t *testing.T) {
+	observed := make(chan Event, 8)
+	host := New(Config{EventQueueSize: 1, EventTimeout: 50 * time.Millisecond, Observer: func(event Event) { observed <- event }})
+	entered := make(chan struct{})
+	conn := &fakeEventConnection{entered: entered, delay: time.Second}
+	eventSubscriber(t, host, "overflow", []string{extension.EventTurnStarted}, conn)
+
+	host.PublishEvent(extension.Event{Type: extension.EventTurnStarted})
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("worker did not start delivery")
+	}
+	host.PublishEvent(extension.Event{Type: extension.EventTurnStarted})
+	host.PublishEvent(extension.Event{Type: extension.EventTurnStarted})
+
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case event := <-observed:
+			if event.Dropped {
+				host.Close()
+				return
+			}
+		case <-deadline:
+			t.Fatal("queue overflow was not observed")
+		}
+	}
+}
+
 func TestSessionEventProjectionAndMinimalPayload(t *testing.T) {
 	host := New(Config{EventQueueSize: 16, EventTimeout: time.Second})
 	conn := &fakeEventConnection{}
@@ -198,6 +236,24 @@ func TestSessionEventProjectionAndMinimalPayload(t *testing.T) {
 	host.Close()
 }
 
+func TestPublishSessionStartedUsesStableEnvelope(t *testing.T) {
+	host := New(Config{EventQueueSize: 8, EventTimeout: time.Second})
+	conn := &fakeEventConnection{}
+	eventSubscriber(t, host, "session-observer", []string{extension.EventSessionStarted}, conn)
+
+	host.PublishSessionStarted("new-session")
+	events := waitForEvents(t, conn, 1)
+	if len(events) != 1 {
+		t.Fatalf("session started events = %#v", events)
+	}
+	event := events[0]
+	if event.Type != extension.EventSessionStarted || event.SessionID != "new-session" ||
+		event.Version != extension.EventVersion || event.EventID == "" || event.Payload != nil {
+		t.Fatalf("session started envelope = %#v", event)
+	}
+	host.Close()
+}
+
 func TestReplacementGenerationResubscribes(t *testing.T) {
 	host := New(Config{EventQueueSize: 8, EventTimeout: time.Second})
 	oldConn := &fakeEventConnection{}
@@ -219,4 +275,21 @@ func TestReplacementGenerationResubscribes(t *testing.T) {
 		t.Fatalf("replacement events = %#v", events)
 	}
 	host.Close()
+}
+
+func TestCloseDeliversTerminalLifecycleBeforeTransportClose(t *testing.T) {
+	host := New(Config{EventQueueSize: 1, EventTimeout: time.Second})
+	conn := &fakeEventConnection{}
+	eventSubscriber(t, host, "shutdown", []string{extension.EventExtensionStopped}, conn)
+
+	if err := host.Close(); err != nil {
+		t.Fatal(err)
+	}
+	events := waitForEvents(t, conn, 1)
+	if len(events) != 1 || events[0].Type != extension.EventExtensionStopped {
+		t.Fatalf("shutdown events = %#v", events)
+	}
+	if events[0].Payload["reason"] != "shutdown" {
+		t.Fatalf("shutdown payload = %#v", events[0].Payload)
+	}
 }

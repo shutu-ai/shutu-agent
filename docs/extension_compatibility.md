@@ -36,3 +36,5 @@ All Agent implementation packages under `internal/...` are unstable. No official
 An extension can be added by changing only discovery configuration and restarting the Agent process; the Agent binary is not recompiled. Extension upgrades that keep Extension API v1 and keep tool names/schemas compatible do not require Agent source changes.
 
 Agent upgrades within Extension API v1 do not require extension source changes. An extension compiled with a newer v1 SDK must keep its manifest limited to the fields understood by the oldest v1 host it targets; new negotiated behavior is exposed through capabilities and the initialize result rather than assumptions about unknown manifest fields.
+
+Web navigation additions are optional in v1: `icon`, `navigation_enabled`, `navigation_group` and `order` have host-side fallbacks or defaults. Event subscription is negotiated through the optional `events` manifest section and the `events` capability; a manifest without an allow-list receives no events. Extensions that must also load under an older v1 host should omit these newer manifest fields.

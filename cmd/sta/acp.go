@@ -459,6 +459,9 @@ func (f *acpFactory) openSession(ctx context.Context, cwd, id string, created bo
 	if len(cfg.Interact.SensitiveTools) > 0 {
 		registry.AddPreExecuteHook(s.acpPermissionGate(cfg.Interact.SensitiveTools))
 	}
+	if created {
+		f.app.extensions.PublishSessionStarted(id)
+	}
 	return s, nil
 }
 
