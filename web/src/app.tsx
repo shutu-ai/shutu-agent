@@ -1,9 +1,10 @@
 import { createContext, memo, useCallback, useContext, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent, type ReactNode } from 'react'
-import type { AttachmentView, CommandView, ConfigView, ContextView, DirectoryListing, EventDetails, EventView, FeedbackView, GoalView, ImageView, InteractionView, JobView, MCPServerView, PlanView, ProviderModelView, ProviderView, QueueItem, RunningSnapshot, SessionSearchHit, SessionStateView, SessionSummary, SettingsView, SkillView, SkillsView, SubagentView, TodoView, WorkspaceView } from './api'
+import type { AttachmentView, CommandView, ConfigView, ContextView, DirectoryListing, EventDetails, EventView, ExtensionInventory, FeedbackView, GoalView, ImageView, InteractionView, JobView, MCPServerView, PlanView, ProviderModelView, ProviderView, QueueItem, RunningSnapshot, SessionSearchHit, SessionStateView, SessionSummary, SettingsView, SkillView, SkillsView, SubagentView, TodoView, WorkspaceView } from './api'
 import { ShutuApiError } from './api'
 import { projectShutuConversation, type ShutuConversationNode, type ShutuConversationSnapshot } from './conversation-model'
 import { collapseShutuAssistantToolCalls, collapseShutuTrajectoryTurns, projectShutuTrajectory, projectShutuTrajectoryRecords, summarizeShutuTimeline, type ShutuTimelineMode, type ShutuTrajectoryEvent, type ShutuTrajectoryRecord } from './trajectory-model'
 import { deriveProducedFiles } from './produced-files'
+import { extensionNavigationItems } from './extensions'
 import { WebStore } from './store'
 import { TrajectorySearchIndex } from './trajectory-search'
 import { buildVirtualOffsets, virtualRange } from './virtual-list'
@@ -284,6 +285,7 @@ function WorkspaceDialog({ store, dialog, onClose, onError }: {
 function SessionBrowser({
   sessions,
   workspaces,
+  extensions,
   selectedId,
   store,
   onError,
@@ -291,6 +293,7 @@ function SessionBrowser({
 }: {
   sessions: readonly SessionSummary[]
   workspaces: { workspaces: WorkspaceView[]; ungrouped_ids: string[] }
+  extensions: readonly ExtensionInventory[]
   selectedId: string | null
   store: WebStore
   onError: (error: unknown) => void
@@ -349,6 +352,7 @@ function SessionBrowser({
     finally { setWorking(false) }
   }
 
+  const extensionNav = useMemo(() => extensionNavigationItems(extensions), [extensions])
   const sessionById = useMemo(() => new Map(sessions.map(session => [session.id, session])), [sessions])
   const visibleIds = useMemo(() => new Set(visible.map(session => session.id)), [visible])
   const sessionIdsForWorkspace = (workspaceId: string): string[] => workspaceId === ''
@@ -419,6 +423,24 @@ function SessionBrowser({
       <button className="new-session" type="button" onClick={() => void run(() => store.createSession())}>
         <span aria-hidden="true">＋</span> New session
       </button>
+      {extensionNav.length > 0 && <>
+        <div className="sidebar-section-head"><span>Extensions</span><span className="session-count">{extensionNav.length}</span></div>
+        <nav className="extension-navigation" aria-label="Extensions">
+          {extensionNav.map(extension => (
+            <a
+              className={`extension-navigation-item ${extension.ready ? '' : 'unavailable'}`}
+              key={extension.id}
+              href={extension.route}
+              aria-disabled={!extension.ready}
+              title={extension.ready ? extension.title : `${extension.title} (unavailable)`}
+              onClick={event => { if (!extension.ready) event.preventDefault() }}
+            >
+              <span aria-hidden="true">{extension.icon}</span>
+              <span className="extension-copy"><span>{extension.title}</span>{!extension.ready && <small>Unavailable</small>}</span>
+            </a>
+          ))}
+        </nav>
+      </>}
       <div className="sidebar-section-head">
         <span>Sessions</span><span className="session-count">{filtered.length}</span>
         <button type="button" className="sidebar-icon-button" onClick={() => setWorkspaceDialog({ kind: 'create' })} aria-label="New workspace" title="New workspace">＋</button>
@@ -2118,7 +2140,7 @@ export function App({ store }: { store: WebStore }) {
 
   return <div className="shell">
     <a className="skip-link" href="#main-tabpanel">Skip to session content</a>
-    <SessionBrowser sessions={state.sessions} workspaces={state.workspaces} selectedId={state.selectedId} store={store} onError={error => setSendError(error instanceof Error ? error.message : String(error))} onSettings={() => setSettingsRoute(true)} />
+    <SessionBrowser sessions={state.sessions} workspaces={state.workspaces} extensions={state.extensions} selectedId={state.selectedId} store={store} onError={error => setSendError(error instanceof Error ? error.message : String(error))} onSettings={() => setSettingsRoute(true)} />
     <TrajectorySearchContext.Provider value={deferredSearch}><TrajectoryToolbarContext.Provider value={{ mode: trajectoryMode, searchQuery: search, selectedSeq: trajectorySelectedSeq, onModeChange: setTrajectoryMode, onSearchQueryChange: setSearch, onReset: resetTrajectoryToolbar, onClearSelection: clearTrajectorySelection }}><main className="main-panel">
       <header className="topbar">
         <button type="button" className="export-toggle" onClick={() => void downloadExport()} disabled={state.selectedId === null}>Export</button>

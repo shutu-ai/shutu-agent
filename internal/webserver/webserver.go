@@ -656,11 +656,15 @@ func New(st store.Store, token, addr string) (*Server, error) {
 }
 
 type ExtensionRoute struct {
-	ExtensionID string `json:"extensionId"`
-	Title       string `json:"title"`
-	Route       string `json:"route"`
-	Ready       bool   `json:"ready"`
-	ServiceURL  string `json:"-"`
+	ExtensionID       string `json:"extensionId"`
+	Title             string `json:"title"`
+	Route             string `json:"route"`
+	Icon              string `json:"icon,omitempty"`
+	NavigationEnabled bool   `json:"navigationEnabled"`
+	NavigationGroup   string `json:"navigationGroup"`
+	Order             int    `json:"order,omitempty"`
+	Ready             bool   `json:"ready"`
+	ServiceURL        string `json:"-"`
 }
 
 // SetExtensionRoutes publishes generic reverse-proxied extension web apps.

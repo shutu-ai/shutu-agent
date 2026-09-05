@@ -29,6 +29,17 @@ export interface WorkspaceList {
   ungrouped_ids: string[]
 }
 
+export interface ExtensionInventory {
+  extensionId: string
+  title: string
+  route: string
+  icon?: string
+  navigationEnabled: boolean
+  navigationGroup: string
+  order?: number
+  ready: boolean
+}
+
 export interface DirectoryEntry {
   name: string
   path: string
@@ -411,6 +422,7 @@ export interface WebApi {
   uploadAttachment(sessionId: string, file: File, signal?: AbortSignal): Promise<AttachmentView>
   loadAttachment(sessionId: string, attachmentId: string, signal?: AbortSignal): Promise<Blob>
   listWorkspaces(signal?: AbortSignal): Promise<WorkspaceList>
+  listExtensions(signal?: AbortSignal): Promise<{ extensions: ExtensionInventory[] }>
   createWorkspace(title: string, path?: string, signal?: AbortSignal): Promise<{ id: string; title: string; path: string }>
   pickWorkspaceDirectory(signal?: AbortSignal): Promise<{ path: string }>
   listWorkspaceDirectories(path?: string, signal?: AbortSignal): Promise<DirectoryListing>
@@ -597,6 +609,10 @@ export class ShutuApi implements WebApi {
 
   listWorkspaces(signal?: AbortSignal): Promise<WorkspaceList> {
     return this.json<WorkspaceList>('/api/workspaces', { signal })
+  }
+
+  listExtensions(signal?: AbortSignal): Promise<{ extensions: ExtensionInventory[] }> {
+    return this.json<{ extensions: ExtensionInventory[] }>('/api/extensions', { signal })
   }
 
   async createWorkspace(title: string, path = '', signal?: AbortSignal): Promise<{ id: string; title: string; path: string }> {

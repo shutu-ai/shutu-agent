@@ -171,11 +171,7 @@ func (a *app) registerWebServer() error {
 		return fmt.Errorf("register web server frontend: %w", err)
 	}
 	if a.extensions != nil {
-		var routes []webserver.ExtensionRoute
-		for _, contribution := range a.extensions.WebContributions() {
-			routes = append(routes, webserver.ExtensionRoute{ExtensionID: contribution.ExtensionID, Title: contribution.Title, Route: contribution.Route, Ready: contribution.Ready, ServiceURL: contribution.ServiceURL})
-		}
-		srv.SetExtensionRoutes(routes)
+		srv.SetExtensionRoutes(a.extensionRoutes())
 	}
 	srv.SetDefaultWorkdir(a.defaultWorkdir())
 	if a.hub == nil {
@@ -354,6 +350,22 @@ func (a *app) registerWebServer() error {
 		}
 	}()
 	return nil
+}
+
+func (a *app) extensionRoutes() []webserver.ExtensionRoute {
+	if a == nil || a.extensions == nil {
+		return nil
+	}
+	var routes []webserver.ExtensionRoute
+	for _, contribution := range a.extensions.WebContributions() {
+		routes = append(routes, webserver.ExtensionRoute{
+			ExtensionID: contribution.ExtensionID, Title: contribution.Title, Route: contribution.Route,
+			Icon: contribution.Icon, NavigationEnabled: contribution.NavigationEnabled,
+			NavigationGroup: contribution.NavigationGroup, Order: contribution.Order,
+			Ready: contribution.Ready, ServiceURL: contribution.ServiceURL,
+		})
+	}
+	return routes
 }
 
 type nativeCommandManager struct {

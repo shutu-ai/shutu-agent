@@ -120,6 +120,11 @@ func (a *app) registerExtensions() error {
 			}
 			_ = eventLog.Write(event)
 		},
+		OnWebContributions: func([]extensionhost.WebContribution) {
+			if a.webserver != nil {
+				a.webserver.SetExtensionRoutes(a.extensionRoutes())
+			}
+		},
 	})
 	if err := host.Start(context.Background()); err != nil {
 		_ = host.Close()

@@ -121,6 +121,14 @@ type WebContribution struct {
 	Enabled bool   `json:"enabled" yaml:"enabled"`
 	Route   string `json:"route,omitempty" yaml:"route"`
 	Title   string `json:"title,omitempty" yaml:"title"`
+	// Icon is presentation metadata only. Agents must provide a generic
+	// fallback because older manifests may omit it.
+	Icon string `json:"icon,omitempty" yaml:"icon"`
+	// NavigationEnabled is optional. Nil preserves v1.0 behavior: every Web
+	// contribution is navigable.
+	NavigationEnabled *bool  `json:"navigationEnabled,omitempty" yaml:"navigation_enabled"`
+	NavigationGroup   string `json:"navigationGroup,omitempty" yaml:"navigation_group"`
+	Order             int    `json:"order,omitempty" yaml:"order"`
 	// ServiceURL may be omitted for a stdio extension; initialize can return the
 	// actual ephemeral URL after it starts its local listener.
 	ServiceURL string `json:"serviceUrl,omitempty" yaml:"service_url"`
@@ -223,6 +231,12 @@ func (m Manifest) Validate() error {
 	}
 	if m.Web.Enabled && strings.TrimSpace(m.Web.Route) == "" {
 		return errors.New("extension: web route is required")
+	}
+	if len([]rune(m.Web.Icon)) > 32 {
+		return errors.New("extension: web icon must contain at most 32 runes")
+	}
+	if len([]rune(m.Web.NavigationGroup)) > 32 {
+		return errors.New("extension: web navigation group must contain at most 32 runes")
 	}
 	if m.Web.Enabled && !m.Capabilities.Web {
 		return errors.New("extension: web.enabled requires the web capability")

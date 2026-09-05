@@ -52,6 +52,7 @@ type Config struct {
 	AllowedTools          map[string]struct{}
 	Registry              *tools.Registry
 	Observer              Observer
+	OnWebContributions    func([]WebContribution)
 }
 
 type Event struct {
@@ -209,8 +210,18 @@ func (h *Host) startOne(ctx context.Context, source Source) error {
 	}
 	h.items = append(h.items, item)
 	h.mu.Unlock()
+	h.notifyWebContributions()
 	h.observe(Event{ExtensionID: manifest.ID, Capability: "lifecycle", Method: "start", Success: true, HealthReady: true, At: time.Now().UTC()})
 	return nil
+}
+
+func (h *Host) notifyWebContributions() {
+	if h.config.OnWebContributions == nil {
+		return
+	}
+	callback := h.config.OnWebContributions
+	defer func() { _ = recover() }()
+	callback(h.WebContributions())
 }
 
 func resolveGrants(manifest extension.Manifest, configured []string) (map[string]struct{}, error) {
@@ -383,6 +394,7 @@ func (h *Host) Close() error {
 		}
 		item.ready.Store(false)
 	}
+	h.notifyWebContributions()
 	return first
 }
 
@@ -411,11 +423,15 @@ func (h *Host) SensitiveTools() []string {
 }
 
 type WebContribution struct {
-	ExtensionID string
-	Title       string
-	Route       string
-	ServiceURL  string
-	Ready       bool
+	ExtensionID       string
+	Title             string
+	Route             string
+	Icon              string
+	NavigationEnabled bool
+	NavigationGroup   string
+	Order             int
+	ServiceURL        string
+	Ready             bool
 }
 
 func (h *Host) WebContributions() []WebContribution {
@@ -423,12 +439,40 @@ func (h *Host) WebContributions() []WebContribution {
 	defer h.mu.RUnlock()
 	var out []WebContribution
 	for _, item := range h.items {
-		if !item.initialized.Capabilities.Web || item.webURL == "" {
+		if !item.initialized.Capabilities.Web || item.webURL == "" || !webNavigationEnabled(item.manifest.Web) {
 			continue
 		}
-		out = append(out, WebContribution{ExtensionID: item.manifest.ID, Title: item.manifest.Web.Title, Route: publicWebRoute(item.manifest), ServiceURL: item.webURL, Ready: item.ready.Load()})
+		out = append(out, WebContribution{
+			ExtensionID: item.manifest.ID, Title: item.manifest.Web.Title, Route: publicWebRoute(item.manifest),
+			Icon: item.manifest.Web.Icon, NavigationEnabled: webNavigationEnabled(item.manifest.Web),
+			NavigationGroup: webNavigationGroup(item.manifest.Web), Order: item.manifest.Web.Order,
+			ServiceURL: item.webURL, Ready: item.ready.Load(),
+		})
 	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].NavigationGroup != out[j].NavigationGroup {
+			return out[i].NavigationGroup < out[j].NavigationGroup
+		}
+		if out[i].Order != out[j].Order {
+			return out[i].Order < out[j].Order
+		}
+		if out[i].Title != out[j].Title {
+			return out[i].Title < out[j].Title
+		}
+		return out[i].ExtensionID < out[j].ExtensionID
+	})
 	return out
+}
+
+func webNavigationEnabled(contribution extension.WebContribution) bool {
+	return contribution.NavigationEnabled == nil || *contribution.NavigationEnabled
+}
+
+func webNavigationGroup(contribution extension.WebContribution) string {
+	if strings.TrimSpace(contribution.NavigationGroup) == "" {
+		return "Extensions"
+	}
+	return strings.TrimSpace(contribution.NavigationGroup)
 }
 
 func publicWebRoute(manifest extension.Manifest) string {

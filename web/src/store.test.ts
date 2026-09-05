@@ -58,6 +58,7 @@ describe('WebStore', () => {
       listWorkspaces: async () => workspaceCreated
         ? { workspaces: [{ id: 'w1', title: 'Workspace', session_ids: ['new'], created_at: 1 }], ungrouped_ids: ['one'] }
         : { workspaces: [], ungrouped_ids: ['one'] },
+      listExtensions: async () => ({ extensions: [] }),
       createWorkspace: async (_title, path = '') => {
         workspaceCreated = true
         return { id: 'w1', title: 'Workspace', path }
@@ -146,6 +147,7 @@ describe('WebStore', () => {
       listSubagents: async () => [],
       listJobs: async () => [],
       listWorkspaces: async () => ({ workspaces: [], ungrouped_ids: [] }),
+      listExtensions: async () => ({ extensions: [] }),
       createWorkspace: async (_title, path = '') => ({ id: 'w1', title: 'Workspace', path }),
       pickWorkspaceDirectory: async () => ({ path: '' }),
       listWorkspaceDirectories: async () => ({ path: '', home: '', crumbs: [], entries: [] }),
@@ -221,6 +223,7 @@ describe('WebStore', () => {
       listSubagents: async () => [],
       listJobs: async () => [],
       listWorkspaces: async () => ({ workspaces: [], ungrouped_ids: ['secure'] }),
+      listExtensions: async () => ({ extensions: [] }),
       createWorkspace: async (_title, path = '') => ({ id: 'w1', title: 'Workspace', path }),
       pickWorkspaceDirectory: async () => ({ path: '' }),
       listWorkspaceDirectories: async () => ({ path: '', home: '', crumbs: [], entries: [] }),

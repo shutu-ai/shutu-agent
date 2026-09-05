@@ -20,14 +20,16 @@ func TestExtensionRoutesProxyAndList(t *testing.T) {
 
 	srv, _ := newTestServer(t, "tok")
 	srv.SetExtensionRoutes([]ExtensionRoute{{
-		ExtensionID: "demo", Title: "Demo", Route: "/extensions/demo/", Ready: true, ServiceURL: backend.URL,
+		ExtensionID: "demo", Title: "Demo", Route: "/extensions/demo/", Icon: "🧩",
+		NavigationEnabled: true, NavigationGroup: "Data", Order: 20, Ready: true, ServiceURL: backend.URL,
 	}})
 	page := doReq(t, srv.Handler(), http.MethodGet, "/extensions/demo/app.js", "tok")
 	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), "extension-page:/app.js:demo") {
 		t.Fatalf("extension page = %d/%s", page.Code, page.Body.String())
 	}
 	list := doReq(t, srv.Handler(), http.MethodGet, "/api/extensions", "tok")
-	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), `"extensionId":"demo"`) {
+	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), `"icon":"🧩"`) ||
+		!strings.Contains(list.Body.String(), `"navigationGroup":"Data"`) || !strings.Contains(list.Body.String(), `"order":20`) {
 		t.Fatalf("extension list = %d/%s", list.Code, list.Body.String())
 	}
 	if unauth := doReq(t, srv.Handler(), http.MethodGet, "/extensions/demo/", ""); unauth.Code != http.StatusUnauthorized {

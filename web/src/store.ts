@@ -1,9 +1,11 @@
-import type { AttachmentView, ConfigView, ContextView, EventView, FeedbackView, FilePreview, InteractionView, MCPServerView, ProviderModelView, QueueItem, RunningSnapshot, SessionConfigView, SessionFilesView, SessionSearchHit, SessionStateView, SessionSummary, SettingsView, SkillActionValues, SkillsView, WebApi, WorkspaceList } from './api'
+import type { AttachmentView, ConfigView, ContextView, EventView, ExtensionInventory, FeedbackView, FilePreview, InteractionView, MCPServerView, ProviderModelView, QueueItem, RunningSnapshot, SessionConfigView, SessionFilesView, SessionSearchHit, SessionStateView, SessionSummary, SettingsView, SkillActionValues, SkillsView, WebApi, WorkspaceList } from './api'
 import { ShutuApiError } from './api'
 
 export interface WebState {
   sessions: readonly SessionSummary[]
   workspaces: WorkspaceList
+  extensions: readonly ExtensionInventory[]
+  extensionsError: string | null
   selectedId: string | null
   events: readonly EventView[]
   hasOlder: boolean
@@ -50,7 +52,7 @@ function saveSessionId(id: string | null): void {
 }
 
 const EMPTY: WebState = {
-  sessions: [], workspaces: { workspaces: [], ungrouped_ids: [] }, selectedId: null, events: [], hasOlder: false, historyStartSeq: null, historyEndSeq: null, historyCursor: null, historyError: null,
+  sessions: [], workspaces: { workspaces: [], ungrouped_ids: [] }, extensions: [], extensionsError: null, selectedId: null, events: [], hasOlder: false, historyStartSeq: null, historyEndSeq: null, historyCursor: null, historyError: null,
   loading: false, loadingOlder: false, sending: false, connected: false, error: null, authRequired: false,
 }
 
@@ -81,7 +83,8 @@ export class WebStore {
     try {
       const [rawSessions, workspaces] = await Promise.all([this.api.listSessions(), this.api.listWorkspaces()])
       const sessions = sortSessions(rawSessions)
-      this.patch({ sessions, workspaces, error: null, authRequired: false })
+      await this.loadExtensions()
+      this.patch({ sessions, workspaces, error: null, authRequired: this.state.authRequired })
       const saved = savedSessionId()
       const current = sessions.find(session => session.id === saved) ?? sessions[0]
       if (current !== undefined) await this.open(current.id)
@@ -102,8 +105,24 @@ export class WebStore {
   async refreshSessions(): Promise<readonly SessionSummary[]> {
     const [rawSessions, workspaces] = await Promise.all([this.api.listSessions(), this.api.listWorkspaces()])
     const sessions = sortSessions(rawSessions)
+    await this.loadExtensions()
     this.patch({ sessions, workspaces })
     return sessions
+  }
+
+  private async loadExtensions(): Promise<void> {
+    try {
+      const inventory = await this.api.listExtensions()
+      this.patch({ extensions: inventory.extensions ?? [], extensionsError: null })
+    } catch (error) {
+      if (isUnauthorized(error)) {
+        this.patch({ authRequired: true, extensions: [] })
+        return
+      }
+      // Navigation is additive. A failed inventory endpoint must not take the
+      // conversation UI or background session refresh down with it.
+      this.patch({ extensions: [], extensionsError: error instanceof Error ? error.message : String(error) })
+    }
   }
 
   private reportBackgroundError(error: unknown): void {
