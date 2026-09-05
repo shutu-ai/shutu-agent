@@ -73,7 +73,7 @@ The tests exercise the real Agent Turn -> Step -> Model Call -> Tool Result -> N
 | `after_tool_result` | PASS | Contributes before the first post-tool model call. A one-tool turn yields one post-tool contribution; two tool calls yield two. |
 | `manual` | PASS | Automatic Loop calls are zero; only the generic `RefreshContext` seam invokes the provider. |
 
-The failure matrix covers optional timeout/crash fail-soft behavior, required provider failure stopping the step, empty contributions, oversized truncatable contributions, and per-contribution limits. Existing integration tests also lock global character/token budgets, priority ordering, same-source/content deduplication, and one durable context row per successful once-per-turn injection. Context contributions are source-attributed durable rows; the documented deduplication boundary is concurrent context contributions, not comparison with prior tool output.
+The failure matrix covers optional timeout/crash fail-soft behavior, required provider failure stopping the step, empty contributions, oversized truncatable contributions, and per-contribution limits. A strategy-wide matrix repeats timeout, crash, empty, oversized, and cancellation behavior for all five strategies, including manual through its explicit refresh seam. Existing integration tests also lock global character/token budgets, provider character budgets, priority ordering, same-source/content deduplication, and one durable context row per successful once-per-turn injection. Context contributions are source-attributed durable rows; the documented deduplication boundary is concurrent context contributions, not comparison with prior tool output.
 
 Evidence:
 

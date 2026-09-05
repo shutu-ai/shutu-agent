@@ -519,6 +519,96 @@ func TestContextProviderFailureModelMatrix(t *testing.T) {
 	}
 }
 
+func TestContextFailureModelAcrossStrategies(t *testing.T) {
+	strategies := []extension.ContextStrategy{
+		extension.ContextOncePerTurn,
+		extension.ContextBeforeEveryModelCall,
+		extension.ContextOnUserInputChange,
+		extension.ContextAfterToolResult,
+		extension.ContextManual,
+	}
+	failureModes := []struct {
+		name       string
+		result     func(int, context.Context) (extension.ContextResult, error)
+		wantCount  int
+		wantPrefix string
+	}{
+		{
+			name: "timeout",
+			result: func(_ int, ctx context.Context) (extension.ContextResult, error) {
+				select {
+				case <-ctx.Done():
+					return extension.ContextResult{}, ctx.Err()
+				case <-time.After(100 * time.Millisecond):
+					return extension.ContextResult{}, errors.New("late")
+				}
+			},
+		},
+		{
+			name: "crash",
+			result: func(int, context.Context) (extension.ContextResult, error) {
+				return extension.ContextResult{}, errors.New("simulated extension crash")
+			},
+		},
+		{
+			name:      "empty contribution",
+			result:    func(int, context.Context) (extension.ContextResult, error) { return extension.ContextResult{}, nil },
+			wantCount: 0,
+		},
+		{
+			name: "oversized contribution",
+			result: func(int, context.Context) (extension.ContextResult, error) {
+				return extension.ContextResult{Contributions: []extension.ContextContribution{{
+					Source: "strategy", Content: strings.Repeat("x", 200), Truncatable: true,
+				}}}, nil
+			},
+			wantCount: 1, wantPrefix: "xxxx",
+		},
+		{
+			name: "cancellation",
+			result: func(_ int, ctx context.Context) (extension.ContextResult, error) {
+				return extension.ContextResult{}, context.Canceled
+			},
+		},
+	}
+
+	for _, strategy := range strategies {
+		for _, failure := range failureModes {
+			t.Run(string(strategy)+"/"+failure.name, func(t *testing.T) {
+				registry := tools.New()
+				registry.SetPolicy(tools.Policy{Timeout: time.Second, Enabled: []string{PublicToolName("strategy", "probe")}})
+				conn := &strategyConnection{result: failure.result}
+				host := strategyHost(t, strategy, false, conn, registry)
+				defer host.Close()
+				ctx := runtimectx.WithCorrelation(context.Background(), runtimectx.Correlation{
+					SessionID: "failure-matrix-session", TurnID: "turn:1", StepID: "step:2",
+				})
+				state := &contextCadenceState{}
+				if strategy == extension.ContextAfterToolResult {
+					state.lastTurn, state.lastStepID = "turn:1", "step:1"
+				}
+
+				var contributions []extension.ContextContribution
+				var err error
+				if strategy == extension.ContextManual {
+					contributions, err = host.RefreshContext(ctx, "failure request")
+				} else {
+					contributions, err = host.ProvideContext(ctx, "failure request", state)
+				}
+				if err != nil {
+					t.Fatalf("optional provider changed loop outcome: %v", err)
+				}
+				if len(contributions) != failure.wantCount {
+					t.Fatalf("contributions = %#v, want %d", contributions, failure.wantCount)
+				}
+				if failure.wantPrefix != "" && (!strings.HasPrefix(contributions[0].Content, failure.wantPrefix) || len(contributions[0].Content) > 80) {
+					t.Fatalf("truncated contribution = %q", contributions[0].Content)
+				}
+			})
+		}
+	}
+}
+
 func TestContextContributionIsPersistedOncePerInjection(t *testing.T) {
 	registry := tools.New()
 	registry.SetPolicy(tools.Policy{Timeout: time.Second, Enabled: []string{PublicToolName("strategy", "probe")}})
