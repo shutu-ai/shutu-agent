@@ -464,6 +464,9 @@ function SessionTree({
                   if (group.workspaceId !== undefined) {
                     setGroupExpanded(group.key, true)
                     startSession(group.workspaceId)
+                  } else {
+                    setGroupExpanded(group.key, true)
+                    startSession(null)
                   }
                 }}
                 drag={workspaceDragProps}

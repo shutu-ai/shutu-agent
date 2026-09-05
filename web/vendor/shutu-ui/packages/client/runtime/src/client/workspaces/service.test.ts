@@ -45,4 +45,29 @@ describe('WorkspaceRuntime', () => {
     expect(second).toBe(first)
     expect(sessions.create).toHaveBeenCalledTimes(1)
   })
+
+  it('creates an explicit Ungrouped session without inheriting recent workspace', async () => {
+    const list = createSnapshotStore<SessionsPortList>({
+      ids: ['s-named'],
+      byId: { 's-named': { id: 's-named', blank: false, updatedAt: Date.now() } },
+      current: 's-named', phase: 'ready',
+      subagentsByParent: {}, jobsBySession: {}, currentAddress: undefined,
+    })
+    const sessions: SessionsPort = {
+      list,
+      create: vi.fn(async () => 's-ungrouped'),
+      open: vi.fn(),
+      clear: vi.fn(),
+    }
+    const runtime = new WorkspaceRuntime(
+      { reflect: { provide: vi.fn() } } as unknown as Context,
+      {} as unknown as IApiClient,
+      sessions,
+    )
+
+    runtime.startSession(null)
+    await vi.waitFor(() => expect(sessions.open).toHaveBeenCalledWith('s-ungrouped'))
+
+    expect(sessions.create).toHaveBeenCalledWith({})
+  })
 })

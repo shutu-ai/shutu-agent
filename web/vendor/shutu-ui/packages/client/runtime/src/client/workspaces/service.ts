@@ -194,20 +194,29 @@ export class WorkspaceRuntime implements IWorkspaces {
 
   /**
    * The shared New Session action behind the shell entry points (sidebar
-   * button, workspace browser): resolve the target Workspace — explicit wins,
-   * then the current Session's Workspace, then the recent-Workspace
-   * projection — connect its blank session and navigate there; with no
-   * Workspace at all, clear the selection into the New Session view state.
+   * button, workspace browser): resolve the explicit, current-Session, or
+   * recent-Workspace target and connect its blank session; `null` creates an
+   * Ungrouped session instead of inheriting or falling back.
    * Connect failures are non-fatal (console diagnostics; the current view
    * stays usable).
-   * @param workspaceId - explicit target Workspace for scoped actions.
+   * @param workspaceId - explicit target Workspace, or `null` for Ungrouped.
    */
-  startSession(workspaceId?: WorkspaceId): void {
+  startSession(workspaceId?: WorkspaceId | null): void {
     const workspace = this.list.getSnapshot()
     const current = this.sessions.list.getSnapshot().current
     const currentWorkspaceId = current === undefined
       ? undefined
       : workspace.items.find(item => item.sessionIds.includes(current))?.workspaceId
+    // Ungrouped is a first-class New Session target. `null` means the user
+    // clicked that bucket's affordance, so it must not fall through to recent.
+    if (workspaceId === null) {
+      const attempt = this.sessions.create({})
+      void attempt.then(
+        sessionId => { this.sessions.open(sessionId) },
+        (reason: unknown) => { console.warn('new ungrouped session failed:', reason) },
+      )
+      return
+    }
     // The ungrouped bucket is a real sidebar target even though it has no
     // Host Workspace row. When the user is already there, "New Session" must
     // stay ungrouped instead of falling through to the most recent named

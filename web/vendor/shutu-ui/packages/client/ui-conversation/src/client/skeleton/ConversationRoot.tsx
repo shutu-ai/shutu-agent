@@ -92,10 +92,10 @@ export function ConversationRoot({
   const chipTitle = pendingWorkspace?.title
     ?? (sessionId === undefined
       ? undefined
-      : sessionWorkspace?.title
-        ?? (workspaces.phase === 'ready' || cwd === undefined || cwd === ''
-          ? undefined
-          : workspaceLabel(cwd)))
+        : sessionWorkspace?.title
+          ?? (workspaces.phase === 'ready'
+            ? t('workspace.ungrouped')
+            : cwd === undefined || cwd === '' ? undefined : workspaceLabel(cwd)))
 
   const heroWorkspaceRow = (
     <div className={css.heroWorkspaceRow}>

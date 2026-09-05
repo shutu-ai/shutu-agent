@@ -32,11 +32,12 @@ export interface SessionsPort {
   /** Observable list snapshot (read face only; writes stay inside the sessions domain). */
   readonly list: ObservableSnapshot<SessionsPortList>
   /**
-   * Create a session on the host.
-   * @param opts - target workspace.
+   * Create a session on the host. Omitting `workspaceId` targets the host's
+   * default directory, which Ungrouped owns as a first-class account.
+   * @param opts - target workspace, or an empty payload for Ungrouped.
    * @returns the new session id.
    */
-  create(opts: { workspaceId: WorkspaceId }): Promise<SessionId>
+  create(opts: { workspaceId?: WorkspaceId }): Promise<SessionId>
   /**
    * Select a session as current.
    * @param id - session id (must exist in the list store).

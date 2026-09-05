@@ -23,11 +23,12 @@ export interface IWorkspaces {
   /**
    * The New Session flow: connect the explicit, current-Session, or recent
    * Workspace and open the resulting session; failures surface on the session
-   * list state.
-   * @param workspaceId - explicit target; omitted inherits the current
-   * Session's Workspace before falling back to the recency projection.
+   * list state. `null` explicitly targets the Ungrouped account, bypassing
+   * current/recency fallback.
+   * @param workspaceId - explicit target, or `null` for Ungrouped; omitted
+   * inherits the current Session's Workspace before falling back to recency.
    */
-  startSession(workspaceId?: WorkspaceId): void
+  startSession(workspaceId?: WorkspaceId | null): void
   /**
    * Register an existing path as a Workspace.
    * @param input - the Host create payload.
