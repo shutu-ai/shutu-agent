@@ -56,3 +56,17 @@ func TestCorrelationContextPreservesRuntimeAndSupportsNarrowing(t *testing.T) {
 		t.Fatalf("session id = %q", SessionID(narrowed))
 	}
 }
+
+func TestToolResultBoundaryContext(t *testing.T) {
+	base := context.Background()
+	if _, ok := ToolResultsComplete(base); ok {
+		t.Fatal("an ordinary context must not be at a tool boundary")
+	}
+
+	boundary := ToolResultBoundary{Sequence: 17}
+	marked := WithToolResultsComplete(base, boundary)
+	got, ok := ToolResultsComplete(marked)
+	if !ok || got != boundary {
+		t.Fatalf("boundary = %+v, %v", got, ok)
+	}
+}

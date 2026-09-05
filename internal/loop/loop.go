@@ -440,7 +440,7 @@ func (l *Loop) RunMessages(ctx context.Context, inputs []llm.Message) (runErr er
 	}
 	userText := inputs[0].Text()
 	var nextStepMessages []llm.Message
-	toolResultsComplete := false
+	var toolResultBoundary runtimectx.ToolResultBoundary
 	for step := 0; ; step++ {
 		if err := ctx.Err(); err != nil {
 			if l.continueOnCancel != nil {
@@ -462,8 +462,8 @@ func (l *Loop) RunMessages(ctx context.Context, inputs []llm.Message) (runErr er
 			TurnID:    fmt.Sprintf("turn:%d", turnNumber),
 			StepID:    fmt.Sprintf("step:%d", step+1),
 		})
-		if toolResultsComplete {
-			stepCtx = runtimectx.WithToolResultsComplete(stepCtx)
+		if toolResultBoundary.Present() {
+			stepCtx = runtimectx.WithToolResultsComplete(stepCtx, toolResultBoundary)
 		}
 		var entered []llm.Message
 		if step > 0 && nextStepMessages != nil {
@@ -514,7 +514,8 @@ func (l *Loop) RunMessages(ctx context.Context, inputs []llm.Message) (runErr er
 		if len(contextMessages) > 0 {
 			entered = append(append([]llm.Message(nil), entered...), contextMessages...)
 		}
-		done, err := l.step(stepCtx, turnNumber, step+1, entered, &finalFinishReason)
+		var nextBoundary runtimectx.ToolResultBoundary
+		done, err := l.step(stepCtx, turnNumber, step+1, entered, &finalFinishReason, &nextBoundary)
 		if err != nil {
 			if l.continueOnCancel != nil && errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 				messages, continued, continueErr := l.continueOnCancel(stepCtx)
@@ -529,7 +530,7 @@ func (l *Loop) RunMessages(ctx context.Context, inputs []llm.Message) (runErr er
 			}
 			return err
 		}
-		toolResultsComplete = !done
+		toolResultBoundary = nextBoundary
 		switch finalFinishReason {
 		case "length", "max_tokens":
 			turnMaxTokens = true
@@ -1132,7 +1133,10 @@ func (o *sessionRetryObserver) RetryStarted(ctx context.Context, _ llm.ChatReque
 // (true, nil) when the turn is complete (no tool calls requested). Pre-step
 // context has already been persisted, so the request contains the system
 // prompt followed by the durable derived history.
-func (l *Loop) step(ctx context.Context, turnNumber, stepNumber int, entered []llm.Message, finalFinishReason *string) (done bool, stepErr error) {
+func (l *Loop) step(ctx context.Context, turnNumber, stepNumber int, entered []llm.Message, finalFinishReason *string, toolResultBoundary *runtimectx.ToolResultBoundary) (done bool, stepErr error) {
+	if toolResultBoundary != nil {
+		*toolResultBoundary = runtimectx.ToolResultBoundary{}
+	}
 	if l.metrics != nil {
 		l.metrics.Step()
 	}
@@ -1737,9 +1741,12 @@ streamRetry:
 	if stepSpan != nil {
 		parentSpanID = stepSpan.ID
 	}
-	concludesTurn, err := l.executeCalls(ctx, turnNumber, stepNumber, calls, parentSpanID)
+	concludesTurn, boundary, err := l.executeCalls(ctx, turnNumber, stepNumber, calls, parentSpanID)
 	if err != nil {
 		return false, err
+	}
+	if toolResultBoundary != nil {
+		*toolResultBoundary = boundary
 	}
 	if concludesTurn {
 		// A successful tool may own the terminal boundary. All calls in the
@@ -1779,14 +1786,15 @@ type toolCallOutcome struct {
 // and approval preparation is ordered, safe bodies use a bounded rolling pool,
 // and all results are committed in model order.
 
-func (l *Loop) executeCalls(ctx context.Context, turnNumber, stepNumber int, calls []llm.ToolCall, parentSpanID string) (bool, error) {
+func (l *Loop) executeCalls(ctx context.Context, turnNumber, stepNumber int, calls []llm.ToolCall, parentSpanID string) (bool, runtimectx.ToolResultBoundary, error) {
 	concludesTurn := false
+	var boundary runtimectx.ToolResultBoundary
 	for next := 0; next < len(calls); {
 		if err := ctx.Err(); err != nil {
 			if logErr := l.appendAbortedCalls(turnNumber, stepNumber, calls[next:]); logErr != nil {
-				return false, logErr
+				return false, boundary, logErr
 			}
-			return false, fmt.Errorf("loop: cancelled: %w", err)
+			return false, boundary, fmt.Errorf("loop: cancelled: %w", err)
 		}
 
 		parsed, parseErr := tools.ParseArguments([]byte(calls[next].Arguments))
@@ -1797,22 +1805,27 @@ func (l *Loop) executeCalls(ctx context.Context, turnNumber, stepNumber int, cal
 			}
 			outcome, err := l.startToolCall(ctx, turnNumber, stepNumber, calls[next], prepareArgs, parentSpanID)
 			if err != nil {
-				return false, err
+				return false, boundary, err
 			}
-			if err := l.commitToolOutcome(turnNumber, stepNumber, outcome); err != nil {
-				return false, err
+			resultSeq, err := l.commitToolOutcome(turnNumber, stepNumber, outcome)
+			if err != nil {
+				return false, boundary, err
 			}
+			boundary.Sequence = resultSeq
 			concludesTurn = concludesTurn || outcome.res.ConcludesTurn
 			next++
 			continue
 		}
-		groupConcludes, err := l.executeParallelGroup(ctx, turnNumber, stepNumber, calls, &next, parentSpanID)
+		groupConcludes, groupBoundary, err := l.executeParallelGroup(ctx, turnNumber, stepNumber, calls, &next, parentSpanID)
 		if err != nil {
-			return false, err
+			return false, boundary, err
+		}
+		if groupBoundary.Sequence > boundary.Sequence {
+			boundary.Sequence = groupBoundary.Sequence
 		}
 		concludesTurn = concludesTurn || groupConcludes
 	}
-	return concludesTurn, nil
+	return concludesTurn, boundary, nil
 }
 
 type settledToolCall struct {
@@ -1824,13 +1837,14 @@ type settledToolCall struct {
 // is important when a completed tool replaces or disables a later tool: dsh
 // reclassifies that later call before starting it, rather than using a stale
 // group classification.
-func (l *Loop) executeParallelGroup(ctx context.Context, turnNumber, stepNumber int, calls []llm.ToolCall, next *int, parentSpanID string) (bool, error) {
+func (l *Loop) executeParallelGroup(ctx context.Context, turnNumber, stepNumber int, calls []llm.ToolCall, next *int, parentSpanID string) (bool, runtimectx.ToolResultBoundary, error) {
 	start := *next
 	committed := start
 	started := start
 	ready := make(map[int]toolCallOutcome)
 	running := make(map[int]struct{})
 	concludesTurn := false
+	var boundary runtimectx.ToolResultBoundary
 	settled := make(chan settledToolCall, len(calls)-start)
 
 	commitReady := func() error {
@@ -1839,9 +1853,11 @@ func (l *Loop) executeParallelGroup(ctx context.Context, turnNumber, stepNumber 
 			if !ok {
 				return nil
 			}
-			if err := l.commitToolOutcome(turnNumber, stepNumber, outcome); err != nil {
+			resultSeq, err := l.commitToolOutcome(turnNumber, stepNumber, outcome)
+			if err != nil {
 				return err
 			}
+			boundary.Sequence = resultSeq
 			concludesTurn = concludesTurn || outcome.res.ConcludesTurn
 			delete(ready, committed)
 			committed++
@@ -1916,24 +1932,24 @@ func (l *Loop) executeParallelGroup(ctx context.Context, turnNumber, stepNumber 
 	for {
 		if err := fill(); err != nil {
 			drain()
-			return false, err
+			return false, boundary, err
 		}
 		if err := commitReady(); err != nil {
 			drain()
-			return false, err
+			return false, boundary, err
 		}
 		if ctx.Err() != nil {
 			drain()
 			if err := commitReady(); err != nil {
-				return false, err
+				return false, boundary, err
 			}
 			if err := l.appendAbortedCalls(turnNumber, stepNumber, calls[*next:]); err != nil {
-				return false, err
+				return false, boundary, err
 			}
-			return false, fmt.Errorf("loop: cancelled: %w", ctx.Err())
+			return false, boundary, fmt.Errorf("loop: cancelled: %w", ctx.Err())
 		}
 		if len(running) == 0 {
-			return concludesTurn, nil
+			return concludesTurn, boundary, nil
 		}
 		settledCall := <-settled
 		delete(running, settledCall.index)
@@ -1994,14 +2010,15 @@ func toolMetricError(result tools.ToolResult, err error) error {
 	return errors.New("structured tool result reported an error")
 }
 
-func (l *Loop) commitToolOutcome(turnNumber, stepNumber int, outcome toolCallOutcome) error {
+func (l *Loop) commitToolOutcome(turnNumber, stepNumber int, outcome toolCallOutcome) (uint64, error) {
 	if outcome.err != nil {
 		info := tools.ErrorInfoOf(outcome.err)
-		if _, err := l.log.Append(session.EventToolResult,
-			session.NewToolErrorAtCodeWithSource(turnNumber, stepNumber, outcome.call.ID, outcome.call.Name, outcome.err.Error(), info.Code, outcome.callSeq)); err != nil {
-			return err
+		result, err := l.log.Append(session.EventToolResult,
+			session.NewToolErrorAtCodeWithSource(turnNumber, stepNumber, outcome.call.ID, outcome.call.Name, outcome.err.Error(), info.Code, outcome.callSeq))
+		if err != nil {
+			return 0, err
 		}
-		return l.appendToolAdditionalContexts(outcome.res)
+		return result.Seq, l.appendToolAdditionalContexts(outcome.res)
 	}
 	var spill *session.SpillRef
 	if outcome.res.SpillPath != "" {
@@ -2028,14 +2045,15 @@ func (l *Loop) commitToolOutcome(turnNumber, stepNumber int, outcome toolCallOut
 			payload = session.NewToolResultWithContentAtSourceMeta(turnNumber, stepNumber, outcome.call.ID, outcome.call.Name, outcome.res.Output, outcome.res.Content, outcome.callSeq, outcome.res.Meta)
 		}
 	}
-	if _, err := l.log.Append(session.EventToolResult, payload); err != nil {
-		return err
+	result, err := l.log.Append(session.EventToolResult, payload)
+	if err != nil {
+		return 0, err
 	}
 	// additionalContexts are deliberately appended only after the tool result.
 	// This is the observable boundary used by the reference loop: nested Code
 	// Mode/plugin context is neither visible while a tool is in flight nor
 	// lost when the outer result is an error.
-	return l.appendToolAdditionalContexts(outcome.res)
+	return result.Seq, l.appendToolAdditionalContexts(outcome.res)
 }
 
 func (l *Loop) appendToolAdditionalContexts(result tools.ToolResult) error {

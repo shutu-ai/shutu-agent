@@ -131,7 +131,8 @@ func (r *strategyReader) Next() (llm.StreamEvent, error) {
 func strategyHost(t *testing.T, strategy extension.ContextStrategy, required bool, conn *strategyConnection, registry *tools.Registry) *Host {
 	t.Helper()
 	host := New(Config{
-		Registry: registry, MaxContributionChars: 80, MaxContributionTokens: 20,
+		Registry: registry, ContextTimeout: 20 * time.Millisecond,
+		MaxContributionChars: 80, MaxContributionTokens: 20,
 		GlobalContextChars: 200, GlobalContextTokens: 50,
 	})
 	definition := extension.ToolDefinition{
@@ -160,6 +161,226 @@ func strategyHost(t *testing.T, strategy extension.ContextStrategy, required boo
 	host.items = append(host.items, item)
 	host.mu.Unlock()
 	return host
+}
+
+func appendContextProvider(t *testing.T, h *Host, id string, strategy extension.ContextStrategy, required bool, conn connection) {
+	t.Helper()
+	item := &managedExtension{
+		manifest: extension.Manifest{
+			ID:              id,
+			Capabilities:    extension.Capabilities{ContextProvider: true},
+			ContextProvider: extension.ContextProviderConfig{Enabled: true, Strategy: strategy, Required: required},
+		},
+		connection:  conn,
+		grants:      map[string]struct{}{"session.id": {}, "session.turn": {}, "session.step": {}, "user.input": {}},
+		initialized: extension.InitializeResult{Capabilities: extension.Capabilities{ContextProvider: true}},
+	}
+	h.mu.Lock()
+	h.items = append(h.items, item)
+	h.mu.Unlock()
+}
+
+func boundaryContext(sessionID string, turn int, sequence uint64) context.Context {
+	base := runtimectx.WithCorrelation(context.Background(), runtimectx.Correlation{
+		SessionID: sessionID, TurnID: fmt.Sprintf("turn:%d", turn), StepID: "step:2",
+	})
+	return runtimectx.WithToolResultsComplete(base, runtimectx.ToolResultBoundary{Sequence: sequence})
+}
+
+func TestAfterToolResultBoundaryIsConsumedOncePerProvider(t *testing.T) {
+	registry := tools.New()
+	conn := &strategyConnection{result: func(int, context.Context) (extension.ContextResult, error) {
+		return extension.ContextResult{Contributions: []extension.ContextContribution{{
+			Source: "provider-a", Content: "post-tool evidence", Truncatable: true,
+		}}}, nil
+	}}
+	host := strategyHost(t, extension.ContextAfterToolResult, false, conn, registry)
+	defer host.Close()
+
+	first, err := host.ProvideContext(boundaryContext("session-a", 1, 17), "request")
+	if err != nil || len(first) != 1 {
+		t.Fatalf("first contribution = %#v, %v", first, err)
+	}
+	second, err := host.ProvideContext(boundaryContext("session-a", 1, 17), "retried pre-step")
+	if err != nil || len(second) != 0 {
+		t.Fatalf("replayed contribution = %#v, %v", second, err)
+	}
+	third, err := host.ProvideContext(boundaryContext("session-a", 1, 18), "request")
+	if err != nil || len(third) != 1 {
+		t.Fatalf("next-boundary contribution = %#v, %v", third, err)
+	}
+	if got := len(conn.calls()); got != 2 {
+		t.Fatalf("provider invocations = %d, want 2", got)
+	}
+
+	if _, err := host.ProvideContext(boundaryContext("session-a", 2, 17), "request"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := host.ProvideContext(boundaryContext("session-b", 1, 17), "request"); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(conn.calls()); got != 4 {
+		t.Fatalf("isolated provider invocations = %d, want 4", got)
+	}
+}
+
+func TestAfterToolResultBoundaryConcurrentClaimIsOnce(t *testing.T) {
+	registry := tools.New()
+	conn := &strategyConnection{result: func(int, context.Context) (extension.ContextResult, error) {
+		return extension.ContextResult{Contributions: []extension.ContextContribution{{
+			Source: "provider-a", Content: "post-tool evidence", Truncatable: true,
+		}}}, nil
+	}}
+	host := strategyHost(t, extension.ContextAfterToolResult, false, conn, registry)
+	defer host.Close()
+
+	const callers = 32
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := host.ProvideContext(boundaryContext("concurrent-session", 1, 17), "request"); err != nil {
+				t.Errorf("provider call failed: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := len(conn.calls()); got != 1 {
+		t.Fatalf("provider invocations = %d, want 1", got)
+	}
+}
+
+func TestAfterToolResultBoundaryIsProviderLocal(t *testing.T) {
+	host := New(Config{})
+	defer host.Close()
+	providerA := &strategyConnection{result: func(int, context.Context) (extension.ContextResult, error) {
+		return extension.ContextResult{Contributions: []extension.ContextContribution{{
+			Source: "provider-a", Content: "evidence-a", Truncatable: true,
+		}}}, nil
+	}}
+	providerB := &strategyConnection{result: func(int, context.Context) (extension.ContextResult, error) {
+		return extension.ContextResult{Contributions: []extension.ContextContribution{{
+			Source: "provider-b", Content: "evidence-b", Truncatable: true,
+		}}}, nil
+	}}
+	appendContextProvider(t, host, "provider-a", extension.ContextAfterToolResult, false, providerA)
+
+	ctx := boundaryContext("multi-provider-session", 1, 17)
+	if _, err := host.ProvideContext(ctx, "request"); err != nil {
+		t.Fatal(err)
+	}
+	appendContextProvider(t, host, "provider-b", extension.ContextAfterToolResult, false, providerB)
+	contributions, err := host.ProvideContext(ctx, "retried pre-step")
+	if err != nil || len(contributions) != 1 || contributions[0].Source != "provider-b" {
+		t.Fatalf("provider-b contribution = %#v, %v", contributions, err)
+	}
+	if got := len(providerA.calls()); got != 1 {
+		t.Fatalf("provider-a invocations = %d, want 1", got)
+	}
+	if got := len(providerB.calls()); got != 1 {
+		t.Fatalf("provider-b invocations = %d, want 1", got)
+	}
+}
+
+func TestAfterToolResultBoundaryFailureConsumption(t *testing.T) {
+	tests := []struct {
+		name       string
+		required   bool
+		result     func(int, context.Context) (extension.ContextResult, error)
+		wantErr    bool
+		wantLoaded bool
+	}{
+		{
+			name: "success consumed", result: func(int, context.Context) (extension.ContextResult, error) {
+				return extension.ContextResult{Contributions: []extension.ContextContribution{{Source: "strategy", Content: "ok", Truncatable: true}}}, nil
+			}, wantLoaded: true,
+		},
+		{
+			name: "empty contribution consumed", result: func(int, context.Context) (extension.ContextResult, error) {
+				return extension.ContextResult{}, nil
+			},
+		},
+		{
+			name: "timeout consumed", result: func(_ int, ctx context.Context) (extension.ContextResult, error) {
+				<-ctx.Done()
+				return extension.ContextResult{}, ctx.Err()
+			},
+		},
+		{
+			name: "crash consumed", result: func(int, context.Context) (extension.ContextResult, error) {
+				return extension.ContextResult{}, errors.New("simulated extension crash")
+			},
+		},
+		{
+			name: "cancellation consumed", result: func(_ int, ctx context.Context) (extension.ContextResult, error) {
+				return extension.ContextResult{}, context.Canceled
+			},
+		},
+		{
+			name: "required failure consumed", required: true, result: func(int, context.Context) (extension.ContextResult, error) {
+				return extension.ContextResult{}, errors.New("required provider failure")
+			}, wantErr: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			registry := tools.New()
+			conn := &strategyConnection{result: test.result}
+			host := strategyHost(t, extension.ContextAfterToolResult, test.required, conn, registry)
+			defer host.Close()
+			ctx := boundaryContext("failure-boundary-session", 1, 17)
+
+			first, firstErr := host.ProvideContext(ctx, "request")
+			if (firstErr != nil) != test.wantErr {
+				t.Fatalf("first error = %v, want error %v", firstErr, test.wantErr)
+			}
+			if test.wantLoaded && len(first) != 1 {
+				t.Fatalf("first contributions = %#v", first)
+			}
+			second, secondErr := host.ProvideContext(ctx, "same boundary retry")
+			if secondErr != nil || len(second) != 0 {
+				t.Fatalf("replayed contribution = %#v, %v", second, secondErr)
+			}
+			if got := len(conn.calls()); got != 1 {
+				t.Fatalf("provider invocations = %d, want 1", got)
+			}
+		})
+	}
+}
+
+func TestAfterToolResultRealLoopBoundaryReplayIsIdempotent(t *testing.T) {
+	registry := tools.New()
+	registry.SetPolicy(tools.Policy{Timeout: time.Second, Enabled: []string{PublicToolName("strategy", "probe")}})
+	conn := &strategyConnection{result: func(int, context.Context) (extension.ContextResult, error) {
+		return extension.ContextResult{Contributions: []extension.ContextContribution{{
+			Source: "strategy", Content: "real-loop evidence", Truncatable: true,
+		}}}, nil
+	}}
+	host := strategyHost(t, extension.ContextAfterToolResult, false, conn, registry)
+	defer host.Close()
+
+	log := runStrategyTurn(t, host, registry, "real-boundary-session", "real boundary request", 1)
+	var resultSeq uint64
+	for _, event := range log.Events() {
+		if event.Type == session.EventToolResult {
+			resultSeq = event.Seq
+		}
+	}
+	if resultSeq == 0 {
+		t.Fatal("real loop did not commit a tool result")
+	}
+
+	ctx := runtimectx.WithCorrelation(context.Background(), runtimectx.Correlation{
+		SessionID: "real-boundary-session", TurnID: "turn:1", StepID: "step:2",
+	})
+	ctx = runtimectx.WithToolResultsComplete(ctx, runtimectx.ToolResultBoundary{Sequence: resultSeq})
+	if contributions, err := host.ProvideContext(ctx, "same boundary pre-step replay"); err != nil || len(contributions) != 0 {
+		t.Fatalf("replayed real-loop contribution = %#v, %v", contributions, err)
+	}
+	if got := len(conn.calls()); got != 1 {
+		t.Fatalf("provider invocations = %d, want 1", got)
+	}
 }
 
 func runStrategyTurn(t *testing.T, host *Host, registry *tools.Registry, sessionID, input string, toolCalls int) *session.Log {
@@ -348,7 +569,7 @@ func TestAfterToolResultUsesLoopToolBoundarySignal(t *testing.T) {
 	if contributions, err := host.ProvideContext(base, "first request"); err != nil || len(contributions) != 0 {
 		t.Fatalf("context before tool boundary = %#v, %v", contributions, err)
 	}
-	postTool := runtimectx.WithToolResultsComplete(base)
+	postTool := runtimectx.WithToolResultsComplete(base, runtimectx.ToolResultBoundary{Sequence: 17})
 	if contributions, err := host.ProvideContext(postTool, "second request"); err != nil || len(contributions) != 1 {
 		t.Fatalf("context after tool boundary = %#v, %v", contributions, err)
 	}
@@ -681,7 +902,7 @@ func TestContextFailureModelAcrossStrategies(t *testing.T) {
 					SessionID: "failure-matrix-session", TurnID: "turn:1", StepID: "step:2",
 				})
 				if strategy == extension.ContextAfterToolResult {
-					ctx = runtimectx.WithToolResultsComplete(ctx)
+					ctx = runtimectx.WithToolResultsComplete(ctx, runtimectx.ToolResultBoundary{Sequence: 17})
 				}
 
 				var contributions []extension.ContextContribution

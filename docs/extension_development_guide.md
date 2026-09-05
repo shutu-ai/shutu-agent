@@ -75,6 +75,10 @@ err := server.Run(ctx, os.Stdin, os.Stdout)
 
 Other languages implement the same JSON-RPC methods over stdio or HTTP.
 
+## Context scheduling semantics
+
+`after_tool_result` is scheduled at most once per durable tool-result batch per context provider. A timeout, empty result, cancellation or failure consumes that scheduling opportunity; it does not retry the same boundary. `manual` providers run only when the host explicitly calls `RefreshContext`; the generic seam does not make a `manual` provider run automatically.
+
 ## Subscribe to events
 
 Declare an exact allow-list; the host never performs an unfiltered event fanout:

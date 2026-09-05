@@ -87,6 +87,8 @@ Request is the minimal permitted session/turn/step/workspace/user context. Resul
 }
 ```
 
+The boundary identity used by host scheduling is internal to the Agent runtime and is not part of this request. For `after_tool_result`, all tool results committed before the next model call form one durable batch. The host schedules a provider at most once for that batch; a claimed boundary remains consumed on an empty result, timeout, cancellation, crash or required failure.
+
 ### `tool/call`
 
 Request contains the extension-local tool name, parsed JSON object arguments, optional durable call id, and session id only when granted. A tool error is represented as `{"error":"message"}` inside a successful RPC result.

@@ -539,21 +539,30 @@ type contextCadenceInputKey struct {
 	extensionID string
 }
 
+type contextToolBoundaryKey struct {
+	sessionID   string
+	turnID      string
+	extensionID string
+}
+
 // contextCadenceCache owns immutable, lock-protected cadence facts. Turn state
 // is scoped by (session, turn, extension), so concurrent turns on one session
 // cannot overwrite one another's state.
 type contextCadenceCache struct {
-	mu         sync.Mutex
-	turns      map[contextCadenceTurnKey]struct{}
-	inputs     map[contextCadenceInputKey]string
-	turnOrder  []contextCadenceTurnKey
-	inputOrder []contextCadenceInputKey
+	mu            sync.Mutex
+	turns         map[contextCadenceTurnKey]struct{}
+	inputs        map[contextCadenceInputKey]string
+	boundaries    map[contextToolBoundaryKey]uint64
+	turnOrder     []contextCadenceTurnKey
+	inputOrder    []contextCadenceInputKey
+	boundaryOrder []contextToolBoundaryKey
 }
 
 func newContextCadenceCache() contextCadenceCache {
 	return contextCadenceCache{
-		turns:  make(map[contextCadenceTurnKey]struct{}),
-		inputs: make(map[contextCadenceInputKey]string),
+		turns:      make(map[contextCadenceTurnKey]struct{}),
+		inputs:     make(map[contextCadenceInputKey]string),
+		boundaries: make(map[contextToolBoundaryKey]uint64),
 	}
 }
 
@@ -582,7 +591,31 @@ func (c *contextCadenceCache) rememberInput(key contextCadenceInputKey, input st
 	c.inputs[key] = input
 }
 
-func (c *contextCadenceCache) admit(strategy extension.ContextStrategy, correlation runtimectx.Correlation, input, extensionID string, toolResultsComplete bool) bool {
+func (c *contextCadenceCache) claimToolBoundary(correlation runtimectx.Correlation, extensionID string, boundary runtimectx.ToolResultBoundary) bool {
+	if !boundary.Present() {
+		return false
+	}
+	key := contextToolBoundaryKey{
+		sessionID: correlation.SessionID, turnID: correlation.TurnID, extensionID: extensionID,
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if consumed, known := c.boundaries[key]; known && consumed == boundary.Sequence {
+		return false
+	}
+	if _, known := c.boundaries[key]; !known {
+		c.boundaryOrder = append(c.boundaryOrder, key)
+		if len(c.boundaryOrder) > contextCadenceMaxEntries {
+			oldest := c.boundaryOrder[0]
+			c.boundaryOrder = c.boundaryOrder[1:]
+			delete(c.boundaries, oldest)
+		}
+	}
+	c.boundaries[key] = boundary.Sequence
+	return true
+}
+
+func (c *contextCadenceCache) admit(strategy extension.ContextStrategy, correlation runtimectx.Correlation, input, extensionID string, boundary runtimectx.ToolResultBoundary) bool {
 	switch strategy {
 	case extension.ContextOncePerTurn:
 		if correlation.TurnID == "" {
@@ -611,7 +644,7 @@ func (c *contextCadenceCache) admit(strategy extension.ContextStrategy, correlat
 		c.rememberInput(key, input)
 		return true
 	case extension.ContextAfterToolResult:
-		return toolResultsComplete
+		return c.claimToolBoundary(correlation, extensionID, boundary)
 	case extension.ContextManual:
 		return true
 	default:
@@ -668,7 +701,8 @@ func (h *Host) provideContext(ctx context.Context, userText string, includeManua
 		if strategy == extension.ContextManual && !includeManual {
 			continue
 		}
-		if !h.cadence.admit(strategy, correlation, inputIdentity, item.manifest.ID, runtimectx.ToolResultsComplete(ctx)) {
+		boundary, _ := runtimectx.ToolResultsComplete(ctx)
+		if !h.cadence.admit(strategy, correlation, inputIdentity, item.manifest.ID, boundary) {
 			continue
 		}
 		request := extension.ContextRequest{Metadata: map[string]string{}}

@@ -6,6 +6,16 @@ import "context"
 
 type toolResultsKey struct{}
 
+// ToolResultBoundary identifies the durable tool-result batch that has just
+// committed. The zero value means "not at a tool-result boundary".
+type ToolResultBoundary struct {
+	Sequence uint64
+}
+
+func (boundary ToolResultBoundary) Present() bool {
+	return boundary.Sequence != 0
+}
+
 type key struct{}
 
 // Correlation carries the stable execution identities visible to tools,
@@ -96,15 +106,14 @@ func CorrelationOf(ctx context.Context) (Correlation, bool) {
 // WithToolResultsComplete marks the boundary after a step's tool calls have
 // committed and another model request is about to run. Context strategies use
 // this authoritative loop signal instead of inferring it from step numbers.
-func WithToolResultsComplete(ctx context.Context) context.Context {
-	return context.WithValue(ctx, toolResultsKey{}, true)
+func WithToolResultsComplete(ctx context.Context, boundary ToolResultBoundary) context.Context {
+	return context.WithValue(ctx, toolResultsKey{}, boundary)
 }
 
-// ToolResultsComplete reports whether the current context is at the post-tool,
-// pre-next-model-call boundary.
-func ToolResultsComplete(ctx context.Context) bool {
-	value, _ := ctx.Value(toolResultsKey{}).(bool)
-	return value
+// ToolResultsComplete returns the post-tool, pre-next-model-call boundary.
+func ToolResultsComplete(ctx context.Context) (ToolResultBoundary, bool) {
+	boundary, _ := ctx.Value(toolResultsKey{}).(ToolResultBoundary)
+	return boundary, boundary.Present()
 }
 
 func Emit(ctx context.Context, typ string, data any) error {
