@@ -55,6 +55,14 @@ export class WorkspaceRuntime implements IWorkspaces {
   private readonly manager: WorkspaceManager
   /** In-flight blank-session creates keyed by workspace (connectWorkspace coalescing). */
   private readonly connecting = new Map<WorkspaceId, Promise<SessionId>>()
+  /**
+   * Session ids this runtime created for a Workspace, retained until the
+   * normal membership/cwd baseline can make the blank-reuse decision itself.
+   * The create response resolves before the Workspace delta and the summary's
+   * cwd are both visible, so a second New Session click in that window would
+   * otherwise mint a duplicate blank session.
+   */
+  private readonly createdBlankSessions = new Map<WorkspaceId, Set<SessionId>>()
   /** Guards the runtime-owned one-shot initial-selection subscription. */
   private initialSelectionStarted = false
 
@@ -102,17 +110,37 @@ export class WorkspaceRuntime implements IWorkspaces {
     // An archived blank is never reused either: reuse would open a session
     // no grouping surface can show, so New Session mints a fresh one instead.
     const archived = this.list.getSnapshot().archivedSessionIds
-    const sessions = this.sessions.list.getSnapshot()
-    for (const id of sessions.ids) {
-      const summary = sessions.byId[id]
+    const remembered = this.createdBlankSessions.get(workspaceId)
+    if (remembered !== undefined) {
+      for (const sessionId of [...remembered]) {
+        const summary = this.sessions.list.getSnapshot().byId[sessionId]
+        if (summary === undefined || !summary.blank || archived.includes(sessionId)) {
+          remembered.delete(sessionId)
+          continue
+        }
+        return sessionId
+      }
+      if (remembered.size === 0) this.createdBlankSessions.delete(workspaceId)
+    }
+    const sessionSnapshot = this.sessions.list.getSnapshot()
+    for (const id of sessionSnapshot.ids) {
+      const summary = sessionSnapshot.byId[id]
       if (summary !== undefined && summary.blank && summary.cwd === workspace.path
         && workspace.sessionIds.includes(summary.id)
         && !archived.includes(summary.id)) return summary.id
     }
     const attempt = this.sessions.create({ workspaceId })
-      .finally(() => { this.connecting.delete(workspaceId) })
+    void attempt.then(
+      (sessionId) => {
+        const ids = this.createdBlankSessions.get(workspaceId) ?? new Set<SessionId>()
+        ids.add(sessionId)
+        this.createdBlankSessions.set(workspaceId, ids)
+      },
+      () => {},
+    )
+    const guarded = attempt.finally(() => { this.connecting.delete(workspaceId) })
     this.connecting.set(workspaceId, attempt)
-    return attempt
+    return guarded
   }
 
   /**
