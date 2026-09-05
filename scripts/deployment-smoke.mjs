@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url'
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const packageRoot = resolve(process.env.SHUTU_RELEASE_PACKAGE ?? join(root, 'release', 'p35-shutu-agent'))
-const binaryName = process.platform === 'win32' ? 'shutu-agent.exe' : 'shutu-agent'
+const binaryName = process.platform === 'win32' ? 'sta.exe' : 'sta'
 const token = 'p35-deployment-smoke-token'
 const ports = [18131, 18132]
 const currentCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim()
