@@ -64,3 +64,21 @@ func TestManifestRejectsUnsafeNamesAndEnvironment(t *testing.T) {
 		t.Fatal("unsafe tool name was accepted")
 	}
 }
+
+func TestEventSubscriptionValidation(t *testing.T) {
+	base := "id: events\nname: Events\nversion: 0.1.0\nextension_api: 1.0\ntransport: {type: stdio, command: events}\n"
+	valid := base + "capabilities: {events: true}\nevents:\n  subscribe:\n    - turn.completed\n    - tool.failed\n"
+	manifest, err := ParseManifest([]byte(valid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Events.Subscribe) != 2 {
+		t.Fatalf("subscriptions = %#v", manifest.Events.Subscribe)
+	}
+	if _, err := ParseManifest([]byte(base + "capabilities: {events: true}\nevents:\n  subscribe: [unknown.event]\n")); err == nil {
+		t.Fatal("unknown event subscription was accepted")
+	}
+	if _, err := ParseManifest([]byte(base + "events:\n  subscribe: [turn.completed]\n")); err == nil {
+		t.Fatal("event subscription without events capability was accepted")
+	}
+}

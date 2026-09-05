@@ -44,6 +44,7 @@ type Manifest struct {
 	Tools             ToolsContribution     `json:"tools" yaml:"tools"`
 	ContextProvider   ContextProviderConfig `json:"contextProvider" yaml:"context_provider"`
 	Web               WebContribution       `json:"web" yaml:"web"`
+	Events            EventSubscription     `json:"events" yaml:"events"`
 	Health            HealthConfig          `json:"health" yaml:"health"`
 	Lifecycle         LifecycleConfig       `json:"lifecycle" yaml:"lifecycle"`
 	Permissions       []Permission          `json:"permissions,omitempty" yaml:"permissions"`
@@ -132,6 +133,12 @@ type WebContribution struct {
 	// ServiceURL may be omitted for a stdio extension; initialize can return the
 	// actual ephemeral URL after it starts its local listener.
 	ServiceURL string `json:"serviceUrl,omitempty" yaml:"service_url"`
+}
+
+// EventSubscription is allow-list only. A capability declaration without
+// event types receives nothing; the Agent never performs an unfiltered fanout.
+type EventSubscription struct {
+	Subscribe []string `json:"subscribe,omitempty" yaml:"subscribe"`
 }
 
 type HealthConfig struct {
@@ -240,6 +247,20 @@ func (m Manifest) Validate() error {
 	}
 	if m.Web.Enabled && !m.Capabilities.Web {
 		return errors.New("extension: web.enabled requires the web capability")
+	}
+	if len(m.Events.Subscribe) > 0 && !m.Capabilities.Events {
+		return errors.New("extension: event subscriptions require the events capability")
+	}
+	seenEvents := make(map[string]struct{}, len(m.Events.Subscribe))
+	for _, eventType := range m.Events.Subscribe {
+		eventType = strings.TrimSpace(eventType)
+		if !ValidEventType(eventType) {
+			return fmt.Errorf("extension: unsupported event subscription %q", eventType)
+		}
+		if _, duplicate := seenEvents[eventType]; duplicate {
+			return fmt.Errorf("extension: duplicate event subscription %q", eventType)
+		}
+		seenEvents[eventType] = struct{}{}
 	}
 	if m.Health.Enabled && !m.Capabilities.Health {
 		return errors.New("extension: health.enabled requires the health capability")

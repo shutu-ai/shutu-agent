@@ -85,6 +85,8 @@ func (h *Host) Restart(ctx context.Context, id string) error {
 	h.mu.Unlock()
 
 	_ = h.removeTools(old)
+	h.publishLifecycle(old, extension.EventExtensionStopped, map[string]any{"reason": "restart"})
+	h.stopEventDelivery(old)
 	shutdownCtx, cancel := context.WithTimeout(ctx, h.config.ShutdownTimeout)
 	_ = old.connection.Call(shutdownCtx, extension.MethodShutdown, nil, nil)
 	cancel()
@@ -108,7 +110,10 @@ func (h *Host) Restart(ctx context.Context, id string) error {
 				}
 				h.items = append(h.items, replacement)
 				h.mu.Unlock()
+				h.notifyWebContributions()
+				h.startEventDelivery(replacement)
 				h.observe(Event{ExtensionID: manifest.ID, Capability: "lifecycle", Method: "restart", Success: true, Restarts: restarts, HealthReady: true, At: time.Now().UTC()})
+				h.publishLifecycle(replacement, extension.EventExtensionRestarted, map[string]any{"restarts": restarts})
 				return nil
 			}
 			_ = h.removeTools(replacement)
@@ -123,7 +128,10 @@ func (h *Host) Restart(ctx context.Context, id string) error {
 // failure. Recovery is asynchronous so an already failed model/tool call is
 // never prolonged by startup, and the failed operation is never replayed.
 func (h *Host) recoverAfterCall(id string, err error) {
-	if err == nil || h.closed || (!errors.Is(err, ErrConnectionLost) && !errors.Is(err, ErrConnectionClosed)) {
+	h.mu.RLock()
+	closed := h.closed
+	h.mu.RUnlock()
+	if err == nil || closed || (!errors.Is(err, ErrConnectionLost) && !errors.Is(err, ErrConnectionClosed)) {
 		return
 	}
 	h.mu.RLock()

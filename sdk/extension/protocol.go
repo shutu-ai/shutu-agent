@@ -14,6 +14,44 @@ const (
 	MethodEvent          = "event"
 )
 
+// EventVersion is independent of the Agent's durable vocabulary: it is the
+// wire contract shown to external processes.
+const EventVersion = 1
+
+// Stable observational event types. Payloads contain identifiers, counts and
+// outcomes only; message bodies, tool arguments and tool output never cross.
+const (
+	EventTurnStarted        = "turn.started"
+	EventTurnCompleted      = "turn.completed"
+	EventStepStarted        = "step.started"
+	EventStepCompleted      = "step.completed"
+	EventToolStarted        = "tool.started"
+	EventToolCompleted      = "tool.completed"
+	EventToolFailed         = "tool.failed"
+	EventContextRequested   = "context.requested"
+	EventContextInjected    = "context.injected"
+	EventExtensionStarted   = "extension.started"
+	EventExtensionRestarted = "extension.restarted"
+	EventExtensionStopped   = "extension.stopped"
+)
+
+var SupportedEventTypes = []string{
+	EventTurnStarted, EventTurnCompleted,
+	EventStepStarted, EventStepCompleted,
+	EventToolStarted, EventToolCompleted, EventToolFailed,
+	EventContextRequested, EventContextInjected,
+	EventExtensionStarted, EventExtensionRestarted, EventExtensionStopped,
+}
+
+func ValidEventType(eventType string) bool {
+	for _, supported := range SupportedEventTypes {
+		if eventType == supported {
+			return true
+		}
+	}
+	return false
+}
+
 type RPCRequest struct {
 	JSONRPC string `json:"jsonrpc"`
 	ID      uint64 `json:"id,omitempty"`
@@ -43,6 +81,7 @@ type InitializeRequest struct {
 	AgentVersion          string       `json:"agentVersion"`
 	GrantedPermissions    []string     `json:"grantedPermissions,omitempty"`
 	SupportedCapabilities Capabilities `json:"supportedCapabilities"`
+	SupportedEventTypes   []string     `json:"supportedEventTypes,omitempty"`
 }
 
 type InitializeResult struct {
@@ -99,9 +138,12 @@ type ToolCallResult struct {
 
 type Event struct {
 	Type       string         `json:"type"`
+	Version    int            `json:"version"`
+	EventID    string         `json:"eventId,omitempty"`
 	SessionID  string         `json:"sessionId,omitempty"`
 	TurnID     string         `json:"turnId,omitempty"`
 	StepID     string         `json:"stepId,omitempty"`
+	Step       int            `json:"step,omitempty"`
 	OccurredAt string         `json:"occurredAt,omitempty"`
 	Payload    map[string]any `json:"payload,omitempty"`
 }

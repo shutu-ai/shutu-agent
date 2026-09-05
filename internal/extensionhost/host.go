@@ -43,6 +43,8 @@ type Config struct {
 	HealthTimeout         time.Duration
 	ContextTimeout        time.Duration
 	ShutdownTimeout       time.Duration
+	EventTimeout          time.Duration
+	EventQueueSize        int
 	GlobalContextChars    int
 	MaxContributionChars  int
 	GlobalContextTokens   int
@@ -66,8 +68,12 @@ type Event struct {
 	ContextChars  int       `json:"contextChars,omitempty"`
 	ContextTokens int       `json:"contextTokens,omitempty"`
 	ToolName      string    `json:"toolName,omitempty"`
+	EventType     string    `json:"eventType,omitempty"`
 	Restarts      int       `json:"restarts,omitempty"`
 	HealthReady   bool      `json:"healthReady,omitempty"`
+	Delivered     bool      `json:"delivered,omitempty"`
+	Dropped       bool      `json:"dropped,omitempty"`
+	QueueDepth    int       `json:"queueDepth,omitempty"`
 	At            time.Time `json:"at"`
 }
 
@@ -84,6 +90,10 @@ type managedExtension struct {
 	restarts       int
 	ready          atomic.Bool
 	webURL         string
+	eventQueue     chan extension.Event
+	eventDone      chan struct{}
+	eventStop      sync.Once
+	subscriptions  map[string]struct{}
 }
 
 type Host struct {
@@ -105,6 +115,12 @@ func New(config Config) *Host {
 	}
 	if config.ShutdownTimeout <= 0 {
 		config.ShutdownTimeout = 3 * time.Second
+	}
+	if config.EventTimeout <= 0 {
+		config.EventTimeout = 2 * time.Second
+	}
+	if config.EventQueueSize <= 0 {
+		config.EventQueueSize = 256
 	}
 	if config.GlobalContextChars <= 0 {
 		config.GlobalContextChars = 4000
@@ -211,7 +227,9 @@ func (h *Host) startOne(ctx context.Context, source Source) error {
 	h.items = append(h.items, item)
 	h.mu.Unlock()
 	h.notifyWebContributions()
+	h.startEventDelivery(item)
 	h.observe(Event{ExtensionID: manifest.ID, Capability: "lifecycle", Method: "start", Success: true, HealthReady: true, At: time.Now().UTC()})
+	h.publishLifecycle(item, extension.EventExtensionStarted, nil)
 	return nil
 }
 
@@ -258,6 +276,7 @@ func (h *Host) initialize(ctx context.Context, manifest extension.Manifest, sour
 		AgentVersion:          h.config.AgentVersion,
 		GrantedPermissions:    grantedNames,
 		SupportedCapabilities: extension.Capabilities{Tools: true, ContextProvider: true, Lifecycle: true, Web: true, Health: true, Events: true},
+		SupportedEventTypes:   extension.SupportedEventTypes,
 	}
 	if err := conn.Call(startupCtx, extension.MethodInitialize, request, &result); err != nil {
 		return nil, fmt.Errorf("extension: initialize %s: %w", manifest.ID, err)
@@ -273,7 +292,8 @@ func (h *Host) initialize(ctx context.Context, manifest extension.Manifest, sour
 		(manifest.Capabilities.ContextProvider && !result.Capabilities.ContextProvider) ||
 		(manifest.Capabilities.Web && !result.Capabilities.Web) ||
 		(manifest.Capabilities.Health && !result.Capabilities.Health) ||
-		(manifest.Capabilities.Lifecycle && !result.Capabilities.Lifecycle) {
+		(manifest.Capabilities.Lifecycle && !result.Capabilities.Lifecycle) ||
+		(len(manifest.Events.Subscribe) > 0 && !result.Capabilities.Events) {
 		return nil, fmt.Errorf("%w: %s omitted a capability declared by its manifest", ErrIncompatible, manifest.ID)
 	}
 	result.Capabilities.Tools = result.Capabilities.Tools && manifest.Capabilities.Tools
@@ -281,8 +301,15 @@ func (h *Host) initialize(ctx context.Context, manifest extension.Manifest, sour
 	result.Capabilities.Web = result.Capabilities.Web && manifest.Capabilities.Web
 	result.Capabilities.Health = result.Capabilities.Health && manifest.Capabilities.Health
 	result.Capabilities.Lifecycle = result.Capabilities.Lifecycle && manifest.Capabilities.Lifecycle
+	result.Capabilities.Events = result.Capabilities.Events && manifest.Capabilities.Events
 
 	item := &managedExtension{manifest: manifest, source: source, connection: conn, initialized: result, grants: grants}
+	if result.Capabilities.Events {
+		item.subscriptions = make(map[string]struct{}, len(manifest.Events.Subscribe))
+		for _, eventType := range manifest.Events.Subscribe {
+			item.subscriptions[strings.TrimSpace(eventType)] = struct{}{}
+		}
+	}
 	item.ready.Store(true)
 	if manifest.Capabilities.Health {
 		healthCtx, healthCancel := context.WithTimeout(ctx, timeout(time.Duration(manifest.Health.TimeoutMS)*time.Millisecond, h.config.HealthTimeout))
@@ -383,6 +410,8 @@ func (h *Host) Close() error {
 	h.mu.Unlock()
 	var first error
 	for _, item := range items {
+		h.publishLifecycle(item, extension.EventExtensionStopped, map[string]any{"reason": "shutdown"})
+		h.stopEventDelivery(item)
 		ctx, cancel := context.WithTimeout(context.Background(), h.config.ShutdownTimeout)
 		_ = item.connection.Call(ctx, extension.MethodShutdown, nil, nil)
 		cancel()
@@ -527,6 +556,7 @@ func (h *Host) ProvideContext(ctx context.Context, userText string, state *conte
 	items := append([]*managedExtension(nil), h.items...)
 	h.mu.RUnlock()
 	correlation, _ := runtimectx.CorrelationOf(ctx)
+	h.publishContextRequested(ctx, userText, extension.ContextBeforeEveryModelCall)
 	var all []extension.ContextContribution
 	var requiredErr error
 	for _, item := range items {
@@ -617,6 +647,7 @@ func (h *Host) ProvideContext(ctx context.Context, userText string, state *conte
 	})
 	all = deduplicateContributions(all)
 	all = truncateContributions(all, h.config.GlobalContextChars, h.config.GlobalContextTokens)
+	h.publishContextInjected(ctx, all)
 	return all, nil
 }
 

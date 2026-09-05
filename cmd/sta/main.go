@@ -1265,6 +1265,9 @@ func (a *app) attachSinkFor(_ context.Context, id string, log *session.Log) {
 		if a.hooks != nil {
 			a.hooks.Notify(id, ev)
 		}
+		if a.extensions != nil {
+			a.extensions.PublishSessionEvent(id, ev)
+		}
 		if a.telemetry != nil {
 			if ev.Type == session.EventFeedbackRecord {
 				a.telemetry.ObserveSession(id, log.Events(), ev.Seq)
