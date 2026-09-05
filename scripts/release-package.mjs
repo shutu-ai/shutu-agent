@@ -5,7 +5,11 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const version = git('rev-parse', '--short', 'HEAD') || 'local'
+// A release checkout is built from an annotated semantic tag. Development
+// packages keep the commit label so unreleased builds cannot masquerade as a
+// semver release.
+const version = git('describe', '--tags', '--exact-match') ||
+  git('rev-parse', '--short', 'HEAD') || 'local'
 const defaultOutput = join(root, 'release', `shutu-agent-${version}`)
 const outputArg = process.argv.indexOf('--output')
 const output = resolve(outputArg >= 0 ? process.argv[outputArg + 1] || defaultOutput : defaultOutput)

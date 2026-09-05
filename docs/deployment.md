@@ -3,7 +3,7 @@
 ## 交付包结构
 
 ```text
-bin/shutu-agent(.exe)  Go 服务
+bin/sta(.exe)          Go 服务
 web/dist/              React/Cordis 前端静态资源
 config/prompts/        standard/code 模式提示词资源
 config.yaml            服务配置，web_server.dist_dir 使用相对路径 web/dist
@@ -41,7 +41,7 @@ node scripts/deployment-smoke.mjs
 4. 启动 Web 门户：
 
 ```powershell
-bin\shutu-agent.exe --web-only --config config.yaml
+bin\sta.exe --web-only --config config.yaml
 ```
 
 5. 检查健康状态：
