@@ -375,6 +375,45 @@ func TestContextContributionDeduplication(t *testing.T) {
 	}
 }
 
+func TestContextGlobalTokenBudgetIsDeterministic(t *testing.T) {
+	host := New(Config{
+		GlobalContextChars: 1000, MaxContributionChars: 1000,
+		GlobalContextTokens: 10, MaxContributionTokens: 100,
+	})
+	defer host.Close()
+	newProvider := func(id, content string) *managedExtension {
+		return &managedExtension{
+			manifest: extension.Manifest{
+				ID: id, Capabilities: extension.Capabilities{ContextProvider: true},
+				ContextProvider: extension.ContextProviderConfig{
+					Enabled: true, Strategy: extension.ContextBeforeEveryModelCall,
+				},
+			},
+			connection: &strategyConnection{result: func(int, context.Context) (extension.ContextResult, error) {
+				return extension.ContextResult{Contributions: []extension.ContextContribution{{
+					Source: id, Content: content, EstimatedTokens: 10, Truncatable: true,
+				}}}, nil
+			}},
+			grants:      map[string]struct{}{},
+			initialized: extension.InitializeResult{Capabilities: extension.Capabilities{ContextProvider: true}},
+		}
+	}
+	host.mu.Lock()
+	host.items = []*managedExtension{
+		newProvider("high", strings.Repeat("A", 40)),
+		newProvider("low", strings.Repeat("B", 40)),
+	}
+	host.mu.Unlock()
+
+	contributions, err := host.ProvideContext(context.Background(), "token budget request", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(contributions) != 1 || contributions[0].Source != "high" || contributions[0].Content != strings.Repeat("A", 20) {
+		t.Fatalf("token-budgeted contributions = %#v", contributions)
+	}
+}
+
 func TestContextAfterToolResultToolOutcomes(t *testing.T) {
 	tests := []struct {
 		name        string

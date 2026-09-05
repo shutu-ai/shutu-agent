@@ -368,12 +368,25 @@ func TestDemoExtensionRuntimeIntegration(t *testing.T) {
 		if len(contributions) != 1 || !contributions[0].Ready {
 			t.Fatalf("post-restart contributions = %#v", contributions)
 		}
+		restartCtx := runtimectx.WithCorrelation(context.Background(), runtimectx.Correlation{
+			SessionID: "post-restart-context", TurnID: "turn:1", StepID: "step:1",
+		})
+		restored, err := host.ProvideContext(restartCtx, "post-restart context", nil)
+		if err != nil || len(restored) != 1 || !strings.Contains(restored[0].Content, "post-restart context") {
+			t.Fatalf("post-restart context = %#v, %v", restored, err)
+		}
 		if err := host.Close(); err != nil {
 			t.Fatal(err)
 		}
 		observer.waitForEventType(t, extension.EventExtensionStopped)
 		if got := host.WebContributions(); len(got) != 0 {
 			t.Fatalf("post-close contributions = %#v", got)
+		}
+		removedCtx := runtimectx.WithCorrelation(context.Background(), runtimectx.Correlation{
+			SessionID: "post-close-context", TurnID: "turn:1", StepID: "step:1",
+		})
+		if removed, err := host.ProvideContext(removedCtx, "post-close context", nil); err != nil || len(removed) != 0 {
+			t.Fatalf("post-close context = %#v, %v", removed, err)
 		}
 	})
 }

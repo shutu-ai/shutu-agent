@@ -99,8 +99,8 @@ The strategy file also locks once-per-turn recurrence on the next durable turn, 
 | `before_every_model_call` behavior | PASS |
 | Post-tool `after_tool_result` behavior | PASS |
 | Extension failure/crash isolation is covered | PASS |
-| Restart produces a healthy new generation and event | PASS |
-| Close removes navigation and delivers `extension.stopped` | PASS |
+| Restart produces a healthy new generation, event, and context contribution | PASS |
+| Close removes navigation, Context target, and delivers `extension.stopped` | PASS |
 | Agent Loop continues to completion | PASS |
 
 The demo uses only generic `demo`, `strategy`, and observer names. No knowledge/RAG/domain-specific code was added to the platform.
