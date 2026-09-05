@@ -2,7 +2,7 @@
 
 Shutu Agent 是一个以 Go 为核心的个人 Agent 运行时，提供 CLI REPL 和原生 Web 工作台。它使用追加式事件日志作为会话事实来源，模型、工具、子代理、后台任务、技能、审批、沙箱和 Web 界面都通过明确的能力接缝组合。
 
-当前发布版本：[v0.1.0](https://github.com/shutu-ai/shutu-agent/releases/tag/v0.1.0)。
+当前发布版本：[v0.2.0](https://github.com/shutu-ai/shutu-agent/releases/tag/v0.2.0)。
 
 ## 特性
 
