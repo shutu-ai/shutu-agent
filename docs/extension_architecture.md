@@ -34,6 +34,10 @@ Extensions return `ContextContribution` values only. They cannot mutate the prom
 
 The Loop persists and orders the message before the provider request. Strategies are `once_per_turn`, `before_every_model_call`, `on_user_input_change`, `after_tool_result` and `manual`.
 
+Host-owned cadence state is keyed by session, so ACP turns that construct a new Loop retain strategy semantics. Input identity is Unicode-field normalized (whitespace is collapsed); `once_per_turn` applies to each durable turn; `after_tool_result` means the pre-request contribution for the next step after a prior step in the same turn; `manual` is never called automatically and is available through the generic Host `RefreshContext` seam.
+
+Context contributions are durable context rows by design. A strategy that calls once will not copy the same evidence again within the turn. A later strategy invocation intentionally creates a new, source-attributed contribution. The context pipeline deduplicates concurrent contributions by source and content; it does not compare evidence with prior tool output.
+
 ## Tool ownership
 
 The extension advertises tool definitions during initialization. The host registers each as `ext__<extension>__<tool>` using the normal registry metadata. Schema validation, whitelist policy, timeout, cancellation, output cap, audit and result persistence remain in `tools.Registry`.
@@ -69,6 +73,14 @@ The shell exposes:
 
 The extension UI owns all markup and business routes. It should use relative asset paths so requests remain below its shell prefix. The service URL is not exposed by the inventory API.
 
+The Web shell builds navigation from the inventory. Contributions are ordered by navigation group, optional `order`, title and id. Ready contributions are links; unhealthy contributions remain visible as unavailable but cannot be clicked. An inventory API failure hides extensions without breaking the conversation shell.
+
+## Events
+
+Extension Protocol v1 supports observational `event` delivery to subscribers declared by the manifest. The host converts the durable session vocabulary into a small stable vocabulary and gives each extension a bounded queue and worker. Publishing is non-blocking; overflow is dropped and counted. A slow or failed subscriber can never block a turn, tool call or model request.
+
+Event payloads carry correlation facts, names, status and counters. They do not carry prompts, model output, tool arguments or tool results.
+
 ## Failure model
 
 | Failure | Behavior |
@@ -79,6 +91,8 @@ The extension UI owns all markup and business routes. It should use relative ass
 | provider timeout/cancel/panic/process death | optional provider contributes nothing; required provider stops the step |
 | oversized contribution | truncates when allowed, drops non-truncatable contribution |
 | tool unavailable | normal structured tool failure; Agent turn continues |
+| slow event subscriber | bounded queue fills; later events are dropped; Agent continues |
+| event handler failure | observed and isolated; Agent continues |
 | crash | no host crash; replacement starts under restart policy on next observed failure |
 | restart budget exhausted | extension absent/unavailable; host stays stable |
 | Web service unavailable | reverse proxy returns 502/503 |

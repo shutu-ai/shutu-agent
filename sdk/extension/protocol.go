@@ -21,6 +21,7 @@ const EventVersion = 1
 // Stable observational event types. Payloads contain identifiers, counts and
 // outcomes only; message bodies, tool arguments and tool output never cross.
 const (
+	EventSessionStarted     = "session.started"
 	EventTurnStarted        = "turn.started"
 	EventTurnCompleted      = "turn.completed"
 	EventStepStarted        = "step.started"
@@ -36,6 +37,7 @@ const (
 )
 
 var SupportedEventTypes = []string{
+	EventSessionStarted,
 	EventTurnStarted, EventTurnCompleted,
 	EventStepStarted, EventStepCompleted,
 	EventToolStarted, EventToolCompleted, EventToolFailed,

@@ -40,7 +40,14 @@ Request:
     "web": true,
     "health": true,
     "events": true
-  }
+  },
+  "supportedEventTypes": [
+    "session.started", "turn.started", "turn.completed",
+    "step.started", "step.completed", "tool.started",
+    "tool.completed", "tool.failed", "context.requested",
+    "context.injected", "extension.started", "extension.restarted",
+    "extension.stopped"
+  ]
 }
 ```
 
@@ -86,7 +93,37 @@ Request contains the extension-local tool name, parsed JSON object arguments, op
 
 ### `event`
 
-Observational host-to-extension notification. It cannot mutate Agent state. V1.0 defines the frame and Go helper; broad Agent event subscription is reserved for a backward-compatible v1 minor update.
+Observational host-to-extension notification. The manifest must declare both `capabilities.events: true` and an allow-list:
+
+```yaml
+capabilities:
+  events: true
+events:
+  subscribe:
+    - turn.started
+    - turn.completed
+    - tool.completed
+```
+
+The frame is:
+
+```json
+{
+  "type": "turn.completed",
+  "version": 1,
+  "eventId": "evt-0000000000000001",
+  "sessionId": "session-id",
+  "turnId": "turn:3",
+  "stepId": "step:2",
+  "step": 2,
+  "occurredAt": "2026-09-05T00:00:00Z",
+  "payload": {"status": "completed"}
+}
+```
+
+Supported types are the host's `supportedEventTypes` list. Delivery is asynchronous, best-effort and at-most-once. Each extension has a bounded queue; overflow is dropped and observed. Events for one extension are dispatched in publication order by one worker, but a slow handler can delay later events and cause drops rather than blocking the Agent.
+
+`session.started` is emitted by the composition root when a new durable session is created. There is no `session.ended` event because long-lived durable sessions have no reliable end semantics in v1. `extension.started`, `extension.restarted` and `extension.stopped` provide lifecycle observations.
 
 ### `shutdown`
 
@@ -104,3 +141,5 @@ JSON-RPC codes:
 * `-32006`: event observer failure
 
 Transport-level errors are fail-soft for optional capabilities. A required context provider returns its error to the Loop and stops the model request.
+
+Event failures are not on the required path: timeout, crash, disconnect and malformed responses are observed, then the Agent continues.
