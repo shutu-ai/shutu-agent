@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { ShutuApiError, type EventPage, type EventView, type SessionSummary, type WebApi } from './api'
 import { sortSessions, WebStore } from './store'
 
@@ -122,6 +122,33 @@ describe('WebStore', () => {
     await store.createSession()
     expect(createdWorkspaceIds).toEqual(['w1', 'w1'])
     expect(store.getSnapshot().selectedId).toBe('new')
+  })
+
+  it('keeps the conversation shell working when extension inventory fails', async () => {
+    const api = {
+      listSessions: async () => [session('one')],
+      listWorkspaces: async () => ({ workspaces: [], ungrouped_ids: ['one'] }),
+      listExtensions: () => Promise.reject(new Error('inventory unavailable')),
+      resumeSession: async () => undefined,
+      loadEvents: async () => page([event(1)]),
+      stream: async (_id: string, _lastSeq: number | null, signal: AbortSignal) => {
+        await waitForAbort(signal)
+      },
+    } as unknown as WebApi
+    const store = new WebStore(api)
+
+    await store.start()
+    await vi.waitFor(() => {
+      expect(store.getSnapshot().events.map(item => item.seq)).toEqual([1])
+    })
+    const snapshot = store.getSnapshot()
+    expect(snapshot.loading).toBe(false)
+    expect(snapshot.sessions.map(item => item.id)).toEqual(['one'])
+    expect(snapshot.selectedId).toBe('one')
+    expect(snapshot.events.map(item => item.seq)).toEqual([1])
+    expect(snapshot.extensions).toEqual([])
+    expect(snapshot.extensionsError).toBe('inventory unavailable')
+    expect(snapshot.error).toBeNull()
   })
 
   it('ignores an older page that resolves after switching sessions', async () => {

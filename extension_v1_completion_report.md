@@ -30,7 +30,7 @@ Evidence:
 - `internal/extensionhost/navigation_test.go` covers host inventory metadata, readiness, defaults, disabled contributions, and ordering.
 - `web/src/extensions.test.ts` covers frontend normalization, fallbacks, sorting, disabled entries, malformed routes, and unhealthy entries.
 - `internal/webserver/extension_proxy_test.go` covers authenticated reverse proxying, Agent credential stripping, and inventory serialization.
-- `web/src/store.test.ts` covers inventory loading without breaking session loading.
+- `web/src/store.test.ts` covers a failed inventory request without breaking session loading or the conversation shell.
 - `examples/extension/integration_test.go` obtains a real `demo` contribution, reads it through `/api/extensions`, and requests the proxied `/extensions/demo/` page.
 
 ## B. Extension Event Subscription
@@ -54,7 +54,7 @@ Delivery is per-extension, asynchronous, bounded, ordered by one delivery worker
 
 Evidence:
 
-- `internal/extensionhost/events_test.go` covers filtering, ordering, envelope stability, slow subscribers, explicit connection loss, repeated handler failures, observed queue overflow, sensitive-payload exclusion, replacement resubscription, stable session-start envelopes, and delivery of `extension.stopped` during close.
+- `internal/extensionhost/events_test.go` covers filtering, independent ordered delivery to multiple subscribers, envelope stability, slow subscribers, explicit handler timeouts, connection loss, repeated handler failures, observed queue overflow, sensitive-payload exclusion, replacement resubscription, stable session-start envelopes, and delivery of `extension.stopped` during close.
 - `sdk/extension/manifest_test.go` covers capability, unknown event, and duplicate subscription validation.
 - `sdk/extension/server_test.go` covers extension-side event dispatch.
 - `go test -race ./internal/extensionhost` passes.
@@ -80,6 +80,8 @@ Evidence:
 - `internal/extensionhost/context_strategy_test.go`
 - `internal/extensionhost/extensionhost_test.go`
 - `go test -race ./internal/extensionhost`
+
+The strategy file also locks once-per-turn recurrence on the next durable turn, provider/global character and token truncation ordering, cross-provider deduplication, and post-tool behavior after successful, failed, and cancelled tool results.
 
 ## Independent Demo Acceptance
 
@@ -113,7 +115,7 @@ Commands completed successfully on the final state:
 
 ```text
 go test ./...
-go test -race ./internal/extensionhost ./internal/webserver ./examples/extension ./cmd/sta
+go test -race -count=1 ./internal/extensionhost ./internal/webserver ./examples/extension ./cmd/sta
 go test ./examples/extension
 npm test
 npm run typecheck
@@ -122,4 +124,4 @@ npm run verify
 git diff --check
 ```
 
-Web tests: 11 files / 50 tests passed. There is no dedicated JavaScript lint script in `web/package.json`; the repository's available static check is `npm run typecheck`, and it passed. `npm run build` emits only normal Vite chunk-size warnings; the build and dist verifier pass.
+The post-audit verification used `-count=1` for the race and independent Demo suites. Web tests: 12 files / 53 tests passed. There is no dedicated JavaScript lint script in `web/package.json`; the repository's available static check is `npm run typecheck`, and it passed. `npm run build` emits only normal Vite chunk-size warnings; the build and dist verifier pass.

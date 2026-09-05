@@ -143,6 +143,53 @@ func TestSlowEventSubscriberDoesNotBlockPublish(t *testing.T) {
 	host.Close()
 }
 
+func TestEventSubscribersReceiveIndependentOrderedCopies(t *testing.T) {
+	host := New(Config{EventQueueSize: 8, EventTimeout: time.Second})
+	first := &fakeEventConnection{}
+	second := &fakeEventConnection{}
+	eventSubscriber(t, host, "first", []string{extension.EventTurnStarted, extension.EventToolStarted}, first)
+	eventSubscriber(t, host, "second", []string{extension.EventTurnStarted, extension.EventToolStarted}, second)
+
+	host.PublishEvent(extension.Event{Type: extension.EventTurnStarted})
+	host.PublishEvent(extension.Event{Type: extension.EventToolStarted})
+	firstEvents := waitForEvents(t, first, 2)
+	secondEvents := waitForEvents(t, second, 2)
+	if len(firstEvents) != 2 || len(secondEvents) != 2 {
+		t.Fatalf("subscriber events = %#v / %#v", firstEvents, secondEvents)
+	}
+	for _, events := range [][]extension.Event{firstEvents, secondEvents} {
+		if events[0].Type != extension.EventTurnStarted || events[1].Type != extension.EventToolStarted {
+			t.Fatalf("ordered events = %#v", events)
+		}
+	}
+	if firstEvents[0].EventID == secondEvents[0].EventID {
+		t.Fatal("each subscriber must receive a distinct event envelope copy")
+	}
+	host.Close()
+}
+
+func TestEventHandlerTimeoutIsObserved(t *testing.T) {
+	observed := make(chan Event, 4)
+	host := New(Config{EventQueueSize: 2, EventTimeout: 10 * time.Millisecond, Observer: func(event Event) { observed <- event }})
+	conn := &fakeEventConnection{delay: time.Second}
+	eventSubscriber(t, host, "timeout", []string{extension.EventTurnStarted}, conn)
+	host.PublishEvent(extension.Event{Type: extension.EventTurnStarted})
+
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case event := <-observed:
+			if event.Timeout && !event.Delivered && event.Error != "" {
+				host.Close()
+				return
+			}
+		case <-deadline:
+			host.Close()
+			t.Fatal("event timeout was not observed")
+		}
+	}
+}
+
 func TestEventFailureIsObservedWithoutStoppingAgentPublishing(t *testing.T) {
 	observed := make(chan Event, 8)
 	host := New(Config{EventQueueSize: 8, EventTimeout: 100 * time.Millisecond, Observer: func(event Event) { observed <- event }})

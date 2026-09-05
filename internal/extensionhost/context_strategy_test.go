@@ -22,7 +22,9 @@ import (
 type strategyConnection struct {
 	mu           sync.Mutex
 	contextCalls []extension.ContextRequest
+	toolCalls    []extension.ToolCallRequest
 	result       func(index int, ctx context.Context) (extension.ContextResult, error)
+	toolCall     func(index int, ctx context.Context) (extension.ToolCallResult, error)
 }
 
 func (c *strategyConnection) Call(ctx context.Context, method string, params, result any) error {
@@ -46,8 +48,21 @@ func (c *strategyConnection) Call(ctx context.Context, method string, params, re
 		}
 		return nil
 	case extension.MethodCallTool:
+		c.mu.Lock()
+		index := len(c.toolCalls)
+		c.toolCalls = append(c.toolCalls, params.(extension.ToolCallRequest))
+		toolFn := c.toolCall
+		c.mu.Unlock()
+		value := extension.ToolCallResult{Value: "tool-result"}
+		if toolFn != nil {
+			var err error
+			value, err = toolFn(index, ctx)
+			if err != nil {
+				return err
+			}
+		}
 		if target, ok := result.(*extension.ToolCallResult); ok {
-			*target = extension.ToolCallResult{Value: "tool-result"}
+			*target = value
 		}
 		return nil
 	default:
@@ -61,6 +76,12 @@ func (c *strategyConnection) calls() []extension.ContextRequest {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]extension.ContextRequest(nil), c.contextCalls...)
+}
+
+func (c *strategyConnection) tools() []extension.ToolCallRequest {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]extension.ToolCallRequest(nil), c.toolCalls...)
 }
 
 type strategyModel struct {
@@ -243,6 +264,183 @@ func TestContextOnUserInputChangeNormalizationAndSessionIsolation(t *testing.T) 
 	runStrategyTurn(t, host, registry, "session-b", "same", 2)
 	if got := len(conn.calls()); got != 2 {
 		t.Fatalf("calls across sessions = %d, want 2", got)
+	}
+}
+
+func TestContextOncePerTurnRunsAgainOnNextTurn(t *testing.T) {
+	registry := tools.New()
+	registry.SetPolicy(tools.Policy{Timeout: time.Second, Enabled: []string{PublicToolName("strategy", "probe")}})
+	conn := &strategyConnection{result: func(int, context.Context) (extension.ContextResult, error) {
+		return extension.ContextResult{Contributions: []extension.ContextContribution{{
+			Source: "strategy", Content: "turn evidence", Truncatable: true,
+		}}}, nil
+	}}
+	host := strategyHost(t, extension.ContextOncePerTurn, false, conn, registry)
+	defer host.Close()
+
+	log := session.New()
+	model := &strategyModel{toolCalls: 1}
+	for _, input := range []string{"first turn", "second turn"} {
+		agent := loop.New(loop.Config{
+			LLM: model, Log: log, Tools: registry, Prompt: promptForTest("system"),
+			RuntimeSessionID: "turn-session", RuntimeAgentID: "turn-session",
+			PreStep: []loop.PreStepInjector{host.ContextInjector()},
+		})
+		if err := agent.Run(context.Background(), input); err != nil {
+			t.Fatalf("agent turn %q: %v", input, err)
+		}
+	}
+	if got := len(model.requests); got != 3 {
+		t.Fatalf("model calls across turns = %d, want 3", got)
+	}
+	if got := len(conn.calls()); got != 2 {
+		t.Fatalf("context calls across turns = %d, want 2", got)
+	}
+}
+
+func TestContextBudgetsAreDeterministic(t *testing.T) {
+	host := New(Config{
+		GlobalContextChars: 220, MaxContributionChars: 240,
+		GlobalContextTokens: 100, MaxContributionTokens: 100,
+	})
+	defer host.Close()
+	newProvider := func(id string, priority, providerChars int, content string) *managedExtension {
+		return &managedExtension{
+			manifest: extension.Manifest{
+				ID: id, Capabilities: extension.Capabilities{ContextProvider: true},
+				ContextProvider: extension.ContextProviderConfig{
+					Enabled: true, Strategy: extension.ContextBeforeEveryModelCall,
+					Priority: priority, MaxChars: providerChars,
+				},
+			},
+			connection: &strategyConnection{result: func(int, context.Context) (extension.ContextResult, error) {
+				return extension.ContextResult{Contributions: []extension.ContextContribution{{
+					Source: id, Content: content, Priority: priority, Truncatable: true,
+				}}}, nil
+			}},
+			grants:      map[string]struct{}{},
+			initialized: extension.InitializeResult{Capabilities: extension.Capabilities{ContextProvider: true}},
+		}
+	}
+	host.mu.Lock()
+	host.items = []*managedExtension{
+		newProvider("low", 10, 160, strings.Repeat("B", 200)),
+		newProvider("high", 20, 120, strings.Repeat("A", 200)),
+	}
+	host.mu.Unlock()
+
+	contributions, err := host.ProvideContext(context.Background(), "budget request", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(contributions) != 2 ||
+		contributions[0].Source != "high" ||
+		contributions[0].Content != truncateUTF8(strings.Repeat("A", 200), 120, true) ||
+		contributions[1].Source != "low" ||
+		contributions[1].Content != strings.Repeat("B", 80) {
+		t.Fatalf("budgeted contributions = %#v", contributions)
+	}
+}
+
+func TestContextContributionDeduplication(t *testing.T) {
+	host := New(Config{})
+	defer host.Close()
+	newProvider := func(id string) *managedExtension {
+		return &managedExtension{
+			manifest: extension.Manifest{
+				ID: id, Capabilities: extension.Capabilities{ContextProvider: true},
+				ContextProvider: extension.ContextProviderConfig{
+					Enabled: true, Strategy: extension.ContextBeforeEveryModelCall,
+				},
+			},
+			connection: &strategyConnection{result: func(int, context.Context) (extension.ContextResult, error) {
+				return extension.ContextResult{Contributions: []extension.ContextContribution{{
+					Source: "shared", Content: "same evidence", Truncatable: true,
+				}}}, nil
+			}},
+			grants:      map[string]struct{}{},
+			initialized: extension.InitializeResult{Capabilities: extension.Capabilities{ContextProvider: true}},
+		}
+	}
+	host.mu.Lock()
+	host.items = []*managedExtension{newProvider("first"), newProvider("second")}
+	host.mu.Unlock()
+
+	contributions, err := host.ProvideContext(context.Background(), "duplicate request", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(contributions) != 1 || contributions[0].Source != "shared" || contributions[0].Content != "same evidence" {
+		t.Fatalf("deduplicated contributions = %#v", contributions)
+	}
+}
+
+func TestContextAfterToolResultToolOutcomes(t *testing.T) {
+	tests := []struct {
+		name        string
+		toolCall    func(index int, ctx context.Context) (extension.ToolCallResult, error)
+		wantContext int
+	}{
+		{
+			name: "successful tool result", wantContext: 1,
+		},
+		{
+			name: "failed tool result", wantContext: 1,
+			toolCall: func(int, context.Context) (extension.ToolCallResult, error) {
+				return extension.ToolCallResult{Error: "simulated tool failure"}, nil
+			},
+		},
+		{
+			name: "cancelled tool result", wantContext: 0,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			registry := tools.New()
+			registry.SetPolicy(tools.Policy{Timeout: time.Second, Enabled: []string{PublicToolName("strategy", "probe")}})
+			conn := &strategyConnection{
+				result: func(int, context.Context) (extension.ContextResult, error) {
+					return extension.ContextResult{Contributions: []extension.ContextContribution{{
+						Source: "strategy", Content: "after tool", Truncatable: true,
+					}}}, nil
+				},
+				toolCall: test.toolCall,
+			}
+			host := strategyHost(t, extension.ContextAfterToolResult, false, conn, registry)
+			defer host.Close()
+			if test.wantContext == 0 {
+				conn.toolCall = func(_ int, callCtx context.Context) (extension.ToolCallResult, error) {
+					cancel()
+					return extension.ToolCallResult{}, context.Canceled
+				}
+			}
+
+			err := func() error {
+				log := session.New()
+				model := &strategyModel{toolCalls: 1}
+				agent := loop.New(loop.Config{
+					LLM: model, Log: log, Tools: registry, Prompt: promptForTest("system"),
+					RuntimeSessionID: "tool-outcome-session", RuntimeAgentID: "tool-outcome-session",
+					PreStep: []loop.PreStepInjector{host.ContextInjector()},
+				})
+				return agent.Run(ctx, "tool outcome")
+			}()
+			if test.wantContext == 0 {
+				if err == nil || !errors.Is(err, context.Canceled) {
+					t.Fatalf("cancelled loop error = %v, want context.Canceled", err)
+				}
+			} else if err != nil {
+				t.Fatalf("agent loop: %v", err)
+			}
+			if len(conn.tools()) != 1 {
+				t.Fatalf("tool calls = %d, want 1", len(conn.tools()))
+			}
+			if got := len(conn.calls()); got != test.wantContext {
+				t.Fatalf("post-tool context calls = %d, want %d", got, test.wantContext)
+			}
+		})
 	}
 }
 
