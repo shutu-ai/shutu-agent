@@ -1,0 +1,59 @@
+id: demo
+name: Demo Extension
+version: 0.1.0
+extension_api: 1.0
+capabilities:
+  tools: true
+  context_provider: true
+  lifecycle: true
+  web: true
+  health: true
+  events: true
+transport:
+  type: stdio
+  command: demo-extension
+tools:
+  definitions:
+    - name: echo
+      description: Echo text supplied by the model
+      input_schema:
+        type: object
+        properties:
+          text:
+            type: string
+        required:
+          - text
+      output_schema:
+        type: string
+      risk: read
+context_provider:
+  enabled: true
+  strategy: before_every_model_call
+  timeout_ms: 2000
+  max_chars: 1200
+  priority: 10
+web:
+  enabled: true
+  route: /extensions/demo/
+  title: Demo
+health:
+  enabled: true
+  timeout_ms: 1000
+lifecycle:
+  enabled: true
+  startup_timeout_ms: 5000
+  shutdown_timeout_ms: 2000
+  restart_policy: on-failure
+  max_restarts: 3
+permissions:
+  - name: session.id
+  - name: session.turn
+  - name: session.step
+  - name: workspace.path
+  - name: user.input
+    required: true
+configuration_schema:
+  type: object
+  properties:
+    exampleSetting:
+      type: string

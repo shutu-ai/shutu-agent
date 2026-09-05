@@ -326,6 +326,9 @@ func (a *app) preStepInjectorsForSession(sessionID string, log *session.Log) []l
 	if config.Enabled(a.cfg.AgentInstructions.Enabled) {
 		injectors = append(injectors, a.agentInstructionsInjectorFor(sessionID, log))
 	}
+	if a.extensions != nil {
+		injectors = append(injectors, a.extensions.ContextInjector())
+	}
 	// M5d-2: the "skill" catalog injector is appended after compaction so the
 	// bounded skill catalog (re-read each turn, no file watching) reaches the
 	// model's first request whenever skill is enabled (D10-gated here and by

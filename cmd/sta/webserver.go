@@ -170,6 +170,13 @@ func (a *app) registerWebServer() error {
 	if err := srv.SetFrontendDist(a.cfg.WebServer.DistDir); err != nil {
 		return fmt.Errorf("register web server frontend: %w", err)
 	}
+	if a.extensions != nil {
+		var routes []webserver.ExtensionRoute
+		for _, contribution := range a.extensions.WebContributions() {
+			routes = append(routes, webserver.ExtensionRoute{ExtensionID: contribution.ExtensionID, Title: contribution.Title, Route: contribution.Route, Ready: contribution.Ready, ServiceURL: contribution.ServiceURL})
+		}
+		srv.SetExtensionRoutes(routes)
+	}
 	srv.SetDefaultWorkdir(a.defaultWorkdir())
 	if a.hub == nil {
 		a.hub = NewEventHub()

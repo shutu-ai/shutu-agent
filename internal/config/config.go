@@ -249,6 +249,7 @@ type Config struct {
 	SessionQuery      SessionQueryConfig      `yaml:"session_query"`      // read-only session history queries (P2)
 	LSP               LSPConfig               `yaml:"lsp"`                // read-only language-server queries (P2)
 	Hooks             HooksConfig             `yaml:"hooks"`              // metadata-only event hooks (P2)
+	Extensions        ExtensionsConfig        `yaml:"extensions"`         // external native extension host (Extension v1)
 	WebServer         WebServerConfig         `yaml:"web_server"`         // unified web portal (M10a)
 	Workspace         WorkspaceConfig         `yaml:"workspace"`          // workspace/session cwd policy
 	Security          SecurityConfig          `yaml:"security"`           // process security boundaries (A6.4)
@@ -867,6 +868,30 @@ type HooksConfig struct {
 	WorkingDir string   `yaml:"working_dir"`
 }
 
+// ExtensionsConfig is generic extension discovery and runtime policy. It never
+// contains extension-owned business settings: those remain in the independent
+// extension process and its own configuration store.
+type ExtensionsConfig struct {
+	Enabled               bool                    `yaml:"enabled"`
+	Directory             string                  `yaml:"directory"`
+	Sources               []ExtensionSourceConfig `yaml:"sources"`
+	Grants                map[string][]string     `yaml:"grants"`
+	StartupTimeoutMS      int                     `yaml:"startup_timeout_ms"`
+	HealthTimeoutMS       int                     `yaml:"health_timeout_ms"`
+	ContextTimeoutMS      int                     `yaml:"context_timeout_ms"`
+	ShutdownTimeoutMS     int                     `yaml:"shutdown_timeout_ms"`
+	GlobalContextChars    int                     `yaml:"global_context_chars"`
+	MaxContributionChars  int                     `yaml:"max_contribution_chars"`
+	GlobalContextTokens   int                     `yaml:"global_context_tokens"`
+	MaxContributionTokens int                     `yaml:"max_contribution_tokens"`
+}
+
+type ExtensionSourceConfig struct {
+	Manifest string   `yaml:"manifest"`
+	Required bool     `yaml:"required"`
+	Grants   []string `yaml:"grants"`
+}
+
 // WebConfig 是联网能力策略（ADR 2026-08-20-m7-web-search.md / dispatch-m7-2 §5）。
 // 默认关（D10）：disabled 时组合根不创建 Engine、不注册/白名单 web_* 工具。
 // web.enabled 同时开搜索与抓取——不设独立的 search_enabled/fetch_enabled 开关
@@ -1025,6 +1050,18 @@ func Load(path string) (Config, error) {
 	}
 	if err := validateThinkingBudgets(cfg.LLM.ThinkingBudgets); err != nil {
 		return Config{}, fmt.Errorf("config: invalid llm.thinking_budgets: %w", err)
+	}
+	if cfg.Extensions.Enabled {
+		seen := make(map[string]struct{}, len(cfg.Extensions.Sources))
+		for _, source := range cfg.Extensions.Sources {
+			if strings.TrimSpace(source.Manifest) == "" {
+				return Config{}, errors.New("config: extensions.sources.manifest is required")
+			}
+			if _, duplicate := seen[source.Manifest]; duplicate {
+				return Config{}, fmt.Errorf("config: duplicate extension manifest %q", source.Manifest)
+			}
+			seen[source.Manifest] = struct{}{}
+		}
 	}
 	if cfg.MaxTokens < 0 {
 		return Config{}, errors.New("config: max_tokens must be non-negative")
@@ -1783,6 +1820,34 @@ func applyDefaults(cfg *Config) {
 	if cfg.Hooks.TimeoutMS <= 0 {
 		cfg.Hooks.TimeoutMS = 10000
 	}
+	if !cfg.Extensions.Enabled {
+		cfg.Extensions.Sources = nil
+		cfg.Extensions.Directory = ""
+	}
+	if cfg.Extensions.StartupTimeoutMS <= 0 {
+		cfg.Extensions.StartupTimeoutMS = 10000
+	}
+	if cfg.Extensions.HealthTimeoutMS <= 0 {
+		cfg.Extensions.HealthTimeoutMS = 3000
+	}
+	if cfg.Extensions.ContextTimeoutMS <= 0 {
+		cfg.Extensions.ContextTimeoutMS = 5000
+	}
+	if cfg.Extensions.ShutdownTimeoutMS <= 0 {
+		cfg.Extensions.ShutdownTimeoutMS = 3000
+	}
+	if cfg.Extensions.GlobalContextChars <= 0 {
+		cfg.Extensions.GlobalContextChars = 4000
+	}
+	if cfg.Extensions.MaxContributionChars <= 0 {
+		cfg.Extensions.MaxContributionChars = 2000
+	}
+	if cfg.Extensions.GlobalContextTokens <= 0 {
+		cfg.Extensions.GlobalContextTokens = 1000
+	}
+	if cfg.Extensions.MaxContributionTokens <= 0 {
+		cfg.Extensions.MaxContributionTokens = 500
+	}
 	// M10a web portal defaults (ADR 2026-08-20-m10-web-portal.md): addr defaults
 	// to the local-only personal portal; token is left for the composition root
 	// to fail closed on when enabled.
@@ -1831,6 +1896,7 @@ func ApplyModePreset(cfg *Config) {
 	cfg.Code.Enabled = Bool(false)
 	cfg.LSP.Enabled = false
 	cfg.Hooks.Enabled = false
+	cfg.Extensions.Enabled = false
 	cfg.Mcp.Enabled = Bool(false)
 	cfg.Web.Enabled = Bool(false)
 	cfg.Eval.Enabled = Bool(false)

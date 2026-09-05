@@ -75,11 +75,14 @@ type Server struct {
 	// defaultWorkdir is the fallback cwd for ungrouped sessions and legacy
 	// title-only workspaces. The composition root sets it from config; an empty
 	// value falls back to the server process cwd.
-	defaultWorkdir string
-	srv            *http.Server
-	closeMu        sync.Mutex
-	closeDone      chan struct{}
-	closed         bool
+	defaultWorkdir  string
+	srv             *http.Server
+	coreHandler     http.Handler
+	extensionMu     sync.RWMutex
+	extensionRoutes []ExtensionRoute
+	closeMu         sync.Mutex
+	closeDone       chan struct{}
+	closed          bool
 
 	// nativeSettings is the small settings document owned by the DSH native
 	// adapter. It carries the onboarding acknowledgement and the agent-preset
@@ -643,12 +646,45 @@ func New(st store.Store, token, addr string) (*Server, error) {
 	// DSH native Connection transport: unary client-request RPC plus the two
 	// downlink-only WebSocket streams. The existing REST routes remain intact.
 	s.registerNativeRoutes(mux)
+	s.coreHandler = mux
 	s.srv = &http.Server{
 		Addr:              addr,
 		Handler:           mux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	return s, nil
+}
+
+type ExtensionRoute struct {
+	ExtensionID string `json:"extensionId"`
+	Title       string `json:"title"`
+	Route       string `json:"route"`
+	Ready       bool   `json:"ready"`
+	ServiceURL  string `json:"-"`
+}
+
+// SetExtensionRoutes publishes generic reverse-proxied extension web apps.
+// The shell owns routing and authentication; each extension owns its business
+// UI and process. Passing nil clears the contribution.
+func (s *Server) SetExtensionRoutes(routes []ExtensionRoute) {
+	if s == nil || s.srv == nil {
+		return
+	}
+	s.extensionMu.Lock()
+	s.extensionRoutes = append([]ExtensionRoute(nil), routes...)
+	s.extensionMu.Unlock()
+	mux := http.NewServeMux()
+	for _, route := range routes {
+		segment := urlPathSegment(route.ExtensionID)
+		if segment == "" || route.ServiceURL == "" {
+			continue
+		}
+		mux.Handle("/extensions/"+segment+"/", s.requireAuth(http.HandlerFunc(s.handleExtensionReverseProxy)))
+		mux.Handle("/extensions/"+segment, s.requireAuth(http.HandlerFunc(s.handleExtensionRedirect)))
+	}
+	mux.Handle("GET /api/extensions", s.requireAuth(http.HandlerFunc(s.handleExtensionList)))
+	mux.Handle("/", s.coreHandler)
+	s.srv.Handler = mux
 }
 
 func (s *Server) handlePluginEvents(w http.ResponseWriter, r *http.Request) {

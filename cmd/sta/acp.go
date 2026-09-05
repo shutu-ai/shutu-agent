@@ -1108,7 +1108,7 @@ func (s *acpSession) executePromptMessagesWithAgent(ctx context.Context, message
 		ContextWindow:   capability.ContextWindow,
 		Provider:        provider,
 		ReasoningEffort: effort,
-		PreStep:         s.compactionPreSteps(),
+		PreStep:         append(s.compactionPreSteps(), s.app.extensionPreSteps()...),
 		OnText: func(text string) {
 			// Deliberately buffered until assistant/message commits; see
 			// emitCommittedAssistantContent.

@@ -33,6 +33,7 @@ import (
 	"github.com/shutu-ai/shutu-agent/internal/config"
 	"github.com/shutu-ai/shutu-agent/internal/credential"
 	"github.com/shutu-ai/shutu-agent/internal/eval"
+	"github.com/shutu-ai/shutu-agent/internal/extensionhost"
 	"github.com/shutu-ai/shutu-agent/internal/fs"
 	hookrunner "github.com/shutu-ai/shutu-agent/internal/hooks"
 	"github.com/shutu-ai/shutu-agent/internal/interact"
@@ -602,6 +603,15 @@ func main() {
 		}
 		return nil
 	})
+	if err := app.registerExtensions(); err != nil {
+		fmt.Fprintln(os.Stderr, "sta:", err)
+		os.Exit(1)
+	}
+	if app.extensions != nil {
+		registerShutdown("extensions", func() error {
+			return errors.Join(app.extensions.Close(), app.extensionEventLog.Close())
+		})
+	}
 	// M6d-2: wire the interact seam 鈥?in-memory Provider + Engine + the two
 	// interact_* tools + the D3 event sink + the sensitive-tool gate 鈥?when
 	// interact.enabled (榛樿鍏抽棴, D10). config.applyDefaults already whitelisted
@@ -942,7 +952,9 @@ type app struct {
 	nativeShell             tools.ShellSettings
 	nativeAgentLoopMax      int
 	nativeWebSearch         nativeWebSearchSettings
-	code                    code.ProgramRuntime   // nil when code disabled (D10)
+	code                    code.ProgramRuntime // nil when code disabled (D10)
+	extensions              *extensionhost.Host // nil when extensions disabled
+	extensionEventLog       *extensionEventLogger
 	codeBindingPolicy       tools.Policy          // PTC nested tools during the active turn
 	mcp                     []mcp.Client          // nil when mcp disabled (D10); one live bridged client per configured server
 	mcpMu                   sync.RWMutex          // protects the live bridged-client slice for Web status and shutdown

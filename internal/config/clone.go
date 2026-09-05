@@ -30,6 +30,15 @@ func (c Config) Clone() Config {
 	}
 	out.Hooks.Args = append([]string(nil), c.Hooks.Args...)
 	out.Hooks.Events = append([]string(nil), c.Hooks.Events...)
+	out.Extensions.Sources = make([]ExtensionSourceConfig, len(c.Extensions.Sources))
+	for i, source := range c.Extensions.Sources {
+		out.Extensions.Sources[i] = source
+		out.Extensions.Sources[i].Grants = append([]string(nil), source.Grants...)
+	}
+	out.Extensions.Grants = make(map[string][]string, len(c.Extensions.Grants))
+	for key, grants := range c.Extensions.Grants {
+		out.Extensions.Grants[key] = append([]string(nil), grants...)
+	}
 	out.Ralph = c.Ralph
 	out.Eval = c.Eval
 	out.Compaction = c.Compaction

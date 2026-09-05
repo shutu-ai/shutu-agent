@@ -19,15 +19,17 @@ import (
 // Snapshot is a point-in-time aggregate suitable for a status endpoint or
 // metrics exporter. Counters are process-local and never used for control flow.
 type Snapshot struct {
-	Turns           uint64 `json:"turns"`
-	Steps           uint64 `json:"steps"`
-	Requests        uint64 `json:"requests"`
-	RequestFailures uint64 `json:"requestFailures"`
-	ToolCalls       uint64 `json:"toolCalls"`
-	ToolFailures    uint64 `json:"toolFailures"`
-	InputTokens     uint64 `json:"inputTokens"`
-	OutputTokens    uint64 `json:"outputTokens"`
-	CachedTokens    uint64 `json:"cachedTokens"`
+	Turns             uint64 `json:"turns"`
+	Steps             uint64 `json:"steps"`
+	Requests          uint64 `json:"requests"`
+	RequestFailures   uint64 `json:"requestFailures"`
+	ToolCalls         uint64 `json:"toolCalls"`
+	ToolFailures      uint64 `json:"toolFailures"`
+	InputTokens       uint64 `json:"inputTokens"`
+	OutputTokens      uint64 `json:"outputTokens"`
+	CachedTokens      uint64 `json:"cachedTokens"`
+	ExtensionCalls    uint64 `json:"extensionCalls"`
+	ExtensionFailures uint64 `json:"extensionFailures"`
 }
 
 // Exporter receives point-in-time telemetry snapshots. Export is deliberately
@@ -74,17 +76,19 @@ func (e *JSONLExporter) Export(_ context.Context, snapshot Snapshot) error {
 // Metrics is a concurrency-safe aggregate. All methods are nil-safe so an
 // observability sink can be disabled without branching in the execution path.
 type Metrics struct {
-	exporterMu      sync.RWMutex
-	exporter        Exporter
-	turns           atomic.Uint64
-	steps           atomic.Uint64
-	requests        atomic.Uint64
-	requestFailures atomic.Uint64
-	toolCalls       atomic.Uint64
-	toolFailures    atomic.Uint64
-	inputTokens     atomic.Uint64
-	outputTokens    atomic.Uint64
-	cachedTokens    atomic.Uint64
+	exporterMu        sync.RWMutex
+	exporter          Exporter
+	turns             atomic.Uint64
+	steps             atomic.Uint64
+	requests          atomic.Uint64
+	requestFailures   atomic.Uint64
+	toolCalls         atomic.Uint64
+	toolFailures      atomic.Uint64
+	inputTokens       atomic.Uint64
+	outputTokens      atomic.Uint64
+	cachedTokens      atomic.Uint64
+	extensionCalls    atomic.Uint64
+	extensionFailures atomic.Uint64
 }
 
 func New() *Metrics { return &Metrics{} }
@@ -111,6 +115,15 @@ func (m *Metrics) Tool(err error) {
 		m.toolCalls.Add(1)
 		if err != nil {
 			m.toolFailures.Add(1)
+		}
+	}
+}
+
+func (m *Metrics) Extension(err error) {
+	if m != nil {
+		m.extensionCalls.Add(1)
+		if err != nil {
+			m.extensionFailures.Add(1)
 		}
 	}
 }
@@ -142,6 +155,7 @@ func (m *Metrics) Snapshot() Snapshot {
 		RequestFailures: m.requestFailures.Load(), ToolCalls: m.toolCalls.Load(),
 		ToolFailures: m.toolFailures.Load(), InputTokens: m.inputTokens.Load(),
 		OutputTokens: m.outputTokens.Load(), CachedTokens: m.cachedTokens.Load(),
+		ExtensionCalls: m.extensionCalls.Load(), ExtensionFailures: m.extensionFailures.Load(),
 	}
 }
 
