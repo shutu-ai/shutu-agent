@@ -4,6 +4,8 @@ package runtimectx
 
 import "context"
 
+type toolResultsKey struct{}
+
 type key struct{}
 
 // Correlation carries the stable execution identities visible to tools,
@@ -89,6 +91,20 @@ func CorrelationOf(ctx context.Context) (Correlation, bool) {
 		correlation.SessionID = runtime.SessionID
 	}
 	return correlation, true
+}
+
+// WithToolResultsComplete marks the boundary after a step's tool calls have
+// committed and another model request is about to run. Context strategies use
+// this authoritative loop signal instead of inferring it from step numbers.
+func WithToolResultsComplete(ctx context.Context) context.Context {
+	return context.WithValue(ctx, toolResultsKey{}, true)
+}
+
+// ToolResultsComplete reports whether the current context is at the post-tool,
+// pre-next-model-call boundary.
+func ToolResultsComplete(ctx context.Context) bool {
+	value, _ := ctx.Value(toolResultsKey{}).(bool)
+	return value
 }
 
 func Emit(ctx context.Context, typ string, data any) error {

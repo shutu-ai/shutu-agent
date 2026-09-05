@@ -440,6 +440,7 @@ func (l *Loop) RunMessages(ctx context.Context, inputs []llm.Message) (runErr er
 	}
 	userText := inputs[0].Text()
 	var nextStepMessages []llm.Message
+	toolResultsComplete := false
 	for step := 0; ; step++ {
 		if err := ctx.Err(); err != nil {
 			if l.continueOnCancel != nil {
@@ -461,6 +462,9 @@ func (l *Loop) RunMessages(ctx context.Context, inputs []llm.Message) (runErr er
 			TurnID:    fmt.Sprintf("turn:%d", turnNumber),
 			StepID:    fmt.Sprintf("step:%d", step+1),
 		})
+		if toolResultsComplete {
+			stepCtx = runtimectx.WithToolResultsComplete(stepCtx)
+		}
 		var entered []llm.Message
 		if step > 0 && nextStepMessages != nil {
 			entered = cloneMessages(nextStepMessages)
@@ -525,6 +529,7 @@ func (l *Loop) RunMessages(ctx context.Context, inputs []llm.Message) (runErr er
 			}
 			return err
 		}
+		toolResultsComplete = !done
 		switch finalFinishReason {
 		case "length", "max_tokens":
 			turnMaxTokens = true

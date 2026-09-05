@@ -98,12 +98,11 @@ type managedExtension struct {
 }
 
 type Host struct {
-	config         Config
-	mu             sync.RWMutex
-	items          []*managedExtension
-	closed         bool
-	contextStateMu sync.Mutex
-	contextStates  map[string]*contextCadenceState
+	config  Config
+	mu      sync.RWMutex
+	items   []*managedExtension
+	closed  bool
+	cadence contextCadenceCache
 }
 
 func New(config Config) *Host {
@@ -140,7 +139,7 @@ func New(config Config) *Host {
 	if config.AgentName == "" {
 		config.AgentName = "shutu-agent"
 	}
-	return &Host{config: config, contextStates: make(map[string]*contextCadenceState)}
+	return &Host{config: config, cadence: newContextCadenceCache()}
 }
 
 func Discover(explicit []Source, root string) ([]Source, error) {
@@ -527,18 +526,104 @@ func (h *Host) observe(event Event) {
 	observer(event)
 }
 
-type contextCadenceState struct {
-	lastTurn   string
-	lastInput  string
-	lastStepID string
+const contextCadenceMaxEntries = 4096
+
+type contextCadenceTurnKey struct {
+	sessionID   string
+	turnID      string
+	extensionID string
+}
+
+type contextCadenceInputKey struct {
+	sessionID   string
+	extensionID string
+}
+
+// contextCadenceCache owns immutable, lock-protected cadence facts. Turn state
+// is scoped by (session, turn, extension), so concurrent turns on one session
+// cannot overwrite one another's state.
+type contextCadenceCache struct {
+	mu         sync.Mutex
+	turns      map[contextCadenceTurnKey]struct{}
+	inputs     map[contextCadenceInputKey]string
+	turnOrder  []contextCadenceTurnKey
+	inputOrder []contextCadenceInputKey
+}
+
+func newContextCadenceCache() contextCadenceCache {
+	return contextCadenceCache{
+		turns:  make(map[contextCadenceTurnKey]struct{}),
+		inputs: make(map[contextCadenceInputKey]string),
+	}
+}
+
+func (c *contextCadenceCache) rememberTurn(key contextCadenceTurnKey) {
+	if _, ok := c.turns[key]; ok {
+		return
+	}
+	c.turns[key] = struct{}{}
+	c.turnOrder = append(c.turnOrder, key)
+	if len(c.turnOrder) > contextCadenceMaxEntries {
+		oldest := c.turnOrder[0]
+		c.turnOrder = c.turnOrder[1:]
+		delete(c.turns, oldest)
+	}
+}
+
+func (c *contextCadenceCache) rememberInput(key contextCadenceInputKey, input string) {
+	if _, ok := c.inputs[key]; !ok {
+		c.inputOrder = append(c.inputOrder, key)
+		if len(c.inputOrder) > contextCadenceMaxEntries {
+			oldest := c.inputOrder[0]
+			c.inputOrder = c.inputOrder[1:]
+			delete(c.inputs, oldest)
+		}
+	}
+	c.inputs[key] = input
+}
+
+func (c *contextCadenceCache) admit(strategy extension.ContextStrategy, correlation runtimectx.Correlation, input, extensionID string, toolResultsComplete bool) bool {
+	switch strategy {
+	case extension.ContextOncePerTurn:
+		if correlation.TurnID == "" {
+			return true
+		}
+		key := contextCadenceTurnKey{
+			sessionID: correlation.SessionID, turnID: correlation.TurnID, extensionID: extensionID,
+		}
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if _, done := c.turns[key]; done {
+			return false
+		}
+		c.rememberTurn(key)
+		return true
+	case extension.ContextOnUserInputChange:
+		if correlation.SessionID == "" {
+			return true
+		}
+		key := contextCadenceInputKey{sessionID: correlation.SessionID, extensionID: extensionID}
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if previous, known := c.inputs[key]; known && previous == input {
+			return false
+		}
+		c.rememberInput(key, input)
+		return true
+	case extension.ContextAfterToolResult:
+		return toolResultsComplete
+	case extension.ContextManual:
+		return true
+	default:
+		return true
+	}
 }
 
 func (h *Host) ContextInjector() loop.PreStepInjector {
 	return loop.PreStepInjector{
 		Name: "extensions",
 		InjectWithError: func(ctx context.Context, userText string) ([]llm.Message, error) {
-			state := h.contextStateFor(ctx)
-			contributions, err := h.ProvideContext(ctx, userText, state)
+			contributions, err := h.ProvideContext(ctx, userText)
 			if err != nil {
 				return nil, err
 			}
@@ -555,37 +640,18 @@ func (h *Host) ContextInjector() loop.PreStepInjector {
 	}
 }
 
-func (h *Host) contextStateFor(ctx context.Context) *contextCadenceState {
-	correlation, _ := runtimectx.CorrelationOf(ctx)
-	if correlation.SessionID == "" {
-		return &contextCadenceState{}
-	}
-	h.contextStateMu.Lock()
-	defer h.contextStateMu.Unlock()
-	state := h.contextStates[correlation.SessionID]
-	if state == nil {
-		state = &contextCadenceState{}
-		h.contextStates[correlation.SessionID] = state
-	}
-	return state
-}
-
 // RefreshContext is the generic manual trigger. It bypasses cadence only for
 // providers that explicitly declare the manual strategy; other strategies
 // retain their normal deduplication semantics.
 func (h *Host) RefreshContext(ctx context.Context, userText string) ([]extension.ContextContribution, error) {
-	state := h.contextStateFor(ctx)
-	return h.provideContext(ctx, userText, state, true)
+	return h.provideContext(ctx, userText, true)
 }
 
-func (h *Host) ProvideContext(ctx context.Context, userText string, state *contextCadenceState) ([]extension.ContextContribution, error) {
-	return h.provideContext(ctx, userText, state, false)
+func (h *Host) ProvideContext(ctx context.Context, userText string) ([]extension.ContextContribution, error) {
+	return h.provideContext(ctx, userText, false)
 }
 
-func (h *Host) provideContext(ctx context.Context, userText string, state *contextCadenceState, includeManual bool) ([]extension.ContextContribution, error) {
-	if state == nil {
-		state = h.contextStateFor(ctx)
-	}
+func (h *Host) provideContext(ctx context.Context, userText string, includeManual bool) ([]extension.ContextContribution, error) {
 	h.mu.RLock()
 	items := append([]*managedExtension(nil), h.items...)
 	h.mu.RUnlock()
@@ -602,14 +668,7 @@ func (h *Host) provideContext(ctx context.Context, userText string, state *conte
 		if strategy == extension.ContextManual && !includeManual {
 			continue
 		}
-		if strategy == extension.ContextOncePerTurn && correlation.TurnID != "" && state.lastTurn == correlation.TurnID {
-			continue
-		}
-		if strategy == extension.ContextOnUserInputChange && state.lastInput == inputIdentity {
-			continue
-		}
-		sameTurn := correlation.TurnID != "" && state.lastTurn == correlation.TurnID
-		if strategy == extension.ContextAfterToolResult && (!sameTurn || state.lastStepID == "" || correlation.StepID == state.lastStepID) {
+		if !h.cadence.admit(strategy, correlation, inputIdentity, item.manifest.ID, runtimectx.ToolResultsComplete(ctx)) {
 			continue
 		}
 		request := extension.ContextRequest{Metadata: map[string]string{}}
@@ -667,11 +726,6 @@ func (h *Host) provideContext(ctx context.Context, userText string, state *conte
 		}
 		h.observe(event)
 		all = append(all, bounded...)
-	}
-	if state != nil && !includeManual {
-		state.lastTurn = correlation.TurnID
-		state.lastInput = inputIdentity
-		state.lastStepID = correlation.StepID
 	}
 	if requiredErr != nil {
 		return nil, fmt.Errorf("extension: required context provider failed: %w", requiredErr)

@@ -61,7 +61,7 @@ func TestHostLifecycleContextToolsAndRestart(t *testing.T) {
 	ctx := runtimectx.WithCorrelation(context.Background(), runtimectx.Correlation{
 		SessionID: "session-1", TurnID: "turn:1", StepID: "step:1",
 	})
-	contributions, err := host.ProvideContext(ctx, "find deployment risk", nil)
+	contributions, err := host.ProvideContext(ctx, "find deployment risk")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,12 +143,12 @@ func TestHostContextTimeoutAndCancellationFailSoft(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer host.Close()
-	if contributions, err := host.ProvideContext(context.Background(), "slow", nil); err != nil || len(contributions) != 0 {
+	if contributions, err := host.ProvideContext(context.Background(), "slow"); err != nil || len(contributions) != 0 {
 		t.Fatalf("timeout result = %#v, %v", contributions, err)
 	}
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := host.ProvideContext(cancelled, "cancelled", nil); err != nil {
+	if _, err := host.ProvideContext(cancelled, "cancelled"); err != nil {
 		t.Fatalf("optional provider cancellation must fail soft: %v", err)
 	}
 }
@@ -166,7 +166,7 @@ func TestHostContextBudgetAndDeduplication(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer host.Close()
-	contributions, err := host.ProvideContext(context.Background(), "large:abcdefghij", nil)
+	contributions, err := host.ProvideContext(context.Background(), "large:abcdefghij")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,7 +177,7 @@ func TestHostContextBudgetAndDeduplication(t *testing.T) {
 	if total != 120 || len(contributions) != 2 || !strings.Contains(contributions[0].Content, "truncated by agent budget") {
 		t.Fatalf("budgeted contributions = %#v, total=%d", contributions, total)
 	}
-	contributions, err = host.ProvideContext(context.Background(), "duplicate:same", nil)
+	contributions, err = host.ProvideContext(context.Background(), "duplicate:same")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +198,7 @@ func TestExtensionProcessCrashFailsSoftAndRecovers(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer host.Close()
-	if contributions, err := host.ProvideContext(context.Background(), "crash", nil); err != nil || len(contributions) != 0 {
+	if contributions, err := host.ProvideContext(context.Background(), "crash"); err != nil || len(contributions) != 0 {
 		t.Fatalf("crashing provider result = %#v, %v", contributions, err)
 	}
 	deadline := time.Now().Add(5 * time.Second)

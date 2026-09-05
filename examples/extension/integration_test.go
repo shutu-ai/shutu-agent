@@ -371,7 +371,7 @@ func TestDemoExtensionRuntimeIntegration(t *testing.T) {
 		restartCtx := runtimectx.WithCorrelation(context.Background(), runtimectx.Correlation{
 			SessionID: "post-restart-context", TurnID: "turn:1", StepID: "step:1",
 		})
-		restored, err := host.ProvideContext(restartCtx, "post-restart context", nil)
+		restored, err := host.ProvideContext(restartCtx, "post-restart context")
 		if err != nil || len(restored) != 1 || !strings.Contains(restored[0].Content, "post-restart context") {
 			t.Fatalf("post-restart context = %#v, %v", restored, err)
 		}
@@ -385,7 +385,7 @@ func TestDemoExtensionRuntimeIntegration(t *testing.T) {
 		removedCtx := runtimectx.WithCorrelation(context.Background(), runtimectx.Correlation{
 			SessionID: "post-close-context", TurnID: "turn:1", StepID: "step:1",
 		})
-		if removed, err := host.ProvideContext(removedCtx, "post-close context", nil); err != nil || len(removed) != 0 {
+		if removed, err := host.ProvideContext(removedCtx, "post-close context"); err != nil || len(removed) != 0 {
 			t.Fatalf("post-close context = %#v, %v", removed, err)
 		}
 	})

@@ -75,6 +75,8 @@ The tests exercise the real Agent Turn -> Step -> Model Call -> Tool Result -> N
 
 The failure matrix covers optional timeout/crash fail-soft behavior, required provider failure stopping the step, empty contributions, oversized truncatable contributions, and per-contribution limits. A strategy-wide matrix repeats timeout, crash, empty, oversized, and cancellation behavior for all five strategies, including manual through its explicit refresh seam. Existing integration tests also lock global character/token budgets, provider character budgets, priority ordering, same-source/content deduplication, and one durable context row per successful once-per-turn injection. Context contributions are source-attributed durable rows; the documented deduplication boundary is concurrent context contributions, not comparison with prior tool output.
 
+Cadence facts are isolated by session, turn and extension under a bounded, lock-protected cache. `after_tool_result` is triggered only by the Loop's explicit post-tool/pre-next-model boundary signal; it does not infer completion from step IDs. A race test proves that repeated callers in concurrent turns of one session receive exactly one once-per-turn contribution per turn.
+
 Evidence:
 
 - `internal/extensionhost/context_strategy_test.go`

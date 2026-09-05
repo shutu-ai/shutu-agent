@@ -298,6 +298,65 @@ func TestContextOncePerTurnRunsAgainOnNextTurn(t *testing.T) {
 	}
 }
 
+func TestContextCadenceIsolatesConcurrentTurns(t *testing.T) {
+	registry := tools.New()
+	conn := &strategyConnection{result: func(int, context.Context) (extension.ContextResult, error) {
+		return extension.ContextResult{Contributions: []extension.ContextContribution{{
+			Source: "strategy", Content: "turn evidence", Truncatable: true,
+		}}}, nil
+	}}
+	host := strategyHost(t, extension.ContextOncePerTurn, false, conn, registry)
+	defer host.Close()
+
+	const turns = 32
+	const callersPerTurn = 8
+	var wg sync.WaitGroup
+	for turn := 0; turn < turns; turn++ {
+		for caller := 0; caller < callersPerTurn; caller++ {
+			wg.Add(1)
+			go func(turn int) {
+				defer wg.Done()
+				ctx := runtimectx.WithCorrelation(context.Background(), runtimectx.Correlation{
+					SessionID: "concurrent-session", TurnID: fmt.Sprintf("turn:%d", turn),
+					StepID: "step:1",
+				})
+				if _, err := host.ProvideContext(ctx, "same request"); err != nil {
+					t.Errorf("provider call failed: %v", err)
+				}
+			}(turn)
+		}
+	}
+	wg.Wait()
+	if got := len(conn.calls()); got != turns {
+		t.Fatalf("provider calls across concurrent turns = %d, want %d", got, turns)
+	}
+}
+
+func TestAfterToolResultUsesLoopToolBoundarySignal(t *testing.T) {
+	registry := tools.New()
+	conn := &strategyConnection{result: func(int, context.Context) (extension.ContextResult, error) {
+		return extension.ContextResult{Contributions: []extension.ContextContribution{{
+			Source: "strategy", Content: "post-tool evidence", Truncatable: true,
+		}}}, nil
+	}}
+	host := strategyHost(t, extension.ContextAfterToolResult, false, conn, registry)
+	defer host.Close()
+
+	base := runtimectx.WithCorrelation(context.Background(), runtimectx.Correlation{
+		SessionID: "signal-session", TurnID: "turn:7", StepID: "step:3",
+	})
+	if contributions, err := host.ProvideContext(base, "first request"); err != nil || len(contributions) != 0 {
+		t.Fatalf("context before tool boundary = %#v, %v", contributions, err)
+	}
+	postTool := runtimectx.WithToolResultsComplete(base)
+	if contributions, err := host.ProvideContext(postTool, "second request"); err != nil || len(contributions) != 1 {
+		t.Fatalf("context after tool boundary = %#v, %v", contributions, err)
+	}
+	if contributions, err := host.ProvideContext(base, "third request"); err != nil || len(contributions) != 0 {
+		t.Fatalf("context without a new tool boundary = %#v, %v", contributions, err)
+	}
+}
+
 func TestContextBudgetsAreDeterministic(t *testing.T) {
 	host := New(Config{
 		GlobalContextChars: 220, MaxContributionChars: 240,
@@ -329,7 +388,7 @@ func TestContextBudgetsAreDeterministic(t *testing.T) {
 	}
 	host.mu.Unlock()
 
-	contributions, err := host.ProvideContext(context.Background(), "budget request", nil)
+	contributions, err := host.ProvideContext(context.Background(), "budget request")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -366,7 +425,7 @@ func TestContextContributionDeduplication(t *testing.T) {
 	host.items = []*managedExtension{newProvider("first"), newProvider("second")}
 	host.mu.Unlock()
 
-	contributions, err := host.ProvideContext(context.Background(), "duplicate request", nil)
+	contributions, err := host.ProvideContext(context.Background(), "duplicate request")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -405,7 +464,7 @@ func TestContextGlobalTokenBudgetIsDeterministic(t *testing.T) {
 	}
 	host.mu.Unlock()
 
-	contributions, err := host.ProvideContext(context.Background(), "token budget request", nil)
+	contributions, err := host.ProvideContext(context.Background(), "token budget request")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -537,8 +596,7 @@ func TestContextProviderFailureModelMatrix(t *testing.T) {
 			ctx := runtimectx.WithCorrelation(context.Background(), runtimectx.Correlation{
 				SessionID: "failure-session", TurnID: "turn:1", StepID: "step:1",
 			})
-			state := host.contextStateFor(ctx)
-			contributions, err := host.ProvideContext(ctx, "request", state)
+			contributions, err := host.ProvideContext(ctx, "request")
 			if test.wantErr && err == nil {
 				t.Fatal("required provider failure was swallowed")
 			}
@@ -622,9 +680,8 @@ func TestContextFailureModelAcrossStrategies(t *testing.T) {
 				ctx := runtimectx.WithCorrelation(context.Background(), runtimectx.Correlation{
 					SessionID: "failure-matrix-session", TurnID: "turn:1", StepID: "step:2",
 				})
-				state := &contextCadenceState{}
 				if strategy == extension.ContextAfterToolResult {
-					state.lastTurn, state.lastStepID = "turn:1", "step:1"
+					ctx = runtimectx.WithToolResultsComplete(ctx)
 				}
 
 				var contributions []extension.ContextContribution
@@ -632,7 +689,7 @@ func TestContextFailureModelAcrossStrategies(t *testing.T) {
 				if strategy == extension.ContextManual {
 					contributions, err = host.RefreshContext(ctx, "failure request")
 				} else {
-					contributions, err = host.ProvideContext(ctx, "failure request", state)
+					contributions, err = host.ProvideContext(ctx, "failure request")
 				}
 				if err != nil {
 					t.Fatalf("optional provider changed loop outcome: %v", err)
