@@ -1,7 +1,7 @@
 declare module '*.css'
 
-declare module 'virtual:shutu-dsh-native-plugins' {
-  export const DSH_NATIVE_PLUGINS: readonly {
+declare module 'virtual:shutu-native-plugins' {
+  export const SHUTU_NATIVE_PLUGINS: readonly {
     readonly id: string
     readonly module: {
       readonly apply?: (context: unknown) => void

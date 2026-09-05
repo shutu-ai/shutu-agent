@@ -1,6 +1,6 @@
 # Agent 工作指南
 
-本文维护 `shutu-agent` 的稳定开发约束、支持范围和 DeepSeek Harness 等价审计口径。
+本文维护 `shutu-agent` 的稳定开发约束、支持范围和参考等价审计口径。
 历史进度以机器可读的 manifest/task register 为准，不在本文重复维护完成数量。
 
 ## 目标范围
@@ -10,7 +10,7 @@
 - 允许因 Go 与 Cordis/Node 架构不同而采用不同内部实现；内部架构不同本身不是缺陷，但不能因此掩盖安全、生命周期、失败语义或跨入口行为差异。
 - Team/`ctx.agentTeams`、`team_task_*` 是可选能力，不属于当前 release blocker。未选定的 E2B、Python、LSP、持久终端、Codex/Claude provider，以及动态 Cordis/client module/HMR 专属能力，必须在 profile/manifest 中明确标为 optional 或 out-of-scope。
 - 即使排除上述架构专属能力，核心 Agent loop、会话历史与 replay、工具策略、approval、sandbox fail-closed、subagent owner、持久化恢复以及已声明的 ACP/MCP/SDK/Web 协议仍属于验收范围。
-- `deepseek-harness` 是只读参考目录，严禁修改其中任何文件；参考版本以 [`docs/equivalence-manifest.yaml`](docs/equivalence-manifest.yaml) 固定的 commit 为准。
+- `.reference/dsh` 是项目内只读参考目录，严禁修改其中任何文件；参考版本以 [`docs/equivalence-manifest.yaml`](docs/equivalence-manifest.yaml) 固定的 commit 为准。它被版本控制忽略，绝不进入构建、module graph 或发布运行时。
 - P36 当前 Windows 目标范围已完成；Linux/WSL 只有在被 manifest 声明为 claimed platform 时才属于发布验收门槛。
 
 ## 等价审计规则
@@ -36,7 +36,7 @@
 ## 开发流程
 
 1. 若仓库存在 `.codegraph/`，先使用 `codegraph explore "..."` 理解相关符号和调用路径，再使用 `rg` 或直接阅读文件定位细节。
-2. 阅读 [`docs/design.md`](docs/design.md)、相关 ADR 和 [`docs/dsh-equivalence-contract.md`](docs/dsh-equivalence-contract.md)；需要对齐 DSH 行为时，以 `../deepseek-harness` 的源码和文档作为只读参考。
+2. 阅读 [`docs/design.md`](docs/design.md)、相关 ADR 和 [`docs/dsh-equivalence-contract.md`](docs/dsh-equivalence-contract.md)；需要对齐参考行为时，以 `.reference/dsh` 的源码和文档作为只读参考。
 3. 涉及核心模型、事件、循环、依赖方向、安全边界或支持 profile 时，先更新设计基线/ADR，并同步 manifest 与 task register 的范围。
 4. 先补测试，再实现；按 Service、Provider、Tool 拆分能力，并覆盖取消、重启、失败、权限、owner 和 unsupported 边界。
 5. 完成后运行相关测试和全量验证；文档变更至少校验链接、JSON/YAML、profile 范围、任务状态和证据路径一致性。
@@ -69,7 +69,7 @@ API key 示例：
 
 ```powershell
 $env:DEEPSEEK_API_KEY = "..."
-go build -o sta.exe ./cmd/pa
+go build -o sta.exe ./cmd/sta
 .\sta.exe
 ```
 
@@ -87,7 +87,7 @@ Windows 目标环境的发布、部署和回滚验证按
 - 设计基线：[`docs/design.md`](docs/design.md)
 - ADR：[`docs/decisions/`](docs/decisions/)
 - 部署说明：[`docs/deployment.md`](docs/deployment.md)
-- DSH 参考：`../deepseek-harness/docs/`
+- 参考目录：`.reference/dsh/docs/`
 ## Current audit state (2026-09-01)
 
 The capability-equivalence claim remains fail-closed. Runtime profile and capability advertisements must be derived from the same host probes used by execution: the TypeScript Code Mode profile requires Node's permission model, and the controlled shell/sandbox profile requires a proven workspace-write backend. An explicit full-access subprocess is not evidence that the default sandbox profile is available. The native/Web agent-preset catalog must also hide `code` and reject selecting it whenever `run_code` was not actually registered; configuration preference alone is not capability evidence.
@@ -408,7 +408,7 @@ with `ErrUnknownRequiredEvent` before advancing the sequence. Native wire
 extensions may still be accepted only when explicitly marked `ignorable`; that
 wire exception must not become a durable-log escape hatch. The cross-module
 negative matrix is at `internal/contractfixture/negative_matrix_test.go`.
-`cmd/pa/tool_contract_matrix_test.go` additionally proves SQLite durable
+`cmd/sta/tool_contract_matrix_test.go` additionally proves SQLite durable
 rejection replay for every required model-facing tool. A9.2 is done: all 49
 denial paths prove the production body is not reached; every claimed provider
 adapter rejects unsupported input before any request or credential header
@@ -423,7 +423,7 @@ real MCP stdio child, and the public SDK client consume the same
 session/tool/terminal facts. ACP, MCP, and SDK wire formats remain distinct by
 design. The production native CLI now also drives the same fixture through a
 real child process at
-`cmd/pa/native_cli_cross_entry_test.go:TestNativeCLICrossEntryFixture`; it
+`cmd/sta/native_cli_cross_entry_test.go:TestNativeCLICrossEntryFixture`; it
 requires a production write-tool file effect and durable tool result, then the
 assistant response on stdout, and opens production SQLite with an independent
 handle to require the same projected history and surface after exit. Child
@@ -481,7 +481,7 @@ side call ledger waiting indefinitely.
 Provider request attribution now has one shared User-Agent helper. Normal
 loop requests carry the durable session ID, and ACP compaction requests carry
 the session ID plus `Purpose: compaction`; the official DeepSeek route adds
-the stable anonymous user ID and `x-deepseek-harness-*` headers lazily. The
+the stable anonymous user ID and `x-shutu-*` attribution headers lazily. The
 OpenAI-compatible route is deliberately excluded from DeepSeek-specific
 identity headers. A shared replay now proves those boundaries across all five
 claimed production adapters over real HTTP. The pinned reference SDK runtime
@@ -535,7 +535,7 @@ reproducible full-regression baseline for this host.
 Code Mode negative-entry verification (2026-09-01): when the Node permission
 model probe is unavailable, `run_code` is removed from the registry and from
 the ACP/SDK catalogs, while Native/Web preset selection is hidden/rejected as
-well. `cmd/pa/codes_test.go:TestRegisterCodeUnavailableRemovesRunCodeFromACPAndSDKCatalogs`
+well. `cmd/sta/codes_test.go:TestRegisterCodeUnavailableRemovesRunCodeFromACPAndSDKCatalogs`
 and the existing Native/Web tests cover the public entry points. This closes
 the advertisement/dispatch evidence gap for A3.2; it does not close A3.1's
 requirement for a real enforcing sandbox backend.
@@ -596,7 +596,7 @@ reasoning maps and boolean facts receive the deterministic compatibility
 default used by the existing selector. Invalid defaults and defaults missing
 from an authoritative effort map fail closed.
 Evidence: `internal/llm/model_catalog_test.go:TestModelDefaultReasoningEffortUsesOwnedMetadataAndLegacyFacts`,
-`cmd/pa/model_catalog_data_test.go:TestReasoningEffortCatalogIsProjectedToProviderAndWebRows`,
+`cmd/sta/model_catalog_data_test.go:TestReasoningEffortCatalogIsProjectedToProviderAndWebRows`,
 `internal/webserver/native_rpc_test.go:TestNativeLLMCatalogPreservesOwnedModelMetadata`.
 
 Model catalog default-output correction (2026-09-01): `DefaultMaxTokens` is
@@ -616,10 +616,10 @@ fallback `32768` when neither model nor request declares one. Evidence:
 `internal/llm/openairesponses/openairesponses_test.go:TestStreamUsesExplicitModelDefaultMaxOutputTokens`,
 `internal/llm/openairesponses/openairesponses_test.go:TestStreamUsesReferenceRouteDefaultMaxOutputTokens`,
 `internal/llm/openai/openai_test.go:TestStreamUsesExplicitModelDefaultMaxTokens`, and
-`cmd/pa/model_catalog_data_test.go:TestDeepSeekReferenceCatalogMetadata`.
+`cmd/sta/model_catalog_data_test.go:TestDeepSeekReferenceCatalogMetadata`.
 Persisted builtin/custom provider profiles may also set a route-level
 `default_max_tokens`; registration passes it to the selected protocol adapter,
-and `cmd/pa/llm_test.go` verifies it survives a provider cold restart and
+and `cmd/sta/llm_test.go` verifies it survives a provider cold restart and
 reaches the wire.
 
 SDK projection correction (2026-09-01): the SDK now exposes the optional
@@ -630,8 +630,8 @@ Native and Web. The extension is included in the local generated SDK schema;
 reference request methods remain unchanged and reference clients may ignore
 the extension. The full A8.1 cross-entry byte-equivalence fixture and ACP
 permission/reconnect projection remain open.
-Evidence: `cmd/pa/sdk.go`, `internal/sdkclient/client.go`,
-`internal/sdkclient/types.go`, `cmd/pa/sdk_test.go:TestSDKServerExternalClientPromptRunsAgentThroughIdle`,
+Evidence: `cmd/sta/sdk.go`, `internal/sdkclient/client.go`,
+`internal/sdkclient/types.go`, `cmd/sta/sdk_test.go:TestSDKServerExternalClientPromptRunsAgentThroughIdle`,
 `tools/generate-sdk-protocol-schema.mjs`, and
 `internal/sdkclient/testdata/protocol.schema.json`.
 
@@ -661,7 +661,7 @@ matrix.
 The production SDK child-process regression also queries `session/snapshot` over
 real exec/stdio after the prompt reaches idle and verifies the durable session
 id, history, trajectory surface, and projection cursor. Evidence:
-`cmd/pa/sdk_test.go:TestSDKClientDrivesRealRuntimeChildThroughIdle`. This
+`cmd/sta/sdk_test.go:TestSDKClientDrivesRealRuntimeChildThroughIdle`. This
 strengthens A8.1 external evidence. A9.1's completed cross-entry suite supplies
 the broader runtime/restart oracle.
 
@@ -691,7 +691,7 @@ failures without turning the local code backend into an enforcing sandbox.
 
 ACP production resume now reports the last durable event sequence as
 `ResumeMetadata.eventCursor` instead of the number of events. The SQLite-backed
-factory regression `cmd/pa/acp_test.go:TestACPFactoryResumeRestoresDurableIdentityCWDHistoryAndCursor`
+factory regression `cmd/sta/acp_test.go:TestACPFactoryResumeRestoresDurableIdentityCWDHistoryAndCursor`
 covers `session/new → append → close → session/resume`, including stable id,
 CWD, restored history, and cursor. This closes a concrete resume-cursor bug;
 the full external ACP/reference matrix remains a release blocker.
@@ -700,7 +700,7 @@ MCP resync publication correction (2026-09-01): reconnect-time tool discovery
 is now transactional. Duplicate public names are rejected before mutation, and
 a registry conflict in any later tool rolls back replacements/new registrations,
 leaving the prior live MCP generation and name index intact. Evidence:
-`cmd/pa/mcps_test.go:TestMCPReconnectResyncKeepsPreviousGenerationOnConflict`.
+`cmd/sta/mcps_test.go:TestMCPReconnectResyncKeepsPreviousGenerationOnConflict`.
 This closes a concrete availability gap in A7.2; the full external MCP matrix,
 side-effect oracle, and release-gate fault/restart suites remain open.
 

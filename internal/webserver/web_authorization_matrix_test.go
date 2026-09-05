@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/shutu-ai/shutu-agent/internal/interact"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
 	"github.com/shutu-ai/shutu-agent/internal/session"
 	"github.com/shutu-ai/shutu-agent/internal/store"
 )
@@ -19,7 +20,7 @@ import (
 // boundary in one place: bearer admission, cross-origin mutation fencing,
 // addressed-owner callbacks, fail-closed secrets, deterministic SSE replay,
 // and stable unknown-interaction handling. Production queue ownership and
-// shutdown admission are covered by cmd/pa's matrix test.
+// shutdown admission are covered by cmd/sta's matrix test.
 func TestWebAuthorizationReplayAndOwnerMatrix(t *testing.T) {
 	srv, st := newTestServer(t, "secret-token")
 	seedSession(t, st, "true-parent", nil)
@@ -38,7 +39,7 @@ func TestWebAuthorizationReplayAndOwnerMatrix(t *testing.T) {
 			}
 			return items, nil
 		},
-		func(_ context.Context, sessionID, text string) (QueueItem, error) {
+		func(_ context.Context, sessionID, text string, _ []llm.ContentBlock, meta PromptMeta) (QueueItem, error) {
 			item := QueueItem{ID: sessionID + "-item", Text: text, CreatedAt: time.Unix(1, 0), Placement: "queued"}
 			queue[sessionID] = append(queue[sessionID], item)
 			return item, nil
@@ -63,7 +64,7 @@ func TestWebAuthorizationReplayAndOwnerMatrix(t *testing.T) {
 		func(context.Context, string) error { return fmt.Errorf("credential store rejected the delete") },
 	)
 	srv.SetNativeSubagentManager(
-		func(context.Context, string, string) error {
+		func(context.Context, string, []llm.ContentBlock, PromptMeta) error {
 			t.Error("unauthorized subagent prompt reached the runtime")
 			return nil
 		},

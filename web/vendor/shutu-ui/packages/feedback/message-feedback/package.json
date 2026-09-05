@@ -1,0 +1,80 @@
+{
+  "name": "@shutu-ai/message-feedback",
+  "description": "Lifecycle-bound per-message rating and note sidecar for the DeepSeek Harness",
+  "version": "0.1.0-rc.8",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shutu-ai/shutu-agent.git",
+    "directory": "packages/feedback/message-feedback"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./invariant": {
+      "types": "./lib/types/invariant.d.ts",
+      "default": "./lib/invariant.js"
+    },
+    "./types": {
+      "types": "./lib/types/types.d.ts",
+      "default": "./lib/types/types.js"
+    },
+    "./typert": {
+      "types": "./lib/typert.host.d.ts",
+      "default": "./lib/typert.host.js"
+    },
+    "./remote": {
+      "types": "./lib/typert.remote-client.d.ts",
+      "default": "./lib/typert.remote-client.js"
+    },
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/invariant.js",
+    "lib/types/**/*.js",
+    "lib/types/**/*.d.ts",
+    "lib/typert.host.js",
+    "lib/typert.host.d.ts",
+    "lib/typert.remote-client.js",
+    "lib/typert.remote-client.d.ts"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@shutu-ai/brand": "workspace:^",
+    "@shutu-ai/invariants": "workspace:^",
+    "@shutu-ai/llm": "workspace:^",
+    "@shutu-ai/session": "workspace:^",
+    "@shutu-ai/session-persistence": "workspace:^",
+    "@shutu-ai/storage-domain": "workspace:^",
+    "@shutu-ai/typert-protocol": "workspace:^",
+    "@shutu-ai/cordis": "workspace:^"
+  },
+  "dependencies": {
+    "@shutu-ai/schemastery": "workspace:^",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@shutu-ai/cordis-plugin-include": "workspace:^",
+    "@shutu-ai/cordis-plugin-loader": "workspace:^",
+    "@shutu-ai/brand": "workspace:^",
+    "@shutu-ai/invariants": "workspace:^",
+    "@shutu-ai/llm": "workspace:^",
+    "@shutu-ai/session": "workspace:^",
+    "@shutu-ai/session-persistence": "workspace:^",
+    "@shutu-ai/session-persistence-jsonl": "workspace:^",
+    "@shutu-ai/storage": "workspace:^",
+    "@shutu-ai/storage-domain": "workspace:^",
+    "@shutu-ai/storage-json": "workspace:^",
+    "@shutu-ai/typert-protocol": "workspace:^",
+    "@shutu-ai/cordis": "workspace:^"
+  }
+}

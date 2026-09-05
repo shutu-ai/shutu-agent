@@ -15,6 +15,9 @@ import (
 // goroutines until ping's long timeout expires.
 func TestRunForegroundKillsWindowsDescendants(t *testing.T) {
 	runner := NewRunCommand(t.TempDir())
+	// This is the force-kill containment test; graceful escalation does not
+	// need another 3s wait here.
+	runner.SettingsFunc = func() ShellSettings { return ShellSettings{GraceMS: 0} }
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 	started := time.Now()

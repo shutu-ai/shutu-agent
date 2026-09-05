@@ -90,7 +90,7 @@ func New(cfg Config) *anthropicProvider
 - ctx 取消贯穿请求与读取。
 - 非 2xx：读 body（1MiB 有界）解析错误 JSON（`{"error":{"message":...}}` 或 `{"message":...}`）→ 返回错误。
 
-## 3. 注册接线（cmd/pa/llm.go 修改）
+## 3. 注册接线（cmd/sta/llm.go 修改）
 
 - `registerLLM`：`if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" { reg.Register(anthropic.New(anthropic.Config{APIKey: key, BaseURL: a.cfg.LLM.Anthropic.BaseURL, Model: a.cfg.LLM.Anthropic.Model})) }`（照 openai 同款：key 非空才注册）。
 - `llmCredentialEnv`：`"anthropic"` → `"ANTHROPIC_API_KEY"`。
@@ -108,7 +108,7 @@ func New(cfg Config) *anthropicProvider
 5. **Available**：key 空 / base_url 非法。
 6. **回传往返**：assistant 消息含 reasoning（BlockReasoning）+ tool_use 序列化正确（thinking/text/tool_use 顺序）。
 
-`cmd/pa`：ANTHROPIC_API_KEY 非空时注册 anthropic；选中 anthropic 可用；/llm-status 显示。
+`cmd/sta`：ANTHROPIC_API_KEY 非空时注册 anthropic；选中 anthropic 可用；/llm-status 显示。
 `internal/config`：anthropic 默认值断言（已有，补 model/base_url 与实现一致）。
 
 ## 5. 提交与报告

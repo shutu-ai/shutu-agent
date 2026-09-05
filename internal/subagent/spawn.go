@@ -103,9 +103,9 @@ type childRun struct {
 	parent      string
 	depth       int
 	log         *session.Log
-	cancel      context.CancelFunc // cancels the child loop context (set in Start)
-	done        chan struct{}      // closed once the child settles
-	inbox       chan string        // waking follow-up messages
+	cancel      context.CancelFunc  // cancels the child loop context (set in Start)
+	done        chan struct{}       // closed once the child settles
+	inbox       chan pendingMessage // waking follow-up messages
 	continuable bool
 	maxTokens   int    // resolved output-token cap inherited by nested children
 	seedSeq     uint64 // parent-history watermark for fork result derivation
@@ -117,6 +117,14 @@ type childRun struct {
 	structuredSet bool
 	settled       bool
 	quietInbox    []string // accepted context waiting for a waking follow-up
+}
+
+// pendingMessage carries a waking follow-up and the Web provenance that must
+// survive until the child loop admits it as an ordinary user message.
+type pendingMessage struct {
+	message  string
+	content  []llm.ContentBlock
+	metadata map[string]string
 }
 
 // NewSpawnProvider returns a SpawnProvider bound to the given core components.
@@ -220,7 +228,7 @@ func (p *SpawnProvider) Start(ctx context.Context, req StartRequest) (*Run, erro
 		log:         session.New(),
 		cancel:      cancel,
 		done:        make(chan struct{}),
-		inbox:       make(chan string, 16),
+		inbox:       make(chan pendingMessage, 16),
 		continuable: req.Continuable,
 	}
 	if req.MaxTokens > 0 {
@@ -398,11 +406,13 @@ func (p *SpawnProvider) Start(ctx context.Context, req StartRequest) (*Run, erro
 
 	go p.runChild(child, req, runCtx)
 	return &Run{
-		ID:        id,
-		Result:    p.resultFunc(child),
-		Send:      p.sendFunc(child),
-		SendQuiet: p.sendQuietFunc(child),
-		Cancel:    p.cancelFunc(child),
+		ID:                      id,
+		Result:                  p.resultFunc(child),
+		Send:                    p.sendFunc(child),
+		SendWithMetadata:        p.sendWithMetadataFunc(child),
+		SendContentWithMetadata: p.sendContentWithMetadataFunc(child),
+		SendQuiet:               p.sendQuietFunc(child),
+		Cancel:                  p.cancelFunc(child),
 	}, nil
 }
 
@@ -510,7 +520,7 @@ func (p *SpawnProvider) Resume(ctx context.Context, sessionID, message string, c
 	runCtx, cancel := context.WithCancel(context.Background())
 	child := &childRun{
 		id: sessionID, label: meta.Label, parent: meta.ParentSession, depth: meta.Depth,
-		log: log, cancel: cancel, done: make(chan struct{}), inbox: make(chan string, 16), continuable: continuable,
+		log: log, cancel: cancel, done: make(chan struct{}), inbox: make(chan pendingMessage, 16), continuable: continuable,
 		maxTokens: maxTokens,
 	}
 	// A resumed run must derive its result from the new turn only. Otherwise a
@@ -542,7 +552,11 @@ func (p *SpawnProvider) Resume(ctx context.Context, sessionID, message string, c
 		p.deps.BindSessionLog(sessionID, log)
 	}
 	go p.runChild(child, StartRequest{Prompt: message, Continuable: continuable}, runCtx)
-	return &Run{ID: sessionID, Result: p.resultFunc(child), Send: p.sendFunc(child), SendQuiet: p.sendQuietFunc(child), Cancel: p.cancelFunc(child)}, nil
+	return &Run{
+		ID: sessionID, Result: p.resultFunc(child), Send: p.sendFunc(child),
+		SendWithMetadata: p.sendWithMetadataFunc(child), SendContentWithMetadata: p.sendContentWithMetadataFunc(child),
+		SendQuiet: p.sendQuietFunc(child), Cancel: p.cancelFunc(child),
+	}, nil
 }
 
 func parseSpawnID(id string) int {
@@ -664,21 +678,56 @@ func (p *SpawnProvider) runChild(child *childRun, req StartRequest, runCtx conte
 			return err
 		},
 	})
-	message := req.Prompt
+	pending := pendingMessage{message: req.Prompt}
 	for {
-		runErr := lp.Run(runCtx, message)
+		runErr := lp.RunMessages(runCtx, []llm.Message{childInputMessage(pending)})
 		if !child.continuable || runErr != nil {
 			p.settle(child, p.deriveResult(child, runErr))
 			return
 		}
 		select {
-		case message = <-child.inbox:
-			message = child.withQuiet(message)
+		case next := <-child.inbox:
+			if len(next.content) > 0 {
+				next.content = child.withQuietContent(next.content)
+			} else {
+				next.message = child.withQuiet(next.message)
+			}
+			pending = next
 		case <-runCtx.Done():
 			p.settle(child, p.deriveResult(child, runCtx.Err()))
 			return
 		}
 	}
+}
+
+// childInputMessage projects a pending provider queue item as the canonical
+// ordinary user message. Web provenance rides in durable source metadata only.
+func childInputMessage(pending pendingMessage) llm.Message {
+	if len(pending.content) > 0 {
+		message := llm.Message{Role: llm.RoleUser, Content: append([]llm.ContentBlock(nil), pending.content...)}
+		message.SourceRPCID = pending.metadata["rpc_id"]
+		message.SourceClientTimeZone = pending.metadata["client_time_zone"]
+		return message
+	}
+	message := llm.Message{
+		Role:    llm.RoleUser,
+		Content: []llm.ContentBlock{llm.Text(pending.message)},
+	}
+	message.SourceRPCID = pending.metadata["rpc_id"]
+	message.SourceClientTimeZone = pending.metadata["client_time_zone"]
+	return message
+}
+
+func (c *childRun) withQuietContent(content []llm.ContentBlock) []llm.ContentBlock {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.quietInbox) == 0 {
+		return content
+	}
+	parts := append([]string(nil), c.quietInbox...)
+	c.quietInbox = nil
+	quiet := llm.Text(strings.Join(parts, "\n\n"))
+	return append([]llm.ContentBlock{quiet}, content...)
 }
 
 func (c *childRun) withQuiet(message string) string {
@@ -759,7 +808,22 @@ func (p *SpawnProvider) resultFunc(child *childRun) func(ctx context.Context) (R
 // request is in flight.
 func (p *SpawnProvider) sendFunc(child *childRun) func(context.Context, string) error {
 	return func(ctx context.Context, message string) error {
+		return p.sendWithMetadataFunc(child)(ctx, message, nil)
+	}
+}
+
+func (p *SpawnProvider) sendWithMetadataFunc(child *childRun) func(context.Context, string, map[string]string) error {
+	return func(ctx context.Context, message string, metadata map[string]string) error {
 		if strings.TrimSpace(message) == "" {
+			return fmt.Errorf("subagent: message is empty")
+		}
+		return p.sendContentWithMetadataFunc(child)(ctx, []llm.ContentBlock{llm.Text(message)}, metadata)
+	}
+}
+
+func (p *SpawnProvider) sendContentWithMetadataFunc(child *childRun) func(context.Context, []llm.ContentBlock, map[string]string) error {
+	return func(ctx context.Context, content []llm.ContentBlock, metadata map[string]string) error {
+		if len(content) == 0 {
 			return fmt.Errorf("subagent: message is empty")
 		}
 		if err := ctx.Err(); err != nil {
@@ -776,7 +840,7 @@ func (p *SpawnProvider) sendFunc(child *childRun) func(context.Context, string) 
 			return fmt.Errorf("%w: %s", ErrNotContinuable, child.id)
 		}
 		select {
-		case child.inbox <- message:
+		case child.inbox <- pendingMessage{content: content, metadata: metadata}:
 			return nil
 		case <-ctx.Done():
 			return ctx.Err()

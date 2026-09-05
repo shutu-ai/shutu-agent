@@ -130,14 +130,14 @@ func TestOfficialRequestCarriesAttributionIdentity(t *testing.T) {
 	if got.Get("User-Agent") != llm.AttributionUserAgent {
 		t.Fatalf("user-agent = %q, want %q", got.Get("User-Agent"), llm.AttributionUserAgent)
 	}
-	if got.Get("X-Deepseek-Harness-User-Id") != "anonymous-test" {
-		t.Fatalf("user id = %q", got.Get("X-Deepseek-Harness-User-Id"))
+	if got.Get("X-Shutu-User-Id") != "anonymous-test" {
+		t.Fatalf("user id = %q", got.Get("X-Shutu-User-Id"))
 	}
-	if got.Get("X-Deepseek-Harness-Session-Id") != "session-1" {
-		t.Fatalf("session id = %q", got.Get("X-Deepseek-Harness-Session-Id"))
+	if got.Get("X-Shutu-Session-Id") != "session-1" {
+		t.Fatalf("session id = %q", got.Get("X-Shutu-Session-Id"))
 	}
-	if got.Get("X-Deepseek-Harness-Compact") != "1" {
-		t.Fatalf("compact = %q", got.Get("X-Deepseek-Harness-Compact"))
+	if got.Get("X-Shutu-Compact") != "1" {
+		t.Fatalf("compact = %q", got.Get("X-Shutu-Compact"))
 	}
 }
 
@@ -166,7 +166,7 @@ func TestCompatibleRouteOmitsDeepSeekIdentityHeaders(t *testing.T) {
 	if got.Get("User-Agent") != llm.AttributionUserAgent {
 		t.Fatalf("user-agent = %q, want %q", got.Get("User-Agent"), llm.AttributionUserAgent)
 	}
-	for _, name := range []string{"X-Deepseek-Harness-User-Id", "X-Deepseek-Harness-Session-Id", "X-Deepseek-Harness-Compact"} {
+	for _, name := range []string{"X-Shutu-User-Id", "X-Shutu-Session-Id", "X-Shutu-Compact"} {
 		if value := got.Get(name); value != "" {
 			t.Fatalf("%s = %q, want omitted for compatible route", name, value)
 		}

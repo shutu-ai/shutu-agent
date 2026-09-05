@@ -19,7 +19,7 @@
 1. 复用 SQLite `SearchSessions` 和 `LoadSession`，保持 D1 单一事实源与 D8 重放语义。
 2. 结果有数量、窗口和文本摘要上限；`session_event_read` 默认只读目标事件，邻居由 `before`/`after` 显式请求。
 3. 查询能力默认关闭，`session_query.enabled: true` 时由配置自动加入五个工具白名单；minimal 模式强制关闭。
-4. 组合根只注入 Store 和当前 session id，工具包不依赖 cmd/pa 或 loop，保持 Service / Consumer 边界。
+4. 组合根只注入 Store 和当前 session id，工具包不依赖 cmd/sta 或 loop，保持 Service / Consumer 边界。
 
 ## 已知偏差
 

@@ -1,0 +1,86 @@
+{
+  "name": "@shutu-ai/client-ui-cordis",
+  "description": "Cordis dynamic-plugin definition card: the keyed cordis_define tool row with its run/stop switch",
+  "version": "0.1.0-rc.8",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shutu-ai/shutu-agent.git",
+    "directory": "packages/extensions/ui-cordis"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./invariant": {
+      "types": "./lib/types/invariant.d.ts",
+      "default": "./lib/invariant.js"
+    },
+    "./client": {
+      "types": "./lib/types/client/index.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "shutu": {
+    "client": {
+      "inject": [
+        "@shutu-ai/client-runtime",
+        "@shutu-ai/client-connection",
+        "@shutu-ai/cordis-client-runner",
+        "@shutu-ai/api-remotes",
+        "@shutu-ai/client-locale",
+        "@shutu-ai/client-ui-input-trigger",
+        "@shutu-ai/client-ui-tool",
+        "@shutu-ai/client-ui-sidebar"
+      ],
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "bundle": "tsdown",
+    "watch": "tsdown --watch"
+  },
+  "license": "MIT",
+  "peerDependencies": {
+    "@shutu-ai/api-remotes": "workspace:^",
+    "@shutu-ai/client-connection": "workspace:^",
+    "@shutu-ai/cordis-client-runner": "workspace:^",
+    "@shutu-ai/client-locale": "workspace:^",
+    "@shutu-ai/client-runtime": "workspace:^",
+    "@shutu-ai/client-ui-sidebar": "workspace:^",
+    "@shutu-ai/client-ui-input-trigger": "workspace:^",
+    "@shutu-ai/client-ui-tool": "workspace:^",
+    "@shutu-ai/invariants": "workspace:^",
+    "@shutu-ai/cordis": "workspace:^"
+  },
+  "devDependencies": {
+    "@shutu-ai/api-remotes": "workspace:^",
+    "@shutu-ai/client-connection": "workspace:^",
+    "@shutu-ai/cordis-client-runner": "workspace:^",
+    "@shutu-ai/client-locale": "workspace:^",
+    "@shutu-ai/client-runtime": "workspace:^",
+    "@shutu-ai/client-ui-primitives": "workspace:^",
+    "@shutu-ai/client-ui-sidebar": "workspace:^",
+    "@shutu-ai/client-ui-input-trigger": "workspace:^",
+    "@shutu-ai/client-ui-slots": "workspace:^",
+    "@shutu-ai/client-ui-tool": "workspace:^",
+    "@shutu-ai/invariants": "workspace:^",
+    "@types/react": "~18.3.1",
+    "@shutu-ai/cordis": "workspace:^",
+    "react": "^18.2.0"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/invariant.js",
+    "lib/client.js",
+    "lib/types/**/*.d.ts"
+  ]
+}

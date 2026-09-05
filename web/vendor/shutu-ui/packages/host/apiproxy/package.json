@@ -1,0 +1,94 @@
+{
+  "name": "@shutu-ai/host-apiproxy",
+  "description": "API gateway: the ApiProxy contract (api/), the fetch carrier pair (fetch/), and the host-side gateway plugin providing ctx.apiProxy",
+  "version": "0.1.0-rc.8",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shutu-ai/shutu-agent.git",
+    "directory": "packages/host/apiproxy"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./invariant": {
+      "types": "./lib/types/invariant.d.ts",
+      "default": "./lib/invariant.js"
+    },
+    "./src/*": "./src/*",
+    "./package.json": "./package.json",
+    "./api": {
+      "types": "./lib/types/api/index.d.ts",
+      "default": "./lib/types/api/index.js"
+    },
+    "./api/*": {
+      "types": "./lib/types/api/*.d.ts",
+      "default": "./lib/types/api/*.js"
+    },
+    "./client": {
+      "types": "./lib/types/fetch/client.d.ts",
+      "default": "./lib/types/fetch/client.js"
+    }
+  },
+  "files": [
+    "lib/index.js",
+    "lib/invariant.js",
+    "lib/types/**/*.js",
+    "lib/types/**/*.d.ts"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@shutu-ai/attachment": "workspace:^",
+    "@shutu-ai/agent": "workspace:^",
+    "@shutu-ai/agent-default-model": "workspace:^",
+    "@shutu-ai/api-remotes": "workspace:^",
+    "@shutu-ai/brand": "workspace:^",
+    "@shutu-ai/commands": "workspace:^",
+    "@shutu-ai/credentials": "workspace:^",
+    "@shutu-ai/goal": "workspace:^",
+    "@shutu-ai/host-directory-picker": "workspace:^",
+    "@shutu-ai/llm": "workspace:^",
+    "@shutu-ai/native-command": "workspace:^",
+    "@shutu-ai/session": "workspace:^",
+    "@shutu-ai/session-persistence": "workspace:^",
+    "@shutu-ai/session-projection": "workspace:^",
+    "@shutu-ai/session-projection-cache": "workspace:^",
+    "@shutu-ai/session-query": "workspace:^",
+    "@shutu-ai/session-title": "workspace:^",
+    "@shutu-ai/settings": "workspace:^",
+    "@shutu-ai/skill": "workspace:^",
+    "@shutu-ai/subagent": "workspace:^",
+    "@shutu-ai/jobs": "workspace:^",
+    "@shutu-ai/tools": "workspace:^",
+    "@shutu-ai/user-approval": "workspace:^",
+    "@shutu-ai/user-questions": "workspace:^",
+    "@shutu-ai/workspace": "workspace:^",
+    "@shutu-ai/schemastery": "workspace:^",
+    "fflate": "^0.8.2",
+    "zod": "^4.4.3"
+  },
+  "peerDependencies": {
+    "@shutu-ai/cordis": "workspace:^",
+    "@shutu-ai/agent-presets": "workspace:^",
+    "@shutu-ai/cordis-host-runner": "workspace:^",
+    "@shutu-ai/invariants": "workspace:^"
+  },
+  "devDependencies": {
+    "@shutu-ai/cordis": "workspace:^",
+    "@shutu-ai/agent-presets": "workspace:^",
+    "@shutu-ai/cordis-host-runner": "workspace:^",
+    "@shutu-ai/invariants": "workspace:^",
+    "@shutu-ai/storage": "workspace:^",
+    "@shutu-ai/storage-domain": "workspace:^",
+    "@shutu-ai/typert-protocol": "workspace:^",
+    "@shutu-ai/typert-registry": "workspace:^",
+    "@shutu-ai/cordis": "workspace:^"
+  }
+}

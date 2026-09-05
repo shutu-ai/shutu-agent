@@ -72,7 +72,7 @@ type eventRec struct {
 
 // newMcpToolsWithEvents returns an McpTools bundle wired to the fake server in
 // the given mode and to a slice that records every emitted mcp/* event (the
-// composition root wires the same sink to the session log in cmd/pa, D3).
+// composition root wires the same sink to the session log in cmd/sta, D3).
 func newMcpToolsWithEvents(t *testing.T, mode string) (*McpTools, *[]eventRec) {
 	t.Helper()
 	recs := &[]eventRec{}
@@ -192,7 +192,7 @@ func TestMcpListToolUnknownServer(t *testing.T) {
 func TestMcpListToolStartFailure(t *testing.T) {
 	var recs []eventRec
 	mt := NewMcpTools(helperFactory{mode: "echo"}, []McpServer{
-		{Name: "ghost", Cmd: "pa-mcp-no-such-command-xyz-54321", Args: nil},
+		{Name: "ghost", Cmd: "sta-mcp-no-such-command-xyz-54321", Args: nil},
 	}, func(typ string, data any) {
 		recs = append(recs, eventRec{typ: typ, data: data})
 	})

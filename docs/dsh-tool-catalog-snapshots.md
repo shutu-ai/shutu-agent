@@ -28,21 +28,21 @@ The system prompt additionally contains the generated TypeScript SDK for the sta
 
 ## Verification
 
-- Mode projection and execution boundary: `cmd/pa/sessionruntime_test.go`.
+- Mode projection and execution boundary: `cmd/sta/sessionruntime_test.go`.
 - Versioned manifest integrity and reload revision observability:
   `internal/tools/tools_test.go`; Web manifest projection:
-  `cmd/pa/webw1_test.go`.
+  `cmd/sta/webw1_test.go`.
 - Release artifact export/verification and compatibility-host fail-closed
-  assembly: `cmd/pa/catalog_test.go`, `cmd/pa/sessionruntime_test.go`.
+  assembly: `cmd/sta/catalog_test.go`, `cmd/sta/sessionruntime_test.go`.
 - ACP/SDK wire inventory and fail-closed provider errors:
   `internal/acp/server_test.go`, `internal/sdkclient/protocol_schema_test.go`,
-  `cmd/pa/sdk_test.go`.
-- Concurrent addressed-runtime isolation: `cmd/pa/agent_runtime_recovery_test.go`.
+  `cmd/sta/sdk_test.go`.
+- Concurrent addressed-runtime isolation: `cmd/sta/agent_runtime_recovery_test.go`.
 - Plugin generation replacement and ownership provenance:
   `internal/plugin/registry_test.go`, `internal/tools/tools_test.go`.
 - Persistent terminal cancellation and process-tree reset:
-  `internal/terminal/terminal_test.go`, `cmd/pa/terminal_test.go`.
-- PTC SDK and transport schema: `cmd/pa/codemode_prompt_test.go`, `cmd/pa/codes_test.go`.
+  `internal/terminal/terminal_test.go`, `cmd/sta/terminal_test.go`.
+- PTC SDK and transport schema: `cmd/sta/codemode_prompt_test.go`, `cmd/sta/codes_test.go`.
 - Historical regression evidence exists, but the current release gate remains
   closed until the manifest, hostile sandbox, cross-process and strict race
   requirements pass together.

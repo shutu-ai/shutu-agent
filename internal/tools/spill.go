@@ -79,6 +79,23 @@ func truncateResult(out, locator string, limit int) ToolResult {
 	}
 }
 
+// truncateInlineResult keeps the bounded tail preview when the configured
+// spill cap makes a complete recovery file impossible. No locator is reported,
+// because the model must never be pointed at an incomplete spill.
+func truncateInlineResult(out string, limit int) ToolResult {
+	const prefix = "\n\n[output truncated and spill disabled: "
+	const suffix = " bytes omitted; output exceeds maxSpillBytes]"
+	placeholder := prefix + strconv.Itoa(len(out)) + suffix
+	budget := limit - len(placeholder)
+	if budget < 0 {
+		budget = 0
+	}
+	head, tail := truncateHeadTailUTF8(out, budget)
+	omitted := len(out) - len(head) - len(tail)
+	notice := prefix + strconv.Itoa(omitted) + suffix
+	return ToolResult{Output: head + tail + notice}
+}
+
 // truncateHeadTailUTF8 retains approximately half of maxBytes from each end,
 // backing off at UTF-8 cut boundaries. It returns the retained slices and does
 // not insert a synthetic separator; the spill notice is the explicit boundary.

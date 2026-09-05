@@ -79,7 +79,7 @@ func Required() *Registry {
 			ReceiptEvent:            "mcp/call (audit only)",
 			Recovery:                "failed/interrupted transports stay terminal; one later explicit caller may retry",
 			ProcessDeathLosesEffect: true,
-			Evidence:                []string{"internal/mcp/reconnect_test.go", "internal/mcp/http_test.go", "cmd/pa/mcps_test.go"},
+			Evidence:                []string{"internal/mcp/reconnect_test.go", "internal/mcp/http_test.go", "cmd/sta/mcps_test.go"},
 		},
 		{
 			ID: "terminal.foreground.write", Family: "terminal",
@@ -89,7 +89,7 @@ func Required() *Registry {
 			LifecycleClassification: ExternalOperation,
 			Recovery:                "close the owned process tree and report an unknown foreground outcome",
 			ProcessDeathLosesEffect: true,
-			Evidence:                []string{"cmd/pa/terminal_test.go", "internal/terminal/terminal_test.go"},
+			Evidence:                []string{"cmd/sta/terminal_test.go", "internal/terminal/terminal_test.go"},
 		},
 		{
 			ID: "terminal.lifecycle", Family: "terminal",
@@ -100,7 +100,7 @@ func Required() *Registry {
 			ReceiptEvent:            "terminal/start and terminal/stop (runtime audit)",
 			Recovery:                "cold restart records one stale stop receipt; it never resurrects a process",
 			ProcessDeathLosesEffect: true,
-			Evidence:                []string{"cmd/pa/terminal_test.go"},
+			Evidence:                []string{"cmd/sta/terminal_test.go"},
 		},
 		{
 			ID: "schedule.fire", Family: "schedule",
@@ -111,7 +111,7 @@ func Required() *Registry {
 			ReceiptEvent:            "schedule/fire plus agent/inbox/spliced",
 			Recovery:                "crash windows replay to one receipt and one fire fact",
 			AutomaticReplay:         true,
-			Evidence:                []string{"cmd/pa/schedules_test.go"},
+			Evidence:                []string{"cmd/sta/schedules_test.go"},
 		},
 		{
 			ID: "workflow.child", Family: "workflow",
@@ -133,7 +133,7 @@ func Required() *Registry {
 			ReceiptEvent:            "subagent/start plus agent/inbox/spliced",
 			Recovery:                "cold recovery materializes one owner receipt from the durable terminal fact",
 			AutomaticReplay:         true,
-			Evidence:                []string{"internal/subagent/tools_test.go", "cmd/pa/agent_runtime_recovery_test.go"},
+			Evidence:                []string{"internal/subagent/tools_test.go", "cmd/sta/agent_runtime_recovery_test.go"},
 		},
 		{
 			ID: "plugin.call", Family: "plugin",

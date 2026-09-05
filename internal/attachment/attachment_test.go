@@ -176,8 +176,8 @@ func TestSaveImageRejectsMalformedDeclaredRaster(t *testing.T) {
 	if _, err := st.SaveImage("image/png", []byte("not a png"), 1024); !errors.Is(err, ErrInvalidImage) {
 		t.Fatalf("malformed image error = %v, want ErrInvalidImage", err)
 	}
-	if _, err := st.SaveImage("image/jpeg", testPNG(), 1024); !errors.Is(err, ErrInvalidImage) {
-		t.Fatalf("wrong declared format error = %v, want ErrInvalidImage", err)
+	if _, err := st.SaveImage("image/jpeg", testPNG(), 1024); !errors.Is(err, ErrTypeMismatch) {
+		t.Fatalf("wrong declared format error = %v, want ErrTypeMismatch", err)
 	}
 }
 

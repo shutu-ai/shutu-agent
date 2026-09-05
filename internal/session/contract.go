@@ -93,7 +93,7 @@ func knownLogEventType(typ string) bool {
 		EventLLMRequestEnd, EventLLMRetry, EventLLMRetryStarted,
 		EventUserMessage, EventAssistantChunk, EventAssistantReasoning, EventAssistantMessage,
 		EventSessionTitle, EventToolCall, EventToolResult, EventFeedbackRecord,
-		EventWebCommandResult, EventCommandRun, EventCommandDone,
+		EventWebCommandResult, EventWebSearchLLMRequest, EventCommandRun, EventCommandDone,
 		EventJobStart, EventJobStatus, EventJobDone,
 		EventTerminalStart, EventTerminalStop, EventEvalRun, EventRalphRun,
 		EventWorkflowRun, EventWorkflowStart, EventWorkflowPhase, EventWorkflowLog,

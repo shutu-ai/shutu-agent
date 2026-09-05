@@ -16,7 +16,7 @@
 2. `deepseek`/`openai`：`toWireMessage` 支持图片 → content parts array（`image_url` + data URL）；无图片保持现有 string 行为。
 3. `anthropic`：`textBlocks` 支持图片 → `{type:"image", source:{type:"base64", media_type, data}}`。
 4. 图片 fail-closed：`model_input_modalities` 不含 image 时遇图片 → 序列化报错（不静默忽略）。
-5. provider Config 增 `SupportsImages bool` / `MaxRequestImageBytes int`；组合根（cmd/pa registerLLM）从 config 传入。
+5. provider Config 增 `SupportsImages bool` / `MaxRequestImageBytes int`；组合根（cmd/sta registerLLM）从 config 传入。
 6. 测试。
 
 **不做（本段）**：图片生成/输出；宽高解码（ImageRef.Width/Height 仍 0）；`temperature` 等高级参数。
@@ -81,7 +81,7 @@ MaxRequestImageBytes int
 
 `anthropic.Config` 同样加 `SupportsImages` / `MaxRequestImageBytes`（默认 20MiB）。
 
-## 5. 组合根接线（cmd/pa/llm.go 修改）
+## 5. 组合根接线（cmd/sta/llm.go 修改）
 
 `registerLLM` 三处 `New(...)` 补传：
 ```go
@@ -101,7 +101,7 @@ MaxRequestImageBytes: a.cfg.LLM.Multimodal.MaxRequestImageBytes, // 默认 20MiB
 - `internal/llm/openai`：同上（委托 deepseek 后由 deepseek 测试覆盖，openai 补一个带图走通）。
 - `internal/llm/anthropic`：带图 user 消息 → `{type:"image",source:{base64}}` 断言；SupportsImages=false → 错误。
 - `internal/config`：`max_request_image_bytes` 默认 20MiB + 解析。
-- `cmd/pa`：registerLLM 传 SupportsImages/MaxRequestImageBytes（默认 deepseek 回归：modalities=text → SupportsImages=false）。
+- `cmd/sta`：registerLLM 传 SupportsImages/MaxRequestImageBytes（默认 deepseek 回归：modalities=text → SupportsImages=false）。
 - 全项目门禁绿；loop.go 无改动（D4）。
 
 ## 8. 提交与报告

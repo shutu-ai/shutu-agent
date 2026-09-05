@@ -17,6 +17,19 @@ type bigOutputTool struct {
 	text string
 }
 
+type namedBigOutputTool struct {
+	name string
+	text string
+}
+
+func (t namedBigOutputTool) Name() string      { return t.name }
+func (namedBigOutputTool) Description() string { return "named oversized output" }
+func (namedBigOutputTool) Schema() map[string]any {
+	return map[string]any{"type": "object", "properties": map[string]any{}}
+}
+func (namedBigOutputTool) OutputSchema() map[string]any                   { return map[string]any{"type": "string"} }
+func (t namedBigOutputTool) Execute(context.Context, any) (string, error) { return t.text, nil }
+
 type richBigOutputTool struct{ text string }
 
 type contextHandleTool struct{}
@@ -138,6 +151,40 @@ func TestExecuteOutputUnderLimitNoSpill(t *testing.T) {
 	}
 	if res.Output != "small" || res.SpillPath != "" {
 		t.Fatalf("res = %+v, want inline output with no spill", res)
+	}
+}
+
+func TestShellMaxSpillDisablesRecoveryFile(t *testing.T) {
+	spillDir := t.TempDir()
+	big := strings.Repeat("x", 4096)
+	r := New()
+	if err := r.Register(namedBigOutputTool{name: "pwsh", text: big}); err != nil {
+		t.Fatal(err)
+	}
+	r.SetPolicy(Policy{
+		Enabled:     []string{"pwsh"},
+		Timeout:     time.Hour,
+		OutputLimit: 128,
+		SpillDir:    spillDir,
+		Shell:       ShellPolicy{MaxSpillBytes: 64},
+	})
+	r.SetOwner(Owner{SessionID: "s-spill-cap", NextSeq: func() uint64 { return 1 }})
+	res, err := r.Execute(context.Background(), "pwsh", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.SpillPath != "" || res.SpillBytes != 0 {
+		t.Fatalf("oversize spill was advertised: %+v", res)
+	}
+	if len(res.Output) > 128 || !strings.Contains(res.Output, "output exceeds maxSpillBytes") {
+		t.Fatalf("bounded inline result = %.120q", res.Output)
+	}
+	entries, err := os.ReadDir(spillDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("spill directory contains %d files, want 0", len(entries))
 	}
 }
 

@@ -1,6 +1,6 @@
 // tools.go — the Eval-3a Consumer half of the eval seam (ADR D-EVAL-5):
 // eval_run, eval_result and eval_list are registered into the tools.Registry by
-// the composition root (cmd/pa) when eval.enabled, and auto-whitelisted by
+// the composition root (cmd/sta) when eval.enabled, and auto-whitelisted by
 // config.applyDefaults the same way the job_* tools are. They implement the
 // tools.Tool method set structurally (Go structural typing), so this package
 // never imports the tools package — the seam stays decoupled. D7 is enforced by

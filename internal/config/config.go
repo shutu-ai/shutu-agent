@@ -57,11 +57,11 @@ const (
 	// summarize a large shadowed prefix.
 	DefaultCompactionSummaryInputTokens = 12000
 
-	// M5d-2 skill defaults (dispatch-m5d-2 §2): the injected catalog is
-	// bounded to 500 chars when skill.catalog_max_chars is absent or
-	// non-positive, and skill returns at most 8000 chars of a skill body
-	// when skill.body_max_chars is absent or non-positive (dispatch-m5d 约束:
-	// 正文有长度上限防超长注入).
+	// M5d-2 skill defaults (DSH tool-skill contract): every catalog
+	// description is bounded to 500 chars when skill.description_max_chars is
+	// absent or non-positive, and skill returns at most 8000 chars of a skill
+	// body when skill.body_max_chars is absent or non-positive. The catalog
+	// itself stays complete.
 	DefaultSkillCatalogMaxChars = 500
 	DefaultSkillBodyMaxChars    = 8000
 
@@ -224,32 +224,34 @@ type Config struct {
 	// ReasoningEffort is the runtime thinking-effort selection (dsh 思考强度,
 	// ModelSelect effort): "" | "off" | "low" | "high" | "max". Runtime-only
 	// (like the live model switch) — it never enters config.yaml.
-	ReasoningEffort string             `yaml:"-"`             // runtime selection; empty keeps provider default
-	Tools           ToolsConfig        `yaml:"tools"`         // tool-execution policy (M3)
-	Jobs            JobsConfig         `yaml:"jobs"`          // background-job policy (M5a)
-	Subagent        SubagentConfig     `yaml:"subagent"`      // subagent policy (M5b)
-	Compaction      CompactionConfig   `yaml:"compaction"`    // context-compaction policy (M5c)
-	Skill           SkillConfig        `yaml:"skill"`         // skill policy (M5d)
-	Schedule        ScheduleConfig     `yaml:"schedule"`      // schedule policy (M6a)
-	Plan            PlanConfig         `yaml:"plan"`          // task-planning policy (M6b)
-	Spill           SpillConfig        `yaml:"spill"`         // long-term-memory policy (M6c)
-	Interact        InteractConfig     `yaml:"interact"`      // human-approval policy (M6d)
-	Code            CodeConfig         `yaml:"code"`          // code-sandbox policy (M6e)
-	Mcp             McpConfig          `yaml:"mcp"`           // MCP tool-ecosystem policy (M6f)
-	Fs              FsConfig           `yaml:"fs"`            // safe-file-operation policy (M6f)
-	Web             WebConfig          `yaml:"web"`           // web search/fetch policy (M7)
-	LLM             LLMConfig          `yaml:"llm"`           // LLM provider selection (M8-2)
-	Terminal        TerminalConfig     `yaml:"terminal"`      // persistent-shell terminal (M9)
-	Eval            EvalConfig         `yaml:"eval"`          // task-evaluation seam (eval)
-	Ralph           RalphConfig        `yaml:"ralph"`         // fresh-agent loop (D-GAP-3)
-	Workflow        WorkflowConfig     `yaml:"workflow"`      // task-DAG orchestration (D-GAP-2)
-	FsSearch        FsSearchConfig     `yaml:"fs_search"`     // file-content-search policy (D-GAP-1)
-	SessionQuery    SessionQueryConfig `yaml:"session_query"` // read-only session history queries (P2)
-	LSP             LSPConfig          `yaml:"lsp"`           // read-only language-server queries (P2)
-	Hooks           HooksConfig        `yaml:"hooks"`         // metadata-only event hooks (P2)
-	WebServer       WebServerConfig    `yaml:"web_server"`    // unified web portal (M10a)
-	Workspace       WorkspaceConfig    `yaml:"workspace"`     // workspace/session cwd policy
-	Security        SecurityConfig     `yaml:"security"`      // process security boundaries (A6.4)
+	ReasoningEffort   string                  `yaml:"-"`                  // runtime selection; empty keeps provider default
+	Tools             ToolsConfig             `yaml:"tools"`              // tool-execution policy (M3)
+	Jobs              JobsConfig              `yaml:"jobs"`               // background-job policy (M5a)
+	Subagent          SubagentConfig          `yaml:"subagent"`           // subagent policy (M5b)
+	Compaction        CompactionConfig        `yaml:"compaction"`         // context-compaction policy (M5c)
+	Skill             SkillConfig             `yaml:"skill"`              // skill policy (M5d)
+	AgentInstructions AgentInstructionsConfig `yaml:"agent_instructions"` // workspace AGENTS.md policy
+	TimeContext       TimeContextConfig       `yaml:"time_context"`       // DSH-compatible opt-in clock context
+	Schedule          ScheduleConfig          `yaml:"schedule"`           // schedule policy (M6a)
+	Plan              PlanConfig              `yaml:"plan"`               // task-planning policy (M6b)
+	Spill             SpillConfig             `yaml:"spill"`              // long-term-memory policy (M6c)
+	Interact          InteractConfig          `yaml:"interact"`           // human-approval policy (M6d)
+	Code              CodeConfig              `yaml:"code"`               // code-sandbox policy (M6e)
+	Mcp               McpConfig               `yaml:"mcp"`                // MCP tool-ecosystem policy (M6f)
+	Fs                FsConfig                `yaml:"fs"`                 // safe-file-operation policy (M6f)
+	Web               WebConfig               `yaml:"web"`                // web search/fetch policy (M7)
+	LLM               LLMConfig               `yaml:"llm"`                // LLM provider selection (M8-2)
+	Terminal          TerminalConfig          `yaml:"terminal"`           // persistent-shell terminal (M9)
+	Eval              EvalConfig              `yaml:"eval"`               // task-evaluation seam (eval)
+	Ralph             RalphConfig             `yaml:"ralph"`              // fresh-agent loop (D-GAP-3)
+	Workflow          WorkflowConfig          `yaml:"workflow"`           // task-DAG orchestration (D-GAP-2)
+	FsSearch          FsSearchConfig          `yaml:"fs_search"`          // file-content-search policy (D-GAP-1)
+	SessionQuery      SessionQueryConfig      `yaml:"session_query"`      // read-only session history queries (P2)
+	LSP               LSPConfig               `yaml:"lsp"`                // read-only language-server queries (P2)
+	Hooks             HooksConfig             `yaml:"hooks"`              // metadata-only event hooks (P2)
+	WebServer         WebServerConfig         `yaml:"web_server"`         // unified web portal (M10a)
+	Workspace         WorkspaceConfig         `yaml:"workspace"`          // workspace/session cwd policy
+	Security          SecurityConfig          `yaml:"security"`           // process security boundaries (A6.4)
 
 	// Mode selects the agent capability preset (D-MODE-1): minimal | standard
 	// | code; default standard. minimal is preset-first (D-MODE-6): 能力开关
@@ -577,12 +579,31 @@ type SkillConfig struct {
 	// Dirs are additional custom skill directories (source "custom", rank 300)
 	// scanned by the filesystem provider, in order. Empty by default.
 	Dirs []string `yaml:"dirs"`
-	// CatalogMaxChars bounds the injected skill catalog (sorted name +
-	// description) in chars; <= 0 means the default 500.
+	// DescriptionMaxChars bounds each normalized skill description in the
+	// model-facing catalog; <= 0 means the default 500. The list of skills is
+	// never truncated: DSH publishes a complete catalog.
+	DescriptionMaxChars int `yaml:"description_max_chars"`
+	// CatalogMaxChars is the deprecated pre-DSH-alignment whole-catalog bound.
+	// It is accepted as a fallback for existing configurations, but new
+	// configuration should use description_max_chars.
 	CatalogMaxChars int `yaml:"catalog_max_chars"`
 	// BodyMaxChars bounds the skill body skill returns to the model in
 	// chars (Unicode-safe truncation, 防超长注入); <= 0 means the default 8000.
 	BodyMaxChars int `yaml:"body_max_chars"`
+}
+
+// AgentInstructionsConfig gates AGENTS.md-compatible workspace instruction
+// discovery. DSH-compatible builds enable this by default; tests and embedders
+// can explicitly disable it.
+type AgentInstructionsConfig struct {
+	// Enabled gates the workspace instruction baseline injector.
+	Enabled *bool `yaml:"enabled"`
+	// Home overrides ~/.shutu as the user-global instruction directory.
+	Home string `yaml:"home"`
+	// MaxBytes bounds one rendered baseline; <=0 means the 64KiB default.
+	MaxBytes int `yaml:"max_bytes"`
+	// MaxSourceBytes bounds one source file; <=0 means the 1MiB default.
+	MaxSourceBytes int `yaml:"max_source_bytes"`
 }
 
 // ScheduleConfig is the schedule policy (dispatch-m6a-2 §2 / ADR
@@ -600,6 +621,30 @@ type ScheduleConfig struct {
 	// (D5); the value is parsed and defaulted here so a future gated advance
 	// can consume it. <= 0 means the default 1m.
 	TickInterval Duration `yaml:"tick_interval"`
+}
+
+// TimeContextConfig is the DSH-compatible opt-in durable clock provider. Nil
+// enabled follows Schedule, matching DSH's official Schedule Web overlay;
+// explicit true/false always wins.
+type TimeContextConfig struct {
+	// Enabled gates the provider. Nil follows schedule.enabled.
+	Enabled *bool `yaml:"enabled"`
+	// TimeZone is the fallback IANA zone when the request has no unique
+	// browser zone; empty means the process zone.
+	TimeZone string `yaml:"time_zone"`
+	// RefreshIntervalMS bounds durable readings. Zero means every eligible
+	// step; positive values use DSH's latest-injection threshold.
+	RefreshIntervalMS int `yaml:"refresh_interval_ms"`
+}
+
+// EnabledWith resolves the DSH opt-in rule: an explicit flag wins, otherwise
+// the provider follows schedule.enabled because DSH's official Schedule Web
+// overlay mounts time-context.
+func (c TimeContextConfig) EnabledWith(scheduleEnabled bool) bool {
+	if c.Enabled == nil {
+		return scheduleEnabled
+	}
+	return *c.Enabled
 }
 
 // PlanConfig is the task-planning policy (dispatch-m6b-2 §2 / ADR
@@ -1329,8 +1374,11 @@ func applyDefaults(cfg *Config) {
 			}
 		}
 	}
-	if cfg.Skill.CatalogMaxChars <= 0 {
-		cfg.Skill.CatalogMaxChars = DefaultSkillCatalogMaxChars
+	if cfg.Skill.DescriptionMaxChars <= 0 {
+		cfg.Skill.DescriptionMaxChars = cfg.Skill.CatalogMaxChars
+	}
+	if cfg.Skill.DescriptionMaxChars <= 0 {
+		cfg.Skill.DescriptionMaxChars = DefaultSkillCatalogMaxChars
 	}
 	if cfg.Skill.BodyMaxChars <= 0 {
 		cfg.Skill.BodyMaxChars = DefaultSkillBodyMaxChars
@@ -1349,6 +1397,9 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Schedule.TickInterval.Duration <= 0 {
 		cfg.Schedule.TickInterval.Duration = DefaultScheduleTickInterval
+	}
+	if cfg.TimeContext.Enabled == nil {
+		cfg.TimeContext.Enabled = Bool(Enabled(cfg.Schedule.Enabled))
 	}
 	// M6b-2 plan defaults: off by default (D10). Enabling plan whitelists its
 	// six consumer tools, so the one plan.enabled switch turns the whole

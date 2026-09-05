@@ -291,6 +291,13 @@ func (c *nativeProjectionCursor) project(sessionID string, ev session.Event) nat
 	case session.EventCompactionStart, session.EventCompactionSummary,
 		session.EventCompactionEnd, session.EventCompactionPrune:
 		ignorable = true
+	case session.EventAgentInboxSpliced:
+		// Older durable removal splices can carry Go's nil-slice null. DSH's
+		// browser replay spreads `inserted`, so normalize the legacy wire form
+		// without rewriting the durable log.
+		if projectedData["inserted"] == nil {
+			projectedData["inserted"] = []any{}
+		}
 	case session.EventCommandRun, session.EventCommandDone:
 		// Command lifecycle facts are already in the canonical dsh shape and
 		// remain outside model history.

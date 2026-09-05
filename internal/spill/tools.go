@@ -1,7 +1,7 @@
 // tools.go — the M6c-2 Consumer half of the spill seam (design.md §8 Consumer /
 // D2, dispatch-m6c-2 §3): spill_write, spill_recall, spill_list and
 // spill_delete are registered into the tools.Registry by the composition root
-// (cmd/pa) when spill.enabled, and auto-whitelisted by config.applyDefaults
+// (cmd/sta) when spill.enabled, and auto-whitelisted by config.applyDefaults
 // the same way the job_*/subagent_*/skill_*/schedule_*/plan_* tools are. They
 // implement the tools.Tool method set structurally (Go structural typing), so
 // this package never imports the tools package — the seam stays decoupled (D2).
@@ -17,7 +17,7 @@
 // emits spill/delete — all through the injected onEvent sink (the composition
 // root wires it to the session log), and each append happens inside a tool
 // Execute — the serial main-loop path (D5). The auto-sedimentation spill/write
-// events are emitted by the wiring layer's turn-completion path (see cmd/pa),
+// events are emitted by the wiring layer's turn-completion path (see cmd/sta),
 // not by a tool.
 package spill
 

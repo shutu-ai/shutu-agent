@@ -1,6 +1,6 @@
 // tools.go — the M5d-2 Consumer half of the skill seam (design.md §8 Consumer /
 // D2, dispatch-m5d-2 §3): skill is registered into the tools.Registry by
-// the composition root (cmd/pa) when skill.enabled, and auto-whitelisted by
+// the composition root (cmd/sta) when skill.enabled, and auto-whitelisted by
 // config.applyDefaults the same way the job_*/subagent_* tools are. It
 // implements the tools.Tool method set structurally (Go structural typing), so
 // this package never imports the tools package — the seam stays decoupled (D2).

@@ -1,6 +1,6 @@
 // tools.go — the M7-2 Consumer half of the web seam (design.md §10 D2,
 // dispatch-m7-2 §4): web_search and web_fetch are registered into the
-// tools.Registry by the composition root (cmd/pa) when web.enabled, and
+// tools.Registry by the composition root (cmd/sta) when web.enabled, and
 // auto-whitelisted by config.applyDefaults the same way the job_*/fs_*/
 // code_* tools are. The tools implement the tools.Tool method set structurally
 // (Go structural typing), so this package never imports the tools package —
@@ -12,7 +12,7 @@
 // this code runs; the checks are repeated here so a direct call can never
 // bypass them.
 //
-// D3: web/search-request is logged by the DeepSeek provider's OnRequest
+// D3: the canonical web search LLM request is logged by the DeepSeek provider's OnRequest
 // (M7-1), never repeated by the tool layer; web_fetch has no web event (the
 // result goes through tool/result). The injected onEvent sink is part of the
 // seam contract and reserved for a future consumer — nothing is emitted here

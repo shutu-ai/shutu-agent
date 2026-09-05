@@ -353,7 +353,7 @@ func TestClientDispatchesToolListChangedNotification(t *testing.T) {
 
 // TestClientStartFailure covers a spawn failure mapping to ErrStartFailed.
 func TestClientStartFailure(t *testing.T) {
-	c := NewStdioClient("pa-mcp-no-such-command-xyz-12345", nil)
+	c := NewStdioClient("sta-mcp-no-such-command-xyz-12345", nil)
 	defer c.Close()
 
 	err := c.Start(context.Background())

@@ -26,6 +26,43 @@ type Message struct {
 	// not part of provider wire encoding.
 	SourceKind   string
 	SourcePlugin string
+	// SourceRPCID and SourceClientTimeZone mirror DSH's ordinary user-rpc
+	// provenance. Time-context uses the latter to derive one request-local
+	// zone policy; they never affect provider wire encoding.
+	SourceRPCID          string
+	SourceClientTimeZone string
+	// SourceForm and SourceEntries optionally carry a producer-owned durable
+	// context shape (for example skill-catalog/catalog entries). They are not
+	// part of provider wire encoding.
+	SourceForm    string
+	SourceEntries any
+	// SourceReferences carries named source-session recall facts. It mirrors
+	// DSH's session-reference `references` field, distinct from catalog
+	// entries, so Web can render retention completeness without guessing.
+	SourceReferences any
+	// SourceName carries producer-specific source identity (for example the
+	// exact skill named by a skill-invocation context). It is durable
+	// provenance, not provider wire encoding.
+	SourceName string
+	// SourceSummary is the collapsed-row account for notice-form context.
+	SourceSummary string
+	// SourceSenderSessionID identifies the sending session for relay-form
+	// context. It is durable provenance, not provider wire encoding.
+	SourceSenderSessionID string
+	// SourceSections carries the named contributions behind a snapshot-form
+	// context (for example the workspace section of runtime context). They are
+	// durable provenance, not provider wire encoding.
+	SourceSections []ContextSnapshotSection
+	// SourceUpdate marks a complete replacement of an earlier context of the
+	// same source kind (DSH skill-catalog update semantics). It is durable
+	// provenance, not provider wire encoding.
+	SourceUpdate bool
+	// Agent-instructions provenance identifies the complete baseline and the
+	// file transitions represented by this context. These fields mirror DSH's
+	// merge-extensible source shape without affecting provider wire content.
+	SourceBaseline         bool
+	SourceBaselineIdentity string
+	SourceChanges          any
 	// Team-message provenance is runtime-only until session.NewUserMessageAt
 	// projects it into the durable source object. Persisted marks an input
 	// already accepted by the target Session receipt transaction, so the loop
@@ -109,6 +146,13 @@ func hasUnsupportedRequestBlocks(blocks []ContentBlock) bool {
 		}
 	}
 	return false
+}
+
+// ContextSnapshotSection is one named contribution to a snapshot-form context.
+// It mirrors the durable source shape consumed by the DSH-compatible Web UI.
+type ContextSnapshotSection struct {
+	Name string `json:"name"`
+	Text string `json:"text"`
 }
 
 // ValidateRequestBlocks rejects non-core request content before credentials,

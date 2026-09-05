@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { EventView } from './api'
-import { projectDshTrajectoryRecords } from './dsh-trajectory'
+import { projectShutuTrajectoryRecords } from './trajectory-model'
 import { TrajectorySearchIndex } from './trajectory-search'
 import { buildVirtualOffsets, virtualRange } from './virtual-list'
 
@@ -18,7 +18,7 @@ function makeEvents(count: number): EventView[] {
 describe('P34 synthetic performance baseline', () => {
   it('keeps projection and indexed search linear for a 10k-event history', () => {
     const events = makeEvents(10_000)
-    const records = projectDshTrajectoryRecords(events)
+    const records = projectShutuTrajectoryRecords(events)
     const index = new TrajectorySearchIndex(events)
 
     expect(records).toHaveLength(10_000)

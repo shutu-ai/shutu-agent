@@ -64,7 +64,7 @@
 - `github.com/shutu-ai/shutu-agent/internal/webserver/static/index.html`（#/settings 页骨架、topbar `model-label`/`mode-badge`）
 - `github.com/shutu-ai/shutu-agent/internal/webserver/static/app.js`（`loadConfig()`、`renderSettings()` 分组表格、路由）
 - `github.com/shutu-ai/shutu-agent/internal/webserver/static/style.css`（:root token 表 + settings 段样式）
-- `github.com/shutu-ai/shutu-agent/cmd/pa/webserver.go`（`webConfig()` — GET /api/config 字段）
+- `github.com/shutu-ai/shutu-agent/cmd/sta/webserver.go`（`webConfig()` — GET /api/config 字段）
 - `github.com/shutu-ai/shutu-agent/internal/webserver/webserver.go`（`handleConfig`、`requireAuth`）
 - `github.com/shutu-ai/shutu-agent/.web-port/P1-spec.md`、`P2-spec.md`（已移植的布局/token/侧栏，P3 引用其主题机制与 token 值）
 
@@ -144,7 +144,7 @@ ul.rows（列 gap8，mt12）> li.rowCard（border l2，r12，pad 12 14，列 gap
 
 ## 3. 各分组面板的逐元素数据映射（字段名 ↔ github.com/shutu-ai/shutu-agent config 键）
 
-数据源：`GET /api/config`（`cmd/pa/webserver.go` `webConfig()`），snake_case；前端 `config` 全局缓存（`app.js` `loadConfig()` 已填）。
+数据源：`GET /api/config`（`cmd/sta/webserver.go` `webConfig()`），snake_case；前端 `config` 全局缓存（`app.js` `loadConfig()` 已填）。
 
 ### 3.1 段：通用设置（nav「通用设置」）
 
@@ -177,7 +177,7 @@ dsh 是「多 provider 行卡 + 每行可展开编辑」；github.com/shutu-ai/s
 
 ### 3.3 段：能力开关（nav「能力开关」，github.com/shutu-ai/shutu-agent 自定义）
 
-遍历 `Object.keys(config)` 中以 `_enabled` 结尾的键（`cmd/pa` 共 19 个），每键一行「中文名 + 开/关徽标」。
+遍历 `Object.keys(config)` 中以 `_enabled` 结尾的键（`cmd/sta` 共 19 个），每键一行「中文名 + 开/关徽标」。
 
 | config 键 | 中文标签（前端静态映射） | 默认 |
 |---|---|---|
@@ -445,4 +445,4 @@ github.com/shutu-ai/shutu-agent 无模型列表、无 provider 目录、无 reas
 | `internal/webserver/static/index.html` | `#settings` 块重写为面板骨架（nav + content 容器） |
 | `internal/webserver/static/style.css` | 新增 settings 面板/导航/行卡/徽标样式（token 见 §5，可追加在 settings 段） |
 | `internal/webserver/static/app.js` | 重写 `renderSettings()`：静态段配置数组 + 渲染函数；复用 `loadConfig()` 缓存 |
-| `cmd/pa/webserver.go` | （可选）`webConfig()` 加 `model_display_name`、`config_file_path` |
+| `cmd/sta/webserver.go` | （可选）`webConfig()` 加 `model_display_name`、`config_file_path` |

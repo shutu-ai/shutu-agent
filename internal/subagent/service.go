@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+
+	"github.com/shutu-ai/shutu-agent/internal/llm"
 )
 
 // Capabilities declares which StartRequest features a Provider supports (ADR
@@ -106,6 +108,12 @@ type Run struct {
 	// Send queues one follow-up user message for a live continuable child.
 	// Providers may reject it when the child is one-shot or already settled.
 	Send func(ctx context.Context, message string) error
+	// SendWithMetadata is the provenance-preserving Web extension. Providers
+	// may leave it nil; Send remains the compatibility path.
+	SendWithMetadata func(ctx context.Context, message string, metadata map[string]string) error
+	// SendContentWithMetadata preserves ordered rich content in addition to
+	// provenance. Providers may leave it nil to reject rich follow-ups.
+	SendContentWithMetadata func(ctx context.Context, content []llm.ContentBlock, metadata map[string]string) error
 	// SendQuiet queues context for the next explicitly waking turn. It never
 	// wakes an idle child; providers may leave it nil when unsupported.
 	SendQuiet func(ctx context.Context, message string) error

@@ -1,8 +1,8 @@
 import { createContext, memo, useCallback, useContext, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type KeyboardEvent, type ReactNode } from 'react'
 import type { AttachmentView, CommandView, ConfigView, ContextView, DirectoryListing, EventDetails, EventView, FeedbackView, GoalView, ImageView, InteractionView, JobView, MCPServerView, PlanView, ProviderModelView, ProviderView, QueueItem, RunningSnapshot, SessionSearchHit, SessionStateView, SessionSummary, SettingsView, SkillView, SkillsView, SubagentView, TodoView, WorkspaceView } from './api'
 import { ShutuApiError } from './api'
-import { projectDshConversation, type DshConversationNode, type DshConversationSnapshot } from './dsh-conversation'
-import { collapseDshAssistantToolCalls, collapseDshTrajectoryTurns, projectDshTrajectory, projectDshTrajectoryRecords, summarizeDshTimeline, type DshTimelineMode, type DshTrajectoryEvent, type DshTrajectoryRecord } from './dsh-trajectory'
+import { projectShutuConversation, type ShutuConversationNode, type ShutuConversationSnapshot } from './conversation-model'
+import { collapseShutuAssistantToolCalls, collapseShutuTrajectoryTurns, projectShutuTrajectory, projectShutuTrajectoryRecords, summarizeShutuTimeline, type ShutuTimelineMode, type ShutuTrajectoryEvent, type ShutuTrajectoryRecord } from './trajectory-model'
 import { deriveProducedFiles } from './produced-files'
 import { WebStore } from './store'
 import { TrajectorySearchIndex } from './trajectory-search'
@@ -11,13 +11,13 @@ import './styles.css'
 
 const ROW_HEIGHT_ESTIMATE = 132
 const CONVERSATION_ROW_HEIGHT_ESTIMATE = 164
-const EMPTY_TRAJECTORY_RECORDS: readonly DshTrajectoryRecord[] = []
+const EMPTY_TRAJECTORY_RECORDS: readonly ShutuTrajectoryRecord[] = []
 const TrajectorySearchContext = createContext('')
 interface TrajectoryToolbarState {
-  mode: DshTimelineMode
+  mode: ShutuTimelineMode
   searchQuery: string
   selectedSeq: number | null
-  onModeChange: (mode: DshTimelineMode) => void
+  onModeChange: (mode: ShutuTimelineMode) => void
   onSearchQueryChange: (query: string) => void
   onReset: () => void
   onClearSelection: () => void
@@ -166,7 +166,7 @@ function formatDurationMs(value: number): string {
   return `${Math.floor(value / 60_000)}m ${Math.round((value % 60_000) / 1000)}s`
 }
 
-function formatTimelineAxis(value: number, mode: DshTimelineMode): string {
+function formatTimelineAxis(value: number, mode: ShutuTimelineMode): string {
   if (mode === 'sequence') return `#${Math.round(value)}`
   if (mode === 'time' || mode === 'actual') return Number.isFinite(value) ? new Date(value).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '—'
   return formatDurationMs(value)
@@ -412,7 +412,7 @@ function SessionBrowser({
     <aside className={`sidebar ${collapsed ? 'collapsed' : ''}`} aria-label="Session sidebar">
       <div className="brand-row">
         <button className="brand" type="button" onClick={() => void run(() => store.createSession())} aria-label="New session">
-          <span className="brand-mark">S</span><span>Shutu</span><span className="brand-sub">DSH web</span>
+          <span className="brand-mark">S</span><span>Shutu</span><span className="brand-sub">SHUTU web</span>
         </button>
         <button className="sidebar-toggle" type="button" onClick={() => setCollapsed(value => !value)} aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'} title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}>{collapsed ? '›' : '‹'}</button>
       </div>
@@ -733,7 +733,7 @@ function SettingsPage({ store, theme, onThemeChange, onBack }: {
       <div className="settings-theme-toggle" role="group" aria-label="主题"><button type="button" className={theme === 'light' ? 'selected' : ''} onClick={() => onThemeChange('light')}>浅色</button><button type="button" className={theme === 'dark' ? 'selected' : ''} onClick={() => onThemeChange('dark')}>深色</button><button type="button" className={theme === 'system' ? 'selected' : ''} onClick={() => onThemeChange('system')}>系统</button></div>
     </header>
     <main className="settings-panel">
-      <div className="settings-heading"><div><span className="eyebrow">DSH WEB</span><h1>设置</h1><p>查看当前运行配置与已启用能力。</p></div><button className="settings-close" type="button" onClick={onBack} aria-label="关闭设置">×</button></div>
+      <div className="settings-heading"><div><span className="eyebrow">SHUTU WEB</span><h1>设置</h1><p>查看当前运行配置与已启用能力。</p></div><button className="settings-close" type="button" onClick={onBack} aria-label="关闭设置">×</button></div>
       <div className="settings-layout">
         <nav className="settings-nav" aria-label="设置分区">{sections.map(item => <button key={item.id} type="button" className={section === item.id ? 'selected' : ''} onClick={() => setSection(item.id)}><strong>{item.label}</strong><span>{item.hint}</span></button>)}</nav>
         <section className="settings-content" aria-live="polite">
@@ -996,9 +996,9 @@ function inspectorPayload(event: EventView, keys: readonly string[]): string | n
 }
 
 function TrajectoryInspector({ event, record, records, onClose, onRetryRequest, onCancelRequest }: {
-  event: DshTrajectoryEvent
-  record?: DshTrajectoryRecord
-  records: readonly DshTrajectoryRecord[]
+  event: ShutuTrajectoryEvent
+  record?: ShutuTrajectoryRecord
+  records: readonly ShutuTrajectoryRecord[]
   onClose: () => void
   onRetryRequest?: (input: string) => void
   onCancelRequest?: () => void
@@ -1109,9 +1109,9 @@ function TrajectoryInspector({ event, record, records, onClose, onRetryRequest, 
   </aside>
 }
 
-function DshTimeline({ events, mode, selectedSeq, onSelectSeq, onSelectSeqs }: {
+function ShutuTimeline({ events, mode, selectedSeq, onSelectSeq, onSelectSeqs }: {
   events: readonly EventView[]
-  mode?: DshTimelineMode
+  mode?: ShutuTimelineMode
   selectedSeq?: number | null
   onSelectSeq: (seq: number) => void
   onSelectSeqs?: (seqs: readonly number[]) => void
@@ -1122,11 +1122,11 @@ function DshTimeline({ events, mode, selectedSeq, onSelectSeq, onSelectSeqs }: {
   const [selected, setSelected] = useState<number | null>(null)
   const [selectedRange, setSelectedRange] = useState<{ start: number; end: number } | null>(null)
   const [dragAnchor, setDragAnchor] = useState<number | null>(null)
-  const projection = useMemo(() => projectDshTrajectory(events, effectiveMode), [effectiveMode, events])
+  const projection = useMemo(() => projectShutuTrajectory(events, effectiveMode), [effectiveMode, events])
   const { timeline: derivedTimeline } = projection
-  const timeline = derivedTimeline ?? projectDshTrajectory(events, 'sequence').timeline
+  const timeline = derivedTimeline ?? projectShutuTrajectory(events, 'sequence').timeline
   const displayMode = derivedTimeline === null ? 'sequence' : effectiveMode
-  const metrics = useMemo(() => summarizeDshTimeline(events), [events])
+  const metrics = useMemo(() => summarizeShutuTimeline(events), [events])
   const sourceSeqByIndex = useMemo(() => new Map(
     projection.turns.flatMap(turn => turn.groups.flatMap(group =>
       group.cells.map(cell => [cell.index, cell.sourceSeq] as const))),
@@ -1222,7 +1222,7 @@ function DshTimeline({ events, mode, selectedSeq, onSelectSeq, onSelectSeqs }: {
     return () => observer.disconnect()
   }, [drawTimeline])
   if (timeline === null) return null
-  return <section className="dsh-timeline" aria-label="Trajectory timeline">
+  return <section className="shutu-timeline" aria-label="Trajectory timeline">
     <div className="timeline-head"><div><strong>Timeline</strong><span>{timeline.spans.length} records</span><span className="timeline-metrics">duration {formatDurationMs(metrics.durationMs)} · idle {formatDurationMs(metrics.idleMs)}</span></div><div className="timeline-controls">{selectedRange !== null && <button type="button" className="text-button" onClick={clearSelection}>Clear selection</button>}</div></div>
     <div className="timeline-track" role="list" aria-label="Timeline events">
       {timeline.turnBoundaries.map(boundary => <div className="timeline-boundary" key={`${boundary.turn}-${boundary.time}`} style={{ left: `${((boundary.time - timeline.start) / span) * 100}%` }}><span>Turn {boundary.turn}</span></div>)}
@@ -1232,7 +1232,7 @@ function DshTimeline({ events, mode, selectedSeq, onSelectSeq, onSelectSeqs }: {
   </section>
 }
 
-function conversationNodeLabel(node: DshConversationNode): string {
+function conversationNodeLabel(node: ShutuConversationNode): string {
   switch (node.kind) {
     case 'user': return 'User message'
     case 'assistant': return 'Assistant message'
@@ -1250,7 +1250,7 @@ function HistoryBoundary({ hasOlder, loading, error, startSeq, endSeq, onRetry }
   return <div className="history-boundary" role="status" aria-live="polite">{hasOlder ? 'Scroll to load earlier history' : 'Start of history'}{startSeq !== null && startSeq !== undefined && endSeq !== null && endSeq !== undefined && <span className="history-range"> · #{startSeq}–#{endSeq}</span>}</div>
 }
 
-function DshConversation({ events, sessionId, store, feedbackBySeq, producedBySeq, onFeedback, onCopy, onRetry, onFork, onOpenFile, onLocate, onReachTop, loadingOlder }: {
+function ShutuConversation({ events, sessionId, store, feedbackBySeq, producedBySeq, onFeedback, onCopy, onRetry, onFork, onOpenFile, onLocate, onReachTop, loadingOlder }: {
   events: readonly EventView[]
   sessionId: string
   store: WebStore
@@ -1266,7 +1266,7 @@ function DshConversation({ events, sessionId, store, feedbackBySeq, producedBySe
   loadingOlder: boolean
 }) {
   const webState = useSyncExternalStore(store.subscribe, store.getSnapshot, store.getSnapshot)
-  const snapshot = useMemo(() => projectDshConversation(events, sessionId), [events, sessionId])
+  const snapshot = useMemo(() => projectShutuConversation(events, sessionId), [events, sessionId])
   const fallbackProducedBySeq = useMemo(() => deriveProducedFiles(events), [events])
   const visibleProducedBySeq = producedBySeq ?? fallbackProducedBySeq
   const eventBySeq = useMemo(() => new Map(events.map(event => [event.seq, event])), [events])
@@ -1286,14 +1286,14 @@ function DshConversation({ events, sessionId, store, feedbackBySeq, producedBySe
     return () => window.removeEventListener('resize', onResize)
   }, [])
 
-  return <div ref={scrollRef} className="dsh-conversation-scroll" onScroll={event => {
+  return <div ref={scrollRef} className="shutu-conversation-scroll" onScroll={event => {
     const top = event.currentTarget.scrollTop
     setScrollTop(top)
     if (top < 100) onReachTop()
   }}>
-    <DshConversationHeader snapshot={snapshot} />
+    <ShutuConversationHeader snapshot={snapshot} />
     <HistoryBoundary hasOlder={webState.hasOlder} startSeq={webState.historyStartSeq} endSeq={webState.historyEndSeq} loading={loadingOlder} error={webState.historyError} onRetry={() => void store.loadOlder()} />
-    <div className="dsh-conversation-canvas" role="list" aria-label="Conversation messages" style={{ height: offsets[offsets.length - 1] ?? 0 }}>
+    <div className="shutu-conversation-canvas" role="list" aria-label="Conversation messages" style={{ height: offsets[offsets.length - 1] ?? 0 }}>
       {visible.map((node, index) => {
         const raw = eventBySeq.get(node.seq)
         if (raw === undefined) return null
@@ -1316,9 +1316,9 @@ function DshConversation({ events, sessionId, store, feedbackBySeq, producedBySe
   </div>
 }
 
-function DshConversationHeader({ snapshot }: { snapshot: DshConversationSnapshot }) {
+function ShutuConversationHeader({ snapshot }: { snapshot: ShutuConversationSnapshot }) {
   const activeTools = snapshot.runningCalls.length
-  return <div className="dsh-conversation-header" aria-label="DSH conversation snapshot">
+  return <div className="shutu-conversation-header" aria-label="SHUTU conversation snapshot">
     <strong>Conversation</strong>
     <span>{snapshot.nodes.length} nodes</span>
     <span>{snapshot.chat.timeline.turnOrder.length} turns</span>
@@ -1343,8 +1343,8 @@ function VirtualEvents({ events, store, sessionId, feedbackBySeq, producedBySeq,
   selectedSeq: number | null
   timelineFocusSeqs: ReadonlySet<number>
   onSelectSeq: (seq: number) => void
-  timelineMode?: DshTimelineMode
-  onTimelineModeChange?: (mode: DshTimelineMode) => void
+  timelineMode?: ShutuTimelineMode
+  onTimelineModeChange?: (mode: ShutuTimelineMode) => void
   searchQuery?: string
   onSearchQueryChange?: (query: string) => void
   onResetToolbar?: () => void
@@ -1402,9 +1402,9 @@ function VirtualEvents({ events, store, sessionId, feedbackBySeq, producedBySeq,
       return next.size === current.size ? current : next
     })
   }, [assistantToolCallSeqs])
-  const displayEvents = useMemo<readonly DshTrajectoryEvent[]>(() => {
-    const visible = collapsed ? collapseDshTrajectoryTurns(events) : events
-    return collapseDshAssistantToolCalls(visible, collapsedAssistants)
+  const displayEvents = useMemo<readonly ShutuTrajectoryEvent[]>(() => {
+    const visible = collapsed ? collapseShutuTrajectoryTurns(events) : events
+    return collapseShutuAssistantToolCalls(visible, collapsedAssistants)
   }, [collapsed, collapsedAssistants, events])
   const [scrollTop, setScrollTop] = useState(0)
   const [viewportHeight, setViewportHeight] = useState(640)
@@ -1440,7 +1440,7 @@ function VirtualEvents({ events, store, sessionId, feedbackBySeq, producedBySeq,
     setScrollTop(top)
     if (top < 100) onReachTop()
   }}>
-    <div className="trajectory-toolbar"><label className="trajectory-toolbar-search"><span className="sr-only">Search trajectory</span><input aria-label="Search trajectory records" placeholder="Search records" value={effectiveSearchQuery} onChange={event => changeSearchQuery(event.target.value)} /></label><select aria-label="Timeline mode" value={effectiveTimelineMode} onChange={event => changeTimelineMode(event.target.value as DshTimelineMode)}><option value="sequence">Sequence</option><option value="duration">Actual duration</option><option value="time">Recorded time</option><option value="actual">Actual time</option></select><button type="button" className="text-button" onClick={() => setCollapsed(value => !value)} aria-label={collapsed ? 'Expand turns' : 'Collapse turns'}>{collapsed ? 'Expand turns' : 'Collapse turns'}</button><button type="button" className="text-button" onClick={toggleAllAssistantCalls} disabled={assistantToolCallSeqs.size === 0} aria-label={allAssistantCallsCollapsed ? 'Expand tool calls' : 'Collapse tool calls'}>{allAssistantCallsCollapsed ? 'Expand calls' : 'Collapse calls'}</button><button type="button" className="text-button" onClick={() => { setCollapsed(false); setCollapsedAssistants(new Set()); resetToolbar() }} aria-label="Reset trajectory view">Reset view</button><span aria-live="polite">{collapsed ? `${displayEvents.length} compact records` : `${displayEvents.length} records`} · {effectiveTimelineMode === 'duration' ? 'actual duration' : effectiveTimelineMode === 'actual' ? 'actual time' : effectiveTimelineMode === 'time' ? 'recorded time' : 'sequence'}</span></div>
+    <div className="trajectory-toolbar"><label className="trajectory-toolbar-search"><span className="sr-only">Search trajectory</span><input aria-label="Search trajectory records" placeholder="Search records" value={effectiveSearchQuery} onChange={event => changeSearchQuery(event.target.value)} /></label><select aria-label="Timeline mode" value={effectiveTimelineMode} onChange={event => changeTimelineMode(event.target.value as ShutuTimelineMode)}><option value="sequence">Sequence</option><option value="duration">Actual duration</option><option value="time">Recorded time</option><option value="actual">Actual time</option></select><button type="button" className="text-button" onClick={() => setCollapsed(value => !value)} aria-label={collapsed ? 'Expand turns' : 'Collapse turns'}>{collapsed ? 'Expand turns' : 'Collapse turns'}</button><button type="button" className="text-button" onClick={toggleAllAssistantCalls} disabled={assistantToolCallSeqs.size === 0} aria-label={allAssistantCallsCollapsed ? 'Expand tool calls' : 'Collapse tool calls'}>{allAssistantCallsCollapsed ? 'Expand calls' : 'Collapse calls'}</button><button type="button" className="text-button" onClick={() => { setCollapsed(false); setCollapsedAssistants(new Set()); resetToolbar() }} aria-label="Reset trajectory view">Reset view</button><span aria-live="polite">{collapsed ? `${displayEvents.length} compact records` : `${displayEvents.length} records`} · {effectiveTimelineMode === 'duration' ? 'actual duration' : effectiveTimelineMode === 'actual' ? 'actual time' : effectiveTimelineMode === 'time' ? 'recorded time' : 'sequence'}</span></div>
     <HistoryBoundary hasOlder={webState.hasOlder} startSeq={webState.historyStartSeq} endSeq={webState.historyEndSeq} loading={loadingOlder} error={webState.historyError} onRetry={() => void store.loadOlder()} />
     <div className="virtual-canvas" role="list" aria-label="Trajectory records" style={{ height: offsets[offsets.length - 1] ?? 0 }}>
       {visible.map((event, index) => {
@@ -1777,7 +1777,7 @@ export function App({ store }: { store: WebStore }) {
   const [focusedSeq, setFocusedSeq] = useState<number | null>(null)
   const [trajectorySelectedSeq, setTrajectorySelectedSeq] = useState<number | null>(null)
   const [trajectoryFocusSeqs, setTrajectoryFocusSeqs] = useState<ReadonlySet<number>>(new Set())
-  const [trajectoryMode, setTrajectoryMode] = useState<DshTimelineMode>('sequence')
+  const [trajectoryMode, setTrajectoryMode] = useState<ShutuTimelineMode>('sequence')
   const [filesOpen, setFilesOpen] = useState(false)
   const [fileOpenPath, setFileOpenPath] = useState<string | null>(null)
   const [token, setToken] = useState(() => store.getToken())
@@ -1806,7 +1806,7 @@ export function App({ store }: { store: WebStore }) {
   const trajectoryRenderEvents = useThrottledValue(state.events, tab === 'trajectory' && state.sending ? 1000 : 0)
   const trajectoryRecords = useMemo(() => trajectorySelectedSeq === null
     ? EMPTY_TRAJECTORY_RECORDS
-    : projectDshTrajectoryRecords(trajectoryRenderEvents), [trajectoryRenderEvents, trajectorySelectedSeq])
+    : projectShutuTrajectoryRecords(trajectoryRenderEvents), [trajectoryRenderEvents, trajectorySelectedSeq])
   const selectedTrajectoryEvent = useMemo(() => trajectorySelectedSeq === null
     ? null
     : state.events.find(event => event.seq === trajectorySelectedSeq) ?? null, [state.events, trajectorySelectedSeq])
@@ -2133,7 +2133,7 @@ export function App({ store }: { store: WebStore }) {
       <InteractionPanel store={store} sessionId={state.selectedId} onError={reportError} />
       <QueuePanel store={store} sessionId={state.selectedId} active={state.sending} onError={reportError} />
        <section className="content-panel" id="main-tabpanel" role="tabpanel" aria-labelledby={`${tab === 'chat' ? 'conversation' : tab === 'trajectory' ? 'trajectory' : 'running'}-tab`} tabIndex={0}>
-        {filesOpen && state.selectedId !== null ? <FilesPanel store={store} sessionId={state.selectedId} openPath={fileOpenPath} onClose={() => { setFilesOpen(false); setFileOpenPath(null) }} onReference={referenceFile} /> : state.authRequired ? <form className="auth-card" onSubmit={event => { event.preventDefault(); void authenticate() }}><strong>Authentication required</strong><span>Enter the bearer token configured for the Shutu web server.</span><input name="token" aria-label="Bearer token" type="password" autoComplete="current-password" value={token} onChange={event => setToken(event.target.value)} placeholder="Bearer token" /><button type="submit" disabled={token.trim() === ''}>Connect</button></form> : state.loading ? <div className="empty"><div className="spinner" />Loading session…</div> : tab === 'running' ? <RunningPanel store={store} sessionId={state.selectedId} /> : state.selectedId === null ? <div className="empty"><strong>Start a new conversation</strong><span>Select a session or send a message from the agent.</span></div> : filtered.length === 0 ? <div className="empty"><strong>{search ? 'No matching events' : 'No events yet'}</strong><span>{search ? 'Try a different search term.' : 'Events will appear here as the session runs.'}</span></div> : tab === 'trajectory' ? <div className="trajectory-layout"><div className="trajectory-main"><DshTimeline events={trajectoryEvents} onSelectSeq={selectTrajectorySeq} onSelectSeqs={selectTrajectorySeqs} /><VirtualEvents events={trajectoryEvents} store={store} sessionId={state.selectedId} feedbackBySeq={feedbackBySeq} producedBySeq={producedBySeq} onFeedback={submitFeedback} onOpenFile={openFilePreview} focusSeq={focusedSeq} selectedSeq={trajectorySelectedSeq} timelineFocusSeqs={trajectoryFocusSeqs} onSelectSeq={selectTrajectorySeq} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} /></div>{selectedTrajectoryEvent !== null && <TrajectoryInspector event={selectedTrajectoryEvent} record={selectedTrajectoryRecord} records={trajectoryRecords} onRetryRequest={retryTrajectoryRequest} onCancelRequest={cancelTrajectoryRequest} onClose={() => { const seq = selectedTrajectoryEvent.seq; setTrajectorySelectedSeq(null); requestAnimationFrame(() => document.getElementById(`inspect-event-${seq}`)?.focus()) }} />}</div> : <DshConversation events={filtered} sessionId={state.selectedId} store={store} feedbackBySeq={feedbackBySeq} onFeedback={onFeedback} onCopy={copyMessage} onOpenFile={openFilePreview} onLocate={locateConversationSeq} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} />}
+        {filesOpen && state.selectedId !== null ? <FilesPanel store={store} sessionId={state.selectedId} openPath={fileOpenPath} onClose={() => { setFilesOpen(false); setFileOpenPath(null) }} onReference={referenceFile} /> : state.authRequired ? <form className="auth-card" onSubmit={event => { event.preventDefault(); void authenticate() }}><strong>Authentication required</strong><span>Enter the bearer token configured for the Shutu web server.</span><input name="token" aria-label="Bearer token" type="password" autoComplete="current-password" value={token} onChange={event => setToken(event.target.value)} placeholder="Bearer token" /><button type="submit" disabled={token.trim() === ''}>Connect</button></form> : state.loading ? <div className="empty"><div className="spinner" />Loading session…</div> : tab === 'running' ? <RunningPanel store={store} sessionId={state.selectedId} /> : state.selectedId === null ? <div className="empty"><strong>Start a new conversation</strong><span>Select a session or send a message from the agent.</span></div> : filtered.length === 0 ? <div className="empty"><strong>{search ? 'No matching events' : 'No events yet'}</strong><span>{search ? 'Try a different search term.' : 'Events will appear here as the session runs.'}</span></div> : tab === 'trajectory' ? <div className="trajectory-layout"><div className="trajectory-main"><ShutuTimeline events={trajectoryEvents} onSelectSeq={selectTrajectorySeq} onSelectSeqs={selectTrajectorySeqs} /><VirtualEvents events={trajectoryEvents} store={store} sessionId={state.selectedId} feedbackBySeq={feedbackBySeq} producedBySeq={producedBySeq} onFeedback={submitFeedback} onOpenFile={openFilePreview} focusSeq={focusedSeq} selectedSeq={trajectorySelectedSeq} timelineFocusSeqs={trajectoryFocusSeqs} onSelectSeq={selectTrajectorySeq} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} /></div>{selectedTrajectoryEvent !== null && <TrajectoryInspector event={selectedTrajectoryEvent} record={selectedTrajectoryRecord} records={trajectoryRecords} onRetryRequest={retryTrajectoryRequest} onCancelRequest={cancelTrajectoryRequest} onClose={() => { const seq = selectedTrajectoryEvent.seq; setTrajectorySelectedSeq(null); requestAnimationFrame(() => document.getElementById(`inspect-event-${seq}`)?.focus()) }} />}</div> : <ShutuConversation events={filtered} sessionId={state.selectedId} store={store} feedbackBySeq={feedbackBySeq} onFeedback={onFeedback} onCopy={copyMessage} onOpenFile={openFilePreview} onLocate={locateConversationSeq} onReachTop={() => void store.loadOlder()} loadingOlder={state.loadingOlder} />}
       </section>
       <form className="composer" onSubmit={event => { event.preventDefault(); if (state.sending && draft.trim() === '' && pendingImages.length === 0) void stopRun(); else void submit() }}><CommandMenu commands={commands} query={commandQuery ?? ''} activeIndex={commandIndex} onSelect={selectCommand} />{pendingImages.length > 0 && <div className="attachment-preview-list">{pendingImages.map(item => <div className="attachment-preview" key={item.ref.id}><img src={item.previewUrl} alt="待发送图片" /><button type="button" onClick={() => removePendingImage(item.ref.id)} aria-label="移除附件">×</button></div>)}</div>}<div className="composer-row"><label className="attach-button" aria-label="添加图片"><input type="file" name="attachments" accept="image/*" multiple disabled={state.selectedId === null || state.sending || uploading} onChange={event => { void attachFiles(event.currentTarget.files); event.currentTarget.value = '' }} />📎</label><textarea name="message" autoComplete="off" value={draft} onChange={event => handleDraftChange(event.target.value)} onKeyDown={handleComposerKeyDown} placeholder={uploading ? '正在上传图片…' : state.sending ? 'Agent is running…' : 'Send a message…'} rows={2} /><button type="submit" disabled={state.selectedId === null || uploading || (!state.sending && draft.trim() === '' && pendingImages.length === 0)}>{state.sending ? (draft.trim() ? 'Queue' : 'Stop') : 'Send'} <span>{state.sending ? '■' : '↵'}</span></button></div></form>
     </main></TrajectoryToolbarContext.Provider></TrajectorySearchContext.Provider>

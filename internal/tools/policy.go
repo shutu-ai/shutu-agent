@@ -51,6 +51,10 @@ type Policy struct {
 	RunCommand RunCommandPolicy
 	// CodeRun is the run_code sandbox tool policy (M6e-2, ADR 决策 M6e).
 	CodeRun CodeRunPolicy
+	// Shell carries the native shell settings' outer timeout and model-facing
+	// output cap. This lets a settings commit update shell execution without
+	// re-registering the tool or widening the global output cap.
+	Shell ShellPolicy
 }
 
 // RunCommandPolicy is the run_command tool policy (design.md §5 / D10 落地).
@@ -78,6 +82,18 @@ type CodeRunPolicy struct {
 	Timeout time.Duration
 }
 
+// ShellPolicy contains the registry-owned portion of the native shell settings.
+type ShellPolicy struct {
+	// Timeout is the outer dispatch deadline, normally configured maxTimeoutMs.
+	Timeout time.Duration
+	// OutputLimit, when positive, overrides the global output cap for
+	// bash/pwsh results only.
+	OutputLimit int
+	// MaxSpillBytes, when positive, prevents a recovery spill larger than the
+	// configured bound. The bounded model-facing tail remains in that case.
+	MaxSpillBytes int
+}
+
 // DefaultPolicy returns the safe-by-default policy: only the read-only tools
 // whitelisted, a 30s deadline, a 64KB output cap, and spill to DefaultSpillDir.
 func DefaultPolicy() Policy {
@@ -92,7 +108,7 @@ func DefaultPolicy() Policy {
 }
 
 // PolicyFromConfig maps the normalized tools config onto a Policy. The caller
-// (cmd/pa) passes the config's data_dir so spill files land under
+// (cmd/sta) passes the config's data_dir so spill files land under
 // <data_dir>/spill (dispatch-m3).
 func PolicyFromConfig(cfg config.ToolsConfig, dataDir string) Policy {
 	p := DefaultPolicy()

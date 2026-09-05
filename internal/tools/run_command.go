@@ -44,6 +44,7 @@ type RunCommand struct {
 	DshEnvFunc             ManagedEnvFunc
 	DshEnvContextFunc      func(context.Context) map[string]string
 	Background             bool
+	SettingsFunc           func() ShellSettings
 }
 
 // NewRunCommand returns a RunCommand bound to a fixed working directory.
@@ -56,7 +57,7 @@ func NewRunCommandForWorkdir(workdir func() string) RunCommand {
 }
 
 // NewRunCommandForWorkdirAndJobs wires the dsh background-job surface without
-// creating an import cycle with cmd/pa's composition root. The providers are
+// creating an import cycle with cmd/sta's composition root. The providers are
 // evaluated per call because jobs are registered after the base tools.
 func NewRunCommandForWorkdirAndJobs(workdir func() string, jobsFunc func() jobs.Registry, ownerFunc func() string, background bool) RunCommand {
 	return RunCommand{WorkdirFunc: workdir, JobsFunc: jobsFunc, OwnerFunc: ownerFunc, Background: background}
@@ -145,6 +146,9 @@ func (t RunCommand) Execute(ctx context.Context, args any) (string, error) {
 	} else if t.WorkdirFunc != nil {
 		workdir = t.WorkdirFunc()
 	}
+	if workdir == "" && t.SettingsFunc != nil {
+		workdir = t.SettingsFunc().Cwd
+	}
 	if a.Workdir != "" {
 		if !filepath.IsAbs(a.Workdir) && workdir != "" {
 			workdir = filepath.Join(workdir, a.Workdir)
@@ -173,12 +177,31 @@ func (t RunCommand) runForeground(ctx context.Context, command, workdir string, 
 	execCtx := ctx
 	timedOut := false
 	requested := int64(0)
+	settings := defaultShellSettings()
+	if t.SettingsFunc != nil {
+		settings = t.SettingsFunc()
+		if settings.TimeoutMS <= 0 {
+			settings.TimeoutMS = int(DefaultRunCommandTimeout.Milliseconds())
+		}
+		if settings.MaxTimeoutMS <= 0 {
+			settings.MaxTimeoutMS = pwshMaxTimeoutMS
+		}
+		if settings.MaxSpillBytes <= 0 {
+			settings.MaxSpillBytes = pwshDefaultSpillBytes
+		}
+		if settings.GraceMS < 0 {
+			settings.GraceMS = 0
+		}
+	}
 	if timeoutMS == nil {
-		requested = DefaultRunCommandTimeout.Milliseconds()
+		requested = int64(settings.TimeoutMS)
 		timeoutMS = &requested
 	}
 	if timeoutMS != nil {
 		requested = *timeoutMS
+		if settings.MaxTimeoutMS > 0 && requested > int64(settings.MaxTimeoutMS) {
+			requested = int64(settings.MaxTimeoutMS)
+		}
 		var cancel context.CancelFunc
 		execCtx, cancel = context.WithTimeout(ctx, time.Duration(requested)*time.Millisecond)
 		defer cancel()
@@ -210,7 +233,7 @@ func (t RunCommand) runForeground(ctx context.Context, command, workdir string, 
 	// Interrupt the process when the context is done (Ctrl+C or the Execute
 	// deadline). The capture goroutines continue draining until the owned
 	// process group has exited.
-	stop := monitorCtx(execCtx, cmd)
+	stop := monitorCtx(execCtx, cmd, settings.GraceMS)
 	stdoutCopyErr := <-stdoutDone
 	stderrCopyErr := <-stderrDone
 	// StdoutPipe's parent end is closed by Wait, so drain both capture
@@ -271,6 +294,22 @@ func (t RunCommand) runForeground(ctx context.Context, command, workdir string, 
 
 func (t RunCommand) startBackground(ctx context.Context, command, description, workdir string) (string, error) {
 	provider := t.jobsFor(ctx)
+	settings := defaultShellSettings()
+	if t.SettingsFunc != nil {
+		settings = t.SettingsFunc()
+		if settings.TimeoutMS <= 0 {
+			settings.TimeoutMS = int(DefaultRunCommandTimeout.Milliseconds())
+		}
+		if settings.MaxTimeoutMS <= 0 {
+			settings.MaxTimeoutMS = pwshMaxTimeoutMS
+		}
+		if settings.MaxSpillBytes <= 0 {
+			settings.MaxSpillBytes = pwshDefaultSpillBytes
+		}
+		if settings.GraceMS < 0 {
+			settings.GraceMS = 0
+		}
+	}
 	var mu sync.Mutex
 	var live *exec.Cmd
 	var capture capturePaths
@@ -279,7 +318,7 @@ func (t RunCommand) startBackground(ctx context.Context, command, description, w
 		// description is the model-supplied UI label and is the only text that
 		// crosses into the durable job/start projection.
 		Kind: jobs.Kind(runCommandName), Label: llm.RedactDiagnostic(description),
-		OwnerSession: t.ownerSession(ctx), OutputLimitBytes: 64 * 1024,
+		OwnerSession: t.ownerSession(ctx), OutputLimitBytes: settings.MaxOutputBytes,
 		Correlation: jobs.CorrelationFromContext(ctx),
 		ReadOutput:  capture.Read,
 		Run: func(jctx context.Context) (outcome jobs.JobOutcome, runErr error) {
@@ -290,12 +329,12 @@ func (t RunCommand) startBackground(ctx context.Context, command, description, w
 			live = cmd
 			mu.Unlock()
 			defer func() { mu.Lock(); live = nil; mu.Unlock() }()
-			outFile, err := os.CreateTemp("", "pa-bash-job-stdout-*.txt")
+			outFile, err := os.CreateTemp("", "sta-bash-job-stdout-*.txt")
 			if err != nil {
 				return jobs.JobOutcome{}, err
 			}
 			path := outFile.Name()
-			errFile, err := os.CreateTemp("", "pa-bash-job-stderr-*.txt")
+			errFile, err := os.CreateTemp("", "sta-bash-job-stderr-*.txt")
 			if err != nil {
 				outFile.Close()
 				os.Remove(path)
@@ -326,7 +365,7 @@ func (t RunCommand) startBackground(ctx context.Context, command, description, w
 			stderrDone := make(chan error, 1)
 			go func() { _, copyErr := io.Copy(stdoutWriter, stdoutPipe); stdoutDone <- copyErr }()
 			go func() { _, copyErr := io.Copy(stderrWriter, stderrPipe); stderrDone <- copyErr }()
-			stop := monitorCtx(jctx, cmd)
+			stop := monitorCtx(jctx, cmd, settings.GraceMS)
 			waitErr := cmd.Wait()
 			stop()
 			stdoutCopyErr := <-stdoutDone
@@ -371,7 +410,7 @@ func (t RunCommand) startBackground(ctx context.Context, command, description, w
 			mu.Lock()
 			defer mu.Unlock()
 			if live != nil {
-				killTree(live)
+				terminateTree(live, settings.GraceMS)
 			}
 			return nil
 		},
@@ -420,14 +459,14 @@ func newCommand(command, workdir string, env []string) *exec.Cmd {
 // monitorCtx terminates the command's process tree when ctx is done. The
 // returned stop func must be called once Wait returns so the watcher goroutine
 // does not leak.
-func monitorCtx(ctx context.Context, cmd *exec.Cmd) func() {
+func monitorCtx(ctx context.Context, cmd *exec.Cmd, graceMS int) func() {
 	done := make(chan struct{})
 	finished := make(chan struct{})
 	go func() {
 		defer close(finished)
 		select {
 		case <-ctx.Done():
-			killTree(cmd)
+			terminateTree(cmd, graceMS)
 		case <-done:
 		}
 	}()

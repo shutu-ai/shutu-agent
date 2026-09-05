@@ -102,7 +102,7 @@ func (d *restoredTeammateDirectory) Direct(_ context.Context, parent, target str
 	}
 	return Teammate{
 		ID: "team:parent:researcher", Label: "researcher", Running: true, Continuable: true,
-		Send:      func(context.Context, string) error { d.sent = true; return nil },
+		Send:      func(context.Context, string, map[string]string) error { d.sent = true; return nil },
 		SendQuiet: func(context.Context, string) error { d.quiet = true; return nil },
 		Followup:  func(context.Context, string) error { d.followed = true; return nil },
 		Cancel:    func(string) error { d.cancelled = true; return nil },
@@ -388,6 +388,79 @@ func TestSubagentAsyncSettlementInvokesParentCompletionWake(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for parent completion wake")
+	}
+}
+
+func TestSubagentReportDeliversDSHRelayAfterDurableEvent(t *testing.T) {
+	model := &scriptedLLM{steps: [][]llm.StreamEvent{{
+		{Kind: llm.StreamTextDelta, Text: "child result"},
+		{Kind: llm.StreamFinish, FinishReason: "stop"},
+	}}}
+	st := testBundle(t, model, 8, nil)
+	type reportEvent struct {
+		id     string
+		parent string
+	}
+	events := make(chan reportEvent, 8)
+	st.SetSessionEventSink(func(_ string, _ string, data any) error {
+		raw, err := json.Marshal(data)
+		if err != nil {
+			t.Fatalf("marshal report event: %v", err)
+		}
+		var payload struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(raw, &payload); err != nil {
+			t.Fatalf("decode report event: %v", err)
+		}
+		var start struct {
+			ParentSession string `json:"parentSession"`
+		}
+		_ = json.Unmarshal(raw, &start)
+		events <- reportEvent{id: payload.ID, parent: start.ParentSession}
+		return nil
+	})
+	type delivery struct {
+		parent, child, messageID, output string
+	}
+	deliveries := make(chan delivery, 1)
+	st.SetReportDelivery(func(_ context.Context, parent, child, messageID, output string) error {
+		deliveries <- delivery{parent: parent, child: child, messageID: messageID, output: output}
+		return nil
+	})
+
+	if _, err := st.Spawn().Execute(context.Background(), json.RawMessage(`{"description":"worker","prompt":"finish"}`)); err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	messageID, err := st.ReportFromChildContext(context.Background(), "spawn-1", "selected findings")
+	if err != nil {
+		t.Fatalf("report: %v", err)
+	}
+	// Spawn emits start before report; consume that lifecycle row while still
+	// requiring the report row to exist before ReportFromChildContext returns.
+	sawReport := false
+	for deadline := time.After(time.Second); !sawReport; {
+		select {
+		case got := <-events:
+			if got.id != "spawn-1" {
+				continue
+			}
+			if got.parent != "sess-1" {
+				t.Fatalf("report event parent = %q, want sess-1", got.parent)
+			}
+			sawReport = true
+		case <-deadline:
+			t.Fatal("timed out waiting for durable report event")
+		}
+	}
+	select {
+	case got := <-deliveries:
+		if got.parent != "sess-1" || got.child != "spawn-1" ||
+			got.messageID != messageID || got.output != "selected findings" {
+			t.Fatalf("report delivery = %+v, want parent/child/message/output identity", got)
+		}
+	default:
+		t.Fatal("timed out waiting for parent report delivery")
 	}
 }
 

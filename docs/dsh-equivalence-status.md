@@ -1107,7 +1107,7 @@ SQLite now commits the Team member identity reservation, child Session, fork
 seed and Lead provisioning receipt in one transaction. Production provisioning
 uses the atomic path without a separate pre-claim; regression coverage rejects
 duplicate identities and proves failed publication rolls back the reservation.
-Team, store and `cmd/pa` tests pass. A2.2/A5.4 remain partial because other
+Team, store and `cmd/sta` tests pass. A2.2/A5.4 remain partial because other
 domain receipts, orphan-reservation recovery/GC and the full crash matrix are
 still unproven.
 
@@ -1252,7 +1252,7 @@ A6.3 can close.
   receipt and one owner inbox receipt survive restart.
 - A2.4 is now done in the task register: owner claims are rebuilt from durable
   receipts and the acceptance command passes across all internal packages plus
-  `cmd/pa`.
+  `cmd/sta`.
 - A2 remains blocked by A2.2/A2.5 external-crash and transaction work, so the
   overall equivalence claim remains disallowed.
 
@@ -1304,7 +1304,7 @@ A6.3 can close.
   first-wins terminal settlement, cold restart reconciliation and retryable
   owner wake receipts.
 - The A5.3 acceptance command passes across `internal/jobs`,
-  `internal/terminal` and `cmd/pa`. A5 remains partial only for Team lifecycle
+  `internal/terminal` and `cmd/sta`. A5 remains partial only for Team lifecycle
   and identity reservation transaction evidence.
 
 ## 2026-08-31 A5.2/A5.4 Team closure
@@ -1929,7 +1929,7 @@ server, preventing stale tools from remaining callable after automatic
 recovery has stopped. Local coverage is provided by
 `internal/mcp/reconnect_test.go:TestReconnectingClientNotifiesExhaustionOnce`
 and
-`cmd/pa/mcps_test.go:TestRegisterMcpsWithdrawsToolsAfterReconnectBudgetExhaustion`.
+`cmd/sta/mcps_test.go:TestRegisterMcpsWithdrawsToolsAfterReconnectBudgetExhaustion`.
 
 This is a bounded A7.2 repair. Full external stdio/Streamable HTTP reconnect,
 close, and side-effect replay remains open.
@@ -1966,7 +1966,7 @@ idle transitions, then flushed only after the prerequisite durable event has
 been forwarded. This closes a real external-client ordering race where later
 `session.event` notifications could overtake `session.status(running)`. The
 external-client regression
-`cmd/pa/sdk_test.go:TestSDKServerExternalClientPromptRunsAgentThroughIdle`
+`cmd/sta/sdk_test.go:TestSDKServerExternalClientPromptRunsAgentThroughIdle`
 passes repeatedly, including a ten-run stress check.
 
 This is a bounded A7.3 repair. The pinned SDK/reference-provider matrix,
@@ -2148,6 +2148,6 @@ not executed.
 
 Malformed JSON lines in the SDK runtime are now ignored, matching the pinned
 DSH line protocol; no uncorrelatable null-id parse-error response is emitted.
-The regression is `cmd/pa/sdk_test.go:TestSDKServerIgnoresMalformedJSONLines`.
+The regression is `cmd/sta/sdk_test.go:TestSDKServerIgnoresMalformedJSONLines`.
 A7.3 remains partial because the reference-runtime and provider
 fault/reconnect matrix is still incomplete.

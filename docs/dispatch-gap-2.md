@@ -1,10 +1,10 @@
 # GAP-2 派发：ralph（fresh-agent 循环）
 
-> 标准模式缺口 ADR `docs/decisions/2026-08-20-standard-gaps.md`（D-GAP-3）。本文件是 **GAP-2** 契约：`internal/ralph` fresh-agent 循环引擎 + `ralph` 工具 + config cap + cmd/pa 接线 + 测试。对齐 dsh `tool-ralph`。
+> 标准模式缺口 ADR `docs/decisions/2026-08-20-standard-gaps.md`（D-GAP-3）。本文件是 **GAP-2** 契约：`internal/ralph` fresh-agent 循环引擎 + `ralph` 工具 + config cap + cmd/sta 接线 + 测试。对齐 dsh `tool-ralph`。
 
 ## 纪律
 
-- 零新依赖、CGO-free；只动 internal/ralph（新建）、internal/config、cmd/pa、config.yaml；gofmt；不改 loop。
+- 零新依赖、CGO-free；只动 internal/ralph（新建）、internal/config、cmd/sta、config.yaml；gofmt；不改 loop。
 - 默认关（D10）：`ralph.enabled` 默认 false；未启用不注册不白名单；**minimal 分支关闭**。
 - 提交 1 个：`GAP-2: ralph fresh-agent 循环（internal/ralph + ralph 工具 + config + 接线）`
 
@@ -13,7 +13,7 @@
 - 子代理 API：`internal/subagent` — `Runtime.Start(ctx, name, StartRequest) (*Run, error)`；`Run.Result(ctx) (Result, error)`；`Result{Output, StopReason}`；`StartRequest{Prompt, ParentSessionID, ...}`（service.go）。组合根持有 `a.subagents subagent.Runtime`（M5b-2 已接线）。
 - 工具模式照 `internal/eval/tools.go`（EvalTools 持有 eng + onEvent）或 `internal/fs/tools.go`。D3 事件照 jobs/eval emit 模式。
 - `internal/config/config.go`：Config struct、applyDefaults 白名单 append 模式、**Mode-1 minimal 分支**（需加 `cfg.Ralph.Enabled = false`）。
-- 子代理父会话：`StartRequest.ParentSessionID` — 组合根把当前 session id 传给它（照 cmd/pa/subagent.go 现有 spawn 工具的传法）。
+- 子代理父会话：`StartRequest.ParentSessionID` — 组合根把当前 session id 传给它（照 cmd/sta/subagent.go 现有 spawn 工具的传法）。
 
 ## 变更清单（精确）
 
@@ -158,7 +158,7 @@ ralph: <objective 头 80 runes>…
 - **minimal 分支**：加 `cfg.Ralph.Enabled = false`。
 - config.yaml：`ralph:` 段 + 注释（enabled 默认 false D10）。
 
-### 6. cmd/pa/ralph.go（新建）+ main.go 接线 + ralph_test.go
+### 6. cmd/sta/ralph.go（新建）+ main.go 接线 + ralph_test.go
 - `registerRalph() error`（照 eval.go 模式）：
 ```go
 // registerRalph wires the fresh-agent loop seam (D-GAP-3) when ralph.enabled
@@ -193,9 +193,9 @@ func (a *app) registerRalph() error {
 	return nil
 }
 ```
-  （`a.sessionID()`：照 cmd/pa 里取当前 session id 的既有方式——实施时查现有 spawn 工具/loop 如何取 session id，用同一来源；无 session 上下文时 ParentSessionID="" 亦可。）
+  （`a.sessionID()`：照 cmd/sta 里取当前 session id 的既有方式——实施时查现有 spawn 工具/loop 如何取 session id，用同一来源；无 session 上下文时 ParentSessionID="" 亦可。）
 - main.go：import internal/ralph；`registerRalph()` 调用（registerSubagent 之后——依赖 a.subagents）；无 defer。
-- cmd/pa/ralph_test.go：makeXxxApp + fake 子代理（照 cmd/pa/subagent_test.go 的 scriptedLLM 模式）：
+- cmd/sta/ralph_test.go：makeXxxApp + fake 子代理（照 cmd/sta/subagent_test.go 的 scriptedLLM 模式）：
   - `TestRegisterRalphDisabledRegistersNothing`（D10）。
   - `TestRegisterRalphEnabled`：enabled → 注册 ralph 工具 + 白名单含 ralph。
   - `TestRalphRunE2E`：fake LLM 让子代理输出 "DONE: 完成" → Execute `{"objective":"x"}` 含 "done" 与 "完成"；ralph/run 事件入 log。
@@ -203,7 +203,7 @@ func (a *app) registerRalph() error {
 
 ## 验证
 
-`go build ./...` + `go test -count=1 ./internal/ralph/ ./internal/session/ ./internal/config/ ./cmd/pa/ -run 'Ralph|ralph' -v` 全 PASS 后提交；随后 `go test -count=1 ./...` 全绿确认。
+`go build ./...` + `go test -count=1 ./internal/ralph/ ./internal/session/ ./internal/config/ ./cmd/sta/ -run 'Ralph|ralph' -v` 全 PASS 后提交；随后 `go test -count=1 ./...` 全绿确认。
 
 ## 环境
 

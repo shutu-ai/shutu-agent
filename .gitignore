@@ -5,6 +5,7 @@ data/
 .gopath/
 .gomodcache/
 .gocache/
+.reference/
 
 # 密钥与环境变量（API Key 只走环境变量，绝不入库）
 .env
@@ -14,6 +15,7 @@ data/
 bin/
 dist/
 release/
+node_modules/
 pa.exe
 sta.exe
 

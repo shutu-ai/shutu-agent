@@ -633,13 +633,13 @@ func (c *Client) streamOnce(ctx context.Context, payload []byte, apiKey, userID,
 	llm.ApplyAttributionHeaders(httpReq.Header)
 	if c.isOfficialRoute() {
 		if userID != "" {
-			httpReq.Header.Set("x-deepseek-harness-user-id", userID)
+			httpReq.Header.Set("x-shutu-user-id", userID)
 		}
 		if sessionID != "" {
-			httpReq.Header.Set("x-deepseek-harness-session-id", sessionID)
+			httpReq.Header.Set("x-shutu-session-id", sessionID)
 		}
 		if strings.EqualFold(strings.TrimSpace(purpose), "compaction") {
-			httpReq.Header.Set("x-deepseek-harness-compact", "1")
+			httpReq.Header.Set("x-shutu-compact", "1")
 		}
 	}
 

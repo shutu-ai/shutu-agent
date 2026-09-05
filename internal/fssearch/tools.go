@@ -9,7 +9,7 @@
 // matches" + per-file "path\nLine N: text" blocks, "No matches found", "No
 // files found"). Both implement the tools.Tool method set structurally (Go
 // structural typing), so this package never imports the tools package — the
-// seam stays decoupled (D2). The composition root (cmd/pa) registers them
+// seam stays decoupled (D2). The composition root (cmd/sta) registers them
 // when fs_search.enabled, and config.applyDefaults auto-whitelists the names.
 package fssearch
 

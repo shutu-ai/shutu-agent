@@ -119,7 +119,7 @@ func (c *Client) Start() error {
 	c.stateMu.Lock()
 	if c.closed || c.closing {
 		c.stateMu.Unlock()
-		return c.closedError("DeepSeek Harness runtime client is closed")
+		return c.closedError("Shutu runtime client is closed")
 	}
 	if c.started {
 		c.stateMu.Unlock()
@@ -184,7 +184,7 @@ func (c *Client) Start() error {
 		c.stateMu.Unlock()
 		_ = failedTransport.Close()
 		failedProcessDone <- processResult{code: -1, err: err}
-		c.failSubscriptions(c.closedError("DeepSeek Harness runtime failed to start"))
+		c.failSubscriptions(c.closedError("Shutu runtime failed to start"))
 		return err
 	}
 	go func() {
@@ -209,7 +209,7 @@ func (c *Client) OnRequest(handler RequestHandler) error {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 	if c.closed || c.closing {
-		return c.closedError("DeepSeek Harness runtime client is closed")
+		return c.closedError("Shutu runtime client is closed")
 	}
 	if c.started {
 		return errors.New("SDK callback handler must be installed before runtime start")
@@ -302,7 +302,7 @@ func (c *Client) handleTransportClosed() {
 			}
 			time.Sleep(time.Millisecond)
 		}
-		c.failSubscriptions(c.closedError("DeepSeek Harness runtime transport closed"))
+		c.failSubscriptions(c.closedError("Shutu runtime transport closed"))
 	}()
 }
 
@@ -315,7 +315,7 @@ func (c *Client) Request(ctx context.Context, method string, params json.RawMess
 	closing := c.closing
 	c.stateMu.Unlock()
 	if closing {
-		return nil, c.closedError("DeepSeek Harness runtime client is closed")
+		return nil, c.closedError("Shutu runtime client is closed")
 	}
 	raw, err := c.transport.Request(ctx, method, params, c.options.RequestTimeout)
 	if err == nil {
@@ -333,7 +333,7 @@ func (c *Client) Request(ctx context.Context, method string, params json.RawMess
 		return nil, err
 	}
 	c.waitProcessSettled(100 * time.Millisecond)
-	return nil, c.closedError("DeepSeek Harness runtime transport closed")
+	return nil, c.closedError("Shutu runtime transport closed")
 }
 
 // Initialize performs the process-wide handshake and validates server identity.
@@ -406,7 +406,7 @@ func (c *Client) Subscribe(filter NotificationFilter) *SubscriptionHandle {
 	dead := c.closed || c.closing || c.spawnErr != nil || c.exitCode != nil
 	c.stateMu.Unlock()
 	if dead {
-		state.fail(c.closedError("DeepSeek Harness runtime closed"))
+		state.fail(c.closedError("Shutu runtime closed"))
 	} else {
 		c.subscriptions[id] = state
 	}
@@ -503,7 +503,7 @@ func (c *Client) performClose() error {
 		// their observation boundary first. Closing an unstarted client (or a
 		// client whose spawn already failed) must still settle those handles;
 		// otherwise Next would wait forever with no producer left.
-		c.failSubscriptions(c.closedError("DeepSeek Harness runtime client is closed"))
+		c.failSubscriptions(c.closedError("Shutu runtime client is closed"))
 		return nil
 	}
 	c.closing = true
@@ -537,7 +537,7 @@ func (c *Client) finishClose(transport *LineTransport) {
 	c.stateMu.Lock()
 	c.closed = true
 	c.stateMu.Unlock()
-	c.failSubscriptions(c.closedError("DeepSeek Harness runtime closed"))
+	c.failSubscriptions(c.closedError("Shutu runtime closed"))
 }
 
 func (c *Client) disposeProcess() error {

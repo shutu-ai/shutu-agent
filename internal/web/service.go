@@ -177,7 +177,8 @@ func truncateSources(sources []WebSearchSource, max int) ([]WebSearchSource, boo
 	return out, true
 }
 
-// SearchRequestEvent 是 web/search-request 事件的载荷（D3，secret-free）：
+// SearchRequestEvent 是 web/deepseek-search-llm-request 事件的载荷
+// （D3，secret-free）：
 // 一次搜索请求在派发前落库的快照，绝不含 API key。
 type SearchRequestEvent struct {
 	Endpoint   string

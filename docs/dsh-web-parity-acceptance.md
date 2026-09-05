@@ -35,7 +35,7 @@
 
 ## P34 性能与联调基线
 
-- 使用 `cmd/pa` 的真实组合根测试覆盖健康检查、会话 API、事件发布到 SSE 的链路。
+- 使用 `cmd/sta` 的真实组合根测试覆盖健康检查、会话 API、事件发布到 SSE 的链路。
 - 使用 10,000 条事件和 100,000 行虚拟列表合成数据验证投影、搜索索引和虚拟区间计算的正确性与边界。
 - 使用真实 Chromium 页面运行 10,000 条含长文本/密集 tool 记录，验证虚拟挂载数量、加载时间、搜索响应、滚动帧率和 JS heap 基线。
 - 已使用真实 `deepseek-v4-flash` 后端执行“生成网页版超级玛丽游戏”的长任务，并通过 `web/scripts/real-task-performance.mjs` 记录大历史与流式输出基线；结果见下方“真实任务基线”。
@@ -44,7 +44,7 @@
 
 ## 真实任务基线（2026-08-26）
 
-测试环境是本机 `cmd/pa --web-only`，模型配置为 `deepseek-official/deepseek-v4-flash`；任务工作区为 `real-task-super-mario`，任务内容是生成并持续维护一个原创网页版横版平台游戏，包含代码生成、测试、修复和 README 更新。该数据来自真实模型后端与真实 SSE 事件，不是合成事件；但它仍不是客户生产环境，不能替代目标环境验收。
+测试环境是本机 `cmd/sta --web-only`，模型配置为 `deepseek-official/deepseek-v4-flash`；任务工作区为 `real-task-super-mario`，任务内容是生成并持续维护一个原创网页版横版平台游戏，包含代码生成、测试、修复和 README 更新。该数据来自真实模型后端与真实 SSE 事件，不是合成事件；但它仍不是客户生产环境，不能替代目标环境验收。
 
 采样命令：
 
@@ -152,7 +152,7 @@ The real-task harness now accepts `SHUTU_REAL_TASK_PROMPT` and dispatches `sessi
 
 `node scripts/release-package.mjs --output release/shutu-agent-p36-current` passed from functional code revision `eb8680f` (`eb8680f095b830833a9afffb0842131c7d16f5f9`). The package manifest reports `win32-x64`, binary `bin/shutu-agent.exe`, frontend `web/dist`, and matching revision metadata; native dist verification reported `111` assets and a valid native manifest. `SHUTU_RELEASE_PACKAGE=release/shutu-agent-p36-current node scripts/deployment-smoke.mjs` passed initial, upgrade and rollback copies sharing one data directory, with `/api/health`, `/api/sessions`, `/`, native `host.describe`, and authenticated `/api/events.mux` plus `/api/events.host` WebSocket upgrades all returning valid responses (`101` for both sockets), with shared data preserved across package replacement. This proves local Windows packaging and lifecycle smoke only; Linux, target-environment startup and failure recovery remain open.
 
-The current Windows host produced a Linux `amd64` binary with `GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build ./cmd/pa`; `go version -m` confirmed the executable, module revision, dependency set, and Linux build metadata. AlmaLinux-8 under WSL2 then ran the binary with `config/config-linux-p36.yaml`, which keeps SQLite on the Linux filesystem to avoid `/mnt/d` WAL I/O errors. From Windows, `/`, `/api/health`, and `/api/sessions` returned `200`; Chromium observed `/api/events.mux` and `/api/events.host`, with title `SHUTU-AI`, console errors `0`, and horizontal overflow `0`. This closes the WSL Linux startup/static/API/WebSocket smoke slice; a separately provisioned target Linux host, upgrade, rollback and failure-recovery run remains open.
+The current Windows host produced a Linux `amd64` binary with `GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build ./cmd/sta`; `go version -m` confirmed the executable, module revision, dependency set, and Linux build metadata. AlmaLinux-8 under WSL2 then ran the binary with `config/config-linux-p36.yaml`, which keeps SQLite on the Linux filesystem to avoid `/mnt/d` WAL I/O errors. From Windows, `/`, `/api/health`, and `/api/sessions` returned `200`; Chromium observed `/api/events.mux` and `/api/events.host`, with title `SHUTU-AI`, console errors `0`, and horizontal overflow `0`. This closes the WSL Linux startup/static/API/WebSocket smoke slice; a separately provisioned target Linux host, upgrade, rollback and failure-recovery run remains open.
 
 The same WSL2 setup completed an upgrade/rollback smoke with a shared Linux-native `/tmp/shutu-agent-p36-data` directory: the old Linux binary created session `s-743c4600`, the new binary resumed it with `/api/health=200`, and the old binary resumed it again with `/api/health=200` and the same session still visible. This proves data reuse across the two local Linux binaries; target-host failure injection and recovery remain open.
 

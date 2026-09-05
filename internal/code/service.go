@@ -104,7 +104,7 @@ type RunRequest struct {
 type SandboxMode string
 
 const (
-	// SandboxReadOnly is the canonical wire spelling used by DeepSeek Harness.
+	// SandboxReadOnly is the canonical read-only wire spelling.
 	SandboxReadOnly SandboxMode = "read-only"
 	// SandboxReadOnlyLegacy remains accepted for existing Shutu config files;
 	// it is normalized before capability checks and execution.

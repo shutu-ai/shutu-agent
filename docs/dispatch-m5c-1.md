@@ -58,7 +58,7 @@
    - **剪枝（`pruner.go`）**：`PruneToolResults(sess SessionLike, maxBytes int) (PruneResult, error)`——纯确定性（无模型），对超预算的 `tool/result` 做 head/middle/tail 截断替换（Unicode code point 边界，不切 rune），返回 `PruneResult{Replaced []seq, SavedBytes int}`。**本任务只实现函数 + 测试**；`compaction/prune` 事件由 M5c-2 落。
    - 测试：`internal/compaction/basic_test.go` + `pruner_test.go`——token 压力触发/不触发、retain_turns 尾部保留、被遮蔽范围配对校正（不平衡范围校正到平衡）、摘要生成（fake LLM）、CompactNow/CompactRegion、剪枝（head/middle/tail、Unicode 边界）。
 
-**纪律**：不改 loop 的 turn/step 结构（D4）；**日志仍追加式（D1）**——压缩绝不物理删除旧事件，被遮蔽事件保留在日志，只是派生时跳过（fold 规则改造在 `session.derive`，属 M2 预留的"派生规则只改折叠"位）；主循环串行（D5）；零新依赖（标准库即可）；CGO-free；原有测试全绿（尤其 session 的 derive 测试）。**不要动**：loop 源码、cmd/pa、config、jobs、subagent、tools 包（只读参考）。**本任务不做**：/compact 命令、`compaction/*` 事件类型、config、PreStep 接线（M5c-2）。
+**纪律**：不改 loop 的 turn/step 结构（D4）；**日志仍追加式（D1）**——压缩绝不物理删除旧事件，被遮蔽事件保留在日志，只是派生时跳过（fold 规则改造在 `session.derive`，属 M2 预留的"派生规则只改折叠"位）；主循环串行（D5）；零新依赖（标准库即可）；CGO-free；原有测试全绿（尤其 session 的 derive 测试）。**不要动**：loop 源码、cmd/sta、config、jobs、subagent、tools 包（只读参考）。**本任务不做**：/compact 命令、`compaction/*` 事件类型、config、PreStep 接线（M5c-2）。
 
 **环境（重要）**：Go 在 `C:\Program Files\Go\bin\go.exe`（不在 PATH）；每次 Go 命令设 `$env:GOTELEMETRY='off'; $env:GOFLAGS='-mod=mod'; $env:GOMODCACHE='D:\dev-projects\Agent\shutu-agent\.gomodcache'; $env:GOPATH='D:\dev-projects\Agent\shutu-agent\.gopath'; $env:GOCACHE='D:\dev-projects\Agent\shutu-agent\.gocache'`。用 pwsh 执行命令。git 提交用 `git -C D:\dev-projects\Agent\shutu-agent -c user.name='Personal Agent' -c user.email='dev@shutu-agent.local' commit -m "..."`。不要提交 `pa.exe`、`data/`、缓存目录。
 

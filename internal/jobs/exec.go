@@ -32,7 +32,7 @@ func runCommandLine(command, workdir string) func(ctx context.Context) (JobOutco
 	/*
 			return func(ctx context.Context) (JobOutcome, error) {
 				cmd := newShellCommand(command, workdir, scrubbedEnv())
-				outFile, err := os.CreateTemp("", "pa-job-*.txt")
+				outFile, err := os.CreateTemp("", "sta-job-*.txt")
 				if err != nil {
 					return JobOutcome{}, fmt.Errorf("job: create output file: %w", err)
 				}

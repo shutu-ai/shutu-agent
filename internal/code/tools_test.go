@@ -15,7 +15,7 @@ type eventRec struct {
 
 // newCodeToolsWithEvents returns an engine and a CodeTools bundle wired to a
 // slice that records every emitted code/* event (the composition root wires the
-// same sink to the session log in cmd/pa, D3).
+// same sink to the session log in cmd/sta, D3).
 func newCodeToolsWithEvents(t *testing.T) (*engine, *CodeTools, *[]eventRec) {
 	t.Helper()
 	e := NewEngine(nil)

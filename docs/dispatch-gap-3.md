@@ -1,10 +1,10 @@
 # GAP-3 派发：workflow（多 agent 编排，JSON DAG）
 
-> 标准模式缺口 ADR `docs/decisions/2026-08-20-standard-gaps.md`（D-GAP-2）。本文件是 **GAP-3** 契约：`internal/workflow` 声明式 DAG 编排 + `workflow_run` 工具 + config cap + cmd/pa 接线 + 测试。用户已拍板「JSON DAG 声明式编排」（Go 原生执行，无 JS 引擎；dsh 的 JS 脚本 hooks 用 JSON 依赖图等价表达）。
+> 标准模式缺口 ADR `docs/decisions/2026-08-20-standard-gaps.md`（D-GAP-2）。本文件是 **GAP-3** 契约：`internal/workflow` 声明式 DAG 编排 + `workflow_run` 工具 + config cap + cmd/sta 接线 + 测试。用户已拍板「JSON DAG 声明式编排」（Go 原生执行，无 JS 引擎；dsh 的 JS 脚本 hooks 用 JSON 依赖图等价表达）。
 
 ## 纪律
 
-- 零新依赖、CGO-free；只动 internal/workflow（新建）、internal/session、internal/config、cmd/pa、config.yaml；gofmt；不改 loop。
+- 零新依赖、CGO-free；只动 internal/workflow（新建）、internal/session、internal/config、cmd/sta、config.yaml；gofmt；不改 loop。
 - 默认关（D10）：`workflow.enabled` 默认 false；未启用不注册不白名单；**minimal 分支关闭**。
 - 提交 1 个：`GAP-3: workflow JSON DAG 编排（internal/workflow + workflow_run 工具 + config + 接线）`
 
@@ -144,7 +144,7 @@ workflow_run: <N> tasks
 - **minimal 分支**：加 `cfg.Workflow.Enabled = false`。
 - config.yaml：`workflow:` 段（enabled 默认 false D10、max_concurrent 默认 4）。
 
-### 6. cmd/pa/workflow.go（新建）+ main.go 接线 + workflow_test.go
+### 6. cmd/sta/workflow.go（新建）+ main.go 接线 + workflow_test.go
 - `registerWorkflow() error`（照 eval.go 模式）：
 ```go
 // registerWorkflow wires the task-DAG orchestration seam (D-GAP-2) when
@@ -173,7 +173,7 @@ func (a *app) registerWorkflow() error {
 }
 ```
 - main.go：import internal/workflow；`registerWorkflow()` 调用（registerSubagent 之后）；无 defer。
-- cmd/pa/workflow_test.go：
+- cmd/sta/workflow_test.go：
   - `TestRegisterWorkflowDisabledRegistersNothing`（D10）。
   - `TestRegisterWorkflowEnabled`：enabled → 注册 + 白名单含 workflow_run。
   - `TestWorkflowRunE2E`：fake LLM 两任务（无依赖并发）→ Execute 含两个 completed；workflow/run 事件入 log（total=2）。
@@ -181,7 +181,7 @@ func (a *app) registerWorkflow() error {
 
 ## 验证
 
-`go build ./...` + `go test -count=1 ./internal/workflow/ ./internal/session/ ./internal/config/ ./cmd/pa/ -run 'Workflow|workflow' -v` 全 PASS 后提交；随后 `go test -count=1 ./...` 全绿确认。
+`go build ./...` + `go test -count=1 ./internal/workflow/ ./internal/session/ ./internal/config/ ./cmd/sta/ -run 'Workflow|workflow' -v` 全 PASS 后提交；随后 `go test -count=1 ./...` 全绿确认。
 
 ## 环境
 

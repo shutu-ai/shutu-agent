@@ -9,7 +9,7 @@
 ## 2. 模块结构
 
 ```text
-cmd/pa/              组合根、REPL、Web 与 ACP 入口
+cmd/sta/              组合根、REPL、Web 与 ACP 入口
 internal/loop/       turn/step 生命周期、取消、工具循环
 internal/session/    追加式事件日志、历史派生、持久化
 internal/llm/        流式消息与 Provider 适配
@@ -19,6 +19,9 @@ internal/jobs/       有 owner 边界的后台任务
 internal/subagent/   子 Agent 生命周期与报告
 internal/compaction/ 上下文压缩
 internal/skill/      本地技能发现和按需加载
+internal/agentinstructions/ 工作区指令基线与增量
+internal/sessionreference/  跨会话引用召回
+internal/timecontext/       可选的持久时钟上下文
 internal/webserver/  认证后的 Web 工作台与只读事件 API
 ```
 
@@ -31,6 +34,8 @@ internal/webserver/  认证后的 Web 工作台与只读事件 API
 turn 包含一个或多个 step：追加用户消息，执行有界的 pre-step 注入，调用流式 LLM，持久化文本和工具调用，执行工具并追加结果，直到模型完成或达到步数上限。所有路径都支持取消和 fail-open 的非关键投影。
 
 `loop.Config.PreStep` 是统一的上下文注入接缝。注入器按注册顺序运行，可设置每轮一次、去重和字符上限；运行时快照、压缩、技能目录等能力通过此接缝组合，不修改 turn/step 结构。
+
+`time_context` 是 DSH 兼容的可选时钟上下文。未显式配置时跟随 `schedule.enabled`；启用后每个进入的 step 在所有普通上下文之后追加 durable snapshot。读数携带带时区时间、请求浏览器时区策略和相对正确 baseline 的耗时；浏览器时区来自 native Web user-rpc provenance，queued prompt 也保留同一 provenance。
 
 ## 4. 工具与安全
 

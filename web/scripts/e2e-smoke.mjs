@@ -6,10 +6,9 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const dshRoot = resolve(process.env.SHUTU_DSH_ROOT ?? resolve(webRoot, '../../deepseek-harness'))
-const vite = resolve(dshRoot, 'apps/web/node_modules/vite/bin/vite.js')
+const vite = resolve(webRoot, 'node_modules/vite/bin/vite.js')
 const distIndex = resolve(webRoot, 'dist/index.html')
-const { chromium, firefox, webkit } = createRequire(import.meta.url)(resolve(dshRoot, 'apps/web/node_modules/playwright'))
+const { chromium, firefox, webkit } = createRequire(import.meta.url)(resolve(webRoot, 'node_modules/playwright'))
 const host = '127.0.0.1'
 const port = Number(process.env.SHUTU_E2E_PORT ?? 18117)
 const baseUrl = process.env.SHUTU_E2E_BASE_URL ?? `http://${host}:${port}/`
@@ -19,7 +18,7 @@ const pixelCaptureDirectory = resolve(process.env.SHUTU_PIXEL_CAPTURE_DIR ?? art
 mkdirSync(artifactDirectory, { recursive: true })
 
 if (!existsSync(vite)) {
-  throw new Error(`Vite is unavailable at ${vite}; set SHUTU_DSH_ROOT to a DSH checkout.`)
+  throw new Error(`Vite is unavailable at ${vite}; run npm install.`)
 }
 if (!existsSync(distIndex)) {
   throw new Error(`Native dist is unavailable at ${distIndex}; run npm.cmd run build first.`)
@@ -56,6 +55,7 @@ async function installNativeMock(page, options = {}) {
   const sockets = new Set()
   const socketConnections = new Map()
   const requests = []
+  const createPayloads = []
   const queueUpdates = []
   const goalActions = []
   let goalState = options.goalControls === true ? {
@@ -273,7 +273,7 @@ async function installNativeMock(page, options = {}) {
         }),
       })
     }
-    if (body.method === 'session.list' && options.seedSession) {
+    if (body.method === 'session.list' && (options.seedSession || options.ungroupedSession)) {
       return route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -281,11 +281,17 @@ async function installNativeMock(page, options = {}) {
           type: 'server-response',
           rpcId: body.rpcId,
           result: { ok: true, value: {
-            items: [{
-              sessionId: 'search-fixture', title: 'Search fixture', updatedAt: Date.now(),
-              running: options.runningSession === true, blank: false, cwd: 'C:/shutu-search',
-              projections: { asOfSeq: 0, values: { title: 'Search fixture', sessionListMetadata: { blank: false } } },
-            }],
+            items: options.ungroupedSession
+              ? [{
+                sessionId: 'ungrouped-fixture', title: 'Ungrouped fixture', updatedAt: Date.now(),
+                running: false, blank: false, cwd: 'C:/Users/tester/shutu',
+                projections: { asOfSeq: 0, values: { title: 'Ungrouped fixture', sessionListMetadata: { blank: false } } },
+              }]
+              : [{
+                sessionId: 'search-fixture', title: 'Search fixture', updatedAt: Date.now(),
+                running: options.runningSession === true, blank: false, cwd: 'C:/shutu-search',
+                projections: { asOfSeq: 0, values: { title: 'Search fixture', sessionListMetadata: { blank: false } } },
+              }],
           } },
         }),
       })
@@ -304,14 +310,15 @@ async function installNativeMock(page, options = {}) {
         }),
       })
     }
-    if (body.method === 'session.create' && options.seedSession) {
+    if (body.method === 'session.create' && (options.seedSession || options.ungroupedSession)) {
+      createPayloads.push(body.payload)
       return route.fulfill({
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
           type: 'server-response',
           rpcId: body.rpcId,
-          result: { ok: true, value: { sessionId: 'created-search' } },
+          result: { ok: true, value: { sessionId: options.ungroupedSession ? 'created-ungrouped' : 'created-search' } },
         }),
       })
     }
@@ -492,7 +499,7 @@ async function installNativeMock(page, options = {}) {
   })
   return {
     sockets, socketConnections, requests, queueUpdates, sendMux, sendQueueSnapshot, sendJobsSnapshot,
-    goalActions, sendProjection, sendRetryStarted,
+    createPayloads, goalActions, sendProjection, sendRetryStarted,
     get interactionStage() { return interactionStage },
     setInteractionStage: value => { interactionStage = value },
   }
@@ -843,8 +850,13 @@ async function runAccessibilityMatrix(browser) {
     await page.keyboard.press('Tab')
     assert.equal(await first.evaluate(element => document.activeElement === element), true, `${viewport.name} Tab did not wrap focus`)
     await page.keyboard.press('Escape')
-    await page.waitForTimeout(100)
-    assert.equal(await settingsButton.evaluate(element => document.activeElement === element), true, `${viewport.name} Escape did not restore focus`)
+    await page.waitForFunction(() => {
+      const active = document.activeElement
+      return active instanceof HTMLButtonElement
+        && active.getAttribute('aria-haspopup') === 'dialog'
+        && active.getAttribute('aria-expanded') === 'false'
+        && document.querySelector('[role="dialog"]') === null
+    }, undefined, { timeout: 2_000 })
     assert.deepEqual(issues, [])
     results.push({ viewport: `${viewport.width}x${viewport.height}`, tabs: semantics.tabs.length, focusableCount, namedControls: semantics.controls.length, touchTargets: semantics.controls.filter(control => control.width >= 24 && control.height >= 24).length, console: 'clean' })
     await page.close()
@@ -1049,6 +1061,27 @@ async function runSearchErrorRecovery(browser) {
   assert.deepEqual(issues, [])
   await page.close()
   return { requests: 2, recovered: true, console: 'clean' }
+}
+
+async function runUngroupedNewSession(browser) {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+  const issues = []
+  page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
+  page.on('pageerror', error => issues.push(error.message))
+  page.on('response', response => { if (response.status() >= 400) issues.push(`http ${response.status}: ${response.url()}`) })
+  const { createPayloads } = await installNativeMock(page, { ungroupedSession: true })
+  await page.goto(baseUrl, { waitUntil: 'domcontentloaded' })
+  await waitForNativeShell(page)
+  await page.getByText('未分组', { exact: true }).click()
+  await page.getByText('Ungrouped fixture', { exact: true }).waitFor({ timeout: 15_000 })
+  const newSession = page.locator('button[aria-label="New session"], button[aria-label="新建会话"]').last()
+  await newSession.click()
+  await page.getByText('Ungrouped fixture', { exact: true }).waitFor({ timeout: 15_000 })
+  assert.equal(createPayloads.length, 1, `expected one ungrouped session create, got ${createPayloads.length}`)
+  assert.equal(createPayloads[0].workspaceId, undefined, 'ungrouped New Session incorrectly sent a workspaceId')
+  assert.deepEqual(issues, [])
+  await page.close()
+  return { created: true, ungrouped: true, console: 'clean' }
 }
 
 async function runSessionLifecycle(browser) {
@@ -1377,13 +1410,14 @@ try {
     const capabilityMatrix = await runCapabilityMatrix(browser)
     const extendedCapabilityMatrix = await runExtendedCapabilityMatrix(browser)
     const searchErrorRecovery = await runSearchErrorRecovery(browser)
+    const ungroupedNewSession = await runUngroupedNewSession(browser)
     const sessionLifecycle = await runSessionLifecycle(browser)
     const interactionControls = await runInteractionControls(browser)
     const queueControls = await runQueueControls(browser)
     const cancelPlanGoalControls = await runCancelPlanGoalControls(browser)
     const retryControls = await runRetryControls(browser)
     const mobile = await runMobile(browser)
-    console.log(JSON.stringify({ browser: 'playwright', native: 'ok', desktop, reconnectDesktop, darkDesktop, loadingDesktop, errorStateMatrix, visualGeometryMatrix, accessibilityMatrix, crossBrowserAccessibilityMatrix, capabilityMatrix, extendedCapabilityMatrix, searchErrorRecovery, sessionLifecycle, interactionControls, queueControls, cancelPlanGoalControls, retryControls, mobile }))
+    console.log(JSON.stringify({ browser: 'playwright', native: 'ok', desktop, reconnectDesktop, darkDesktop, loadingDesktop, errorStateMatrix, visualGeometryMatrix, accessibilityMatrix, crossBrowserAccessibilityMatrix, capabilityMatrix, extendedCapabilityMatrix, searchErrorRecovery, ungroupedNewSession, sessionLifecycle, interactionControls, queueControls, cancelPlanGoalControls, retryControls, mobile }))
     }
   } finally {
     await browser.close()

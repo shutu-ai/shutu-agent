@@ -1,10 +1,10 @@
 # GAP-4 派发：subagent 外部 provider 变体（codex / claude-code，可选默认关）
 
-> 标准模式缺口 ADR `docs/decisions/2026-08-20-standard-gaps.md`（D-GAP-4）。本文件是 **GAP-4** 契约：`internal/subagent` 外部 provider + `subagent_spawn` 加 provider 字段 + config + cmd/pa 接线 + 测试。用户已拍板「可选、默认关、CLI 探测」。
+> 标准模式缺口 ADR `docs/decisions/2026-08-20-standard-gaps.md`（D-GAP-4）。本文件是 **GAP-4** 契约：`internal/subagent` 外部 provider + `subagent_spawn` 加 provider 字段 + config + cmd/sta 接线 + 测试。用户已拍板「可选、默认关、CLI 探测」。
 
 ## 纪律
 
-- 零新依赖、CGO-free；只动 internal/subagent、internal/config、cmd/pa、config.yaml；gofmt；不改 loop。
+- 零新依赖、CGO-free；只动 internal/subagent、internal/config、cmd/sta、config.yaml；gofmt；不改 loop。
 - 默认关（D10）：外部 provider 未启用不注册；`subagent_spawn` 的 provider 字段缺省 `spawn`；未启用/未知 provider → fail-closed（不静默回退本地）。
 - 提交 1 个：`GAP-4: subagent 外部 provider（codex/claude-code exec + provider 字段 + config + 接线）`
 
@@ -14,7 +14,7 @@
 - `internal/subagent/tools.go`：`SubagentSpawnTool.Execute` 用 `defaultProviderName` 硬编码（tools.go:236）——需改为读 schema 的 provider 字段。`defaultProviderName` 常量（照查 spawn.go 或 service.go）。
 - `internal/subagent/service.go`：Capabilities{OutputSchema, DepthLimit, ToolFilter, Persona}；哨兵 error 集合。
 - `internal/config/config.go`：`SubagentConfig`（读现有字段：max_depth / default_provider / ...）；applyDefaults；Mode-1 minimal 分支（subagent 已关闭，无需加——但确认 `cfg.Subagent.Enabled = false` 已在 minimal 分支；外部 provider 开关随 subagent cap 一起被 minimal 关闭）。
-- `cmd/pa/subagent.go`：registerSubagent（注册 SpawnProvider + SubagentTools + D3 事件）。
+- `cmd/sta/subagent.go`：registerSubagent（注册 SpawnProvider + SubagentTools + D3 事件）。
 
 ## 变更清单（精确）
 
@@ -112,16 +112,16 @@ func NewExternalProvider(name, command string) *ExternalProvider
 ```
 - config_test.go：`TestExternalProviderDefaults`——配置 codex 空 command → applyDefaults 后 "codex"；未启用默认 false。
 
-### 5. cmd/pa/subagent.go 接线
+### 5. cmd/sta/subagent.go 接线
 - `registerSubagent` 内（注册 SpawnProvider 后、或单独 loop）：遍历 `a.cfg.Subagent.ExternalProviders`，`Enabled` 的 → `a.subagents.RegisterProvider(subagent.NewExternalProvider(name, command))`；`RegisterProvider` 失败（重复名）→ 返回 error（fail-closed）。command 取 `cfg.Command`（applyDefaults 已填默认）。
 - main.go：无需新调用（并入 registerSubagent）。
-- cmd/pa/subagent_test.go（或新 external 接线测试）：
+- cmd/sta/subagent_test.go（或新 external 接线测试）：
   - `TestRegisterSubagentExternalProviders`：enabled codex + command 指向 fake helper → RegisterProvider 后 `ListProviders()` 含 "codex"。
   - `TestRegisterSubagentExternalDisabled`：disabled → ListProviders 不含（D10）。
 
 ## 验证
 
-`go build ./...` + `go test -count=1 ./internal/subagent/ ./internal/config/ ./cmd/pa/ -run 'External|Provider|Spawn|Subagent' -v` 全 PASS 后提交；随后 `go test -count=1 ./...` 全绿确认。
+`go build ./...` + `go test -count=1 ./internal/subagent/ ./internal/config/ ./cmd/sta/ -run 'External|Provider|Spawn|Subagent' -v` 全 PASS 后提交；随后 `go test -count=1 ./...` 全绿确认。
 
 ## 环境
 

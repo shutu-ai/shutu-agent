@@ -6,7 +6,7 @@ claimAllowed: true
 
 reference:
   repository: deepseek-harness
-  root: .gocache/reference/deepseek-harness
+  root: .reference/dsh
   commit: 141eb6fef83422698aef7a981029e843e8161534
   tag: dsh-v0.1.0-rc.8
   profiles:

@@ -46,7 +46,8 @@ type Config struct {
 	// HTTPClient 可选；默认 http.DefaultClient。注意：provider 会在其基础上
 	// 复制出不跟随重定向的 client，不改动调用方传入的共享 client。
 	HTTPClient *http.Client
-	// OnRequest 在派发前收到 secret-free 请求快照（组合根用它落 web/search-request）。
+	// OnRequest 在派发前收到 secret-free 请求快照（组合根用它落 canonical
+	// web/deepseek-search-llm-request 事件）。
 	// 返回错误则阻止派发（模型可见的辅助输入不能逃过日志，D3）。
 	OnRequest        func(SearchRequestEvent) error
 	OnRequestContext func(context.Context, SearchRequestEvent) error

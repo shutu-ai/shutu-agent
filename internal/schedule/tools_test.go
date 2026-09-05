@@ -43,7 +43,7 @@ func countEventType(recs []eventRecord, typ string) int {
 // the tools: schedule_create requires kind (restricted to the interval|cron
 // enum) and spec and rejects unknown properties; schedule_list takes no
 // arguments; schedule_delete requires a non-empty id. The registry compiles and
-// enforces these (cmd/pa), so the shape is asserted here.
+// enforces these (cmd/sta), so the shape is asserted here.
 func TestScheduleToolsSchemaShape(t *testing.T) {
 	e := NewEngine(nil)
 	defer e.Close()

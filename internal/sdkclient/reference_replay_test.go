@@ -10,9 +10,12 @@ import (
 )
 
 func TestHarnessReplaysReferenceNotificationFixtures(t *testing.T) {
-	referenceRoot := os.Getenv("DSH_REFERENCE_ROOT")
+	referenceRoot := os.Getenv("SHUTU_REFERENCE_ROOT")
 	if referenceRoot == "" {
-		t.Skip("DSH_REFERENCE_ROOT is not set; reference SDK replay is not available")
+		referenceRoot = filepath.Clean(filepath.Join("..", "..", ".reference", "dsh"))
+		if _, err := os.Stat(filepath.Join(referenceRoot, "examples", "jsonrpc-agent", "tests", "snapshots", "text-turn", "notifications.expected.jsonl")); err != nil {
+			t.Skip("reference SDK checkout is not available")
+		}
 	}
 	scenarios := []string{"text-turn", "bash-tool", "persistent-tools", "subagent-spawn-in-process"}
 	for _, scenario := range scenarios {

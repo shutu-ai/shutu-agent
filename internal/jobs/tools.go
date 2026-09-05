@@ -1,7 +1,7 @@
 // tools.go — the M5a-2 Consumer half of the jobs seam (design.md §8 Consumer /
 // D2/D9, dispatch-m5a-2 §2): dsh's job_output, job_kill and job_list
 // projections are registered into the tools.Registry by the composition root
-// (cmd/pa) when jobs.enabled, and auto-whitelisted by config.applyDefaults the
+// (cmd/sta) when jobs.enabled, and auto-whitelisted by config.applyDefaults the
 // same way the other built-in tools are. They implement the tools.Tool method set
 // structurally (Go structural typing), so this package never imports the tools
 // package — the seam stays decoupled.

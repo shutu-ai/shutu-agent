@@ -1,6 +1,6 @@
 // tools.go — the M6f-2 Consumer half of the MCP seam (design.md §8 Consumer /
 // D2, dispatch-m6f-2 §3): mcp_list and mcp_call are registered into the
-// tools.Registry by the composition root (cmd/pa) when mcp.enabled, and
+// tools.Registry by the composition root (cmd/sta) when mcp.enabled, and
 // auto-whitelisted by config.applyDefaults the same way the job_*/subagent_*/
 // skill_*/schedule_*/plan_*/spill_*/interact_*/code_* tools are. The returned
 // tools implement the tools.Tool method set structurally (Go structural
@@ -502,7 +502,7 @@ func formatToolList(tools []Tool) string {
 // FormatCallResult renders a tools/call result as model-facing text: an
 // [isError] marker when the server reported a tool-level failure, then the
 // content items (each item's "text" when it is a text block, else its JSON).
-// It is shared by mcp_call and by cmd/pa's bridged mcp.<server>.<tool> tools so
+// It is shared by mcp_call and by cmd/sta's bridged mcp.<server>.<tool> tools so
 // a server tool's result reads identically through either path.
 func FormatCallResult(res CallResult) string {
 	var sb strings.Builder

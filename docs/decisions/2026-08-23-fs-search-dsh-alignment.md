@@ -37,7 +37,7 @@
 
 - 模型可见变化：grep 的 pattern 现在是正则且大小写敏感；include 代替原 glob/regex/max_results 参数；输出格式换成 dsh 分组样式；glob 的 `*.md` 语义从"根层"变为"任意深度"。
 - 旧会话回放：UI 只对新输出用新解析器；旧 "path:line: text" 行在新解析器下不产生搜索卡（回落 IO 卡）——可接受。
-- 测试面：`internal/fssearch` 两套测试重写（正则语义、大小写敏感、include 校验与匹配、glob 任意深度/排序/分页、dsh 文案）；`cmd/pa/fssearch_test.go` 断言更新。
+- 测试面：`internal/fssearch` 两套测试重写（正则语义、大小写敏感、include 校验与匹配、glob 任意深度/排序/分页、dsh 文案）；`cmd/sta/fssearch_test.go` 断言更新。
 
 ## 验收标准（全部通过）
 

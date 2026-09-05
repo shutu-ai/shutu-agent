@@ -289,6 +289,26 @@ func TestNativeSessionCancelIsIdempotentWhenNoTurnIsRunning(t *testing.T) {
 		t.Fatalf("idempotent cancel = %d %+v", rec.Code, response)
 	}
 
+	seedSession(t, st, "cancel-child", []session.Event{{
+		Seq: 1, Type: session.EventSubagentStart, At: time.UnixMilli(1000), Version: session.EventVersion,
+		Data: json.RawMessage(`{"parentSession":"cancel-parent","depth":1}`),
+	}})
+	if err := st.SetSessionHeader(context.Background(), "cancel-child", store.SessionHeader{
+		ID: "cancel-child", Origin: "subagent", DelegationDepth: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec = doReqBody(t, srv.Handler(), http.MethodPost, "/api/session.cancel", "tok", `{
+		"type":"client-request","rpcId":"cancel-child","method":"session.cancel",
+		"payload":{"sessionId":"cancel-child"}
+	}`)
+	response = nativeResponse(t, rec.Body.Bytes())
+	if response.Result.OK || response.Result.Error == nil ||
+		response.Result.Error.Code != "agent-busy" ||
+		response.Result.Error.Details["reason"] != "use subagent delivery for this child session" {
+		t.Fatalf("subagent ownership cancel = %+v", response)
+	}
+
 	rec = doReqBody(t, srv.Handler(), http.MethodPost, "/api/session.cancel", "tok", `{
 		"type":"client-request","rpcId":"cancel-2","method":"session.cancel",
 		"payload":{"sessionId":"missing-session"}
@@ -359,6 +379,92 @@ func TestNativeSessionCancelStopsBeforeMetadataRead(t *testing.T) {
 	case <-wrapped.metadataStarted:
 		t.Fatal("cancel read metadata after the stopper accepted it")
 	default:
+	}
+}
+
+func TestNativeGenericSessionRoutesFenceSubagentOwnedSessions(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	const sessionID = "subagent-owned"
+	seedSession(t, st, sessionID, []session.Event{{
+		Seq: 1, Type: session.EventSubagentStart, At: time.UnixMilli(1000), Version: session.EventVersion,
+		Data: json.RawMessage(`{"parentSession":"parent-session","depth":1}`),
+	}})
+	if err := st.SetSessionHeader(context.Background(), sessionID, store.SessionHeader{
+		ID:              sessionID,
+		Origin:          "subagent",
+		Parent:          "parent-session",
+		DelegationDepth: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var callbackCalls atomic.Int64
+	callback := func() { callbackCalls.Add(1) }
+	srv.SetNativeSessionRenamer(func(context.Context, string, string) (int64, error) {
+		callback()
+		return 0, nil
+	})
+	srv.SetQueueManager(
+		func(context.Context, string) ([]QueueItem, error) {
+			callback()
+			return nil, nil
+		},
+		func(context.Context, string, string, []llm.ContentBlock, PromptMeta) (QueueItem, error) {
+			callback()
+			return QueueItem{}, nil
+		},
+		func(context.Context, string, string, string) error {
+			callback()
+			return nil
+		},
+	)
+	srv.SetSessionModelValidator(func(context.Context, string, string, string, string) error {
+		callback()
+		return nil
+	})
+	srv.SetNativeQueueUpdater(func(context.Context, string, string, string, string) error {
+		callback()
+		return nil
+	})
+	srv.SetNativeGoalManager(func(context.Context, NativeGoalMutation) (NativeGoalMutationResult, error) {
+		callback()
+		return NativeGoalMutationResult{}, nil
+	})
+	srv.SetTurnStopper(func(string) error {
+		callback()
+		return nil
+	})
+
+	cases := []struct {
+		name    string
+		method  string
+		payload string
+	}{
+		{name: "rename", method: "session.rename", payload: `{"sessionId":"subagent-owned","title":"renamed"}`},
+		{name: "prompt", method: "session.prompt", payload: `{"sessionId":"subagent-owned","mode":"queue","content":[{"type":"text","text":"blocked"}]}`},
+		{name: "models", method: "session.models", payload: `{"sessionId":"subagent-owned"}`},
+		{name: "select-model", method: "session.selectModel", payload: `{"sessionId":"subagent-owned","provider":"provider","model":"model"}`},
+		{name: "update-queue", method: "session.updateQueue", payload: `{"sessionId":"subagent-owned","itemId":"item-1","action":{"kind":"remove"}}`},
+		{name: "goal", method: "goal.create", payload: `{"sessionId":"subagent-owned","objective":"blocked"}`},
+		{name: "agent-preset", method: "agentPreset.select", payload: `{"sessionId":"subagent-owned","agentPreset":"minimal"}`},
+		{name: "cancel", method: "session.cancel", payload: `{"sessionId":"subagent-owned"}`},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			body := fmt.Sprintf(`{"type":"client-request","rpcId":"%s","method":"%s","payload":%s}`,
+				strings.ReplaceAll(test.name, " ", "-"), test.method, test.payload)
+			rec := doReqBody(t, srv.Handler(), http.MethodPost, "/api/"+test.method, "tok", body)
+			response := nativeResponse(t, rec.Body.Bytes())
+			if response.Result.OK || response.Result.Error == nil ||
+				response.Result.Error.Code != "agent-busy" ||
+				response.Result.Error.Message != `session "subagent-owned" is owned by subagent routing` ||
+				response.Result.Error.Details["reason"] != "use subagent delivery for this child session" {
+				t.Fatalf("%s response = %+v", test.name, response)
+			}
+		})
+	}
+	if callbackCalls.Load() != 0 {
+		t.Fatalf("ownership gate leaked %d callback calls", callbackCalls.Load())
 	}
 }
 
@@ -565,7 +671,7 @@ func TestNativeRPCSessionHistoryAndPrompt(t *testing.T) {
 	}
 
 	gotPrompt := make(chan string, 1)
-	srv.SetMessageHandler(func(_ context.Context, sessionID, text string, _ []llm.ImageRef) error {
+	srv.SetMessageHandler(func(_ context.Context, sessionID, text string, _ []llm.ImageRef, _ PromptMeta) error {
 		gotPrompt <- sessionID + ":" + text
 		return nil
 	})
@@ -607,6 +713,39 @@ func TestNativeHistoryRejectsUnknownDurableEventsFromRawStore(t *testing.T) {
 	}
 }
 
+func TestNativeSessionPromptCarriesCanonicalTimeZoneProvenance(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	if err := st.CreateSession(context.Background(), "native-zone", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	gotMeta := make(chan PromptMeta, 1)
+	srv.SetMessageHandler(func(_ context.Context, _ string, _ string, _ []llm.ImageRef, meta PromptMeta) error {
+		gotMeta <- meta
+		return nil
+	})
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/session.prompt", "tok", `{"type":"client-request","rpcId":"zone-request","method":"session.prompt","payload":{"sessionId":"native-zone","mode":"steer","clientTimeZone":"Asia/Shanghai","content":[{"type":"text","text":"schedule this"}]}}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK {
+		t.Fatalf("zone prompt response=%+v", response)
+	}
+	select {
+	case meta := <-gotMeta:
+		if meta.RPCID == "" || meta.ClientTimeZone != "Asia/Shanghai" {
+			t.Fatalf("prompt meta = %#v", meta)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("zone prompt was not dispatched")
+	}
+
+	rec = doReqBody(t, srv.Handler(), "POST", "/api/session.prompt", "tok", `{"type":"client-request","rpcId":"bad-zone","method":"session.prompt","payload":{"sessionId":"native-zone","mode":"steer","clientTimeZone":"+08:00","content":[{"type":"text","text":"bad"}]}}`)
+	response = nativeResponse(t, rec.Body.Bytes())
+	if response.Result.OK || response.Result.Error == nil ||
+		response.Result.Error.Code != "invalid-time-zone" ||
+		response.Result.Error.Details["value"] != "+08:00" {
+		t.Fatalf("bad zone response=%+v", response)
+	}
+}
+
 func TestNativeSessionPromptReturnsBeforeTurnCompletes(t *testing.T) {
 	srv, st := newTestServer(t, "tok")
 	if err := st.CreateSession(context.Background(), "native-admission", time.Now()); err != nil {
@@ -614,7 +753,7 @@ func TestNativeSessionPromptReturnsBeforeTurnCompletes(t *testing.T) {
 	}
 	started := make(chan struct{})
 	release := make(chan struct{})
-	srv.SetMessageHandler(func(ctx context.Context, _ string, _ string, _ []llm.ImageRef) error {
+	srv.SetMessageHandler(func(ctx context.Context, _ string, _ string, _ []llm.ImageRef, _ PromptMeta) error {
 		close(started)
 		if ctx.Done() != nil {
 			t.Error("native prompt handler inherited request cancellation")
@@ -645,7 +784,59 @@ func TestNativeSessionPromptReturnsBeforeTurnCompletes(t *testing.T) {
 	close(release)
 }
 
-func TestNativeSessionPromptPersistsBase64ImagesAndUsesQueueForText(t *testing.T) {
+func TestNativeSessionPromptRejectsUnservedProviderBeforeAdmission(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	if err := st.CreateSession(context.Background(), "native-route", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	provider := "closed-provider"
+	srv.SetConfigProvider(func() map[string]any {
+		return map[string]any{
+			"llm_provider": provider,
+			"model":        "closed-model",
+			"providers": []any{
+				map[string]any{"id": "closed-provider", "configured": false, "available": false},
+				map[string]any{"id": "ready-provider", "configured": true, "available": true},
+			},
+		}
+	})
+	var admitted atomic.Int64
+	srv.SetQueueManager(
+		func(context.Context, string) ([]QueueItem, error) { return nil, nil },
+		func(context.Context, string, string, []llm.ContentBlock, PromptMeta) (QueueItem, error) {
+			admitted.Add(1)
+			return QueueItem{}, nil
+		},
+		func(context.Context, string, string, string) error { return nil },
+	)
+	call := func() nativeRPCResponse {
+		rec := doReqBody(t, srv.Handler(), "POST", "/api/session.prompt", "tok",
+			`{"type":"client-request","rpcId":"route","method":"session.prompt","payload":{"sessionId":"native-route","mode":"queue","content":[{"type":"text","text":"hello"}]}}`)
+		return nativeResponse(t, rec.Body.Bytes())
+	}
+	response := call()
+	if response.Result.OK || response.Result.Error == nil ||
+		response.Result.Error.Code != "model-unavailable" ||
+		response.Result.Error.Message != `no adapter serves provider "closed-provider"; select a model for this session` ||
+		response.Result.Error.Details["provider"] != "closed-provider" ||
+		response.Result.Error.Details["model"] != "closed-model" {
+		t.Fatalf("unserved prompt = %+v", response)
+	}
+	if admitted.Load() != 0 {
+		t.Fatal("unserved prompt reached queue admission")
+	}
+
+	provider = "ready-provider"
+	response = call()
+	if !response.Result.OK || response.Result.Value == nil {
+		t.Fatalf("served prompt = %+v", response)
+	}
+	if admitted.Load() != 1 {
+		t.Fatalf("served prompt admissions = %d", admitted.Load())
+	}
+}
+
+func TestNativeSessionPromptQueuesRichImagesAndText(t *testing.T) {
 	srv, st := newTestServer(t, "tok")
 	if err := st.CreateSession(context.Background(), "native-prompt", time.Now()); err != nil {
 		t.Fatal(err)
@@ -655,37 +846,72 @@ func TestNativeSessionPromptPersistsBase64ImagesAndUsesQueueForText(t *testing.T
 		t.Fatal(err)
 	}
 	srv.SetAttachmentStore(att)
-	gotImages := make(chan []llm.ImageRef, 1)
-	srv.SetMessageHandler(func(_ context.Context, sessionID, text string, images []llm.ImageRef) error {
-		if sessionID != "native-prompt" || text != "describe this" {
-			return fmt.Errorf("prompt callback = %q/%q", sessionID, text)
-		}
-		gotImages <- images
+	var directPrompts atomic.Int32
+	srv.SetMessageHandler(func(context.Context, string, string, []llm.ImageRef, PromptMeta) error {
+		directPrompts.Add(1)
 		return nil
 	})
-	rec := doReqBody(t, srv.Handler(), "POST", "/api/session.prompt", "tok", `{"type":"client-request","rpcId":"image-1","method":"session.prompt","payload":{"sessionId":"native-prompt","mode":"queue","content":[{"type":"text","text":"describe this"},{"type":"image","mediaType":"image/png","data":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="}]}}`)
+	queuedContentCh := make(chan []llm.ContentBlock, 1)
+	var queuedItem QueueItem
+	srv.SetQueueManager(nil, func(_ context.Context, sessionID, text string, content []llm.ContentBlock, _ PromptMeta) (QueueItem, error) {
+		queuedContentCh <- content
+		queuedItem = QueueItem{ID: "q-rich", Text: text, Content: content, Placement: "queued"}
+		return queuedItem, nil
+	}, nil)
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/session.prompt", "tok", `{"type":"client-request","rpcId":"image-1","method":"session.prompt","payload":{"sessionId":"native-prompt","mode":"queue","content":[{"type":"text","text":"describe this"},{"type":"image","mediaType":"image/png","name":"diagram.png","data":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="}]}}`)
 	response := nativeResponse(t, rec.Body.Bytes())
 	if !response.Result.OK {
 		t.Fatalf("image prompt response=%+v", response)
 	}
 	select {
-	case images := <-gotImages:
-		if len(images) != 1 || images[0].MediaType != "image/png" || images[0].Bytes != 68 {
-			t.Fatalf("image prompt images=%+v", images)
+	case content := <-queuedContentCh:
+		if len(content) != 2 || content[0].Kind != llm.BlockText || content[0].Text != "describe this" ||
+			content[1].Kind != llm.BlockImage || content[1].Image.MediaType != "image/png" ||
+			content[1].Image.Name != "diagram.png" || content[1].Image.Bytes != 68 {
+			t.Fatalf("image prompt content=%+v", content)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("image prompt was not dispatched after admission")
+		t.Fatal("image prompt was not queued after admission")
+	}
+	if directPrompts.Load() != 0 {
+		t.Fatalf("queued image prompt bypassed the queue: directPrompts=%d", directPrompts.Load())
+	}
+	frame := nativeQueueFrame("native-prompt", []QueueItem{queuedItem})
+	items, ok := frame["items"].([]map[string]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("native queue frame = %#v", frame)
+	}
+	message, ok := items[0]["message"].(map[string]any)
+	if !ok {
+		t.Fatalf("native queue message = %#v", items[0])
+	}
+	content, ok := message["content"].([]llm.ContentBlock)
+	if !ok || len(content) != 2 ||
+		content[0].Kind != llm.BlockText || content[0].Text != "describe this" ||
+		content[1].Kind != llm.BlockImage || content[1].Image.MediaType != "image/png" ||
+		content[1].Image.Name != "diagram.png" {
+		t.Fatalf("native queue content = %#v", message["content"])
 	}
 
 	var queued string
-	srv.SetQueueManager(nil, func(_ context.Context, sessionID, text string) (QueueItem, error) {
+	queuedMeta := make(chan PromptMeta, 1)
+	srv.SetQueueManager(nil, func(_ context.Context, sessionID, text string, content []llm.ContentBlock, meta PromptMeta) (QueueItem, error) {
 		queued = sessionID + ":" + text
+		queuedMeta <- meta
 		return QueueItem{ID: "q-native", Text: text}, nil
 	}, nil)
-	rec = doReqBody(t, srv.Handler(), "POST", "/api/session.prompt", "tok", `{"type":"client-request","rpcId":"queue-1","method":"session.prompt","payload":{"sessionId":"native-prompt","mode":"queue","content":[{"type":"text","text":"queue this"}]}}`)
+	rec = doReqBody(t, srv.Handler(), "POST", "/api/session.prompt", "tok", `{"type":"client-request","rpcId":"queue-1","method":"session.prompt","payload":{"sessionId":"native-prompt","mode":"queue","clientTimeZone":"Asia/Shanghai","content":[{"type":"text","text":"queue this"}]}}`)
 	response = nativeResponse(t, rec.Body.Bytes())
 	if !response.Result.OK || queued != "native-prompt:queue this" {
 		t.Fatalf("queue prompt response=%+v queued=%q", response, queued)
+	}
+	select {
+	case meta := <-queuedMeta:
+		if meta.RPCID == "" || meta.ClientTimeZone != "Asia/Shanghai" {
+			t.Fatalf("queued provenance = %#v", meta)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("queue prompt callback was not invoked")
 	}
 }
 
@@ -703,7 +929,7 @@ func TestNativeSessionPromptValidatesImageBatchBeforeWriting(t *testing.T) {
 	valid := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 	rec := doReqBody(t, srv.Handler(), "POST", "/api/session.prompt", "tok", fmt.Sprintf(`{"type":"client-request","rpcId":"batch-1","method":"session.prompt","payload":{"sessionId":"native-batch","mode":"steer","content":[{"type":"text","text":"batch"},{"type":"image","mediaType":"image/png","data":%q},{"type":"image","mediaType":"image/tiff","data":%q}]}}`, "data:image/png;base64,"+valid, valid))
 	response := nativeResponse(t, rec.Body.Bytes())
-	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "attachment-error" {
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "attachment-error" || response.Result.Error.Details["reason"] != "UNSUPPORTED_IMAGE_TYPE" {
 		t.Fatalf("invalid image batch response = %+v", response)
 	}
 	entries, err := os.ReadDir(attachmentDir)
@@ -712,6 +938,135 @@ func TestNativeSessionPromptValidatesImageBatchBeforeWriting(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("invalid native image batch left %d attachment files", len(entries))
+	}
+}
+
+func TestNativeSessionPromptReportsImageTypeMismatch(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	if err := st.CreateSession(context.Background(), "native-mismatch", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	att, err := attachment.NewStore(filepath.Join(t.TempDir(), "attachments"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.SetAttachmentStore(att)
+	png := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/session.prompt", "tok", fmt.Sprintf(`{"type":"client-request","rpcId":"mismatch-1","method":"session.prompt","payload":{"sessionId":"native-mismatch","mode":"steer","content":[{"type":"text","text":"mismatch"},{"type":"image","mediaType":"image/jpeg","data":%q}]}}`, png))
+	response := nativeResponse(t, rec.Body.Bytes())
+	if response.Result.OK || response.Result.Error == nil ||
+		response.Result.Error.Code != "attachment-error" ||
+		response.Result.Error.Details["reason"] != "IMAGE_TYPE_MISMATCH" {
+		t.Fatalf("image type mismatch response = %+v", response)
+	}
+}
+
+func TestNativeSessionPromptRequiresCanonicalImageBase64(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	if err := st.CreateSession(context.Background(), "native-base64", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	att, err := attachment.NewStore(filepath.Join(t.TempDir(), "attachments"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.SetAttachmentStore(att)
+	call := func(id, data string) nativeRPCResponse {
+		t.Helper()
+		rec := doReqBody(t, srv.Handler(), "POST", "/api/session.prompt", "tok", fmt.Sprintf(`{"type":"client-request","rpcId":%q,"method":"session.prompt","payload":{"sessionId":"native-base64","mode":"steer","content":[{"type":"text","text":"base64"},{"type":"image","mediaType":"image/png","data":%q}]}}`, id, data))
+		return nativeResponse(t, rec.Body.Bytes())
+	}
+	response := call("empty-base64", "")
+	if response.Result.OK || response.Result.Error == nil ||
+		response.Result.Error.Code != "attachment-error" ||
+		response.Result.Error.Details["reason"] != "INVALID_IMAGE_BASE64" {
+		t.Fatalf("empty image base64 response = %+v", response)
+	}
+	response = call("noncanonical-base64", "QU\nJD")
+	if response.Result.OK || response.Result.Error == nil ||
+		response.Result.Error.Code != "attachment-error" ||
+		response.Result.Error.Details["reason"] != "INVALID_IMAGE_BASE64" {
+		t.Fatalf("non-canonical image base64 response = %+v", response)
+	}
+}
+
+func TestNativeSessionSearchUsesDSHBoundsAndVisibleMessages(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	ctx := context.Background()
+
+	longText := "needle at the beginning " + strings.Repeat("x", 260)
+	longData, err := json.Marshal(map[string]string{"text": longText})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedSession(t, st, "search-visible", []session.Event{
+		{Seq: 1, Type: session.EventUserMessage, At: time.UnixMilli(1000), Version: session.EventVersion,
+			Data: longData,
+		},
+	})
+	seedSession(t, st, "search-archived", []session.Event{
+		{Seq: 1, Type: session.EventUserMessage, At: time.UnixMilli(1001), Version: session.EventVersion,
+			Data: json.RawMessage(`{"text":"needle archived"}`),
+		},
+	})
+	if err := st.ArchiveSession(ctx, "search-archived", true); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 21; index++ {
+		seedSession(t, st, fmt.Sprintf("search-more-%02d", index), []session.Event{
+			{Seq: 1, Type: session.EventUserMessage, At: time.UnixMilli(int64(2000 + index)), Version: session.EventVersion,
+				Data: json.RawMessage(`{"text":"needle more"}`),
+			},
+		})
+	}
+
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/session.search", "tok", `{"type":"client-request","rpcId":"search-bounds","method":"session.search","payload":{"query":"needle more"}}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK {
+		t.Fatalf("session.search response = %+v", response)
+	}
+	var value struct {
+		Items []struct {
+			SessionID string `json:"sessionId"`
+			Snippet   string `json:"snippet"`
+		} `json:"items"`
+		HasMore bool `json:"hasMore"`
+	}
+	encoded, _ := json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &value); err != nil {
+		t.Fatal(err)
+	}
+	if len(value.Items) != 20 || !value.HasMore {
+		t.Fatalf("session search value = %#v", value)
+	}
+	if len(value.Items) != 20 {
+		t.Fatalf("unexpected visible item in more search = %#v", value.Items)
+	}
+	for _, item := range value.Items {
+		if item.SessionID == "search-visible" || item.SessionID == "search-archived" {
+			t.Fatalf("hidden or archived search item = %#v", item)
+		}
+	}
+
+	rec = doReqBody(t, srv.Handler(), "POST", "/api/session.search", "tok", `{"type":"client-request","rpcId":"search-snippet","method":"session.search","payload":{"query":"beginning"}}`)
+	response = nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK {
+		t.Fatalf("snippet search response = %+v", response)
+	}
+	encoded, _ = json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &value); err != nil {
+		t.Fatal(err)
+	}
+	if len(value.Items) != 1 || value.Items[0].SessionID != "search-visible" ||
+		len([]rune(value.Items[0].Snippet)) != 240 ||
+		!strings.HasPrefix(value.Items[0].Snippet, "needle at the beginning ") {
+		t.Fatalf("snippet search value = %#v", value)
+	}
+
+	rec = doReqBody(t, srv.Handler(), "POST", "/api/session.search", "tok", `{"type":"client-request","rpcId":"search-nul","method":"session.search","payload":{"query":"bad\u0000ue"}}`)
+	response = nativeResponse(t, rec.Body.Bytes())
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "bad-request" {
+		t.Fatalf("bad search response = %+v", response)
 	}
 }
 
@@ -730,7 +1085,7 @@ func TestNativeSessionPromptChecksSessionImageCapabilityBeforeWriting(t *testing
 	data := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 	rec := doReqBody(t, srv.Handler(), "POST", "/api/session.prompt", "tok", fmt.Sprintf(`{"type":"client-request","rpcId":"cap-1","method":"session.prompt","payload":{"sessionId":"native-no-image","mode":"steer","content":[{"type":"text","text":"image"},{"type":"image","mediaType":"image/png","data":%q}]}}`, data))
 	response := nativeResponse(t, rec.Body.Bytes())
-	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "not-supported" {
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "attachment-error" || response.Result.Error.Details["reason"] != "MODEL_DOES_NOT_SUPPORT_IMAGES" {
 		t.Fatalf("unsupported native image response = %+v", response)
 	}
 	entries, err := os.ReadDir(attachmentDir)
@@ -739,6 +1094,21 @@ func TestNativeSessionPromptChecksSessionImageCapabilityBeforeWriting(t *testing
 	}
 	if len(entries) != 0 {
 		t.Fatalf("unsupported native image prompt left %d attachment files", len(entries))
+	}
+
+	rec = doReqBody(t, srv.Handler(), "POST", "/api/session.prompt", "tok", fmt.Sprintf(`{"type":"client-request","rpcId":"cap-invalid-base64","method":"session.prompt","payload":{"sessionId":"native-no-image","mode":"steer","content":[{"type":"text","text":"image"},{"type":"image","mediaType":"image/png","data":"not-base64"}]}}`))
+	response = nativeResponse(t, rec.Body.Bytes())
+	if response.Result.OK || response.Result.Error == nil ||
+		response.Result.Error.Code != "attachment-error" ||
+		response.Result.Error.Details["reason"] != "MODEL_DOES_NOT_SUPPORT_IMAGES" {
+		t.Fatalf("unsupported model precedence response = %+v", response)
+	}
+	entries, err = os.ReadDir(attachmentDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("unsupported model image prompt left %d attachment files", len(entries))
 	}
 }
 
@@ -846,8 +1216,49 @@ func TestNativeSessionReferenceCandidatesReturnCanonicalMentions(t *testing.T) {
 	if err := json.Unmarshal(encoded, &values); err != nil {
 		t.Fatal(err)
 	}
-	if len(values) != 1 || values[0].SessionID != "release-session" || values[0].Label != "Release notes" || !strings.HasPrefix(values[0].Mention, "@[Release notes](dsh-session:") {
+	if len(values) != 1 || values[0].SessionID != "release-session" || values[0].Label != "Release notes" || !strings.HasPrefix(values[0].Mention, "@[Release notes](shutu-session:") {
 		t.Fatalf("session reference values = %+v", values)
+	}
+}
+
+func TestNativeSessionReferenceCandidatesRankWorkingDirectoryFirst(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	root := t.TempDir()
+	if err := st.CreateSession(context.Background(), "current-session", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetSessionCWD(context.Background(), "current-session", root); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []struct{ id, cwd, title string }{
+		{"other-cwd", filepath.Join(root, "other"), "Other"},
+		{"same-cwd", root, "Same"},
+	} {
+		if err := st.CreateSession(context.Background(), item.id, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.SetSessionCWD(context.Background(), item.id, item.cwd); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.SetSessionTitle(context.Background(), item.id, item.title, session.TitleSourceUser); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/sessionReferenceResolver/candidates", "tok", `{"type":"client-request","rpcId":"rank","method":"sessionReferenceResolver/candidates","payload":{"args":["current-session","",{}]}}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK {
+		t.Fatalf("session reference response = %+v", response)
+	}
+	var values []struct {
+		SessionID string `json:"sessionId"`
+		Label     string `json:"label"`
+	}
+	encoded, _ := json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &values); err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 2 || values[0].SessionID != "same-cwd" || values[1].SessionID != "other-cwd" {
+		t.Fatalf("ranked candidates = %+v", values)
 	}
 }
 
@@ -1430,7 +1841,7 @@ func TestNativeProjectionIncludesImageLimitsWhenAttachmentsEnabled(t *testing.T)
 	if !ok {
 		t.Fatalf("history imageLimits = %#v", history.Projections.Values["imageLimits"])
 	}
-	if limits["maxImageBytes"] != float64(maxWebImageBytes) || limits["maxImagesPerMessage"] != float64(20) || limits["maxImageDimension"] != float64(2000) {
+	if limits["maxImageBytes"] != float64(5*1024*1024) || limits["maxImagesPerMessage"] != float64(20) || limits["maxImageDimension"] != float64(2000) {
 		t.Fatalf("history imageLimits = %#v", limits)
 	}
 
@@ -1834,6 +2245,74 @@ func TestNativeSessionSelectModelMapsCapabilityFailure(t *testing.T) {
 	}
 }
 
+func TestNativeWorkspaceCreateSerializesSamePath(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	root := t.TempDir()
+	canonical, err := nativeWorkspaceCanonicalPath(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const workers = 8
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var failures []string
+	ids := make(map[string]int)
+	created := 0
+	wg.Add(workers)
+	for range workers {
+		go func() {
+			defer wg.Done()
+			rec := doReqBody(t, srv.Handler(), http.MethodPost, "/api/workspace.create", "tok",
+				fmt.Sprintf(`{"type":"client-request","rpcId":"concurrent-create","method":"workspace.create","payload":{"path":%q}}`, root))
+			var response nativeRPCResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+				mu.Lock()
+				failures = append(failures, err.Error())
+				mu.Unlock()
+				return
+			}
+			var value struct {
+				Created   bool `json:"created"`
+				Workspace struct {
+					WorkspaceID string `json:"workspaceId"`
+					Path        string `json:"path"`
+				} `json:"workspace"`
+			}
+			encoded, _ := json.Marshal(response.Result.Value)
+			if err := json.Unmarshal(encoded, &value); err != nil {
+				mu.Lock()
+				failures = append(failures, err.Error())
+				mu.Unlock()
+				return
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if !response.Result.OK || value.Workspace.Path != canonical || value.Workspace.WorkspaceID == "" {
+				failures = append(failures, rec.Body.String())
+				return
+			}
+			ids[value.Workspace.WorkspaceID]++
+			if value.Created {
+				created++
+			}
+		}()
+	}
+	wg.Wait()
+	if len(failures) != 0 {
+		t.Fatalf("concurrent workspace.create failures = %d, first=%s", len(failures), failures[0])
+	}
+	if created != 1 || len(ids) != 1 {
+		t.Fatalf("concurrent create created=%d ids=%#v, want one id created once", created, ids)
+	}
+	workspaces, err := st.ListWorkspaces(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(workspaces) != 1 || workspaces[0].Path != canonical {
+		t.Fatalf("workspaces = %#v, want one path %q", workspaces, canonical)
+	}
+}
+
 func TestNativeWorkspaceLifecycleAndOrdering(t *testing.T) {
 	srv, st := newTestServer(t, "tok")
 	call := func(id, method string, payload any) nativeRPCResponse {
@@ -1925,6 +2404,16 @@ func TestNativeWorkspaceLifecycleAndOrdering(t *testing.T) {
 	if len(ordered.SessionIDs) != 2 || ordered.SessionIDs[0] != "ws-a-2" || ordered.SessionIDs[1] != "ws-a-1" {
 		t.Fatalf("session order = %+v", ordered.SessionIDs)
 	}
+	response = call("session-order-invalid", "workspace.insertSessionBefore", map[string]any{
+		"workspaceId": wsA.WorkspaceID, "sessionId": "missing-session",
+	})
+	if response.Result.OK || response.Result.Error == nil ||
+		response.Result.Error.Code != "workspace-move-invalid" ||
+		response.Result.Error.Details["workspaceId"] != wsA.WorkspaceID ||
+		response.Result.Error.Details["sessionId"] != "missing-session" ||
+		response.Result.Error.Details["beforeSessionId"] != nil {
+		t.Fatalf("invalid session move = %+v", response)
+	}
 
 	response = call("workspace-order", "workspace.insertBefore", map[string]any{
 		"workspaceId": wsB.WorkspaceID, "beforeWorkspaceId": wsA.WorkspaceID,
@@ -1942,6 +2431,14 @@ func TestNativeWorkspaceLifecycleAndOrdering(t *testing.T) {
 	if len(workspaceOrder.WorkspaceIDs) != 2 || workspaceOrder.WorkspaceIDs[0] != wsB.WorkspaceID {
 		t.Fatalf("workspace order = %+v", workspaceOrder.WorkspaceIDs)
 	}
+	response = call("workspace-order-missing", "workspace.insertBefore", map[string]any{
+		"workspaceId": wsA.WorkspaceID, "beforeWorkspaceId": "missing-workspace",
+	})
+	if response.Result.OK || response.Result.Error == nil ||
+		response.Result.Error.Code != "workspace-not-found" ||
+		response.Result.Error.Details["workspaceId"] != "missing-workspace" {
+		t.Fatalf("missing workspace order anchor = %+v", response)
+	}
 
 	response = call("workspace-rename", "workspace.rename", map[string]any{"workspaceId": wsA.WorkspaceID, "title": "Project A"})
 	if !response.Result.OK || workspace(response).Title != "Project A" {
@@ -1950,6 +2447,9 @@ func TestNativeWorkspaceLifecycleAndOrdering(t *testing.T) {
 	response = call("workspace-conflict", "workspace.rename", map[string]any{"workspaceId": wsB.WorkspaceID, "title": "Project A"})
 	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "workspace-name-conflict" {
 		t.Fatalf("workspace rename conflict = %+v", response)
+	}
+	if response.Result.Error.Details["name"] != "Project A" {
+		t.Fatalf("workspace rename conflict details = %#v", response.Result.Error.Details)
 	}
 
 	response = call("workspace-archive", "workspace.archiveSession", map[string]any{"sessionId": "ws-a-1"})
@@ -1989,6 +2489,9 @@ func TestNativeWorkspaceLifecycleAndOrdering(t *testing.T) {
 	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "workspace-not-found" {
 		t.Fatalf("missing workspace.delete = %+v", response)
 	}
+	if response.Result.Error.Details["workspaceId"] != wsB.WorkspaceID {
+		t.Fatalf("missing workspace.delete details = %#v", response.Result.Error.Details)
+	}
 	response = call("workspace-invalid-path", "workspace.create", map[string]any{"path": filepath.Join(rootA, "missing")})
 	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "workspace-invalid-path" {
 		t.Fatalf("invalid workspace.create = %+v", response)
@@ -2021,6 +2524,262 @@ func TestNativeSessionCreatePersistsAgentPreset(t *testing.T) {
 	}
 	if config.AgentPreset != "code" {
 		t.Fatalf("created session config = %+v", config)
+	}
+}
+
+func TestNativeSessionCreateEchoesAdoptedAgentPreset(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+	defaultCWD := t.TempDir()
+	srv.SetDefaultWorkdir(defaultCWD)
+	var got NativeSessionCreateSpec
+	srv.SetNativeSessionCreator(func(_ context.Context, spec NativeSessionCreateSpec) (NativeSessionCreateResult, error) {
+		got = spec
+		return NativeSessionCreateResult{SessionID: "adopted", AgentPreset: "code", CWD: defaultCWD}, nil
+	})
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/session.create", "tok",
+		`{"type":"client-request","rpcId":"adopt-preset","method":"session.create","payload":{"sessionId":"adopted"}}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK {
+		t.Fatalf("adopt response = %+v; body=%s", response, rec.Body.String())
+	}
+	var value map[string]any
+	encoded, _ := json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &value); err != nil {
+		t.Fatal(err)
+	}
+	if value["sessionId"] != "adopted" || value["agentPreset"] != "code" {
+		t.Fatalf("adopt value = %#v", value)
+	}
+	if got.AgentPresetRequested {
+		t.Fatalf("creator spec = %#v", got)
+	}
+}
+
+func TestNativeSessionCreateSingleFlightsNamedRetries(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+	var calls atomic.Int64
+	leaderStarted := make(chan struct{})
+	release := make(chan struct{})
+	srv.SetNativeSessionCreator(func(_ context.Context, spec NativeSessionCreateSpec) (NativeSessionCreateResult, error) {
+		if calls.Add(1) == 1 {
+			close(leaderStarted)
+			<-release
+		}
+		return NativeSessionCreateResult{
+			SessionID: spec.SessionID, AgentPreset: spec.AgentPreset, CWD: spec.CWD,
+		}, nil
+	})
+	inner := srv.Handler()
+	followerEntered := make(chan struct{})
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Test-Flight") == "follower" {
+			close(followerEntered)
+		}
+		inner.ServeHTTP(w, r)
+	})
+	request := func(header string) (*http.Request, *httptest.ResponseRecorder) {
+		req := httptest.NewRequest(http.MethodPost, "/api/session.create", strings.NewReader(
+			`{"type":"client-request","rpcId":"flight","method":"session.create","payload":{"sessionId":"flight-session"}}`,
+		))
+		req.Header.Set("Authorization", "Bearer tok")
+		req.Header.Set("Content-Type", "application/json")
+		if header != "" {
+			req.Header.Set("X-Test-Flight", header)
+		}
+		return req, httptest.NewRecorder()
+	}
+	firstReq, firstRec := request("")
+	firstDone := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(firstRec, firstReq)
+		close(firstDone)
+	}()
+	select {
+	case <-leaderStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first create did not reach the creator")
+	}
+	secondReq, secondRec := request("follower")
+	secondDone := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(secondRec, secondReq)
+		close(secondDone)
+	}()
+	select {
+	case <-followerEntered:
+	case <-time.After(time.Second):
+		t.Fatal("second create did not enter the transport")
+	}
+	// Give the follower one scheduler beat to attach to the in-flight leader.
+	time.Sleep(20 * time.Millisecond)
+	close(release)
+	select {
+	case <-firstDone:
+	case <-time.After(time.Second):
+		t.Fatal("first create did not finish")
+	}
+	select {
+	case <-secondDone:
+	case <-time.After(time.Second):
+		t.Fatal("second create did not finish")
+	}
+	for _, rec := range []*httptest.ResponseRecorder{firstRec, secondRec} {
+		response := nativeResponse(t, rec.Body.Bytes())
+		if !response.Result.OK || response.Result.Value == nil {
+			t.Fatalf("single-flight response = %+v", response)
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("creator calls = %d, want 1", calls.Load())
+	}
+}
+
+func TestNativeSessionCreateSingleFlightChecksFollowerPreset(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+	leaderStarted := make(chan struct{})
+	release := make(chan struct{})
+	srv.SetNativeSessionCreator(func(_ context.Context, spec NativeSessionCreateSpec) (NativeSessionCreateResult, error) {
+		close(leaderStarted)
+		<-release
+		return NativeSessionCreateResult{
+			SessionID: spec.SessionID, AgentPreset: "code", CWD: spec.CWD,
+		}, nil
+	})
+	inner := srv.Handler()
+	followerEntered := make(chan struct{})
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Test-Flight") == "follower" {
+			close(followerEntered)
+		}
+		inner.ServeHTTP(w, r)
+	})
+	request := func(rpcID, header, preset string) (*http.Request, *httptest.ResponseRecorder) {
+		payload := map[string]any{"sessionId": "flight-preset"}
+		if preset != "" {
+			payload["agentPreset"] = preset
+		}
+		encoded, _ := json.Marshal(map[string]any{
+			"type": "client-request", "rpcId": rpcID, "method": "session.create", "payload": payload,
+		})
+		req := httptest.NewRequest(http.MethodPost, "/api/session.create", strings.NewReader(string(encoded)))
+		req.Header.Set("Authorization", "Bearer tok")
+		req.Header.Set("Content-Type", "application/json")
+		if header != "" {
+			req.Header.Set("X-Test-Flight", header)
+		}
+		return req, httptest.NewRecorder()
+	}
+	leaderReq, leaderRec := request("leader", "", "")
+	leaderDone := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(leaderRec, leaderReq)
+		close(leaderDone)
+	}()
+	select {
+	case <-leaderStarted:
+	case <-time.After(time.Second):
+		t.Fatal("leader create did not reach the creator")
+	}
+	followerReq, followerRec := request("follower", "follower", "minimal")
+	followerDone := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(followerRec, followerReq)
+		close(followerDone)
+	}()
+	select {
+	case <-followerEntered:
+	case <-time.After(time.Second):
+		t.Fatal("follower create did not enter the transport")
+	}
+	time.Sleep(20 * time.Millisecond)
+	close(release)
+	select {
+	case <-leaderDone:
+	case <-time.After(time.Second):
+		t.Fatal("leader create did not finish")
+	}
+	select {
+	case <-followerDone:
+	case <-time.After(time.Second):
+		t.Fatal("follower create did not finish")
+	}
+	leader := nativeResponse(t, leaderRec.Body.Bytes())
+	if !leader.Result.OK || leader.Result.Value == nil {
+		t.Fatalf("leader response = %+v", leader)
+	}
+	follower := nativeResponse(t, followerRec.Body.Bytes())
+	if follower.Result.OK || follower.Result.Error == nil ||
+		follower.Result.Error.Code != "agent-preset-conflict" ||
+		follower.Result.Error.Details["existingPreset"] != "code" ||
+		follower.Result.Error.Details["requestedPreset"] != "minimal" {
+		t.Fatalf("follower response = %+v", follower)
+	}
+}
+
+func TestNativeSessionCreateValidatesWorkspaceBeforeCreation(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	called := false
+	srv.SetSessionManager(func(ctx context.Context, action, requestedID string) (string, error) {
+		called = true
+		id := requestedID
+		if id == "" {
+			id = "created-workspace"
+		}
+		if err := st.CreateSession(ctx, id, time.Now()); err != nil {
+			return "", err
+		}
+		return id, nil
+	})
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/session.create", "tok", `{"type":"client-request","rpcId":"create-missing-workspace","method":"session.create","payload":{"workspaceId":"missing"}}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if response.Result.OK || response.Result.Error == nil ||
+		response.Result.Error.Code != "workspace-not-found" ||
+		response.Result.Error.Details["workspaceId"] != "missing" {
+		t.Fatalf("missing workspace response = %+v", response)
+	}
+	if called {
+		t.Fatal("session manager was called for an unknown workspace")
+	}
+	metas, err := st.ListSessions(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(metas) != 0 {
+		t.Fatalf("invalid workspace created orphan sessions = %+v", metas)
+	}
+
+	root := t.TempDir()
+	if err := st.CreateWorkspaceWithPath(context.Background(), "workspace-valid", "Valid", root); err != nil {
+		t.Fatal(err)
+	}
+	rec = doReqBody(t, srv.Handler(), "POST", "/api/session.create", "tok", `{"type":"client-request","rpcId":"create-workspace","method":"session.create","payload":{"workspaceId":"workspace-valid"}}`)
+	response = nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK {
+		t.Fatalf("valid workspace response = %+v", response)
+	}
+	meta, err := st.GetSessionMeta(context.Background(), "created-workspace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.WorkspaceID != "workspace-valid" || !sameWorkspacePath(meta.CWD, root) {
+		t.Fatalf("workspace session meta = %#v, want cwd %q", meta, root)
+	}
+}
+
+func TestNativeSessionCreateRejectsWorkspaceAndCWDTogether(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+	called := false
+	srv.SetSessionManager(func(context.Context, string, string) (string, error) {
+		called = true
+		return "should-not-create", nil
+	})
+	rec := doReqBody(t, srv.Handler(), "POST", "/api/session.create", "tok", `{"type":"client-request","rpcId":"create-conflict","method":"session.create","payload":{"workspaceId":"workspace","cwd":"C:/tmp"}}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "bad-request" {
+		t.Fatalf("workspace and cwd response = %+v", response)
+	}
+	if called {
+		t.Fatal("session manager was called for conflicting create inputs")
 	}
 }
 
@@ -2340,7 +3099,7 @@ func TestNativeSettingsDescribeAndMutate(t *testing.T) {
 	if err := json.Unmarshal(encoded, &described); err != nil {
 		t.Fatal(err)
 	}
-	if len(described.Namespaces) != 1 || described.Namespaces[0]["ns"] != nativeSettingsOnboarding {
+	if len(described.Namespaces[0]) == 0 || described.Namespaces[0]["ns"] != nativeSettingsOnboarding {
 		t.Fatalf("settings namespaces = %+v", described.Namespaces)
 	}
 	if described.Namespaces[0]["value"].(map[string]any)["welcomeNoticeVersion"] != nativeWelcomeNoticeVersion {
@@ -2363,6 +3122,101 @@ func TestNativeSettingsDescribeAndMutate(t *testing.T) {
 	}
 	if view.NS != nativeSettingsOnboarding || view.Value["welcomeNoticeVersion"] != "2026-08-13.1" || view.Revision != 1 {
 		t.Fatalf("settings view = %+v", view)
+	}
+}
+
+func TestNativeSettingsCoreNamespacesDefaultsAndValidation(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+	rec := doReqBody(t, srv.Handler(), http.MethodPost, "/api/settings.describe", "tok",
+		`{"type":"client-request","rpcId":"settings-core","method":"settings.describe","payload":{}}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK {
+		t.Fatalf("settings.describe = %+v", response.Result.Error)
+	}
+	encoded, _ := json.Marshal(response.Result.Value)
+	var described struct {
+		Namespaces []map[string]any `json:"namespaces"`
+	}
+	if err := json.Unmarshal(encoded, &described); err != nil {
+		t.Fatal(err)
+	}
+	byNS := make(map[string]map[string]any, len(described.Namespaces))
+	for _, namespace := range described.Namespaces {
+		byNS[namespace["ns"].(string)] = namespace
+	}
+	for _, namespace := range []string{
+		"ui-theme", "locale", "ui-conversation", "permission", "shell",
+		"agent-loop", "agent-default-model", "web-search-deepseek",
+	} {
+		if byNS[namespace] == nil {
+			t.Fatalf("%s namespace missing from %#v", namespace, byNS)
+		}
+	}
+	theme := byNS["ui-theme"]["value"].(map[string]any)
+	if theme["preference"] != "system" || theme["fontSize"] != float64(14) {
+		t.Fatalf("theme defaults = %#v", theme)
+	}
+	agentLoop := byNS["agent-loop"]["value"].(map[string]any)
+	if agentLoop["maxParallelToolCalls"] != float64(10) {
+		t.Fatalf("agent loop defaults = %#v", agentLoop)
+	}
+
+	rec = doReqBody(t, srv.Handler(), http.MethodPost, "/api/settings.update", "tok",
+		`{"type":"client-request","rpcId":"settings-invalid","method":"settings.update","payload":{"ns":"ui-theme","patch":{"fontSize":99}}}`)
+	response = nativeResponse(t, rec.Body.Bytes())
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "settings-rejected" {
+		t.Fatalf("invalid theme response = %+v", response)
+	}
+}
+
+func TestNativeSettingsWebSearchSecretNeverRidesDescribeOrWriteView(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	rec := doReqBody(t, srv.Handler(), http.MethodPost, "/api/settings.update", "tok",
+		`{"type":"client-request","rpcId":"search-secret","method":"settings.update","payload":{"ns":"web-search-deepseek","patch":{"apiKey":"literal-secret"}}}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK {
+		t.Fatalf("web search update = %+v", response.Result.Error)
+	}
+	encoded, _ := json.Marshal(response.Result.Value)
+	var view struct {
+		Base  map[string]any `json:"base"`
+		User  map[string]any `json:"user"`
+		Value map[string]any `json:"value"`
+	}
+	if err := json.Unmarshal(encoded, &view); err != nil {
+		t.Fatal(err)
+	}
+	for _, layer := range []map[string]any{view.Base, view.User, view.Value} {
+		if _, exists := layer["apiKey"]; exists {
+			t.Fatalf("api key crossed response boundary: %#v", layer)
+		}
+	}
+	settings, err := st.GetSettings(context.Background())
+	if err != nil || !strings.Contains(settings[nativeSettingsKey("web-search-deepseek")], "literal-secret") {
+		t.Fatalf("secret was not durably accepted: raw=%q err=%v", settings[nativeSettingsKey("web-search-deepseek")], err)
+	}
+}
+
+func TestNativeSettingsDocumentUpdatedFanout(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+	events := make(chan [2]any, 2)
+	unsubscribe := srv.subscribeNativeSettingsDocumentUpdated(func(namespace string, revision int) {
+		events <- [2]any{namespace, revision}
+	})
+	t.Cleanup(unsubscribe)
+	rec := doReqBody(t, srv.Handler(), http.MethodPost, "/api/settings.update", "tok",
+		`{"type":"client-request","rpcId":"settings-event","method":"settings.update","payload":{"ns":"ui-conversation","patch":{"busyEnter":"steer"}}}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK {
+		t.Fatalf("settings.update = %+v", response.Result.Error)
+	}
+	select {
+	case event := <-events:
+		if event[0] != "ui-conversation" || event[1] != 1 {
+			t.Fatalf("settings event = %#v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("settings/document-updated was not emitted")
 	}
 }
 
@@ -2414,7 +3268,7 @@ func TestNativeSettingsMutationSurvivesServerRestart(t *testing.T) {
 	if err := json.Unmarshal(encoded, &described); err != nil {
 		t.Fatal(err)
 	}
-	if len(described.Namespaces) != 1 || described.Namespaces[0].Value["welcomeNoticeVersion"] != "persisted-version" || described.Namespaces[0].Revision != 1 {
+	if len(described.Namespaces) < 2 || described.Namespaces[0].Value["welcomeNoticeVersion"] != "persisted-version" || described.Namespaces[0].Revision != 1 {
 		t.Fatalf("reloaded settings = %+v", described.Namespaces)
 	}
 }
@@ -2588,7 +3442,7 @@ func TestNativeMuxWebSocketSendsSubscriptionBaseline(t *testing.T) {
 	srv.SetQueueManager(func(context.Context, string) ([]QueueItem, error) {
 		queueCalls.Add(1)
 		return queueItems, nil
-	}, func(_ context.Context, _ string, text string) (QueueItem, error) {
+	}, func(_ context.Context, _ string, text string, _ []llm.ContentBlock, meta PromptMeta) (QueueItem, error) {
 		item := QueueItem{ID: "q-2", Text: text, Placement: "queued"}
 		queueItems = append(queueItems, item)
 		return item, nil
@@ -2766,6 +3620,77 @@ func TestNativeMuxWebSocketSendsSubscriptionBaseline(t *testing.T) {
 	}
 	if got := jobCalls.Load(); got != jobCallsBeforeEvent {
 		t.Fatalf("job provider called for unrelated plan event: before=%d after=%d", jobCallsBeforeEvent, got)
+	}
+}
+
+func TestNativeMuxWebSocketForwardsConfigurationOwnerEvents(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	seedSession(t, st, "native-owner-events", nil)
+	registered := make(chan struct{})
+	srv.SetEventSource(func(_ string, _ func(session.Event)) func() {
+		close(registered)
+		return func() {}
+	})
+	httpServer := httptest.NewServer(srv.Handler())
+	defer httpServer.Close()
+	address := strings.TrimPrefix(httpServer.URL, "http://")
+	conn, err := net.Dial("tcp", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	request := fmt.Sprintf("GET /api/events.mux HTTP/1.1\r\nHost: %s\r\nConnection: keep-alive, Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGVzdC1uYXRpdmUta2V5\r\nAuthorization: Bearer tok\r\n\r\n", address)
+	if _, err := io.WriteString(conn, request); err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(conn)
+	status, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(status, "101 Switching Protocols") {
+		t.Fatalf("upgrade status = %q", status)
+	}
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.TrimSpace(line) == "" {
+			break
+		}
+	}
+	select {
+	case <-registered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("mux did not register an event callback")
+	}
+
+	srv.NotifyNativeCredentialUpdated("TEST_API_KEY")
+	srv.NotifyNativeLLMAdaptersUpdated()
+
+	seen := map[string][]any{}
+	for len(seen) < 2 {
+		frame, err := readNativeTextFrame(reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var envelope struct {
+			nativeRemoteEventFrame
+		}
+		if err := json.Unmarshal(frame, &envelope); err != nil {
+			t.Fatalf("decode remote event frame %s: %v", frame, err)
+		}
+		if envelope.Type != "host/remote-event" {
+			continue
+		}
+		seen[envelope.Event] = envelope.Args
+	}
+	if args := seen["credentials/updated"]; len(args) != 1 || args[0] != "TEST_API_KEY" {
+		t.Fatalf("credentials/updated args = %#v", args)
+	}
+	if args := seen["llm/adapters-updated"]; len(args) != 0 {
+		t.Fatalf("llm/adapters-updated args = %#v, want payload-free", args)
 	}
 }
 
@@ -3105,6 +4030,43 @@ func TestNativeHostWebSocketSendsHostBaselineAndStatus(t *testing.T) {
 	}
 }
 
+func TestNativeHostDescribeUsesLiveAgentsAndDefaultSelection(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	seedSession(t, st, "durable-but-not-live", nil)
+	srv.SetSessionStatusProvider(func(_ context.Context, _ store.SessionMeta) SessionStatus {
+		return SessionStatus{State: "idle"}
+	})
+	srv.SetLiveAgentCounter(func() int { return 7 })
+	srv.SetConfigProvider(func() map[string]any {
+		return map[string]any{"llm_provider": "provider-live", "model": "model-live"}
+	})
+
+	rec := doReqBody(t, srv.Handler(), http.MethodPost, "/api/host.describe", "tok",
+		`{"type":"client-request","rpcId":"host-1","method":"host.describe","payload":{}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("host.describe = %d: %s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Result struct {
+			Value struct {
+				Provider         string `json:"provider"`
+				Model            string `json:"model"`
+				AttachedSessions int    `json:"attachedSessions"`
+			} `json:"value"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	view := response.Result.Value
+	if view.Provider != "provider-live" || view.Model != "model-live" {
+		t.Fatalf("model selection = %#v, want provider-live/model-live", view)
+	}
+	if view.AttachedSessions != 7 {
+		t.Fatalf("attachedSessions = %d, want live registry count 7", view.AttachedSessions)
+	}
+}
+
 func TestNativeHostWebSocketReconcilesSessionsAfterConnect(t *testing.T) {
 	srv, st := newTestServer(t, "tok")
 	defer srv.Close()
@@ -3198,8 +4160,9 @@ func TestNativeSessionForkCopiesCompletedTurnPrefixAndMetadata(t *testing.T) {
 		{Seq: 1, Type: session.EventTurnStart, At: time.UnixMilli(1001), Version: session.EventVersion, Data: json.RawMessage(`{}`)},
 		{Seq: 2, Type: session.EventUserMessage, At: time.UnixMilli(1002), Version: session.EventVersion, Data: json.RawMessage(`{"text":"first"}`)},
 		{Seq: 3, Type: session.EventTurnEnd, At: time.UnixMilli(1003), Version: session.EventVersion, Data: json.RawMessage(`{}`)},
-		{Seq: 4, Type: session.EventTurnStart, At: time.UnixMilli(1004), Version: session.EventVersion, Data: json.RawMessage(`{}`)},
-		{Seq: 5, Type: session.EventUserMessage, At: time.UnixMilli(1005), Version: session.EventVersion, Data: json.RawMessage(`{"text":"open"}`)},
+		{Seq: 4, Type: session.EventSessionTitle, At: time.UnixMilli(1004), Version: session.EventVersion, Data: json.RawMessage(`{"title":"Boundary title","messageSeqs":[],"source":{"kind":"fallback"}}`)},
+		{Seq: 5, Type: session.EventTurnStart, At: time.UnixMilli(1005), Version: session.EventVersion, Data: json.RawMessage(`{}`)},
+		{Seq: 6, Type: session.EventUserMessage, At: time.UnixMilli(1006), Version: session.EventVersion, Data: json.RawMessage(`{"text":"open"}`)},
 	}
 	seedSession(t, st, "fork-source", events)
 	ctx := context.Background()
@@ -3255,14 +4218,15 @@ func TestNativeSessionForkCopiesCompletedTurnPrefixAndMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cloned) != 3 || cloned[0].Seq != 1 || cloned[2].Type != session.EventTurnEnd {
+	if len(cloned) != 4 || cloned[0].Seq != 1 || cloned[2].Type != session.EventTurnEnd || cloned[3].Type != session.EventSessionTitle {
 		t.Fatalf("forked events = %+v", cloned)
 	}
 	meta, err := st.GetSessionMeta(ctx, value.SessionID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if meta.Title != "Fork title" || meta.WorkspaceID != "fork-workspace" || meta.CWD != workspacePath {
+	if meta.Title != "Boundary title" || meta.TitleSource != session.TitleSourceFallback ||
+		meta.WorkspaceID != "fork-workspace" || meta.CWD != workspacePath {
 		t.Fatalf("forked metadata = %+v", meta)
 	}
 	config, err := st.GetSessionConfig(ctx, value.SessionID)
@@ -3282,18 +4246,106 @@ func TestNativeSessionForkCopiesCompletedTurnPrefixAndMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	cloned, err = st.LoadSession(ctx, value.SessionID)
-	if err != nil || len(cloned) != 3 {
+	if err != nil || len(cloned) != 4 {
 		t.Fatalf("fallback forked events = %d, err=%v", len(cloned), err)
 	}
 
 	seedSession(t, st, "fork-empty", nil)
 	response = call("fork-empty", map[string]any{"sessionId": "fork-empty"})
-	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "fork-unavailable" {
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "fork-unavailable" ||
+		response.Result.Error.Message != `session "fork-empty" has no completed turn to fork from` {
 		t.Fatalf("empty fork response = %+v", response)
+	}
+	seedSession(t, st, "fork-open", []session.Event{
+		{Seq: 1, Type: session.EventTurnStart, At: time.UnixMilli(2001), Version: session.EventVersion, Data: json.RawMessage(`{}`)},
+		{Seq: 2, Type: session.EventUserMessage, At: time.UnixMilli(2002), Version: session.EventVersion, Data: json.RawMessage(`{"text":"open"}`)},
+	})
+	response = call("fork-open", map[string]any{"sessionId": "fork-open", "atSeq": 2})
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "fork-unavailable" ||
+		response.Result.Error.Message != `session "fork-open" has not completed the turn containing event 2` {
+		t.Fatalf("open fork response = %+v", response)
 	}
 	response = call("fork-missing", map[string]any{"sessionId": "missing"})
 	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "session-not-found" {
 		t.Fatalf("missing fork response = %+v", response)
+	}
+}
+
+func TestNativeSessionForkAttachesSubagentSourceToNearestAncestorWorkspace(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	seedSession(t, st, "ordinary-root", nil)
+	workspacePath := t.TempDir()
+	if err := st.CreateWorkspaceWithPath(context.Background(), "ancestor-workspace", "Ancestor", workspacePath); err != nil {
+		t.Fatal(err)
+	}
+	directPath := t.TempDir()
+	if err := st.CreateWorkspaceWithPath(context.Background(), "direct-workspace", "Direct", directPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetSessionWorkspace(context.Background(), "ordinary-root", "ancestor-workspace"); err != nil {
+		t.Fatal(err)
+	}
+	seedSession(t, st, "subagent-source", []session.Event{
+		{Seq: 1, Type: session.EventTurnStart, At: time.UnixMilli(3001), Version: session.EventVersion, Data: json.RawMessage(`{}`)},
+		{Seq: 2, Type: session.EventUserMessage, At: time.UnixMilli(3002), Version: session.EventVersion, Data: json.RawMessage(`{"text":"child work"}`)},
+		{Seq: 3, Type: session.EventTurnEnd, At: time.UnixMilli(3003), Version: session.EventVersion, Data: json.RawMessage(`{}`)},
+	})
+	if err := st.SetSessionHeader(context.Background(), "subagent-source", store.SessionHeader{
+		ID: "subagent-source", Parent: "ordinary-root", Origin: "subagent", DelegationDepth: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var value struct {
+		SessionID string `json:"sessionId"`
+	}
+
+	fork := func(id string) store.SessionMeta {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{
+			"type": "client-request", "rpcId": id, "method": "session.fork",
+			"payload": map[string]any{"sessionId": "subagent-source"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := doReqBody(t, srv.Handler(), "POST", "/api/session.fork", "tok", string(body))
+		response := nativeResponse(t, rec.Body.Bytes())
+		if !response.Result.OK {
+			t.Fatalf("subagent fork response = %+v", response)
+		}
+		encoded, err := json.Marshal(response.Result.Value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(encoded, &value); err != nil {
+			t.Fatal(err)
+		}
+		meta, err := st.GetSessionMeta(context.Background(), value.SessionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		header, err := st.GetSessionHeader(context.Background(), value.SessionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if header.Parent != "subagent-source" || header.Origin != "fork" {
+			t.Fatalf("subagent fork header = %#v", header)
+		}
+		return meta
+	}
+
+	if err := st.SetSessionWorkspace(context.Background(), "subagent-source", "direct-workspace"); err != nil {
+		t.Fatal(err)
+	}
+	if meta := fork("fork-direct-subagent"); meta.WorkspaceID != "direct-workspace" {
+		t.Fatalf("direct subagent fork workspace = %q", meta.WorkspaceID)
+	}
+
+	if err := st.SetSessionWorkspace(context.Background(), "subagent-source", ""); err != nil {
+		t.Fatal(err)
+	}
+	if meta := fork("fork-ancestor-subagent"); meta.WorkspaceID != "ancestor-workspace" {
+		t.Fatalf("subagent fork workspace = %q", meta.WorkspaceID)
 	}
 }
 
@@ -3341,9 +4393,36 @@ func TestNativeSessionUpdateQueueUsesDSHActionUnion(t *testing.T) {
 		"sessionId": "session-1", "itemId": "message-1",
 		"action": map[string]any{"kind": "edit", "content": []any{map[string]any{"type": "image"}}},
 	})
-	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "not-supported" {
+	if response.Result.OK || response.Result.Error == nil ||
+		response.Result.Error.Code != "attachment-error" ||
+		response.Result.Error.Details["reason"] != "QUEUE_EDIT_NON_TEXT" {
 		t.Fatalf("image edit response = %+v", response)
 	}
+	queueErr := ErrQueueItemNotFound
+	srv.SetNativeQueueUpdater(func(context.Context, string, string, string, string) error {
+		return queueErr
+	})
+	response = call("queue-missing", map[string]any{
+		"sessionId": "session-1", "itemId": "message-1", "action": map[string]any{"kind": "remove"},
+	})
+	if response.Result.OK || response.Result.Error == nil ||
+		response.Result.Error.Code != "queue-item-not-found" ||
+		response.Result.Error.Details["itemId"] != "message-1" {
+		t.Fatalf("missing queue item response = %+v", response)
+	}
+	queueErr = ErrSteerUnavailable
+	response = call("queue-steer-unavailable", map[string]any{
+		"sessionId": "session-1", "itemId": "message-1", "action": map[string]any{"kind": "steer"},
+	})
+	if response.Result.OK || response.Result.Error == nil ||
+		response.Result.Error.Code != "steer-unavailable" ||
+		response.Result.Error.Details["itemId"] != "message-1" {
+		t.Fatalf("steer unavailable response = %+v", response)
+	}
+	srv.SetNativeQueueUpdater(func(_ context.Context, sessionID, itemID, action, text string) error {
+		gotSession, gotItem, gotAction, gotText = sessionID, itemID, action, text
+		return nil
+	})
 	response = call("queue-invalid", map[string]any{
 		"sessionId": "session-1", "itemId": "message-1", "action": map[string]any{"kind": "unknown"},
 	})
@@ -3423,6 +4502,152 @@ func TestNativeSettingsUpdateReplaceAndLLMDiscovery(t *testing.T) {
 	}
 }
 
+func TestNativeSettingsDescribeExposesAgentPresetBaseLayer(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+	srv.SetConfigProvider(func() map[string]any { return map[string]any{"mode": "code"} })
+	rec := doReqBody(t, srv.Handler(), http.MethodPost, "/api/settings.describe", "tok",
+		`{"type":"client-request","rpcId":"settings-describe","method":"settings.describe","payload":{}}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK {
+		t.Fatalf("settings.describe = %+v", response.Result.Error)
+	}
+	encoded, _ := json.Marshal(response.Result.Value)
+	var value struct {
+		Namespaces []struct {
+			Ns       string         `json:"ns"`
+			Base     map[string]any `json:"base"`
+			User     map[string]any `json:"user"`
+			Value    map[string]any `json:"value"`
+			Revision int            `json:"revision"`
+		} `json:"namespaces"`
+	}
+	if err := json.Unmarshal(encoded, &value); err != nil {
+		t.Fatal(err)
+	}
+	var preset *struct {
+		Ns       string         `json:"ns"`
+		Base     map[string]any `json:"base"`
+		User     map[string]any `json:"user"`
+		Value    map[string]any `json:"value"`
+		Revision int            `json:"revision"`
+	}
+	for i := range value.Namespaces {
+		if value.Namespaces[i].Ns == "agent-presets" {
+			preset = &value.Namespaces[i]
+			break
+		}
+	}
+	if preset == nil {
+		t.Fatalf("agent-presets namespace missing from %#v", value.Namespaces)
+	}
+	if preset.Base["default"] != "code" || preset.Value["default"] != "code" || preset.User == nil || len(preset.User) != 0 || preset.Revision != 0 {
+		t.Fatalf("agent-presets view = %#v, want code base with empty user layer", preset)
+	}
+}
+
+func TestNativeSettingsLLMBaseAndUserLayers(t *testing.T) {
+	srv, _ := newTestServer(t, "tok")
+	srv.SetConfigProvider(func() map[string]any {
+		return map[string]any{"providers": []map[string]any{
+			{
+				"id": "deepseek-official", "name": "DeepSeek", "configured": true, "available": true,
+				"env_var": "DEEPSEEK_API_KEY", "base_url": "https://api.deepseek.com",
+				"model": "deepseek-v4-flash",
+			},
+			{
+				"id": "custom", "name": "Custom", "custom": true, "configured": true, "available": true,
+				"env_var": "CUSTOM_API_KEY", "base_url": "https://custom.example/v1",
+				"protocol": "openai-completions", "model": "custom-model",
+			},
+		}}
+	})
+	describe := func() map[string]map[string]any {
+		t.Helper()
+		rec := doReqBody(t, srv.Handler(), http.MethodPost, "/api/settings.describe", "tok",
+			`{"type":"client-request","rpcId":"settings-describe","method":"settings.describe","payload":{}}`)
+		response := nativeResponse(t, rec.Body.Bytes())
+		if !response.Result.OK {
+			t.Fatalf("settings.describe = %+v", response.Result.Error)
+		}
+		encoded, _ := json.Marshal(response.Result.Value)
+		var value struct {
+			Namespaces []map[string]any `json:"namespaces"`
+		}
+		if err := json.Unmarshal(encoded, &value); err != nil {
+			t.Fatal(err)
+		}
+		byNS := make(map[string]map[string]any, len(value.Namespaces))
+		for _, namespace := range value.Namespaces {
+			byNS[namespace["ns"].(string)] = namespace
+		}
+		return byNS
+	}
+
+	views := describe()
+	deepseek := views["llm-deepseek"]
+	if deepseek == nil {
+		t.Fatal("llm-deepseek namespace missing")
+	}
+	deepseekBase := deepseek["base"].(map[string]any)
+	if deepseekBase["apiKeyEnv"] != "DEEPSEEK_API_KEY" || deepseekBase["baseURL"] != "https://api.deepseek.com" {
+		t.Fatalf("deepseek base = %#v", deepseekBase)
+	}
+	if len(deepseek["user"].(map[string]any)) != 0 {
+		t.Fatalf("deepseek user = %#v, want empty", deepseek["user"])
+	}
+
+	custom := views["llm-pi-ai"]
+	if custom == nil {
+		t.Fatal("llm-pi-ai namespace missing")
+	}
+	customBase := custom["base"].(map[string]any)["providers"].(map[string]any)["custom"].(map[string]any)
+	if customBase["baseURL"] != "https://custom.example/v1" || customBase["api"] != "openai-completions" {
+		t.Fatalf("custom base profile = %#v", customBase)
+	}
+
+	rec := doReqBody(t, srv.Handler(), http.MethodPost, "/api/settings.update", "tok",
+		`{"type":"client-request","rpcId":"settings-update","method":"settings.update","payload":{"ns":"llm-pi-ai","patch":{"providers":{"custom":{"baseURL":"https://override.example/v1"}}},"expectedRevision":0}}`)
+	response := nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK {
+		t.Fatalf("settings.update = %+v", response.Result.Error)
+	}
+	encoded, _ := json.Marshal(response.Result.Value)
+	var updated struct {
+		Base     map[string]any `json:"base"`
+		User     map[string]any `json:"user"`
+		Value    map[string]any `json:"value"`
+		Revision int            `json:"revision"`
+	}
+	if err := json.Unmarshal(encoded, &updated); err != nil {
+		t.Fatal(err)
+	}
+	customUser := updated.User["providers"].(map[string]any)["custom"].(map[string]any)
+	customValue := updated.Value["providers"].(map[string]any)["custom"].(map[string]any)
+	if customUser["baseURL"] != "https://override.example/v1" || customValue["baseURL"] != "https://override.example/v1" || customValue["apiKeyEnv"] != "CUSTOM_API_KEY" {
+		t.Fatalf("custom merged profile = user %#v value %#v", customUser, customValue)
+	}
+
+	rec = doReqBody(t, srv.Handler(), http.MethodPost, "/api/settings.replace", "tok",
+		`{"type":"client-request","rpcId":"settings-replace","method":"settings.replace","payload":{"ns":"llm-pi-ai","section":{},"expectedRevision":1}}`)
+	response = nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK {
+		t.Fatalf("settings.replace = %+v", response.Result.Error)
+	}
+	encoded, _ = json.Marshal(response.Result.Value)
+	updated = struct {
+		Base     map[string]any `json:"base"`
+		User     map[string]any `json:"user"`
+		Value    map[string]any `json:"value"`
+		Revision int            `json:"revision"`
+	}{}
+	if err := json.Unmarshal(encoded, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if len(updated.User) != 0 || updated.Value["providers"].(map[string]any)["custom"].(map[string]any)["baseURL"] != "https://custom.example/v1" {
+		t.Fatalf("custom reset = %#v, want user reset and base restored", updated)
+	}
+}
+
 func TestNativeAgentPresetDefaultSettingsUpdate(t *testing.T) {
 	srv, st := newTestServer(t, "tok")
 	call := func(id string, preset string, expected *int) nativeRPCResponse {
@@ -3469,6 +4694,36 @@ func TestNativeAgentPresetDefaultSettingsUpdate(t *testing.T) {
 	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "settings-conflict" {
 		t.Fatalf("stale agent preset update response = %+v", response)
 	}
+
+	unsetBody, err := json.Marshal(map[string]any{
+		"type": "client-request", "rpcId": "agent-preset-unset", "method": "settings.mutate",
+		"payload": map[string]any{
+			"ns": "agent-presets", "ops": []map[string]any{
+				{"op": "unset", "path": []string{"default"}},
+			}, "expectedRevision": 2,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := doReqBody(t, srv.Handler(), http.MethodPost, "/api/settings.mutate", "tok", string(unsetBody))
+	response = nativeResponse(t, rec.Body.Bytes())
+	if !response.Result.OK {
+		t.Fatalf("agent preset unset response = %+v", response.Result.Error)
+	}
+	encoded, _ = json.Marshal(response.Result.Value)
+	if err := json.Unmarshal(encoded, &view); err != nil {
+		t.Fatal(err)
+	}
+	if view["revision"] != float64(3) ||
+		view["value"].(map[string]any)["default"] != "standard" ||
+		len(view["user"].(map[string]any)) != 0 {
+		t.Fatalf("agent preset reset view = %#v, want base standard with empty user", view)
+	}
+	settings, err = st.GetSettings(context.Background())
+	if err != nil || settings["agent_preset"] != "standard" {
+		t.Fatalf("persisted agent preset after reset = %#v, err=%v", settings, err)
+	}
 }
 
 func TestNativeSkillListProjectsUserInvocableCatalog(t *testing.T) {
@@ -3507,6 +4762,71 @@ func TestNativeSkillListProjectsUserInvocableCatalog(t *testing.T) {
 	response = nativeResponse(t, rec.Body.Bytes())
 	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "bad-request" {
 		t.Fatalf("missing session skill.list response = %+v", response)
+	}
+}
+
+func TestNativeSkillListUsesSessionCWD(t *testing.T) {
+	srv, st := newTestServer(t, "tok")
+	seedSession(t, st, "skill-alpha", nil)
+	seedSession(t, st, "skill-beta", nil)
+	seedSession(t, st, "skill-no-cwd", nil)
+	if err := st.SetSessionCWD(context.Background(), "skill-no-cwd", ""); err != nil {
+		t.Fatal(err)
+	}
+	first, second := filepath.Join(t.TempDir(), "first"), filepath.Join(t.TempDir(), "second")
+	if err := st.SetSessionCWD(context.Background(), "skill-alpha", first); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetSessionCWD(context.Background(), "skill-beta", second); err != nil {
+		t.Fatal(err)
+	}
+	catalogs := map[string][]SkillCatalogEntry{
+		first:  {{Name: "first-only", Description: "first"}},
+		second: {{Name: "second-only", Description: "second", WhenToUse: "when second"}},
+	}
+	srv.SetSkillCatalogProvider(func(_ context.Context, cwd string) ([]SkillCatalogEntry, error) {
+		rows, ok := catalogs[cwd]
+		if !ok {
+			return nil, fmt.Errorf("unexpected cwd %q", cwd)
+		}
+		return rows, nil
+	})
+	call := func(sessionID string) nativeRPCResponse {
+		t.Helper()
+		payload, _ := json.Marshal(map[string]any{"sessionId": sessionID})
+		body, _ := json.Marshal(map[string]any{
+			"type":    "client-request",
+			"rpcId":   "skill-" + sessionID,
+			"method":  "skill.list",
+			"payload": json.RawMessage(payload),
+		})
+		rec := doReqBody(t, srv.Handler(), http.MethodPost, "/api/skill.list", "tok", string(body))
+		return nativeResponse(t, rec.Body.Bytes())
+	}
+	for sessionID, want := range map[string]string{"skill-alpha": "first-only", "skill-beta": "second-only"} {
+		response := call(sessionID)
+		if !response.Result.OK {
+			t.Fatalf("%s skill.list = %+v", sessionID, response.Result.Error)
+		}
+		encoded, _ := json.Marshal(response.Result.Value)
+		var value struct {
+			Skills []map[string]any `json:"skills"`
+		}
+		if err := json.Unmarshal(encoded, &value); err != nil {
+			t.Fatal(err)
+		}
+		if len(value.Skills) != 1 || value.Skills[0]["name"] != want {
+			t.Fatalf("%s skills = %#v, want %s", sessionID, value.Skills, want)
+		}
+	}
+	response := call("skill-missing")
+	if response.Result.OK || response.Result.Error == nil || response.Result.Error.Code != "session-not-found" {
+		t.Fatalf("missing session response = %+v", response.Result.Error)
+	}
+	response = call("skill-no-cwd")
+	if response.Result.OK || response.Result.Error == nil ||
+		response.Result.Error.Message != `session "skill-no-cwd" has no project cwd` {
+		t.Fatalf("cwd-less session response = %+v", response.Result.Error)
 	}
 }
 
@@ -3618,14 +4938,21 @@ func TestNativeSubagentPromptAndInterruptRequireLineageAndWireLiveRuntime(t *tes
 	seedSession(t, st, "child-control", []session.Event{
 		{Seq: 1, Type: session.EventSubagentStart, At: time.UnixMilli(1001), Version: session.EventVersion, Data: json.RawMessage(`{"parentSession":"parent-control","depth":1}`)},
 	})
+	att, err := attachment.NewStore(filepath.Join(t.TempDir(), "attachments"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.SetAttachmentStore(att)
 	var prompted struct {
-		ID   string
-		Text string
+		ID      string
+		Text    string
+		Content []llm.ContentBlock
+		Meta    PromptMeta
 	}
 	var interrupted string
 	srv.SetNativeSubagentManager(
-		func(_ context.Context, childID, text string) error {
-			prompted.ID, prompted.Text = childID, text
+		func(_ context.Context, childID string, content []llm.ContentBlock, meta PromptMeta) error {
+			prompted.ID, prompted.Content, prompted.Meta = childID, content, meta
 			return nil
 		},
 		func(childID, _ string) error {
@@ -3642,11 +4969,31 @@ func TestNativeSubagentPromptAndInterruptRequireLineageAndWireLiveRuntime(t *tes
 		rec := doReqBody(t, srv.Handler(), "POST", "/api/"+method, "tok", string(body))
 		return nativeResponse(t, rec.Body.Bytes())
 	}
+	badZoneWrongParent := call("subagent-bad-zone-wrong-parent", "subagent.prompt", map[string]any{
+		"parentSessionId": "missing-parent", "childSessionId": "child-control", "mode": "continuable",
+		"clientTimeZone": "+08:00",
+		"content":        []map[string]any{{"type": "text", "text": "validate metadata first"}},
+	})
+	if badZoneWrongParent.Result.OK || badZoneWrongParent.Result.Error == nil ||
+		badZoneWrongParent.Result.Error.Code != "invalid-time-zone" ||
+		badZoneWrongParent.Result.Error.Details["value"] != "+08:00" {
+		t.Fatalf("subagent bad zone before authorization = %+v", badZoneWrongParent)
+	}
+	if interrupted != "" {
+		t.Fatalf("metadata validation triggered subagent callback = %q", interrupted)
+	}
 	prompt := call("subagent-prompt", "subagent.prompt", map[string]any{
 		"parentSessionId": "parent-control", "childSessionId": "child-control", "mode": "continuable",
-		"content": []map[string]any{{"type": "text", "text": "follow up"}},
+		"clientTimeZone": "Asia/Shanghai",
+		"content": []map[string]any{
+			{"type": "image", "mediaType": "image/png", "name": "follow-up.png", "data": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="},
+			{"type": "text", "text": "follow up"},
+		},
 	})
-	if !prompt.Result.OK || prompted.ID != "child-control" || prompted.Text != "follow up" {
+	if !prompt.Result.OK || prompted.ID != "child-control" || len(prompted.Content) != 2 ||
+		prompted.Content[0].Kind != llm.BlockImage || prompted.Content[0].Image.Name != "follow-up.png" ||
+		prompted.Content[1].Kind != llm.BlockText || prompted.Content[1].Text != "follow up" ||
+		prompted.Meta.RPCID == "" || prompted.Meta.ClientTimeZone != "Asia/Shanghai" {
 		t.Fatalf("subagent prompt = %+v, callback = %+v", prompt, prompted)
 	}
 	var receipt map[string]any
@@ -3657,6 +5004,30 @@ func TestNativeSubagentPromptAndInterruptRequireLineageAndWireLiveRuntime(t *tes
 	if receipt["messageId"] == "" {
 		t.Fatalf("subagent prompt receipt = %#v", receipt)
 	}
+	badZone := call("subagent-bad-zone", "subagent.prompt", map[string]any{
+		"parentSessionId": "parent-control", "childSessionId": "child-control", "mode": "continuable",
+		"clientTimeZone": "+08:00",
+		"content":        []map[string]any{{"type": "text", "text": "bad zone"}},
+	})
+	if badZone.Result.OK || badZone.Result.Error == nil ||
+		badZone.Result.Error.Code != "invalid-time-zone" ||
+		badZone.Result.Error.Details["value"] != "+08:00" {
+		t.Fatalf("subagent bad zone = %+v", badZone)
+	}
+	srv.SetNativeImageCapabilityResolver(func(context.Context, string) bool { return false })
+	imageBlocked := call("subagent-prompt-image-blocked", "subagent.prompt", map[string]any{
+		"parentSessionId": "parent-control", "childSessionId": "child-control", "mode": "continuable",
+		"content": []map[string]any{
+			{"type": "image", "mediaType": "image/png", "data": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="},
+			{"type": "text", "text": "blocked"},
+		},
+	})
+	if imageBlocked.Result.OK || imageBlocked.Result.Error == nil ||
+		imageBlocked.Result.Error.Code != "attachment-error" ||
+		imageBlocked.Result.Error.Details["reason"] != "MODEL_DOES_NOT_SUPPORT_IMAGES" {
+		t.Fatalf("blocked subagent image prompt = %+v", imageBlocked)
+	}
+	srv.SetNativeImageCapabilityResolver(func(context.Context, string) bool { return true })
 	interrupt := call("subagent-interrupt", "subagent.interrupt", map[string]any{
 		"parentSessionId": "parent-control", "childSessionId": "child-control", "mode": "continuable",
 	})

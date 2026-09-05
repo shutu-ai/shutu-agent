@@ -46,10 +46,10 @@ const pwshToolName = "pwsh"
 const (
 	pwshDefaultTimeoutMS = 120_000
 	pwshMaxTimeoutMS     = 600_000
-	// pwshJobOutputLimit bounds a background job's stored output (dsh's
-	// maxOutputBytes default); the registry applies the same cap to
-	// foreground results via Policy.OutputLimit.
-	pwshJobOutputLimit = 64 * 1024
+	// pwshDefaultSpillBytes and pwshDefaultGraceMS mirror the DSH shell-local
+	// settings defaults. They apply to both the bash and pwsh executor seam.
+	pwshDefaultSpillBytes = 64 * 1024 * 1024
+	pwshDefaultGraceMS    = 3_000
 )
 
 // pwshEncodingPreamble pins UTF-8 output encoding for every command (dsh
@@ -86,6 +86,9 @@ type PwshOpts struct {
 	// DshEnvFunc supplies managed DSH_* facts per invocation.
 	DshEnvFunc        ManagedEnvFunc
 	DshEnvContextFunc func(context.Context) map[string]string
+	// SettingsFunc is the live native shell-settings source. A nil source
+	// preserves the DSH-compatible built-in defaults.
+	SettingsFunc func() ShellSettings
 }
 
 // PwshTool runs one PowerShell command in a fresh process per call.
@@ -100,6 +103,7 @@ type PwshTool struct {
 	dshEnv                 ManagedEnvFunc
 	dshEnvContextFunc      func(context.Context) map[string]string
 	background             bool // run_in_background advertised and accepted
+	settingsFunc           func() ShellSettings
 }
 
 // NewPwsh returns a PwshTool bound to the composition's defaults. Background
@@ -116,7 +120,51 @@ func NewPwsh(opts PwshOpts) PwshTool {
 		dshEnv:                 opts.DshEnvFunc,
 		dshEnvContextFunc:      opts.DshEnvContextFunc,
 		background:             registryPresent(opts.Jobs),
+		settingsFunc:           opts.SettingsFunc,
 	}
+}
+
+// ShellSettings is the live executor-owned half of the native shell namespace.
+// Registry owns the outer timeout/output cap; the executor owns defaults,
+// executable resolution, and the configured fallback cwd.
+type ShellSettings struct {
+	TimeoutMS      int
+	MaxTimeoutMS   int
+	MaxOutputBytes int
+	MaxSpillBytes  int
+	GraceMS        int
+	Cwd            string
+	PwshPath       string
+}
+
+func defaultShellSettings() ShellSettings {
+	return ShellSettings{
+		TimeoutMS: pwshDefaultTimeoutMS, MaxTimeoutMS: pwshMaxTimeoutMS,
+		MaxSpillBytes: pwshDefaultSpillBytes,
+		// Grace is a deployment policy supplied by the composition root.
+		// Standalone tools keep the historical prompt hard-kill behavior.
+		GraceMS: 0,
+	}
+}
+
+func (t PwshTool) shellSettings() ShellSettings {
+	if t.settingsFunc != nil {
+		settings := t.settingsFunc()
+		if settings.TimeoutMS <= 0 {
+			settings.TimeoutMS = pwshDefaultTimeoutMS
+		}
+		if settings.MaxTimeoutMS <= 0 {
+			settings.MaxTimeoutMS = pwshMaxTimeoutMS
+		}
+		if settings.MaxSpillBytes <= 0 {
+			settings.MaxSpillBytes = pwshDefaultSpillBytes
+		}
+		if settings.GraceMS < 0 {
+			settings.GraceMS = 0
+		}
+		return settings
+	}
+	return defaultShellSettings()
 }
 
 // registryPresent reports whether r holds a usable registry. An interface
@@ -216,11 +264,15 @@ func (t PwshTool) Execute(ctx context.Context, args any) (string, error) {
 	if a.TimeoutMS != nil && *a.TimeoutMS <= 0 {
 		return "", fmt.Errorf("pwsh: timeoutMs must be a positive number")
 	}
+	settings := t.shellSettings()
 	base := t.workdir
 	if t.workdirContextFunc != nil {
 		base = t.workdirContextFunc(ctx)
 	} else if t.workdirFunc != nil {
 		base = t.workdirFunc()
+	}
+	if base == "" && settings.Cwd != "" {
+		base = settings.Cwd
 	}
 	workdir := resolveWorkdir(a.Workdir, base)
 	if t.workdirRootContextFunc != nil {
@@ -236,7 +288,7 @@ func (t PwshTool) Execute(ctx context.Context, args any) (string, error) {
 		}
 		return t.startBackground(ctx, a.Command, a.Description, workdir)
 	}
-	return t.runForeground(ctx, a.Command, workdir, a.TimeoutMS)
+	return t.runForeground(ctx, a.Command, workdir, a.TimeoutMS, settings)
 }
 
 // resolveWorkdir resolves the model workdir: an explicit absolute path is
@@ -256,7 +308,20 @@ func resolveWorkdir(requested, base string) string {
 // resolvePwshPath finds the PowerShell executable: pwsh (PowerShell 7) first,
 // then Windows PowerShell 5.1 on Windows, so a host without pwsh on PATH
 // still works (dsh candidatePwshPaths).
-func resolvePwshPath() (string, error) {
+func resolvePwshPath(configured ...string) (string, error) {
+	if len(configured) > 0 && strings.TrimSpace(configured[0]) != "" {
+		path := strings.TrimSpace(configured[0])
+		if filepath.IsAbs(path) {
+			if _, err := os.Stat(path); err != nil {
+				return "", fmt.Errorf("pwsh: configured executable is unavailable: %w", err)
+			}
+			return path, nil
+		}
+		if p, err := exec.LookPath(path); err == nil {
+			return p, nil
+		}
+		return "", fmt.Errorf("pwsh: configured executable %q was not found on PATH", path)
+	}
 	if p, err := exec.LookPath("pwsh"); err == nil {
 		return p, nil
 	}
@@ -271,18 +336,22 @@ func resolvePwshPath() (string, error) {
 // effectiveTimeout clamps the model timeout to [1ms, pwshMaxTimeoutMS],
 // defaulting to pwshDefaultTimeoutMS when absent (dsh clampTimeout). The
 // registry's per-tool deadline is folded in by the caller.
-func effectiveTimeout(requested *int64) time.Duration {
-	ms := int64(pwshDefaultTimeoutMS)
+func effectiveTimeoutWith(settings ShellSettings, requested *int64) time.Duration {
+	ms := int64(settings.TimeoutMS)
 	if requested != nil {
 		ms = *requested
 	}
-	if ms > pwshMaxTimeoutMS {
-		ms = pwshMaxTimeoutMS
+	if ms > int64(settings.MaxTimeoutMS) {
+		ms = int64(settings.MaxTimeoutMS)
 	}
 	if ms < 1 {
 		ms = 1
 	}
 	return time.Duration(ms) * time.Millisecond
+}
+
+func effectiveTimeout(requested *int64) time.Duration {
+	return effectiveTimeoutWith(defaultShellSettings(), requested)
 }
 
 // pwshCommand assembles the fresh-process invocation: the command string is
@@ -317,12 +386,12 @@ func pwshEnv(managed ManagedEnvFunc) []string {
 // cancellation (user stop) surfaces as an error. Output goes to temp files
 // (not pipes), so a grandchild that lingers after the kill can never keep
 // Wait blocked.
-func (t PwshTool) runForeground(ctx context.Context, command, workdir string, timeoutMS *int64) (string, error) {
-	pwsh, err := resolvePwshPath()
+func (t PwshTool) runForeground(ctx context.Context, command, workdir string, timeoutMS *int64, settings ShellSettings) (string, error) {
+	pwsh, err := resolvePwshPath(settings.PwshPath)
 	if err != nil {
 		return "", err
 	}
-	timeout := effectiveTimeout(timeoutMS)
+	timeout := effectiveTimeoutWith(settings, timeoutMS)
 	if d, ok := ctx.Deadline(); ok {
 		if rem := time.Until(d); rem < timeout {
 			timeout = rem
@@ -363,10 +432,10 @@ func (t PwshTool) runForeground(ctx context.Context, command, workdir string, ti
 	case waitErr = <-waitDone:
 	case <-timer.C:
 		timedOut = true
-		killTree(cmd)
+		terminateTree(cmd, settings.GraceMS)
 		waitErr = <-waitDone
 	case <-ctx.Done():
-		killTree(cmd)
+		terminateTree(cmd, settings.GraceMS)
 		waitErr = <-waitDone
 		if ctx.Err() == context.DeadlineExceeded {
 			// The registry's per-tool deadline is the deployment timeout; it
@@ -419,9 +488,10 @@ func (t PwshTool) runForeground(ctx context.Context, command, workdir string, ti
 // startBackground registers the command as a jobs.Registry job (kind pwsh)
 // and returns the registry-issued id in the dsh acknowledgement text. The
 // registry's owner fence and cancellation apply; the job's stored output is
-// bounded to pwshJobOutputLimit.
+// bounded to the configured maxOutputBytes.
 func (t PwshTool) startBackground(ctx context.Context, command, description, workdir string) (string, error) {
-	pwsh, err := resolvePwshPath()
+	settings := t.shellSettings()
+	pwsh, err := resolvePwshPath(settings.PwshPath)
 	if err != nil {
 		return "", err
 	}
@@ -436,10 +506,10 @@ func (t PwshTool) startBackground(ctx context.Context, command, description, wor
 		Label:            llm.RedactDiagnostic(description),
 		OwnerSession:     t.ownerSession(ctx),
 		Correlation:      jobs.CorrelationFromContext(ctx),
-		OutputLimitBytes: pwshJobOutputLimit,
+		OutputLimitBytes: settings.MaxOutputBytes,
 		ReadOutput:       capture.Read,
 		Run: func(jctx context.Context) (jobs.JobOutcome, error) {
-			return runPwshJob(jctx, pwsh, command, workdir, &mu, &live, &capture, func() map[string]string {
+			return runPwshJob(jctx, pwsh, command, workdir, &mu, &live, &capture, settings.GraceMS, func() map[string]string {
 				if t.dshEnvContextFunc != nil {
 					return t.dshEnvContextFunc(jctx)
 				}
@@ -454,7 +524,7 @@ func (t PwshTool) startBackground(ctx context.Context, command, description, wor
 			c := live
 			mu.Unlock()
 			if c != nil {
-				killTree(c)
+				terminateTree(c, settings.GraceMS)
 			}
 			return nil
 		},
@@ -486,7 +556,7 @@ func (t PwshTool) ownerSession(ctx context.Context) string {
 // settles the job from the outcome — killed when the job context was
 // cancelled, otherwise completed with the exit code as detail (a nonzero
 // command exit is reported, not failed; dsh processOutcome).
-func runPwshJob(ctx context.Context, pwsh, command, workdir string, mu *sync.Mutex, live **exec.Cmd, capture *capturePaths, managed ManagedEnvFunc) (outcome jobs.JobOutcome, runErr error) {
+func runPwshJob(ctx context.Context, pwsh, command, workdir string, mu *sync.Mutex, live **exec.Cmd, capture *capturePaths, graceMS int, managed ManagedEnvFunc) (outcome jobs.JobOutcome, runErr error) {
 	streamOutput := ""
 	defer func() { capture.Finish(streamOutput) }()
 	cmd := pwshCommand(pwsh, command, workdir, managed)
@@ -512,7 +582,7 @@ func runPwshJob(ctx context.Context, pwsh, command, workdir string, mu *sync.Mut
 	}
 	attachProcessGroup(cmd)
 	defer releaseProcessGroup(cmd)
-	stop := monitorCtx(ctx, cmd)
+	stop := monitorCtx(ctx, cmd, graceMS)
 	waitErr := cmd.Wait()
 	stop()
 
@@ -548,11 +618,11 @@ func runPwshJob(ctx context.Context, pwsh, command, workdir string, mu *sync.Mut
 // not pipes — the run_command rationale: Wait never blocks on a lingering
 // grandchild). The returned cleanup closes and removes both.
 func pwshOutputFiles() (outFile, errFile *os.File, cleanup func(), err error) {
-	outFile, err = os.CreateTemp("", "pa-pwsh-out-*.txt")
+	outFile, err = os.CreateTemp("", "sta-pwsh-out-*.txt")
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("create stdout file: %w", err)
 	}
-	errFile, err = os.CreateTemp("", "pa-pwsh-err-*.txt")
+	errFile, err = os.CreateTemp("", "sta-pwsh-err-*.txt")
 	if err != nil {
 		outFile.Close()
 		os.Remove(outFile.Name())

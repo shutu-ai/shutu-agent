@@ -583,7 +583,12 @@ func TestSpawnContinuableSend(t *testing.T) {
 	if got := model.callCount(); got != 1 {
 		t.Fatalf("quiet send woke child: calls = %d, want 1", got)
 	}
-	if err := run.Send(context.Background(), "follow up"); err != nil {
+	if err := run.SendContentWithMetadata(context.Background(), []llm.ContentBlock{
+		{Kind: llm.BlockImage, Image: llm.ImageRef{ID: "img-1", MediaType: "image/png", Name: "follow-up.png"}},
+		{Kind: llm.BlockText, Text: "follow up"},
+	}, map[string]string{
+		"rpc_id": "web-rpc", "client_time_zone": "Asia/Shanghai",
+	}); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 	deadline = time.Now().Add(time.Second)
@@ -597,9 +602,12 @@ func TestSpawnContinuableSend(t *testing.T) {
 		t.Fatalf("follow-up calls = %d, want 2", got)
 	}
 	call := model.call(1)
-	last := call.Messages[len(call.Messages)-1].Text()
-	if !strings.Contains(last, "background context") || !strings.Contains(last, "follow up") {
-		t.Fatalf("waking turn did not receive quiet context and follow-up: %q", last)
+	last := call.Messages[len(call.Messages)-1]
+	if len(last.Content) != 3 || last.Content[0].Kind != llm.BlockText ||
+		last.Content[0].Text != "background context" ||
+		last.Content[1].Kind != llm.BlockImage || last.Content[1].Image.Name != "follow-up.png" ||
+		last.Content[2].Kind != llm.BlockText || last.Content[2].Text != "follow up" {
+		t.Fatalf("waking turn did not receive quiet context and rich follow-up: %#v", last.Content)
 	}
 	res, err := run.Result(context.Background())
 	if err != nil {
@@ -614,6 +622,36 @@ func TestSpawnContinuableSend(t *testing.T) {
 	}
 	if got := len(log.DeriveHistory()); got != 4 {
 		t.Fatalf("derived messages = %d, want 4", got)
+	}
+	var source struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+		Source *struct {
+			Kind           string `json:"kind"`
+			RPCID          string `json:"rpcId"`
+			ClientTimeZone string `json:"clientTimeZone"`
+		} `json:"source"`
+		Text string `json:"text"`
+	}
+	var userEvent session.Event
+	for _, event := range log.Events() {
+		if event.Type == session.EventUserMessage && strings.Contains(string(event.Data), "follow up") {
+			userEvent = event
+		}
+	}
+	if err := json.Unmarshal(userEvent.Data, &source); err != nil {
+		t.Fatal(err)
+	}
+	if source.Source == nil || source.Source.Kind != "user" || source.Source.RPCID != "web-rpc" ||
+		source.Source.ClientTimeZone != "Asia/Shanghai" {
+		t.Fatalf("follow-up source = %+v", source.Source)
+	}
+	if len(source.Content) != 3 || source.Content[0].Type != "text" ||
+		source.Content[1].Type != "image" ||
+		source.Content[2].Type != "text" || source.Content[2].Text != "follow up" {
+		t.Fatalf("follow-up durable content = %+v", source.Content)
 	}
 	if err := prov.Close(); err != nil {
 		t.Fatalf("close: %v", err)

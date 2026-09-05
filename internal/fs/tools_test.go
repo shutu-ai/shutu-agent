@@ -64,7 +64,7 @@ type eventRec struct {
 
 // newToolsWithEvents returns a FileService and an FsTools bundle wired to a
 // slice that records every emitted fs/* event (the composition root wires the
-// same sink to the session log in cmd/pa, D3).
+// same sink to the session log in cmd/sta, D3).
 func newToolsWithEvents(t *testing.T) (FileService, *FsTools, *[]eventRec) {
 	t.Helper()
 	svc := NewLocalFS(t.TempDir())

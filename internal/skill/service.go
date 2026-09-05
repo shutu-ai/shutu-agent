@@ -52,6 +52,7 @@ const (
 type Candidate struct {
 	Name        string
 	Description string
+	WhenToUse   string
 	Source      string
 	Rank        int
 	Path        string

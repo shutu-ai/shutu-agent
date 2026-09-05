@@ -1,1 +1,1 @@
-declare const __SHUTU_DSH_NATIVE__: boolean
+declare const __SHUTU_UI_NATIVE__: boolean

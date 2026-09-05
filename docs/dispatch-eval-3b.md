@@ -1,21 +1,21 @@
-# Eval-3b 派发：cmd/pa 评测接线（registerEval + LLM judge 闭包 + 人工回退闭包 + /eval-status + 测试）
+# Eval-3b 派发：cmd/sta 评测接线（registerEval + LLM judge 闭包 + 人工回退闭包 + /eval-status + 测试）
 
 > 评测接缝 ADR `docs/decisions/2026-08-20-eval-seam.md` D-EVAL-2/3/7。本文件是 **Eval-3b**（收尾）契约：组合根接线——registerEval、LLM judge 闭包（用 `a.llm`）、人工回退闭包（用 `a.interacts`）、`/eval-status` 命令、printHelp、生命周期、接线测试 + 冒烟。前置：Eval-1/2/3a 全部已交付。
 
 ## 纪律
 
-- 零新依赖、CGO-free；只动 cmd/pa（eval.go 新建 + main.go 接线 + eval_test.go 新建）；gofmt；不改 loop；默认关（D10）。
-- 提交 1 个：`Eval-3b: cmd/pa 评测接线（registerEval + LLM judge + 人工回退 + /eval-status + 测试）`
+- 零新依赖、CGO-free；只动 cmd/sta（eval.go 新建 + main.go 接线 + eval_test.go 新建）；gofmt；不改 loop；默认关（D10）。
+- 提交 1 个：`Eval-3b: cmd/sta 评测接线（registerEval + LLM judge + 人工回退 + /eval-status + 测试）`
 
 ## 已知 API（已交付，勿重复读）
 
 - `internal/eval`：`NewEngine(opts EngineOpts{Evaluator, MaxRecords}) (Engine, error)`；`Engine.Evaluate(ctx, taskID, output, criteria) (EvalRecord, error)` / `List` / `Get` / `Close`；`EvalRecord{ID, TaskID, Criteria, Output, Verdict, Reason, EvaluatorKind, CreatedAt}`；`VerdictPass/Fail/Manual`；`CompositeEvaluator{Rule, LLM, Manual Evaluator; ManualFallback bool}`（三者都实现 `Evaluate(ctx, output, criteria) (Verdict, string, string, error)`）；`RuleEvaluator{}`；`LLMEvaluator{Judge JudgeFunc}`；`ManualEvaluator{Manual ManualFunc}`；`JudgeFunc func(ctx, output string, llmCriteria []string) (Verdict, string, error)`；`ManualFunc func(ctx, taskID, output string, manualCriteria []string) (Verdict, string, error)`；`NewEvalTools(eng Engine, onEvent) *EvalTools` + `Run()/Result()/List()`（各实现 tools.Tool）。
 - `internal/interact`：`Engine.Request(ctx, prompt, toolName, args string) (Request, error)`；`Await(ctx, id) (Request, error)`；`StatusApproved/StatusRejected/StatusPending` 常量。
 - `internal/llm`：`LLM.Stream(ctx, ChatRequest{Model, Messages}) (StreamReader, error)`；`Message{Role, Content []llm.ContentBlock}`；`llm.Text(s)`；`llm.RoleSystem/RoleUser`；`StreamTextDelta`；读取流照 compaction.basic.go summarize（for { ev, err := reader.Next(); io.EOF → break; ev.Kind == StreamTextDelta → 拼 }）。
-- `cmd/pa/llm.go`：`llmProviderModel(cfg, id) string` 存在。
+- `cmd/sta/llm.go`：`llmProviderModel(cfg, id) string` 存在。
 - main.go 注册序列：`registerInteracts()` 在 312 行（registerTerminal 294 之后）；`app.llm llm.LLM`（332 行）；`app.interacts interact.Engine`（338 附近，nil when interact disabled）；`a.log *session.Log`。
 
-## 交付 1：cmd/pa/eval.go（package main）
+## 交付 1：cmd/sta/eval.go（package main）
 
 ### registerEval
 ```go
@@ -233,7 +233,7 @@ func (a *app) evalStatus() error {
 	}
 ```
 
-## 交付 3：cmd/pa/eval_test.go（接线测试 + 冒烟）
+## 交付 3：cmd/sta/eval_test.go（接线测试 + 冒烟）
 
 模式照 jobs_test.go（makeXxxApp + 白名单 policy）。fakeLLM 照 subagent spawn_test 的 scriptedLLM（实现 llm.LLM.Stream，返回固定事件或捕获 req）。fakeInteract 实现 interact.Engine（Request 记录 + 预置 Approved/Rejected 状态 + Await 立即返回）。
 
@@ -251,7 +251,7 @@ func (a *app) evalStatus() error {
 
 - fakeLLM/fakeInteract 只实现所需方法（llm.LLM 只有 Stream；interact.Engine 有 Request/Resolve/Await/List/Close——fake 全实现，Request 返回预置状态、Await 立即返回）。
 - 测试断言宽松（Contains），不放宽到必过；flaky 先重跑 2 次再修。
-- `go build ./...` + `go test -count=1 ./cmd/pa/ -run 'Eval|RegisterEval' -v` 全 PASS 后提交；随后 `go test -count=1 ./...` 全绿确认。
+- `go build ./...` + `go test -count=1 ./cmd/sta/ -run 'Eval|RegisterEval' -v` 全 PASS 后提交；随后 `go test -count=1 ./...` 全绿确认。
 
 ## 环境
 

@@ -10,7 +10,7 @@ model: deepseek-v4-flash
 base_url: ""
 
 # Session workspace fallback. Ungrouped sessions and legacy title-only
-# workspaces use this directory; empty creates and uses ~/shudu.
+# workspaces use this directory; empty creates and uses ~/shutu.
 workspace:
   default_dir: ""
 
@@ -196,9 +196,9 @@ skill:
   # Additional custom skill directories (source "custom", rank 300), scanned in
   # order. Empty by default.
   dirs: []
-  # Bound on the injected skill catalog (name + description), in chars;
-  # 0/absent ⇒ 500.
-  catalog_max_chars: 500
+  # Bound on each normalized skill description in the model-facing catalog,
+  # in chars; 0/absent ⇒ 500. The skill list itself is never truncated.
+  description_max_chars: 500
   # Bound on the skill body skill returns to the model, in chars
   # (Unicode-safe truncation, 防超长注入); 0/absent ⇒ 8000.
   body_max_chars: 8000
@@ -214,6 +214,16 @@ skill:
 # payload (D5: no background ticker; every side effect happens on the serial
 # pre-step path). schedule/create, schedule/list, schedule/delete and
 # schedule/fire are logged as facts (D3).
+
+# DSH-compatible durable clock context. When enabled is omitted it follows
+# schedule.enabled, matching DSH's official Schedule Web overlay. Readings use
+# the browser's request-local time zone when available; time_zone is the
+# fallback IANA zone, and refresh_interval_ms is 0 for every eligible step.
+time_context:
+  enabled: true
+  time_zone: ""
+  refresh_interval_ms: 0
+
 schedule:
   # Master switch. false ⇒ no schedule Provider/Engine is created and the
   # schedule_* tools are neither registered nor whitelisted (默认关闭，不初始化).

@@ -26,11 +26,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf16"
 
 	"github.com/shutu-ai/shutu-agent/internal/attachment"
 	"github.com/shutu-ai/shutu-agent/internal/interact"
@@ -39,8 +41,33 @@ import (
 	"github.com/shutu-ai/shutu-agent/internal/profile"
 	"github.com/shutu-ai/shutu-agent/internal/projection"
 	"github.com/shutu-ai/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/sessionreference"
 	"github.com/shutu-ai/shutu-agent/internal/store"
 )
+
+var canonicalIANAPromptTimeZone = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_+.-]*(?:/[A-Za-z0-9_+.-]+)+$`)
+var nativeLocalePattern = regexp.MustCompile(`^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$`)
+
+const (
+	nativeSessionSearchMaxQueryUTF16     = 500
+	nativeSessionSearchResultLimit       = 20
+	nativeSessionSearchSnippetMaxRunes   = 240
+	nativeSessionSearchProviderCallLimit = 100
+)
+
+func loadCanonicalPromptTimeZone(value string) (*time.Location, error) {
+	if value == "UTC" {
+		return time.UTC, nil
+	}
+	if !canonicalIANAPromptTimeZone.MatchString(value) {
+		return nil, fmt.Errorf("browser time zone must be canonical UTC or IANA Area/Location: %q", value)
+	}
+	location, err := time.LoadLocation(value)
+	if err != nil {
+		return nil, fmt.Errorf("browser time zone is unsupported: %q", value)
+	}
+	return location, nil
+}
 
 const (
 	nativeRPCTypeRequest       = "client-request"
@@ -53,6 +80,14 @@ const (
 	nativeSettingsDeepSeek     = "llm-deepseek"
 	nativeSettingsPiAI         = "llm-pi-ai"
 	nativeSettingsAgentPresets = "agent-presets"
+	nativeSettingsTheme        = "ui-theme"
+	nativeSettingsLocale       = "locale"
+	nativeSettingsConversation = "ui-conversation"
+	nativeSettingsPermission   = "permission"
+	nativeSettingsShell        = "shell"
+	nativeSettingsAgentLoop    = "agent-loop"
+	nativeSettingsDefaultModel = "agent-default-model"
+	nativeSettingsWebSearch    = "web-search-deepseek"
 	nativeWelcomeNoticeVersion = "2026-08-13.1"
 	nativeDirectoryMaxEntries  = 1000
 	nativeSessionListTailLimit = 256
@@ -70,9 +105,86 @@ type nativeSettingsDocument struct {
 	Revision int            `json:"revision"`
 }
 
+type nativeRemoteEventFrame struct {
+	Type  string `json:"type"`
+	Event string `json:"event"`
+	Args  []any  `json:"args"`
+}
+
 func nativeSettingsKey(namespace string) string { return "native.settings." + namespace }
 
 func nativeSettingsSchemaFor(namespace string) map[string]any {
+	switch namespace {
+	case nativeSettingsTheme:
+		return map[string]any{"uid": 0, "refs": map[string]any{
+			"0": map[string]any{"uid": 0, "type": "object", "meta": map[string]any{"default": map[string]any{"preference": "system", "fontSize": 14}}, "dict": map[string]any{"preference": 1, "fontSize": 5}},
+			"1": map[string]any{"uid": 1, "type": "union", "meta": map[string]any{"default": "system"}, "list": []any{2, 3, 4}},
+			"2": map[string]any{"uid": 2, "type": "const", "meta": map[string]any{}, "value": "light"},
+			"3": map[string]any{"uid": 3, "type": "const", "meta": map[string]any{}, "value": "dark"},
+			"4": map[string]any{"uid": 4, "type": "const", "meta": map[string]any{}, "value": "system"},
+			"5": map[string]any{"uid": 5, "type": "number", "meta": map[string]any{"default": 14, "min": 12, "max": 17, "step": 1}},
+		}}
+	case nativeSettingsLocale:
+		return map[string]any{"uid": 0, "refs": map[string]any{
+			"0": map[string]any{"uid": 0, "type": "object", "meta": map[string]any{"default": map[string]any{}}, "dict": map[string]any{"preference": 1}},
+			"1": map[string]any{"uid": 1, "type": "string", "meta": map[string]any{"pattern": map[string]any{"source": "^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$", "flags": "u"}}},
+		}}
+	case nativeSettingsConversation:
+		return map[string]any{"uid": 0, "refs": map[string]any{
+			"0": map[string]any{"uid": 0, "type": "object", "meta": map[string]any{"default": map[string]any{"busyEnter": "queue"}}, "dict": map[string]any{"busyEnter": 1}},
+			"1": map[string]any{"uid": 1, "type": "union", "meta": map[string]any{"default": "queue"}, "list": []any{2, 3}},
+			"2": map[string]any{"uid": 2, "type": "const", "meta": map[string]any{}, "value": "queue"},
+			"3": map[string]any{"uid": 3, "type": "const", "meta": map[string]any{}, "value": "steer"},
+		}}
+	case nativeSettingsPermission:
+		return map[string]any{"uid": 0, "refs": map[string]any{
+			"0": map[string]any{"uid": 0, "type": "object", "meta": map[string]any{"default": map[string]any{"defaultPreset": "standard"}}, "dict": map[string]any{"defaultPreset": 1}},
+			"1": map[string]any{"uid": 1, "type": "union", "meta": map[string]any{"required": true, "default": "standard"}, "list": []any{2, 3, 4}},
+			"2": map[string]any{"uid": 2, "type": "const", "meta": map[string]any{}, "value": "readonly"},
+			"3": map[string]any{"uid": 3, "type": "const", "meta": map[string]any{}, "value": "standard"},
+			"4": map[string]any{"uid": 4, "type": "const", "meta": map[string]any{}, "value": "full"},
+		}}
+	case nativeSettingsShell:
+		return map[string]any{"uid": 0, "refs": map[string]any{
+			"0": map[string]any{"uid": 0, "type": "object", "meta": map[string]any{"default": map[string]any{
+				"timeoutMs": 120000, "maxTimeoutMs": 600000, "maxOutputBytes": 64000,
+				"maxSpillBytes": 67108864, "graceMs": 3000,
+			}}, "dict": map[string]any{
+				"cwd": 1, "timeoutMs": 2, "maxTimeoutMs": 3, "maxOutputBytes": 4,
+				"maxSpillBytes": 5, "graceMs": 6, "pwshPath": 1,
+			}},
+			"1": map[string]any{"uid": 1, "type": "string", "meta": map[string]any{}},
+			"2": map[string]any{"uid": 2, "type": "number", "meta": map[string]any{"default": 120000, "min": 1}},
+			"3": map[string]any{"uid": 3, "type": "number", "meta": map[string]any{"default": 600000, "min": 1}},
+			"4": map[string]any{"uid": 4, "type": "number", "meta": map[string]any{"default": 64000, "min": 1}},
+			"5": map[string]any{"uid": 5, "type": "number", "meta": map[string]any{"default": 67108864, "min": 1}},
+			"6": map[string]any{"uid": 6, "type": "number", "meta": map[string]any{"default": 3000, "min": 1, "max": 2147483647}},
+		}}
+	case nativeSettingsAgentLoop:
+		return map[string]any{"uid": 0, "refs": map[string]any{
+			"0": map[string]any{"uid": 0, "type": "object", "meta": map[string]any{"default": map[string]any{"maxParallelToolCalls": 10}}, "dict": map[string]any{"maxParallelToolCalls": 1}},
+			"1": map[string]any{"uid": 1, "type": "number", "meta": map[string]any{"default": 10, "min": 1, "step": 1}},
+		}}
+	case nativeSettingsDefaultModel:
+		return map[string]any{"uid": 0, "refs": map[string]any{
+			"0": map[string]any{"uid": 0, "type": "object", "meta": map[string]any{"required": true}, "dict": map[string]any{"provider": 1, "model": 1, "reasoningEffort": 1}},
+			"1": map[string]any{"uid": 1, "type": "string", "meta": map[string]any{"required": true}},
+			"2": map[string]any{"uid": 2, "type": "string", "meta": map[string]any{}},
+		}}
+	case nativeSettingsWebSearch:
+		return map[string]any{"uid": 0, "refs": map[string]any{
+			"0": map[string]any{"uid": 0, "type": "object", "meta": map[string]any{"default": map[string]any{
+				"apiKeyEnv": "DEEPSEEK_API_KEY", "model": "deepseek-v4-flash",
+				"apiVersion": "2023-06-01", "maxTokens": 4096, "maxUses": 5,
+			}}, "dict": map[string]any{
+				"apiKey": 1, "apiKeyEnv": 1, "baseURL": 1, "model": 1,
+				"apiVersion": 1, "maxTokens": 2, "maxUses": 3,
+			}},
+			"1": map[string]any{"uid": 1, "type": "string", "meta": map[string]any{}},
+			"2": map[string]any{"uid": 2, "type": "number", "meta": map[string]any{"default": 4096, "min": 1, "step": 1}},
+			"3": map[string]any{"uid": 3, "type": "number", "meta": map[string]any{"default": 5, "min": 1, "step": 1}},
+		}}
+	}
 	if namespace == nativeSettingsAgentPresets {
 		return map[string]any{
 			"uid": 0,
@@ -397,6 +509,154 @@ type nativeSessionSearchRequest struct {
 	Query string `json:"query"`
 }
 
+// truncateUnicodeCodePoints mirrors DSH's code-point-safe response bound. The
+// wire schema re-checks this bound, so truncation never appends an ellipsis.
+func truncateUnicodeCodePoints(value string, maximum int) string {
+	if maximum < 0 {
+		return ""
+	}
+	count := 0
+	for index := range value {
+		if count == maximum {
+			return value[:index]
+		}
+		count++
+	}
+	return value
+}
+
+// nativeSessionSearch enforces the fixed DSH sidebar-search bounds. Search is
+// restricted to visible sessions and to messages on their current surface, so
+// hidden compaction sources and tool telemetry do not enter the Web sidebar.
+func (s *Server) nativeSessionSearch(r *http.Request, raw json.RawMessage) nativeRPCResult {
+	var req nativeSessionSearchRequest
+	if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
+		return failure
+	}
+	query := strings.TrimSpace(req.Query)
+	if query == "" {
+		return nativeRPCFailure("bad-request", "query is required", nil)
+	}
+	if strings.ContainsRune(query, 0) {
+		return nativeRPCFailure("bad-request", "query must not contain NUL", nil)
+	}
+	if len(utf16.Encode([]rune(query))) > nativeSessionSearchMaxQueryUTF16 {
+		return nativeRPCFailure("bad-request", fmt.Sprintf("query must contain at most %d characters", nativeSessionSearchMaxQueryUTF16), nil)
+	}
+
+	metas, err := s.store.ListSessions(r.Context())
+	if err != nil {
+		return nativeRPCFailure("internal", err.Error(), nil)
+	}
+	visible := make(map[string]struct{}, len(metas))
+	for _, meta := range metas {
+		if meta.ArchivedAt.IsZero() {
+			visible[meta.ID] = struct{}{}
+		}
+	}
+	items := make([]map[string]any, 0, nativeSessionSearchResultLimit)
+	accepted := make(map[string]struct{})
+	addHit := func(hit store.SearchHit) error {
+		if _, ok := visible[hit.SessionID]; !ok {
+			return nil
+		}
+		if _, ok := accepted[hit.SessionID]; ok {
+			return nil
+		}
+		snippet, ok, err := s.currentSessionMessageMatch(r.Context(), hit.SessionID, query)
+		if err != nil || !ok {
+			return err
+		}
+		accepted[hit.SessionID] = struct{}{}
+		items = append(items, map[string]any{
+			"sessionId": hit.SessionID,
+			"snippet":   truncateUnicodeCodePoints(snippet, nativeSessionSearchSnippetMaxRunes),
+		})
+		return nil
+	}
+
+	hasMore := false
+	pager, canPage := s.store.(store.SessionSearchPager)
+	if !canPage {
+		hits, err := s.store.SearchSessions(r.Context(), query)
+		if err != nil {
+			return nativeRPCFailure("internal", err.Error(), nil)
+		}
+		for _, hit := range hits {
+			if len(items) > nativeSessionSearchResultLimit {
+				hasMore = true
+				break
+			}
+			if err := addHit(hit); err != nil {
+				return nativeRPCFailure("internal", err.Error(), nil)
+			}
+		}
+	} else {
+		offset, providerCalls := 0, 0
+		for len(items) <= nativeSessionSearchResultLimit {
+			if providerCalls >= nativeSessionSearchProviderCallLimit {
+				return nativeRPCFailure("internal", fmt.Sprintf("session search provider exceeded the %d-call work budget", nativeSessionSearchProviderCallLimit), nil)
+			}
+			providerCalls++
+			page, more, err := pager.SearchSessionsPage(r.Context(), query, offset, nativeSessionSearchResultLimit)
+			if err != nil {
+				return nativeRPCFailure("internal", err.Error(), nil)
+			}
+			for _, hit := range page {
+				if len(items) > nativeSessionSearchResultLimit {
+					break
+				}
+				if err := addHit(hit); err != nil {
+					return nativeRPCFailure("internal", err.Error(), nil)
+				}
+			}
+			offset += len(page)
+			if len(items) > nativeSessionSearchResultLimit || !more {
+				break
+			}
+		}
+	}
+	if len(items) > nativeSessionSearchResultLimit {
+		hasMore = true
+		items = items[:nativeSessionSearchResultLimit]
+	}
+	return nativeRPCSuccess(map[string]any{"items": items, "hasMore": hasMore})
+}
+
+// currentSessionMessageMatch rebuilds the authoritative projection and matches
+// only current user/assistant text. It intentionally filters the raw store hit
+// again because the SQLite prefilter spans every durable event.
+func (s *Server) currentSessionMessageMatch(ctx context.Context, sessionID, query string) (string, bool, error) {
+	events, err := s.store.LoadSession(ctx, sessionID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	surfaces, err := projection.ClassifyEventSurfaces(events)
+	if err != nil {
+		return "", false, err
+	}
+	needle := strings.ToLower(query)
+	for _, event := range events {
+		if event.Type != session.EventUserMessage && event.Type != session.EventAssistantMessage {
+			continue
+		}
+		if surfaces[event.Seq] != projection.SurfaceCurrent {
+			continue
+		}
+		message, ok := session.DeriveEventMessage(event)
+		if !ok {
+			continue
+		}
+		if strings.Contains(strings.ToLower(message.Text()), needle) {
+			return message.Text(), true, nil
+		}
+	}
+	return "", false, nil
+}
+
 type nativeWorkspaceView struct {
 	WorkspaceID string   `json:"workspaceId"`
 	Path        string   `json:"path"`
@@ -630,6 +890,85 @@ func nativeRPCFailure(code, message string, details map[string]any) nativeRPCRes
 	return nativeRPCResult{OK: false, Error: &nativeRPCError{Code: code, Message: message, Details: details}}
 }
 
+// nativeAttachmentFailure maps durable image admission failures to the stable
+// attachment protocol shape. The reason lets the client distinguish model
+// capability from caller-correctable image and batch policy failures.
+func nativeAttachmentFailure(err error) nativeRPCResult {
+	reason := "ATTACHMENT_WRITE_FAILED"
+	switch {
+	case errors.Is(err, attachment.ErrTooManyImages):
+		reason = "TOO_MANY_IMAGES"
+	case errors.Is(err, attachment.ErrBatchTooLarge):
+		reason = "IMAGES_TOO_LARGE"
+	case errors.Is(err, attachment.ErrUnsupportedType):
+		reason = "UNSUPPORTED_IMAGE_TYPE"
+	case errors.Is(err, attachment.ErrTypeMismatch):
+		reason = "IMAGE_TYPE_MISMATCH"
+	case errors.Is(err, attachment.ErrTooLarge):
+		reason = "IMAGE_TOO_LARGE"
+	case errors.Is(err, attachment.ErrEmptyData), errors.Is(err, attachment.ErrInvalidImage),
+		errors.Is(err, attachment.ErrDimensionTooLarge), errors.Is(err, attachment.ErrTooManyPixels):
+		reason = "INVALID_IMAGE"
+	}
+	return nativeRPCFailure("attachment-error", err.Error(), map[string]any{"reason": reason})
+}
+
+func nativeImageCapabilityFailure() nativeRPCResult {
+	return nativeRPCFailure("attachment-error", "image prompt capability is unavailable for this session", map[string]any{
+		"reason": "MODEL_DOES_NOT_SUPPORT_IMAGES",
+	})
+}
+
+func nativeSubagentOwnershipFailure(sessionID string) nativeRPCResult {
+	return nativeRPCFailure("agent-busy", fmt.Sprintf("session %q is owned by subagent routing", sessionID), map[string]any{
+		"reason": "use subagent delivery for this child session",
+	})
+}
+
+func nativePromptTimeZoneFailure(value string) nativeRPCResult {
+	return nativeRPCFailure("invalid-time-zone",
+		"clientTimeZone must be UTC or a valid IANA Area/Location name",
+		map[string]any{"value": value})
+}
+
+// nativeSubagentOwnershipGate mirrors DSH's generic session resolver: session
+// control-plane mutations resolve only ordinary sessions, while identities
+// reserved for subagent delivery remain callable through the subagent API.
+func (s *Server) nativeSubagentOwnershipGate(ctx context.Context, sessionID string) (nativeRPCResult, bool) {
+	headers, ok := s.store.(store.SessionLineageStore)
+	if !ok {
+		return nativeRPCResult{}, true
+	}
+	header, err := headers.GetSessionHeader(ctx, sessionID)
+	if err != nil || header.Origin != "subagent" {
+		return nativeRPCResult{}, true
+	}
+	return nativeSubagentOwnershipFailure(sessionID), false
+}
+
+// nativeDecodeImageBase64 applies DSH's canonical browser-image Base64 rule.
+// Decoding permissive variants would accept input the DSH client cannot round
+// trip and could turn the same upload into different durable bytes.
+func nativeDecodeImageBase64(encoded string) ([]byte, error) {
+	if encoded == "" {
+		return nil, errors.New("image data is empty")
+	}
+	data, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, fmt.Errorf("image upload is not canonical base64: %v", err)
+	}
+	if base64.StdEncoding.EncodeToString(data) != encoded {
+		return nil, errors.New("image upload is not canonical base64")
+	}
+	return data, nil
+}
+
+func nativeImageBase64Failure(err error) nativeRPCResult {
+	return nativeRPCFailure("attachment-error", err.Error(), map[string]any{
+		"reason": "INVALID_IMAGE_BASE64",
+	})
+}
+
 func (s *Server) profileUnavailable(id string) nativeRPCResult {
 	descriptor, err := s.profileRegistry.Get(id)
 	if err != nil {
@@ -805,7 +1144,7 @@ func nativeSessionReferenceMention(sessionID, label string) string {
 	encoded, _ := json.Marshal(sessionID)
 	uri := base64.RawURLEncoding.EncodeToString(encoded)
 	label = strings.NewReplacer("\\", "\\\\", "]", "\\]").Replace(label)
-	return fmt.Sprintf("@[%s](dsh-session:%s)", label, uri)
+	return fmt.Sprintf("@[%s](shutu-session:%s)", label, uri)
 }
 
 func (s *Server) nativeSessionReferenceCandidates(r *http.Request, raw json.RawMessage) nativeRPCResult {
@@ -826,8 +1165,12 @@ func (s *Server) nativeSessionReferenceCandidates(r *http.Request, raw json.RawM
 		return nativeRPCFailure("session-reference-failed", err.Error(), nil)
 	}
 	needle := strings.ToLower(strings.TrimSpace(query))
-	values := make([]map[string]any, 0, 20)
-	for _, meta := range metas {
+	type referenceCandidate struct {
+		meta  store.SessionMeta
+		index int
+	}
+	records := make([]referenceCandidate, 0, len(metas))
+	for index, meta := range metas {
 		if meta.ID == sessionID {
 			continue
 		}
@@ -839,21 +1182,53 @@ func (s *Server) nativeSessionReferenceCandidates(r *http.Request, raw json.RawM
 		if needle != "" && !strings.Contains(searchable, needle) {
 			continue
 		}
-		item := map[string]any{
-			"sessionId": meta.ID,
-			"label":     label,
-			"createdAt": meta.CreatedAt.UnixMilli(),
-			"mention":   nativeSessionReferenceMention(meta.ID, label),
+		records = append(records, referenceCandidate{meta: meta, index: index})
+	}
+	// DSH ranks discovery by working-directory affinity, then by durable
+	// catalog order. Keep that behavior when mentions select source sessions.
+	targetCWD := ""
+	if current, err := s.store.GetSessionMeta(r.Context(), sessionID); err == nil {
+		targetCWD = current.CWD
+	}
+	sort.SliceStable(records, func(left, right int) bool {
+		leftRank := sessionReferenceCandidateRank(records[left].meta.CWD, targetCWD)
+		rightRank := sessionReferenceCandidateRank(records[right].meta.CWD, targetCWD)
+		if leftRank != rightRank {
+			return leftRank < rightRank
 		}
-		if meta.CWD != "" {
-			item["cwd"] = meta.CWD
+		return records[left].index < records[right].index
+	})
+	values := make([]map[string]any, 0, min(len(records), sessionreference.DefaultCandidateLimit))
+	for _, record := range records {
+		label := strings.TrimSpace(record.meta.Title)
+		if label == "" {
+			label = record.meta.ID
+		}
+		item := map[string]any{
+			"sessionId": record.meta.ID,
+			"label":     label,
+			"createdAt": record.meta.CreatedAt.UnixMilli(),
+			"mention":   nativeSessionReferenceMention(record.meta.ID, label),
+		}
+		if record.meta.CWD != "" {
+			item["cwd"] = record.meta.CWD
 		}
 		values = append(values, item)
-		if len(values) >= 20 {
+		if len(values) >= sessionreference.DefaultCandidateLimit {
 			break
 		}
 	}
 	return nativeRPCSuccess(values)
+}
+
+func sessionReferenceCandidateRank(candidateCWD, targetCWD string) int {
+	if candidateCWD == "" {
+		return 1
+	}
+	if candidateCWD == targetCWD {
+		return 0
+	}
+	return 2
 }
 
 func nativePluginInventory() nativeRPCResult {
@@ -869,14 +1244,14 @@ func nativePluginInventory() nativeRPCResult {
 	}
 	entries := make([]any, 0, len(packages)+4)
 	for _, name := range packages {
-		id := "@shutu-ai/dsh-client-" + name
+		id := "@shutu-ai/client-" + name
 		entries = append(entries, map[string]any{"entryId": id, "moduleName": id, "enabled": true, "fiberPhase": "active"})
 	}
 	for _, item := range []struct{ id, module string }{
-		{"@shutu-ai/dsh-typert-registry", "@shutu-ai/dsh-typert-registry"},
-		{"@shutu-ai/dsh-cordis-client-runner", "@shutu-ai/dsh-cordis-client-runner"},
-		{"@shutu-ai/dsh-client-ui-cordis", "@shutu-ai/dsh-client-ui-cordis"},
-		{"@shutu-ai/dsh-session-log-export", "@shutu-ai/dsh-session-log-export"},
+		{"@shutu-ai/typert-registry", "@shutu-ai/typert-registry"},
+		{"@shutu-ai/cordis-client-runner", "@shutu-ai/cordis-client-runner"},
+		{"@shutu-ai/ui-cordis", "@shutu-ai/ui-cordis"},
+		{"@shutu-ai/session-log-export", "@shutu-ai/session-log-export"},
 	} {
 		entries = append(entries, map[string]any{"entryId": item.id, "moduleName": item.module, "enabled": true, "fiberPhase": "active"})
 	}
@@ -887,8 +1262,8 @@ func (s *Server) nativeSettingsDescribe() nativeRPCResult {
 	s.nativeSettingsMu.Lock()
 	defer s.nativeSettingsMu.Unlock()
 	s.ensureNativeSettingsFromConfigLocked()
-	namespaces := make([]any, 0, 3)
-	for _, namespace := range []string{nativeSettingsOnboarding, nativeSettingsDeepSeek, nativeSettingsPiAI} {
+	namespaces := make([]any, 0, 12)
+	for _, namespace := range nativeSettingsNamespaces() {
 		if document, ok := s.nativeSettings[namespace]; ok {
 			namespaces = append(namespaces, s.nativeSettingsView(namespace, document))
 		}
@@ -939,6 +1314,15 @@ func (s *Server) nativeSettingsApply(ctx context.Context, namespace string, ops 
 			return nativeRPCFailure("settings-rejected", err.Error(), map[string]any{"ns": namespace})
 		}
 	}
+	if base := s.nativeSettingsBaseLocked(namespace); len(base) > 0 {
+		resolved := cloneNativeSettingsMap(base)
+		mergeNativeSettingsMap(resolved, document.Value)
+		if err := validateNativeSettingsValue(namespace, resolved); err != nil {
+			return nativeRPCFailure("settings-rejected", err.Error(), map[string]any{"ns": namespace})
+		}
+	} else if err := validateNativeSettingsValue(namespace, document.Value); err != nil {
+		return nativeRPCFailure("settings-rejected", err.Error(), map[string]any{"ns": namespace})
+	}
 	if len(ops) > 0 {
 		document.Revision++
 		encoded, err := json.Marshal(document)
@@ -950,12 +1334,22 @@ func (s *Server) nativeSettingsApply(ctx context.Context, namespace string, ops 
 		}
 	}
 	s.nativeSettings[namespace] = document
-	return nativeRPCSuccess(s.nativeSettingsView(namespace, document))
+	view := s.nativeSettingsView(namespace, document)
+	if apply := s.nativeSettingsAppliedFn; apply != nil {
+		if err := apply(ctx, namespace, cloneNativeSettingsMap(view["value"].(map[string]any))); err != nil {
+			return nativeRPCFailure("settings-apply-failed", err.Error(), map[string]any{"ns": namespace})
+		}
+	}
+	s.notifyNativeSettingsDocumentUpdated(namespace, document.Revision)
+	return nativeRPCSuccess(view)
 }
 
 func (s *Server) nativeSettingsView(namespace string, document nativeSettingsDocument) map[string]any {
-	value := cloneNativeSettingsMap(document.Value)
-	return map[string]any{
+	base := s.nativeSettingsBaseLocked(namespace)
+	user := cloneNativeSettingsMap(document.Value)
+	value := cloneNativeSettingsMap(base)
+	mergeNativeSettingsMap(value, user)
+	view := map[string]any{
 		"ns":       namespace,
 		"schema":   nativeSettingsSchemaFor(namespace),
 		"value":    value,
@@ -963,6 +1357,155 @@ func (s *Server) nativeSettingsView(namespace string, document nativeSettingsDoc
 		"applies":  "live",
 		"secrets":  []any{},
 		"revision": document.Revision,
+	}
+	if namespace == nativeSettingsAgentPresets {
+		base := map[string]any{"default": s.nativeAgentPresetBaseDefault()}
+		resolved := cloneNativeSettingsMap(document.Value)
+		if _, ok := resolved["default"]; !ok {
+			resolved["default"] = base["default"]
+		}
+		view["base"] = base
+		view["value"] = resolved
+		view["user"] = cloneNativeSettingsMap(document.Value)
+	}
+	if namespace == nativeSettingsTheme {
+		if base == nil {
+			base = map[string]any{"preference": "system", "fontSize": 14}
+		}
+	}
+	if namespace == nativeSettingsConversation {
+		if base == nil {
+			base = map[string]any{"busyEnter": "queue"}
+		}
+	}
+	if namespace == nativeSettingsPermission {
+		if base == nil {
+			base = map[string]any{"defaultPreset": "standard"}
+		}
+	}
+	if namespace == nativeSettingsAgentLoop {
+		if base == nil {
+			base = map[string]any{"maxParallelToolCalls": 10}
+		}
+	}
+	if namespace == nativeSettingsShell {
+		if base == nil {
+			base = map[string]any{
+				"timeoutMs": 120000, "maxTimeoutMs": 600000,
+				"maxOutputBytes": 64000, "maxSpillBytes": 67108864, "graceMs": 3000,
+			}
+		}
+	}
+	if namespace == nativeSettingsWebSearch {
+		if base == nil {
+			base = map[string]any{
+				"apiKeyEnv": "DEEPSEEK_API_KEY", "model": "deepseek-v4-flash",
+				"apiVersion": "2023-06-01", "maxTokens": 4096, "maxUses": 5,
+			}
+		}
+		delete(base, "apiKey")
+	}
+	if namespace == nativeSettingsWebSearch {
+		delete(value, "apiKey")
+		delete(user, "apiKey")
+		view["value"] = value
+		view["user"] = user
+	}
+	if len(base) > 0 {
+		view["base"] = cloneNativeSettingsMap(base)
+		view["value"] = value
+		view["user"] = user
+	}
+	return view
+}
+
+// nativeSettingsBaseLocked projects the composition/config-owned layer for a
+// native namespace. The persisted native-settings row remains the user layer,
+// so deployment defaults are removable/resettable rather than masquerading as
+// user overrides (DSH settings base semantics).
+func (s *Server) nativeSettingsBaseLocked(namespace string) map[string]any {
+	switch namespace {
+	case nativeSettingsTheme:
+		return map[string]any{"preference": "system", "fontSize": 14}
+	case nativeSettingsConversation:
+		return map[string]any{"busyEnter": "queue"}
+	case nativeSettingsPermission:
+		return map[string]any{"defaultPreset": "standard"}
+	case nativeSettingsAgentLoop:
+		return map[string]any{"maxParallelToolCalls": 10}
+	case nativeSettingsShell:
+		return map[string]any{
+			"timeoutMs": 120000, "maxTimeoutMs": 600000,
+			"maxOutputBytes": 64000, "maxSpillBytes": 67108864, "graceMs": 3000,
+		}
+	case nativeSettingsWebSearch:
+		return map[string]any{
+			"apiKeyEnv": "DEEPSEEK_API_KEY", "model": "deepseek-v4-flash",
+			"apiVersion": "2023-06-01", "maxTokens": 4096, "maxUses": 5,
+		}
+	case nativeSettingsDefaultModel:
+		if s.cfgFn == nil {
+			return nil
+		}
+		view := s.cfgFn()
+		provider := nativeString(view["llm_provider"])
+		if provider == "" {
+			provider = nativeString(view["provider"])
+		}
+		model := nativeString(view["model"])
+		effort := nativeString(view["reasoning_effort"])
+		if provider == "" || model == "" {
+			return nil
+		}
+		base := map[string]any{"provider": provider, "model": model}
+		if effort != "" {
+			base["reasoningEffort"] = effort
+		}
+		return base
+	}
+	if namespace != nativeSettingsDeepSeek && namespace != nativeSettingsPiAI {
+		return nil
+	}
+	if s.cfgFn == nil {
+		return nil
+	}
+	providers := nativeConfigProviderMaps(s.cfgFn()["providers"])
+	if namespace == nativeSettingsDeepSeek {
+		for _, provider := range providers {
+			if nativeString(provider["id"]) != "deepseek-official" {
+				continue
+			}
+			profile := map[string]any{}
+			nativeCopyProviderProfile(profile, provider)
+			return profile
+		}
+		return nil
+	}
+	profiles := map[string]any{}
+	for _, provider := range providers {
+		id := nativeString(provider["id"])
+		if id == "" || id == "deepseek-official" {
+			continue
+		}
+		if !nativeBool(provider["configured"]) && !nativeBool(provider["available"]) && !nativeBool(provider["custom"]) {
+			continue
+		}
+		profile := map[string]any{}
+		nativeCopyProviderProfile(profile, provider)
+		profiles[id] = profile
+	}
+	return map[string]any{"providers": profiles}
+}
+
+func mergeNativeSettingsMap(base, user map[string]any) {
+	for key, value := range user {
+		userMap, userIsMap := value.(map[string]any)
+		baseMap, baseIsMap := base[key].(map[string]any)
+		if userIsMap && baseIsMap {
+			mergeNativeSettingsMap(baseMap, userMap)
+			continue
+		}
+		base[key] = cloneNativeSettingsValue(value)
 	}
 }
 
@@ -988,18 +1531,41 @@ func (s *Server) nativeAgentPresetSettingsApply(ctx context.Context, ops []nativ
 			return nativeRPCFailure("settings-rejected", err.Error(), map[string]any{"ns": nativeSettingsAgentPresets})
 		}
 	}
-	defaultPreset, ok := next["default"].(string)
-	if !ok || strings.TrimSpace(defaultPreset) == "" {
-		return nativeRPCFailure("settings-rejected", "agent-presets.default must be a non-empty preset id", map[string]any{"ns": nativeSettingsAgentPresets})
+	rawDefault, hasUserDefault := next["default"]
+	defaultPreset := ""
+	if hasUserDefault {
+		var ok bool
+		defaultPreset, ok = rawDefault.(string)
+		if !ok || strings.TrimSpace(defaultPreset) == "" {
+			return nativeRPCFailure("settings-rejected", "agent-presets.default must be a non-empty preset id", map[string]any{"ns": nativeSettingsAgentPresets})
+		}
+		defaultPreset = strings.TrimSpace(defaultPreset)
+		if !s.nativeAgentPresetAvailable(ctx, defaultPreset) {
+			return nativeRPCFailure("agent-preset-invalid", "agent preset is not available", map[string]any{
+				"agentPreset": defaultPreset, "reason": "preset is not available",
+			})
+		}
 	}
-	defaultPreset = strings.TrimSpace(defaultPreset)
-	if !s.nativeAgentPresetAvailable(ctx, defaultPreset) {
-		return nativeRPCFailure("agent-preset-invalid", "agent preset is not available", map[string]any{
-			"agentPreset": defaultPreset, "reason": "preset is not available",
-		})
+	if !hasUserDefault {
+		// Unsetting the user default deliberately falls through to the
+		// deployment's base preset; this is DSH's remove/reset path.
+		delete(next, "default")
+	}
+	if hasUserDefault {
+		next["default"] = defaultPreset
+	} else {
+		delete(next, "default")
 	}
 	document.Value = next
-	document.Value["default"] = defaultPreset
+	if document.Value == nil {
+		document.Value = map[string]any{}
+	}
+	// Unsetting the user default restores the deployment base for the legacy
+	// scalar used by session creation; setting an explicit default uses it.
+	effectivePreset := defaultPreset
+	if !hasUserDefault {
+		effectivePreset = s.nativeAgentPresetBaseDefault()
+	}
 	var encoded []byte
 	if len(ops) > 0 {
 		document.Revision++
@@ -1017,7 +1583,7 @@ func (s *Server) nativeAgentPresetSettingsApply(ctx context.Context, ops []nativ
 		return nativeRPCFailure("settings-rejected", err.Error(), map[string]any{"ns": nativeSettingsAgentPresets})
 	}
 	previousPreset := settings["agent_preset"]
-	if err := s.store.SetSetting(ctx, "agent_preset", defaultPreset); err != nil {
+	if err := s.store.SetSetting(ctx, "agent_preset", effectivePreset); err != nil {
 		return nativeRPCFailure("settings-rejected", err.Error(), map[string]any{"ns": nativeSettingsAgentPresets})
 	}
 	if len(ops) > 0 {
@@ -1030,9 +1596,10 @@ func (s *Server) nativeAgentPresetSettingsApply(ctx context.Context, ops []nativ
 		}
 	}
 	if setter, ok := s.nativeAgentPresetManager.(interface{ SetDefault(string) }); ok {
-		setter.SetDefault(defaultPreset)
+		setter.SetDefault(effectivePreset)
 	}
 	s.nativeSettings[nativeSettingsAgentPresets] = document
+	s.notifyNativeSettingsDocumentUpdated(nativeSettingsAgentPresets, document.Revision)
 	return nativeRPCSuccess(s.nativeSettingsView(nativeSettingsAgentPresets, document))
 }
 
@@ -1109,7 +1676,7 @@ func (s *Server) ensureNativeSettingsFromConfigLocked() {
 	// settings capabilities.
 	if len(s.nativeSettingsLoaded) == 0 {
 		if settings, err := s.store.GetSettings(context.Background()); err == nil {
-			for _, namespace := range []string{nativeSettingsOnboarding, nativeSettingsDeepSeek, nativeSettingsPiAI, nativeSettingsAgentPresets} {
+			for _, namespace := range nativeSettingsNamespaces() {
 				s.nativeSettingsLoaded[namespace] = true
 				var document nativeSettingsDocument
 				raw := strings.TrimSpace(settings[nativeSettingsKey(namespace)])
@@ -1121,55 +1688,331 @@ func (s *Server) ensureNativeSettingsFromConfigLocked() {
 		}
 	}
 	s.nativeSettings[nativeSettingsOnboarding] = s.nativeSettings[nativeSettingsOnboarding]
+	for _, namespace := range []string{
+		nativeSettingsTheme, nativeSettingsLocale, nativeSettingsConversation,
+		nativeSettingsPermission, nativeSettingsShell, nativeSettingsAgentLoop,
+		nativeSettingsDefaultModel, nativeSettingsWebSearch,
+	} {
+		if _, exists := s.nativeSettings[namespace]; !exists {
+			s.nativeSettings[namespace] = nativeSettingsDocument{Value: map[string]any{}}
+		}
+	}
 	if s.cfgFn == nil {
 		return
 	}
-	configView := s.cfgFn()
-	providers := nativeConfigProviderMaps(configView["providers"])
+	// Config-derived llm profiles belong to the base layer computed in
+	// nativeSettingsBaseLocked. Persisted native-settings documents start as an
+	// empty user layer; copying configuration into them would make deployment
+	// defaults look like user overrides.
 	if _, exists := s.nativeSettings[nativeSettingsDeepSeek]; !exists {
-		profile := map[string]any{}
-		for _, provider := range providers {
-			if nativeString(provider["id"]) != "deepseek-official" {
-				continue
-			}
-			nativeCopyProviderProfile(profile, provider)
-			break
-		}
-		s.nativeSettings[nativeSettingsDeepSeek] = nativeSettingsDocument{Value: profile}
+		s.nativeSettings[nativeSettingsDeepSeek] = nativeSettingsDocument{Value: map[string]any{}}
 	}
 	if _, exists := s.nativeSettings[nativeSettingsPiAI]; !exists {
-		profiles := map[string]any{}
-		for _, provider := range providers {
-			id := nativeString(provider["id"])
-			if id == "" || id == "deepseek-official" {
-				continue
-			}
-			if !nativeBool(provider["configured"]) && !nativeBool(provider["available"]) && !nativeBool(provider["custom"]) {
-				continue
-			}
-			profile := map[string]any{}
-			nativeCopyProviderProfile(profile, provider)
-			profiles[id] = profile
-		}
-		s.nativeSettings[nativeSettingsPiAI] = nativeSettingsDocument{
-			Value: map[string]any{"providers": profiles},
-		}
+		s.nativeSettings[nativeSettingsPiAI] = nativeSettingsDocument{Value: map[string]any{}}
 	}
 	if _, exists := s.nativeSettings[nativeSettingsAgentPresets]; !exists {
-		defaultPreset := "standard"
-		if s.cfgFn != nil {
-			if mode := nativeString(s.cfgFn()["mode"]); nativeAgentPresetKnown(mode) && s.nativeAgentPresetAvailable(context.Background(), mode) {
-				defaultPreset = mode
-			}
-		}
 		s.nativeSettings[nativeSettingsAgentPresets] = nativeSettingsDocument{
-			Value: map[string]any{"default": defaultPreset},
+			// The user layer starts empty. The deployment default is supplied
+			// by the base layer in settings views, matching DSH's settings
+			// composition semantics rather than copying base into user state.
+			Value: map[string]any{},
 		}
 	}
 }
 
+func (s *Server) nativeAgentPresetBaseDefault() string {
+	if s.cfgFn != nil {
+		if mode := nativeString(s.cfgFn()["mode"]); nativeAgentPresetKnown(mode) {
+			return mode
+		}
+	}
+	return "standard"
+}
+
 func nativeSettingsNamespace(namespace string) bool {
-	return namespace == nativeSettingsOnboarding || namespace == nativeSettingsDeepSeek || namespace == nativeSettingsPiAI || namespace == nativeSettingsAgentPresets
+	for _, known := range nativeSettingsNamespaces() {
+		if namespace == known {
+			return true
+		}
+	}
+	return false
+}
+
+func nativeSettingsNamespaces() []string {
+	return []string{
+		nativeSettingsOnboarding, nativeSettingsDeepSeek, nativeSettingsPiAI,
+		nativeSettingsAgentPresets, nativeSettingsTheme, nativeSettingsLocale,
+		nativeSettingsConversation, nativeSettingsPermission, nativeSettingsShell,
+		nativeSettingsAgentLoop, nativeSettingsDefaultModel, nativeSettingsWebSearch,
+	}
+}
+
+func nativeSettingsStringList(value any) ([]string, bool) {
+	items, ok := value.([]any)
+	if !ok {
+		return nil, false
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		text, ok := item.(string)
+		if !ok {
+			return nil, false
+		}
+		out = append(out, text)
+	}
+	return out, true
+}
+
+func validateNativeSettingsObject(namespace string, value map[string]any, allowed []string) error {
+	for key := range value {
+		known := false
+		for _, candidate := range allowed {
+			if key == candidate {
+				known = true
+				break
+			}
+		}
+		if !known {
+			return fmt.Errorf("%s.%s is not a supported setting", namespace, key)
+		}
+	}
+	return nil
+}
+
+func validateNativeSettingsNumber(namespace, key string, value any, min, max float64, integer bool) (float64, error) {
+	var number float64
+	switch typed := value.(type) {
+	case float64:
+		number = typed
+	case int:
+		number = float64(typed)
+	case int64:
+		number = float64(typed)
+	default:
+		return 0, fmt.Errorf("%s.%s must be a number", namespace, key)
+	}
+	if integer && number != float64(int64(number)) {
+		return 0, fmt.Errorf("%s.%s must be an integer", namespace, key)
+	}
+	if number < min || (max > 0 && number > max) {
+		return 0, fmt.Errorf("%s.%s is outside the permitted range", namespace, key)
+	}
+	return number, nil
+}
+
+func validateNativeSettingsEnum(namespace, key string, value any, allowed ...string) (string, error) {
+	text, ok := value.(string)
+	if !ok {
+		return "", fmt.Errorf("%s.%s must be a string", namespace, key)
+	}
+	for _, candidate := range allowed {
+		if text == candidate {
+			return text, nil
+		}
+	}
+	return "", fmt.Errorf("%s.%s has an unsupported value", namespace, key)
+}
+
+func validateNativeSettingsValue(namespace string, value any) error {
+	root, ok := value.(map[string]any)
+	if !ok || root == nil {
+		return fmt.Errorf("%s settings must be an object", namespace)
+	}
+	switch namespace {
+	case nativeSettingsTheme:
+		if err := validateNativeSettingsObject(namespace, root, []string{"preference", "fontSize"}); err != nil {
+			return err
+		}
+		if raw, exists := root["preference"]; exists {
+			if _, err := validateNativeSettingsEnum(namespace, "preference", raw, "light", "dark", "system"); err != nil {
+				return err
+			}
+		}
+		if raw, exists := root["fontSize"]; exists {
+			if _, err := validateNativeSettingsNumber(namespace, "fontSize", raw, 12, 17, true); err != nil {
+				return err
+			}
+		}
+	case nativeSettingsLocale:
+		if err := validateNativeSettingsObject(namespace, root, []string{"preference"}); err != nil {
+			return err
+		}
+		if raw, exists := root["preference"]; exists {
+			text, ok := raw.(string)
+			if !ok || !nativeLocalePattern.MatchString(text) {
+				return fmt.Errorf("%s.preference must be a locale id", namespace)
+			}
+		}
+	case nativeSettingsConversation:
+		if err := validateNativeSettingsObject(namespace, root, []string{"busyEnter"}); err != nil {
+			return err
+		}
+		if raw, exists := root["busyEnter"]; exists {
+			if _, err := validateNativeSettingsEnum(namespace, "busyEnter", raw, "queue", "steer"); err != nil {
+				return err
+			}
+		}
+	case nativeSettingsPermission:
+		if err := validateNativeSettingsObject(namespace, root, []string{"defaultPreset"}); err != nil {
+			return err
+		}
+		if _, err := validateNativeSettingsEnum(namespace, "defaultPreset", root["defaultPreset"], "readonly", "standard", "full"); err != nil {
+			return err
+		}
+	case nativeSettingsShell:
+		if err := validateNativeSettingsObject(namespace, root, []string{
+			"cwd", "timeoutMs", "maxTimeoutMs", "maxOutputBytes", "maxSpillBytes", "graceMs", "pwshPath",
+		}); err != nil {
+			return err
+		}
+		for _, key := range []string{"cwd", "pwshPath"} {
+			if raw, exists := root[key]; exists && nativeString(raw) == "" {
+				return fmt.Errorf("%s.%s must be a non-empty string", namespace, key)
+			}
+		}
+		for _, key := range []string{"timeoutMs", "maxTimeoutMs", "maxOutputBytes", "maxSpillBytes"} {
+			if raw, exists := root[key]; exists {
+				if _, err := validateNativeSettingsNumber(namespace, key, raw, 1, 0, true); err != nil {
+					return err
+				}
+			}
+		}
+		if raw, exists := root["graceMs"]; exists {
+			if _, err := validateNativeSettingsNumber(namespace, "graceMs", raw, 1, 2147483647, true); err != nil {
+				return err
+			}
+		}
+	case nativeSettingsAgentLoop:
+		if err := validateNativeSettingsObject(namespace, root, []string{"maxParallelToolCalls"}); err != nil {
+			return err
+		}
+		if _, err := validateNativeSettingsNumber(namespace, "maxParallelToolCalls", root["maxParallelToolCalls"], 1, 0, true); err != nil {
+			return err
+		}
+	case nativeSettingsDefaultModel:
+		if err := validateNativeSettingsObject(namespace, root, []string{"provider", "model", "reasoningEffort"}); err != nil {
+			return err
+		}
+		for _, key := range []string{"provider", "model"} {
+			if nativeString(root[key]) == "" {
+				return fmt.Errorf("%s.%s is required", namespace, key)
+			}
+		}
+	case nativeSettingsWebSearch:
+		if err := validateNativeSettingsObject(namespace, root, []string{
+			"apiKey", "apiKeyEnv", "baseURL", "model", "apiVersion", "maxTokens", "maxUses",
+		}); err != nil {
+			return err
+		}
+		for _, key := range []string{"apiKey", "apiKeyEnv", "baseURL", "model", "apiVersion"} {
+			if raw, exists := root[key]; exists && nativeString(raw) == "" {
+				return fmt.Errorf("%s.%s must be a non-empty string", namespace, key)
+			}
+		}
+		for _, key := range []string{"maxTokens", "maxUses"} {
+			if raw, exists := root[key]; exists {
+				if _, err := validateNativeSettingsNumber(namespace, key, raw, 1, 0, true); err != nil {
+					return err
+				}
+			}
+		}
+	default:
+		return nil
+	}
+	return nil
+}
+
+func (s *Server) subscribeNativeSettingsDocumentUpdated(callback func(namespace string, revision int)) func() {
+	s.nativeSettingsSubscribersMu.Lock()
+	defer s.nativeSettingsSubscribersMu.Unlock()
+	if s.nativeSettingsSubscribers == nil {
+		s.nativeSettingsSubscribers = make(map[uint64]func(string, int))
+	}
+	s.nativeSettingsSubscriberID++
+	id := s.nativeSettingsSubscriberID
+	s.nativeSettingsSubscribers[id] = callback
+	return func() {
+		s.nativeSettingsSubscribersMu.Lock()
+		defer s.nativeSettingsSubscribersMu.Unlock()
+		delete(s.nativeSettingsSubscribers, id)
+	}
+}
+
+func (s *Server) notifyNativeSettingsDocumentUpdated(namespace string, revision int) {
+	s.nativeSettingsSubscribersMu.Lock()
+	callbacks := make([]func(string, int), 0, len(s.nativeSettingsSubscribers))
+	for _, callback := range s.nativeSettingsSubscribers {
+		callbacks = append(callbacks, callback)
+	}
+	s.nativeSettingsSubscribersMu.Unlock()
+	for _, callback := range callbacks {
+		callback(namespace, revision)
+	}
+}
+
+// subscribeNativeCredentialUpdated registers a host/remote-event sink for the
+// canonical credentials/updated owner event. The payload is the reference name
+// only.
+func (s *Server) subscribeNativeCredentialUpdated(callback func(ref string)) func() {
+	s.nativeCredentialSubscribersMu.Lock()
+	defer s.nativeCredentialSubscribersMu.Unlock()
+	if s.nativeCredentialSubscribers == nil {
+		s.nativeCredentialSubscribers = make(map[uint64]func(string))
+	}
+	s.nativeCredentialSubscriberID++
+	id := s.nativeCredentialSubscriberID
+	s.nativeCredentialSubscribers[id] = callback
+	return func() {
+		s.nativeCredentialSubscribersMu.Lock()
+		defer s.nativeCredentialSubscribersMu.Unlock()
+		delete(s.nativeCredentialSubscribers, id)
+	}
+}
+
+// NotifyNativeCredentialUpdated is called by the composition root after a
+// provider-managed credential source commits. It is intentionally value-free.
+func (s *Server) NotifyNativeCredentialUpdated(ref string) {
+	s.nativeCredentialSubscribersMu.Lock()
+	callbacks := make([]func(string), 0, len(s.nativeCredentialSubscribers))
+	for _, callback := range s.nativeCredentialSubscribers {
+		callbacks = append(callbacks, callback)
+	}
+	s.nativeCredentialSubscribersMu.Unlock()
+	for _, callback := range callbacks {
+		callback(ref)
+	}
+}
+
+// subscribeNativeLLMAdaptersUpdated registers a host/remote-event sink for the
+// canonical payload-free LLM topology invalidation event.
+func (s *Server) subscribeNativeLLMAdaptersUpdated(callback func()) func() {
+	s.nativeLLMAdapterSubscribersMu.Lock()
+	defer s.nativeLLMAdapterSubscribersMu.Unlock()
+	if s.nativeLLMAdapterSubscribers == nil {
+		s.nativeLLMAdapterSubscribers = make(map[uint64]func())
+	}
+	s.nativeLLMAdapterSubscriberID++
+	id := s.nativeLLMAdapterSubscriberID
+	s.nativeLLMAdapterSubscribers[id] = callback
+	return func() {
+		s.nativeLLMAdapterSubscribersMu.Lock()
+		defer s.nativeLLMAdapterSubscribersMu.Unlock()
+		delete(s.nativeLLMAdapterSubscribers, id)
+	}
+}
+
+// NotifyNativeLLMAdaptersUpdated is called after a provider registry topology
+// is committed, so connected configuration surfaces re-read provider views.
+func (s *Server) NotifyNativeLLMAdaptersUpdated() {
+	s.nativeLLMAdapterSubscribersMu.Lock()
+	callbacks := make([]func(), 0, len(s.nativeLLMAdapterSubscribers))
+	for _, callback := range s.nativeLLMAdapterSubscribers {
+		callbacks = append(callbacks, callback)
+	}
+	s.nativeLLMAdapterSubscribersMu.Unlock()
+	for _, callback := range callbacks {
+		callback()
+	}
 }
 
 func nativeCopyProviderProfile(profile map[string]any, provider map[string]any) {
@@ -1346,15 +2189,9 @@ func nativeNumber(value any) int {
 func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawMessage) nativeRPCResult {
 	switch method {
 	case "host.describe":
-		metas, err := s.store.ListSessions(r.Context())
-		if err != nil {
-			return nativeRPCFailure("internal", err.Error(), nil)
-		}
 		attached := 0
-		for _, m := range metas {
-			if s.statusFn != nil && s.statusFn(r.Context(), m).State != "" {
-				attached++
-			}
+		if s.liveAgentCountFn != nil {
+			attached = s.liveAgentCountFn()
 		}
 		value := map[string]any{
 			"version":          "shutu-agent",
@@ -1365,10 +2202,14 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 		}
 		if cfg := s.cfgFn; cfg != nil {
 			view := cfg()
-			if provider, ok := view["provider"].(string); ok {
+			provider := nativeString(view["llm_provider"])
+			if provider == "" {
+				provider = nativeString(view["provider"])
+			}
+			if provider != "" {
 				value["provider"] = provider
 			}
-			if model, ok := view["model"].(string); ok {
+			if model := nativeString(view["model"]); model != "" {
 				value["model"] = model
 			}
 		}
@@ -1471,23 +2312,7 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 	case "session.list":
 		return s.nativeSessionList(r)
 	case "session.search":
-		var req nativeSessionSearchRequest
-		if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
-			return failure
-		}
-		query := strings.TrimSpace(req.Query)
-		if query == "" {
-			return nativeRPCFailure("bad-request", "query is required", nil)
-		}
-		hits, err := s.store.SearchSessions(r.Context(), query)
-		if err != nil {
-			return nativeRPCFailure("internal", err.Error(), nil)
-		}
-		items := make([]map[string]any, 0, len(hits))
-		for _, hit := range hits {
-			items = append(items, map[string]any{"sessionId": hit.SessionID, "snippet": hit.Snippet})
-		}
-		return nativeRPCSuccess(map[string]any{"items": items, "hasMore": false})
+		return s.nativeSessionSearch(r, raw)
 	case "session.history":
 		return s.nativeSessionHistory(r, raw)
 	case "session.create":
@@ -1501,6 +2326,9 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 		if title == "" {
 			return nativeRPCFailure("title-invalid", "session title must contain visible characters", map[string]any{"sessionId": req.SessionID})
 		}
+		if failure, ok := s.nativeSubagentOwnershipGate(r.Context(), req.SessionID); !ok {
+			return failure
+		}
 		if s.nativeSessionRenameFn != nil {
 			seq, err := s.nativeSessionRenameFn(r.Context(), req.SessionID, title)
 			if err != nil {
@@ -1512,7 +2340,7 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 			return nativeStoreFailure(err)
 		}
 		// Compatibility embedders without a live runtime cannot mint a log
-		// event. Production cmd/pa always wires nativeSessionRenameFn above;
+		// event. Production cmd/sta always wires nativeSessionRenameFn above;
 		// retain the old metadata-only path only for those embedders.
 		return nativeRPCSuccess(map[string]any{"title": title, "seq": 0})
 	case "session.prompt":
@@ -1538,6 +2366,12 @@ func (s *Server) dispatchNativeRPC(r *http.Request, method string, raw json.RawM
 		}
 		if s.stopFn == nil {
 			return nativeRPCFailure("not-supported", "turn stopper not wired", nil)
+		}
+		// Generic session.cancel is the ordinary-session stop boundary. Child
+		// identities reserved for subagent delivery are fenced first; a header
+		// lookup keeps the fast running-turn cancellation path bounded.
+		if failure, ok := s.nativeSubagentOwnershipGate(r.Context(), req.SessionID); !ok {
+			return failure
 		}
 		// Cancellation is a control-plane operation. Ask the in-memory turn
 		// owner first: validating a running 100k-event session through SQLite can
@@ -2419,7 +3253,7 @@ func (s *Server) nativeLLMDiscoverModels(r *http.Request, raw json.RawMessage) n
 }
 
 func (s *Server) nativeSkillList(r *http.Request, raw json.RawMessage) nativeRPCResult {
-	if s.skillsFn == nil {
+	if s.skillCatalogFn == nil && s.skillsFn == nil {
 		return nativeRPCFailure("not-supported", "skill registry not wired", nil)
 	}
 	var req struct {
@@ -2430,6 +3264,50 @@ func (s *Server) nativeSkillList(r *http.Request, raw json.RawMessage) nativeRPC
 	}
 	if strings.TrimSpace(req.SessionID) == "" {
 		return nativeRPCFailure("bad-request", "sessionId is required", nil)
+	}
+	if catalog := s.skillCatalogFn; catalog != nil {
+		meta, err := s.store.GetSessionMeta(r.Context(), req.SessionID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return nativeRPCFailure(
+					"session-not-found",
+					fmt.Sprintf("session %q not found (not attached)", req.SessionID),
+					map[string]any{"sessionId": req.SessionID},
+				)
+			}
+			return nativeRPCFailure("internal", err.Error(), map[string]any{"sessionId": req.SessionID})
+		}
+		if strings.TrimSpace(meta.CWD) == "" {
+			return nativeRPCFailure(
+				"internal",
+				fmt.Sprintf("session %q has no project cwd", req.SessionID),
+				map[string]any{"sessionId": req.SessionID},
+			)
+		}
+		entries, err := catalog(r.Context(), meta.CWD)
+		if err != nil {
+			return nativeRPCFailure(
+				"internal",
+				fmt.Sprintf("skill listing failed: %v", err),
+				map[string]any{"sessionId": req.SessionID},
+			)
+		}
+		value := make([]map[string]any, 0, len(entries))
+		for _, entry := range entries {
+			row := map[string]any{
+				"name":           entry.Name,
+				"description":    entry.Description,
+				"modelInvocable": entry.ModelInvocable,
+			}
+			if entry.WhenToUse != "" {
+				row["whenToUse"] = entry.WhenToUse
+			}
+			value = append(value, row)
+		}
+		sort.SliceStable(value, func(left, right int) bool {
+			return nativeString(value[left]["name"]) < nativeString(value[right]["name"])
+		})
+		return nativeRPCSuccess(map[string]any{"skills": value})
 	}
 	result, err := s.skillsFn(r.Context(), "list", SkillRequest{})
 	if err != nil {
@@ -2589,30 +3467,73 @@ func (s *Server) nativeSubagentPrompt(r *http.Request, raw json.RawMessage) nati
 	req.ParentSessionID = strings.TrimSpace(req.ParentSessionID)
 	req.ChildSessionID = strings.TrimSpace(req.ChildSessionID)
 	req.Mode = strings.TrimSpace(req.Mode)
+	// DSH validates the canonical browser time zone before authorization or
+	// any durable subagent work. Keep malformed request metadata fail-fast.
+	if strings.TrimSpace(req.ClientTimeZone) != "" {
+		if _, err := loadCanonicalPromptTimeZone(req.ClientTimeZone); err != nil {
+			return nativePromptTimeZoneFailure(req.ClientTimeZone)
+		}
+	}
 	if failure, ok := s.authorizeNativeSubagent(r.Context(), req.ParentSessionID, req.ChildSessionID, req.Mode); !ok {
 		return failure
 	}
-	var text string
+	content := make([]llm.ContentBlock, 0, len(req.Content))
+	var imageInputs []attachment.ImageInput
+	var imageIndexes []int
 	for _, part := range req.Content {
 		switch part.Type {
 		case "text":
-			text += part.Text
+			content = append(content, llm.Text(part.Text))
 		case "image":
-			return nativeRPCFailure("not-supported", "native subagent image prompt is not wired", nil)
+			if s.att == nil {
+				return nativeRPCFailure("not-supported", "native subagent image prompt is not wired", nil)
+			}
+			encoded := strings.TrimSpace(part.Data)
+			if strings.HasPrefix(encoded, "data:") {
+				separator := strings.IndexByte(encoded, ',')
+				if separator < 0 {
+					return nativeRPCFailure("bad-request", "image data URL is invalid", nil)
+				}
+				encoded = encoded[separator+1:]
+			}
+			data, err := nativeDecodeImageBase64(encoded)
+			if err != nil {
+				return nativeImageBase64Failure(err)
+			}
+			imageInputs = append(imageInputs, attachment.ImageInput{
+				MediaType: strings.TrimSpace(part.MediaType),
+				Data:      data,
+				Name:      strings.TrimSpace(part.Name),
+			})
+			imageIndexes = append(imageIndexes, len(content))
+			content = append(content, llm.ContentBlock{Kind: llm.BlockImage})
 		default:
 			return nativeRPCFailure("bad-request", "unsupported subagent prompt content type", nil)
 		}
 	}
-	if strings.TrimSpace(text) == "" {
-		return nativeRPCFailure("bad-request", "subagent prompt text content is required", nil)
+	if len(content) == 0 {
+		return nativeRPCFailure("bad-request", "subagent prompt content is required", nil)
+	}
+	if len(imageInputs) > 0 && s.nativeImageCapabilityFn != nil && !s.nativeImageCapabilityFn(r.Context(), req.ChildSessionID) {
+		return nativeImageCapabilityFailure()
+	}
+	if len(imageInputs) > 0 {
+		refs, err := s.att.SaveImages(imageInputs, maxWebImageBytes)
+		if err != nil {
+			return nativeAttachmentFailure(err)
+		}
+		for index, ref := range refs {
+			content[imageIndexes[index]].Image = ref
+		}
 	}
 	if s.nativeSubagentPromptFn == nil {
 		return nativeRPCFailure("not-supported", "subagent prompt handler not wired", nil)
 	}
-	if err := s.nativeSubagentPromptFn(r.Context(), req.ChildSessionID, text); err != nil {
+	meta := PromptMeta{RPCID: nativeRPCID(), ClientTimeZone: strings.TrimSpace(req.ClientTimeZone)}
+	if err := s.nativeSubagentPromptFn(r.Context(), req.ChildSessionID, content, meta); err != nil {
 		return nativeRPCFailure("subagent-prompt-failed", err.Error(), nil)
 	}
-	return nativeRPCSuccess(map[string]any{"messageId": nativeRPCID()})
+	return nativeRPCSuccess(map[string]any{"messageId": meta.RPCID})
 }
 
 func (s *Server) nativeSubagentInterrupt(r *http.Request, raw json.RawMessage) nativeRPCResult {
@@ -2733,6 +3654,9 @@ func (s *Server) nativeGoalMutation(r *http.Request, method string, raw json.Raw
 		}
 		mutation.GoalID = strings.TrimSpace(req.Ref.ID)
 		mutation.Revision = req.Ref.Revision
+	}
+	if failure, ok := s.nativeSubagentOwnershipGate(r.Context(), req.SessionID); !ok {
+		return failure
 	}
 	if s.nativeGoalMutationFn == nil {
 		return nativeRPCFailure("not-supported", "goal mutation handler not wired", nil)
@@ -2898,6 +3822,9 @@ func (s *Server) nativeAgentPresetSelect(r *http.Request, raw json.RawMessage) n
 	if req.SessionID == "" || req.AgentPreset == "" {
 		return nativeRPCFailure("bad-request", "sessionId and agentPreset are required", nil)
 	}
+	if failure, ok := s.nativeSubagentOwnershipGate(r.Context(), req.SessionID); !ok {
+		return failure
+	}
 	if !s.nativeAgentPresetAvailable(r.Context(), req.AgentPreset) {
 		return nativeRPCFailure("agent-preset-invalid", "agent preset is not available", map[string]any{
 			"agentPreset": req.AgentPreset, "reason": "preset is not available",
@@ -3047,6 +3974,9 @@ func (s *Server) nativeSessionModels(r *http.Request, raw json.RawMessage) nativ
 	if strings.TrimSpace(req.SessionID) == "" {
 		return nativeRPCFailure("bad-request", "sessionId is required", nil)
 	}
+	if failure, ok := s.nativeSubagentOwnershipGate(r.Context(), req.SessionID); !ok {
+		return failure
+	}
 	if _, err := s.store.GetSessionMeta(r.Context(), req.SessionID); err != nil {
 		return nativeStoreFailure(err)
 	}
@@ -3112,6 +4042,9 @@ func (s *Server) nativeSessionSelectModel(r *http.Request, raw json.RawMessage) 
 	req.ReasoningEffort = strings.TrimSpace(req.ReasoningEffort)
 	if req.SessionID == "" || req.Provider == "" || req.Model == "" {
 		return nativeRPCFailure("bad-request", "sessionId, provider and model are required", nil)
+	}
+	if failure, ok := s.nativeSubagentOwnershipGate(r.Context(), req.SessionID); !ok {
+		return failure
 	}
 	if _, err := s.store.GetSessionMeta(r.Context(), req.SessionID); err != nil {
 		return nativeStoreFailure(err)
@@ -3582,22 +4515,232 @@ func nativeIsAppendSurfaceMessage(event nativeSessionEvent) bool {
 	return event.SurfaceOp == "append"
 }
 
+// nativeSessionCreatePostFlightChecks preserves DSH's split between one shared
+// creation operation and caller-specific assertions. A concurrent retry with a
+// different cwd or explicit preset must conflict even though the leader's
+// successful result was reused.
+func nativeSessionCreatePostFlightChecks(
+	created NativeSessionCreateResult,
+	requestedPreset, desiredCWD string,
+) (nativeRPCResult, bool) {
+	if requestedPreset != "" && created.AgentPreset != requestedPreset {
+		message := fmt.Sprintf(
+			"session %q already runs agent preset %q; requested %q. A session's preset is fixed at creation.",
+			created.SessionID, created.AgentPreset, requestedPreset)
+		if created.AgentPreset == "" {
+			message = fmt.Sprintf(
+				"session %q records no agent preset, so it cannot be adopted under one; "+
+					"a deployment composing no roster records none on any session — requested %q. "+
+					"A session's preset is fixed at creation.", created.SessionID, requestedPreset)
+		}
+		details := map[string]any{
+			"sessionId": created.SessionID, "requestedPreset": requestedPreset,
+		}
+		if created.AgentPreset != "" {
+			details["existingPreset"] = created.AgentPreset
+		}
+		return nativeRPCFailure("agent-preset-conflict", message, details), true
+	}
+	if created.CWD != desiredCWD {
+		return nativeRPCFailure("session-conflict",
+			fmt.Sprintf("session %q already exists with cwd %q; requested %q",
+				created.SessionID, created.CWD, desiredCWD),
+			map[string]any{
+				"sessionId": created.SessionID, "requestedCwd": desiredCWD, "existingCwd": created.CWD,
+			}), true
+	}
+	return nativeRPCResult{}, false
+}
+
+// nativeSessionCreateDeduped applies DSH's per-identity create single-flight.
+// The first named create request resolves fresh-versus-adoption and runs the
+// creator; concurrent retries await and receive the same outcome instead of
+// racing the durable uniqueness boundary.
+func (s *Server) nativeSessionCreateDeduped(
+	ctx context.Context,
+	req *nativeSessionCreateRequest,
+	requestedPreset, resolvedCWD string,
+) (NativeSessionCreateResult, nativeRPCResult, bool) {
+	return s.withNativeSessionCreateFlight(ctx, strings.TrimSpace(req.SessionID), func() (NativeSessionCreateResult, nativeRPCResult, bool) {
+		existingIdentity := false
+		if req.SessionID != "" {
+			_, err := s.store.GetSessionMeta(ctx, req.SessionID)
+			switch {
+			case err == nil:
+				existingIdentity = true
+			case errors.Is(err, store.ErrNotFound):
+			default:
+				return NativeSessionCreateResult{}, nativeStoreFailure(err), true
+			}
+		}
+		agentPreset := strings.TrimSpace(requestedPreset)
+		if !existingIdentity {
+			// Fresh identities compose the requested/default preset. Existing
+			// identities are adopted under their already-running composition.
+			if agentPreset == "" {
+				agentPreset = s.nativeAgentPresetDefault(ctx)
+			}
+			if agentPreset != "" && !s.nativeAgentPresetAvailable(ctx, agentPreset) {
+				return NativeSessionCreateResult{}, nativeRPCFailure("agent-preset-invalid",
+					"agent preset is not available",
+					map[string]any{"agentPreset": agentPreset, "reason": "preset is not available"}), true
+			}
+		}
+		desiredCWD := resolvedCWD
+		if req.WorkspaceID == "" {
+			desiredCWD = req.CWD
+		}
+		if desiredCWD == "" {
+			desiredCWD = s.defaultWorkdir
+		}
+		created, err := s.nativeSessionCreateFn(ctx, NativeSessionCreateSpec{
+			SessionID:            req.SessionID,
+			CWD:                  desiredCWD,
+			WorkspaceID:          req.WorkspaceID,
+			AgentPreset:          agentPreset,
+			AgentPresetRequested: requestedPreset != "",
+		})
+		if err != nil {
+			var createErr *NativeSessionCreateError
+			if errors.As(err, &createErr) {
+				return NativeSessionCreateResult{}, nativeRPCFailure(createErr.Code, createErr.Message, createErr.Details), true
+			}
+			return NativeSessionCreateResult{}, nativeRPCFailure("internal",
+				fmt.Sprintf("failed to create session %q: %v", req.SessionID, err), nil), true
+		}
+		return created, nativeRPCResult{}, false
+	})
+}
+
+func (s *Server) withNativeSessionCreateFlight(
+	ctx context.Context,
+	sessionID string,
+	run func() (NativeSessionCreateResult, nativeRPCResult, bool),
+) (NativeSessionCreateResult, nativeRPCResult, bool) {
+	if sessionID == "" {
+		return run()
+	}
+	s.nativeSessionCreateMu.Lock()
+	if flight, ok := s.nativeSessionCreateFlights[sessionID]; ok {
+		s.nativeSessionCreateMu.Unlock()
+		select {
+		case <-flight.done:
+		case <-ctx.Done():
+			return NativeSessionCreateResult{}, nativeRPCFailure("cancelled", "request context cancelled", nil), true
+		}
+		if flight.failed {
+			return flight.result, flight.failure, true
+		}
+		return flight.result, nativeRPCResult{}, false
+	}
+	flight := &nativeSessionCreateFlight{done: make(chan struct{})}
+	if s.nativeSessionCreateFlights == nil {
+		s.nativeSessionCreateFlights = make(map[string]*nativeSessionCreateFlight)
+	}
+	s.nativeSessionCreateFlights[sessionID] = flight
+	s.nativeSessionCreateMu.Unlock()
+
+	flight.result, flight.failure, flight.failed = run()
+	close(flight.done)
+	s.nativeSessionCreateMu.Lock()
+	delete(s.nativeSessionCreateFlights, sessionID)
+	s.nativeSessionCreateMu.Unlock()
+	if flight.failed {
+		return flight.result, flight.failure, true
+	}
+	return flight.result, nativeRPCResult{}, false
+}
+
 func (s *Server) nativeSessionCreate(r *http.Request, raw json.RawMessage) nativeRPCResult {
-	if s.sessFn == nil {
+	if s.sessFn == nil && s.nativeSessionCreateFn == nil {
 		return nativeRPCFailure("not-supported", "session manager not wired", nil)
 	}
 	var req nativeSessionCreateRequest
 	if failure := nativeDecode(raw, &req); !failure.OK && failure.Error != nil {
 		return failure
 	}
-	req.AgentPreset = strings.TrimSpace(req.AgentPreset)
-	if req.AgentPreset == "" {
-		req.AgentPreset = s.nativeAgentPresetDefault(r.Context())
+	if req.WorkspaceID != "" && req.CWD != "" {
+		return nativeRPCFailure("bad-request", "session.create accepts workspaceId or cwd, not both", nil)
 	}
-	if req.AgentPreset != "" && !s.nativeAgentPresetAvailable(r.Context(), req.AgentPreset) {
-		return nativeRPCFailure("agent-preset-invalid", "agent preset is not available", map[string]any{
-			"agentPreset": req.AgentPreset, "reason": "preset is not available",
-		})
+	requestedPreset := strings.TrimSpace(req.AgentPreset)
+	// DSH resolves the workspace before creating a session. Creating first
+	// would turn an invalid sidebar selection into an orphan session even when
+	// the attach step subsequently fails.
+	resolvedCWD := ""
+	if req.WorkspaceID != "" {
+		cwd, err := s.workspaceWorkdir(r.Context(), req.WorkspaceID)
+		if err != nil {
+			if strings.Contains(err.Error(), "workspace not found") {
+				return nativeWorkspaceNotFound(req.WorkspaceID)
+			}
+			return nativeRPCFailure("workspace-invalid-path", err.Error(), map[string]any{"workspaceId": req.WorkspaceID})
+		}
+		resolvedCWD = cwd
+	}
+	req.SessionID = strings.TrimSpace(req.SessionID)
+	// DSH fences a named subagent before preset/CWD adoption checks.
+	if req.SessionID != "" {
+		if failure, ok := s.nativeSubagentOwnershipGate(r.Context(), req.SessionID); !ok {
+			return failure
+		}
+	}
+	if s.nativeSessionCreateFn != nil {
+		created, failure, handled := s.nativeSessionCreateDeduped(r.Context(), &req, requestedPreset, resolvedCWD)
+		if handled {
+			return failure
+		}
+		desiredCWD := resolvedCWD
+		if req.WorkspaceID == "" {
+			desiredCWD = req.CWD
+		}
+		if desiredCWD == "" {
+			desiredCWD = s.defaultWorkdir
+		}
+		if failure, failed := nativeSessionCreatePostFlightChecks(created, requestedPreset, desiredCWD); failed {
+			return failure
+		}
+		// The native mux is already connected while the user creates a session.
+		// Publish the new address before returning so its live event
+		// subscription is installed before the client can submit the first prompt.
+		s.notifyNativeMuxSessionAdded(created.SessionID)
+		value := map[string]any{"sessionId": created.SessionID}
+		if created.AgentPreset != "" {
+			value["agentPreset"] = created.AgentPreset
+		}
+		return nativeRPCSuccess(value)
+	}
+	existingIdentity := false
+	if req.SessionID != "" {
+		_, err := s.store.GetSessionMeta(r.Context(), req.SessionID)
+		switch {
+		case err == nil:
+			existingIdentity = true
+		case errors.Is(err, store.ErrNotFound):
+		default:
+			return nativeStoreFailure(err)
+		}
+	}
+	req.AgentPreset = strings.TrimSpace(req.AgentPreset)
+	if !existingIdentity {
+		// Composition and roster checks belong to a fresh identity only. DSH
+		// adopts an existing session under its already-running preset first;
+		// an explicitly named but different preset is a conflict, not a new
+		// preset admission request.
+		if req.AgentPreset == "" {
+			req.AgentPreset = s.nativeAgentPresetDefault(r.Context())
+		}
+		if req.AgentPreset != "" && !s.nativeAgentPresetAvailable(r.Context(), req.AgentPreset) {
+			return nativeRPCFailure("agent-preset-invalid", "agent preset is not available", map[string]any{
+				"agentPreset": req.AgentPreset, "reason": "preset is not available",
+			})
+		}
+	}
+	desiredCWD := resolvedCWD
+	if req.WorkspaceID == "" {
+		desiredCWD = req.CWD
+	}
+	if desiredCWD == "" {
+		desiredCWD = s.defaultWorkdir
 	}
 	id, err := s.sessFn(r.Context(), "new", req.SessionID)
 	if err != nil {
@@ -3605,10 +4748,12 @@ func (s *Server) nativeSessionCreate(r *http.Request, raw json.RawMessage) nativ
 	}
 	if req.WorkspaceID != "" {
 		if err := s.store.SetSessionWorkspace(r.Context(), id, req.WorkspaceID); err != nil {
-			return nativeRPCFailure("workspace-attach-failed", err.Error(), nil)
+			return nativeRPCFailure("workspace-attach-failed", err.Error(), map[string]any{"sessionId": id, "workspaceId": req.WorkspaceID})
 		}
-		if err := s.syncSessionCWD(r.Context(), id, req.WorkspaceID); err != nil {
-			return nativeRPCFailure("workspace-attach-failed", err.Error(), nil)
+		if headers, ok := s.store.(store.SessionHeaderStore); ok {
+			if err := headers.SetSessionCWD(r.Context(), id, resolvedCWD); err != nil {
+				return nativeRPCFailure("workspace-attach-failed", err.Error(), map[string]any{"sessionId": id, "workspaceId": req.WorkspaceID})
+			}
 		}
 	}
 	if req.CWD != "" {
@@ -3661,7 +4806,24 @@ func (s *Server) nativeSessionFork(r *http.Request, raw json.RawMessage) nativeR
 	}
 	end := nativeForkBoundary(events, req.AtSeq)
 	if end < 0 {
-		return nativeRPCFailure("fork-unavailable", "session has no completed turn to fork", map[string]any{"sessionId": req.SessionID})
+		lastSeq := uint64(0)
+		if len(events) != 0 {
+			lastSeq = events[len(events)-1].Seq
+		}
+		if req.AtSeq != nil && *req.AtSeq <= lastSeq {
+			return nativeRPCFailure("fork-unavailable",
+				fmt.Sprintf("session %q has not completed the turn containing event %d", req.SessionID, *req.AtSeq),
+				map[string]any{"sessionId": req.SessionID})
+		}
+		return nativeRPCFailure("fork-unavailable",
+			fmt.Sprintf("session %q has no completed turn to fork from", req.SessionID),
+			map[string]any{"sessionId": req.SessionID})
+	}
+	seedEnd := nativeForkSeedEnd(events, end)
+	workspaceID, err := s.nativeForkWorkspaceID(r.Context(), req.SessionID)
+	if err != nil {
+		return nativeRPCFailure("internal",
+			fmt.Sprintf("failed to resolve fork workspace for session %q: %v", req.SessionID, err), nil)
 	}
 	forkStore, ok := s.store.(store.SessionForkStore)
 	if !ok {
@@ -3671,19 +4833,116 @@ func (s *Server) nativeSessionFork(r *http.Request, raw json.RawMessage) nativeR
 	if err != nil {
 		return nativeRPCFailure("fork-failed", err.Error(), nil)
 	}
+	options := store.SessionForkOptions{InheritParentMetadata: true, WorkspaceID: workspaceID}
+	if title, source := nativeForkSeedTitle(events[:seedEnd]); title != "" {
+		options.Title = title
+		options.TitleSource = source
+	}
 	// The store reads the parent header, sidebar projection, runtime config,
 	// and closed seed under one SQLite transaction. Publishing those pieces via
 	// separate Store calls would let a crash expose a runnable child whose
 	// transcript and metadata describe different states.
-	if err := forkStore.ForkSessionWithOptions(r.Context(), req.SessionID, forkID, events[end].Seq, store.SessionForkOptions{
-		InheritParentMetadata: true,
-	}); err != nil {
+	if err := forkStore.ForkSessionWithOptions(r.Context(), req.SessionID, forkID, events[seedEnd-1].Seq, options); err != nil {
 		return nativeRPCFailure("fork-failed", err.Error(), nil)
 	}
 	// A fork is a new live session as well. Attach it to every resident native
 	// mux before returning so the first follow-up prompt is not missed.
 	s.notifyNativeMuxSessionAdded(forkID)
 	return nativeRPCSuccess(map[string]any{"sessionId": forkID})
+}
+
+// nativeForkSeedEnd extends the completed-turn cut through trailing
+// out-of-band events (title, approvals, injections, etc.) exactly as DSH does.
+// These standalone records belong to the forked turn even though the lifecycle
+// boundary itself has already closed.
+func nativeForkSeedEnd(events []session.Event, boundaryIndex int) int {
+	end := boundaryIndex + 1
+	for end < len(events) && events[end].Type != session.EventTurnStart {
+		end++
+	}
+	return end
+}
+
+// nativeForkSeedTitle folds the latest title event in the copied seed. DSH
+// derives the child's title from its seed log rather than copying the parent's
+// mutable latest-title metadata, so an older boundary keeps the title that
+// existed when that turn completed.
+func nativeForkSeedTitle(events []session.Event) (string, string) {
+	title := ""
+	source := session.TitleSourceFallback
+	for _, event := range events {
+		if event.Type != session.EventSessionTitle {
+			continue
+		}
+		var data struct {
+			Title  string `json:"title"`
+			Source struct {
+				Kind string `json:"kind"`
+			} `json:"source"`
+		}
+		if json.Unmarshal(event.Data, &data) != nil || data.Title == "" {
+			continue
+		}
+		switch data.Source.Kind {
+		case "provider":
+			source = session.TitleSourceLLM
+		case "user":
+			source = session.TitleSourceUser
+		default:
+			source = session.TitleSourceFallback
+		}
+		title = data.Title
+	}
+	return title, source
+}
+
+// nativeForkWorkspaceID resolves DSH's fork membership: a direct workspace for
+// ordinary sources, or the nearest workspace-bearing ancestor for a subagent.
+func (s *Server) nativeForkWorkspaceID(ctx context.Context, sessionID string) (string, error) {
+	header := store.SessionHeader{ID: sessionID}
+	if headers, ok := s.store.(store.SessionLineageStore); ok {
+		resolved, err := headers.GetSessionHeader(ctx, sessionID)
+		if err != nil {
+			return "", err
+		}
+		header = resolved
+	}
+	sourceMeta, err := s.store.GetSessionMeta(ctx, header.ID)
+	if err != nil {
+		return "", err
+	}
+	// DSH first honors direct workspace membership, even for a subagent;
+	// ancestor lookup is only the fallback for an unlisted child.
+	if sourceMeta.WorkspaceID != "" {
+		return sourceMeta.WorkspaceID, nil
+	}
+	if header.Origin == "subagent" {
+		for header.Parent != "" {
+			headers, ok := s.store.(store.SessionLineageStore)
+			if !ok {
+				break
+			}
+			resolved, err := headers.GetSessionHeader(ctx, header.Parent)
+			if err != nil {
+				return "", err
+			}
+			header = resolved
+			if header.Origin != "subagent" {
+				break
+			}
+		}
+		if header.Origin == "subagent" {
+			return "", nil
+		}
+	}
+	if header.ID == sessionID {
+		return sourceMeta.WorkspaceID, nil
+	}
+	meta, err := s.store.GetSessionMeta(ctx, header.ID)
+	if err != nil {
+		return "", err
+	}
+	return meta.WorkspaceID, nil
 }
 
 func nativeForkBoundary(events []session.Event, atSeq *uint64) int {
@@ -3731,7 +4990,9 @@ func (s *Server) nativeSessionUpdateQueue(r *http.Request, raw json.RawMessage) 
 		}
 		for _, part := range req.Action.Content {
 			if part.Type != "text" {
-				return nativeRPCFailure("not-supported", "queued message editing currently supports text content only", nil)
+				return nativeRPCFailure("attachment-error", "queue edits accept text content only", map[string]any{
+					"reason": "QUEUE_EDIT_NON_TEXT",
+				})
 			}
 			builder.WriteString(part.Text)
 		}
@@ -3740,9 +5001,12 @@ func (s *Server) nativeSessionUpdateQueue(r *http.Request, raw json.RawMessage) 
 			return nativeRPCFailure("bad-request", "edit content must not be blank", nil)
 		}
 	}
+	if failure, ok := s.nativeSubagentOwnershipGate(r.Context(), req.SessionID); !ok {
+		return failure
+	}
 	if s.nativeQueueUpdateFn != nil {
 		if err := s.nativeQueueUpdateFn(r.Context(), req.SessionID, req.ItemID, req.Action.Kind, text); err != nil {
-			return nativeRPCFailure("queue-update-failed", err.Error(), nil)
+			return nativeQueueFailure(err, req.ItemID)
 		}
 		s.notifyNativeMux(req.SessionID)
 		return nativeRPCSuccess(map[string]any{"accepted": true})
@@ -3755,10 +5019,74 @@ func (s *Server) nativeSessionUpdateQueue(r *http.Request, raw json.RawMessage) 
 		return nativeRPCFailure("not-supported", "native queue edit handler not wired", nil)
 	}
 	if err := s.queueUpdateFn(r.Context(), req.SessionID, req.ItemID, legacyAction); err != nil {
-		return nativeRPCFailure("queue-update-failed", err.Error(), nil)
+		return nativeQueueFailure(err, req.ItemID)
 	}
 	s.notifyNativeMux(req.SessionID)
 	return nativeRPCSuccess(map[string]any{"accepted": true})
+}
+
+func nativeQueueFailure(err error, itemID string) nativeRPCResult {
+	switch {
+	case errors.Is(err, ErrQueueItemNotFound):
+		return nativeRPCFailure("queue-item-not-found", ErrQueueItemNotFound.Error(), map[string]any{"itemId": itemID})
+	case errors.Is(err, ErrSteerUnavailable):
+		return nativeRPCFailure("steer-unavailable", ErrSteerUnavailable.Error(), map[string]any{"itemId": itemID})
+	default:
+		return nativeRPCFailure("queue-update-failed", err.Error(), nil)
+	}
+}
+
+// nativePromptRouteFailure applies DSH's prompt admission rule: an unserved
+// provider must fail before durable prompt/attachment admission instead of
+// turning into a late model-loop error.
+func (s *Server) nativePromptRouteFailure(ctx context.Context, sessionID string) (nativeRPCResult, bool) {
+	if s.cfgFn == nil {
+		return nativeRPCResult{}, false
+	}
+	view := s.cfgFn()
+	provider := nativeString(view["llm_provider"])
+	if provider == "" {
+		provider = nativeString(view["provider"])
+	}
+	model := nativeString(view["model"])
+	effort := nativeString(view["reasoning_effort"])
+	if effort == "" {
+		effort = nativeString(view["reasoningEffort"])
+	}
+	if configs, ok := s.store.(store.SessionConfigStore); ok {
+		if config, err := configs.GetSessionConfig(ctx, sessionID); err == nil {
+			if config.Provider != "" {
+				provider = config.Provider
+			}
+			if config.Model != "" {
+				model = config.Model
+			}
+			if config.ReasoningEffort != "" {
+				effort = config.ReasoningEffort
+			}
+		}
+	}
+	providers := nativeConfigProviderMaps(view["providers"])
+	served := false
+	if len(providers) == 0 {
+		// DSH permits prompts when the host composes no LLM registry; the
+		// legacy embedded runtime has the same absence-of-registry meaning.
+		return nativeRPCResult{}, false
+	}
+	for _, candidate := range providers {
+		if nativeString(candidate["id"]) == provider &&
+			nativeBool(candidate["configured"]) &&
+			nativeBool(candidate["available"]) {
+			served = true
+			break
+		}
+	}
+	if served {
+		return nativeRPCResult{}, false
+	}
+	return nativeRPCFailure("model-unavailable",
+		fmt.Sprintf("no adapter serves provider %q; select a model for this session", provider),
+		map[string]any{"provider": provider, "model": model}), true
 }
 
 func (s *Server) nativeSessionPrompt(r *http.Request, raw json.RawMessage) nativeRPCResult {
@@ -3773,18 +5101,47 @@ func (s *Server) nativeSessionPrompt(r *http.Request, raw json.RawMessage) nativ
 	if req.SessionID == "" {
 		return nativeRPCFailure("bad-request", "sessionId is required", nil)
 	}
+	// DSH validates the browser's canonical time-zone request before resolving
+	// the agent route or opening any admission side effects.
+	if strings.TrimSpace(req.ClientTimeZone) != "" {
+		if _, err := loadCanonicalPromptTimeZone(req.ClientTimeZone); err != nil {
+			return nativePromptTimeZoneFailure(req.ClientTimeZone)
+		}
+	}
+	if failure, ok := s.nativeSubagentOwnershipGate(r.Context(), req.SessionID); !ok {
+		return failure
+	}
 	if _, err := s.store.GetSessionMeta(r.Context(), req.SessionID); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return nativeRPCFailure("session-not-found", "session not found", map[string]any{"sessionId": req.SessionID})
 		}
 		return nativeStoreFailure(err)
 	}
+	if failure, blocked := s.nativePromptRouteFailure(r.Context(), req.SessionID); blocked {
+		return failure
+	}
+	// DSH checks the selected model's image modality before decoding or
+	// persisting image content. This preserves that failure precedence and
+	// keeps an unsupported-model prompt free of Base64 admission side effects.
+	hasImage := false
+	for _, part := range req.Content {
+		if part.Type == "image" {
+			hasImage = true
+			break
+		}
+	}
+	if hasImage && s.nativeImageCapabilityFn != nil && !s.nativeImageCapabilityFn(r.Context(), req.SessionID) {
+		return nativeImageCapabilityFailure()
+	}
 	var text string
 	imageInputs := make([]attachment.ImageInput, 0)
+	queueContent := make([]llm.ContentBlock, 0, len(req.Content))
+	queueImageIndexes := make([]int, 0)
 	for _, part := range req.Content {
 		switch part.Type {
 		case "text":
 			text += part.Text
+			queueContent = append(queueContent, llm.Text(part.Text))
 		case "image":
 			if s.att == nil {
 				return nativeRPCFailure("not-supported", "native image prompt is not wired", nil)
@@ -3797,23 +5154,23 @@ func (s *Server) nativeSessionPrompt(r *http.Request, raw json.RawMessage) nativ
 				}
 				encoded = encoded[separator+1:]
 			}
-			data, err := base64.StdEncoding.DecodeString(encoded)
+			data, err := nativeDecodeImageBase64(encoded)
 			if err != nil {
-				return nativeRPCFailure("bad-request", "image data must be Base64", map[string]any{"message": err.Error()})
+				return nativeImageBase64Failure(err)
 			}
 			imageInputs = append(imageInputs, attachment.ImageInput{
 				MediaType: strings.TrimSpace(part.MediaType),
 				Data:      data,
+				Name:      strings.TrimSpace(part.Name),
 			})
+			queueImageIndexes = append(queueImageIndexes, len(queueContent))
+			queueContent = append(queueContent, llm.ContentBlock{Kind: llm.BlockImage})
 		default:
 			return nativeRPCFailure("bad-request", "unsupported prompt content type", nil)
 		}
 	}
 	if strings.TrimSpace(text) == "" && len(imageInputs) == 0 {
 		return nativeRPCFailure("bad-request", "text or image content is required", nil)
-	}
-	if len(imageInputs) > 0 && s.nativeImageCapabilityFn != nil && !s.nativeImageCapabilityFn(r.Context(), req.SessionID) {
-		return nativeRPCFailure("not-supported", "image prompt capability is unavailable for this session", map[string]any{"sessionId": req.SessionID})
 	}
 	// Rich prompt admission is one batch boundary: validate every image before
 	// publishing the first object. This matches ACP/MCP and prevents a late
@@ -3822,16 +5179,24 @@ func (s *Server) nativeSessionPrompt(r *http.Request, raw json.RawMessage) nativ
 	if len(imageInputs) > 0 {
 		refs, err := s.att.SaveImages(imageInputs, maxWebImageBytes)
 		if err != nil {
-			return nativeRPCFailure("attachment-error", err.Error(), nil)
+			return nativeAttachmentFailure(err)
 		}
 		images = refs
 	}
-	// DSH uses queue mode for a prompt submitted while another turn is active.
-	// Let the composition root's queue owner accept it immediately; it will
-	// drain after the current turn and publish the same live events. Image
-	// prompts stay on msgFn because the process queue is intentionally text-only.
-	if req.Mode == "queue" && len(images) == 0 && s.queueEnqueueFn != nil {
-		if _, err := s.queueEnqueueFn(r.Context(), req.SessionID, text); err != nil {
+	for index, ref := range images {
+		queueContent[queueImageIndexes[index]].Image = ref
+	}
+	meta := PromptMeta{RPCID: nativeRPCID(), ClientTimeZone: strings.TrimSpace(req.ClientTimeZone)}
+	if meta.ClientTimeZone != "" {
+		if _, err := loadCanonicalPromptTimeZone(meta.ClientTimeZone); err != nil {
+			return nativePromptTimeZoneFailure(meta.ClientTimeZone)
+		}
+	}
+	// DSH queues complete pending messages, including image blocks. Admission
+	// has already persisted the attachment batch, so only durable refs cross
+	// the queue boundary.
+	if req.Mode == "queue" && s.queueEnqueueFn != nil {
+		if _, err := s.queueEnqueueFn(r.Context(), req.SessionID, text, queueContent, meta); err != nil {
 			return nativeRPCFailure("prompt-failed", err.Error(), nil)
 		}
 		s.notifyNativeMux(req.SessionID)
@@ -3854,7 +5219,7 @@ func (s *Server) nativeSessionPrompt(r *http.Request, raw json.RawMessage) nativ
 	// accepted turn. webMessage owns the process lifetime and explicit stop path.
 	turnCtx := context.WithoutCancel(r.Context())
 	go func() {
-		if err := s.msgFn(turnCtx, req.SessionID, text, images); err != nil {
+		if err := s.msgFn(turnCtx, req.SessionID, text, images, meta); err != nil {
 			// Errors are persisted/published by the composition-root message
 			// handler. Keep a transport log as a last-resort diagnostic for
 			// handlers that fail before they can append a turn/end event.
@@ -3913,6 +5278,10 @@ func nativeWorkspaceViews(workspaces []store.WorkspaceMeta, metas []store.Sessio
 	return items, archived
 }
 
+func nativeWorkspaceNotFound(workspaceID string) nativeRPCResult {
+	return nativeRPCFailure("workspace-not-found", fmt.Sprintf("workspace %q not found", workspaceID), map[string]any{"workspaceId": workspaceID})
+}
+
 func nativeWorkspaceTime(value time.Time) string {
 	if value.IsZero() {
 		return time.Unix(0, 0).UTC().Format(time.RFC3339Nano)
@@ -3949,6 +5318,8 @@ func nativeWorkspaceCanonicalPath(rawPath string) (string, error) {
 }
 
 func (s *Server) nativeWorkspaceCreate(r *http.Request, rawPath string) nativeRPCResult {
+	s.workspaceMutationMu.Lock()
+	defer s.workspaceMutationMu.Unlock()
 	path, err := nativeWorkspaceCanonicalPath(rawPath)
 	if err != nil {
 		return nativeRPCFailure("workspace-invalid-path", err.Error(), map[string]any{"path": strings.TrimSpace(rawPath)})
@@ -3988,6 +5359,8 @@ func (s *Server) nativeWorkspaceCreate(r *http.Request, rawPath string) nativeRP
 }
 
 func (s *Server) nativeWorkspaceRename(r *http.Request, id, rawTitle string) nativeRPCResult {
+	s.workspaceMutationMu.Lock()
+	defer s.workspaceMutationMu.Unlock()
 	id = strings.TrimSpace(id)
 	title := strings.TrimSpace(boundRunes(rawTitle, maxWorkspaceTitle))
 	if id == "" || title == "" {
@@ -4004,11 +5377,11 @@ func (s *Server) nativeWorkspaceRename(r *http.Request, id, rawTitle string) nat
 	items, _ := nativeWorkspaceViews(workspaces, metas)
 	current, found := nativeWorkspaceFind(items, id)
 	if !found {
-		return nativeRPCFailure("workspace-not-found", "workspace not found", map[string]any{"workspaceId": id})
+		return nativeWorkspaceNotFound(id)
 	}
 	for _, workspace := range items {
 		if workspace.WorkspaceID != id && workspace.Title == title {
-			return nativeRPCFailure("workspace-name-conflict", "workspace title is already in use", map[string]any{"workspaceId": workspace.WorkspaceID})
+			return nativeRPCFailure("workspace-name-conflict", fmt.Sprintf("workspace name %q is already in use", title), map[string]any{"name": title})
 		}
 	}
 	if current.Title == title {
@@ -4016,7 +5389,7 @@ func (s *Server) nativeWorkspaceRename(r *http.Request, id, rawTitle string) nat
 	}
 	if err := s.store.SetWorkspaceTitle(r.Context(), id, title); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return nativeRPCFailure("workspace-not-found", "workspace not found", map[string]any{"workspaceId": id})
+			return nativeWorkspaceNotFound(id)
 		}
 		return nativeRPCFailure("workspace-rename-failed", err.Error(), nil)
 	}
@@ -4025,13 +5398,15 @@ func (s *Server) nativeWorkspaceRename(r *http.Request, id, rawTitle string) nat
 }
 
 func (s *Server) nativeWorkspaceDelete(r *http.Request, id string) nativeRPCResult {
+	s.workspaceMutationMu.Lock()
+	defer s.workspaceMutationMu.Unlock()
 	id = strings.TrimSpace(id)
 	if id == "" {
 		return nativeRPCFailure("bad-request", "workspaceId is required", nil)
 	}
 	if err := s.store.DeleteWorkspace(r.Context(), id); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return nativeRPCFailure("workspace-not-found", "workspace not found", map[string]any{"workspaceId": id})
+			return nativeWorkspaceNotFound(id)
 		}
 		return nativeRPCFailure("workspace-delete-failed", err.Error(), nil)
 	}
@@ -4055,7 +5430,11 @@ func (s *Server) nativeWorkspaceInsertBefore(r *http.Request, id, beforeID strin
 		known[workspace.ID] = true
 	}
 	if !known[id] || (beforeID != "" && !known[beforeID]) {
-		return nativeRPCFailure("workspace-not-found", "workspace or anchor not found", nil)
+		missing := id
+		if known[id] {
+			missing = beforeID
+		}
+		return nativeWorkspaceNotFound(missing)
 	}
 	if id == beforeID {
 		return nativeRPCSuccess(map[string]any{"workspaceIds": order})
@@ -4098,7 +5477,7 @@ func (s *Server) nativeWorkspaceInsertSessionBefore(r *http.Request, workspaceID
 	items, _ := nativeWorkspaceViews(workspaces, metas)
 	workspace, found := nativeWorkspaceFind(items, workspaceID)
 	if !found {
-		return nativeRPCFailure("workspace-not-found", "workspace not found", map[string]any{"workspaceId": workspaceID})
+		return nativeWorkspaceNotFound(workspaceID)
 	}
 	order := append([]string(nil), workspace.SessionIDs...)
 	contains := func(id string) bool {
@@ -4110,7 +5489,11 @@ func (s *Server) nativeWorkspaceInsertSessionBefore(r *http.Request, workspaceID
 		return false
 	}
 	if !contains(sessionID) || (beforeID != "" && !contains(beforeID)) {
-		return nativeRPCFailure("workspace-move-invalid", "session or anchor is not accounted by this workspace", nil)
+		moveDetails := map[string]any{"workspaceId": workspaceID, "sessionId": sessionID}
+		if beforeID != "" {
+			moveDetails["beforeSessionId"] = beforeID
+		}
+		return nativeRPCFailure("workspace-move-invalid", "session or anchor is not accounted by this workspace", moveDetails)
 	}
 	if sessionID == beforeID {
 		return nativeRPCSuccess(map[string]any{"workspace": workspace})
@@ -4132,7 +5515,11 @@ func (s *Server) nativeWorkspaceInsertSessionBefore(r *http.Request, workspaceID
 	}
 	order = append(without[:index:index], append([]string{sessionID}, without[index:]...)...)
 	if err := s.store.ReorderSessions(r.Context(), workspaceID, order); err != nil {
-		return nativeRPCFailure("workspace-move-invalid", err.Error(), nil)
+		moveDetails := map[string]any{"workspaceId": workspaceID, "sessionId": sessionID}
+		if beforeID != "" {
+			moveDetails["beforeSessionId"] = beforeID
+		}
+		return nativeRPCFailure("workspace-move-invalid", err.Error(), moveDetails)
 	}
 	workspace.SessionIDs = order
 	return nativeRPCSuccess(map[string]any{"workspace": workspace})
@@ -4202,6 +5589,27 @@ func (s *Server) handleNativeMuxWebSocket(w http.ResponseWriter, r *http.Request
 		}
 		return writeWithID(method, payload, nativeRPCID())
 	}
+	writeRemoteEvent := func(event string, args ...any) error {
+		body, err := json.Marshal(nativeRemoteEventFrame{Type: "host/remote-event", Event: event, Args: args})
+		if err != nil {
+			return err
+		}
+		writes.Lock()
+		defer writes.Unlock()
+		return writeNativeWebSocketText(conn, body)
+	}
+	settingsUnsub := s.subscribeNativeSettingsDocumentUpdated(func(namespace string, revision int) {
+		_ = writeRemoteEvent("settings/document-updated", namespace, revision)
+	})
+	defer settingsUnsub()
+	credentialUnsub := s.subscribeNativeCredentialUpdated(func(ref string) {
+		_ = writeRemoteEvent("credentials/updated", ref)
+	})
+	defer credentialUnsub()
+	llmAdapterUnsub := s.subscribeNativeLLMAdaptersUpdated(func() {
+		_ = writeRemoteEvent("llm/adapters-updated")
+	})
+	defer llmAdapterUnsub()
 	interactionKinds := make(map[string]string)
 	var interactionKindsMu sync.Mutex
 	emitInteraction := func(sessionID string, ev session.Event) {
@@ -4470,6 +5878,27 @@ func (s *Server) handleNativeHostWebSocket(w http.ResponseWriter, r *http.Reques
 		defer writes.Unlock()
 		return writeNativeWebSocketText(conn, body)
 	}
+	writeRemoteEvent := func(event string, args ...any) error {
+		body, err := json.Marshal(nativeRemoteEventFrame{Type: "host/remote-event", Event: event, Args: args})
+		if err != nil {
+			return err
+		}
+		writes.Lock()
+		defer writes.Unlock()
+		return writeNativeWebSocketText(conn, body)
+	}
+	settingsUnsub := s.subscribeNativeSettingsDocumentUpdated(func(namespace string, revision int) {
+		_ = writeRemoteEvent("settings/document-updated", namespace, revision)
+	})
+	defer settingsUnsub()
+	credentialUnsub := s.subscribeNativeCredentialUpdated(func(ref string) {
+		_ = writeRemoteEvent("credentials/updated", ref)
+	})
+	defer credentialUnsub()
+	llmAdapterUnsub := s.subscribeNativeLLMAdaptersUpdated(func() {
+		_ = writeRemoteEvent("llm/adapters-updated")
+	})
+	defer llmAdapterUnsub()
 	metas, err := s.store.ListSessions(ctx)
 	if err != nil {
 		return
@@ -4747,13 +6176,17 @@ func nativeQueueFrame(sessionID string, items []QueueItem) map[string]any {
 		default:
 			placement = "queued"
 		}
+		content := item.Content
+		if len(content) == 0 {
+			content = []llm.ContentBlock{llm.Text(item.Text)}
+		}
 		view = append(view, map[string]any{
 			"id":        item.ID,
 			"placement": placement,
 			"message": map[string]any{
 				"id":      item.ID,
 				"role":    "user",
-				"content": []map[string]any{{"type": "text", "text": item.Text}},
+				"content": content,
 				"source":  map[string]any{"kind": "user", "rpcId": item.ID},
 			},
 		})

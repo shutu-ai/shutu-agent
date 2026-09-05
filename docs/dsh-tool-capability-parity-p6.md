@@ -12,6 +12,6 @@ P6 已完成，`workflow` 的模型面向协议和运行结果已切换为 DSH �
 
 验证：
 
-- `go test ./internal/workflow ./internal/workflow/node ./cmd/pa`
+- `go test ./internal/workflow ./internal/workflow/node ./cmd/sta`
 - `go test ./...`
 

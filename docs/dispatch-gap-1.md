@@ -1,10 +1,10 @@
 # GAP-1 派发：fs-search（文件内容全文检索）
 
-> 标准模式缺口 ADR `docs/decisions/2026-08-20-standard-gaps.md`（D-GAP-1）。本文件是 **GAP-1** 契约：`internal/fssearch` 全文检索 + `fs_search` 工具 + config cap + cmd/pa 接线 + 测试。对齐 dsh `tool-fs-search`。
+> 标准模式缺口 ADR `docs/decisions/2026-08-20-standard-gaps.md`（D-GAP-1）。本文件是 **GAP-1** 契约：`internal/fssearch` 全文检索 + `fs_search` 工具 + config cap + cmd/sta 接线 + 测试。对齐 dsh `tool-fs-search`。
 
 ## 纪律
 
-- 零新依赖、CGO-free；只动 internal/fssearch（新建）、internal/config、cmd/pa、config.yaml；gofmt；不改 loop。
+- 零新依赖、CGO-free；只动 internal/fssearch（新建）、internal/config、cmd/sta、config.yaml；gofmt；不改 loop。
 - 默认关（D10）：`fs_search.enabled` 默认 false；未启用不注册不白名单。
 - 提交 1 个：`GAP-1: fs-search 文件内容全文检索（internal/fssearch + fs_search 工具 + config + 接线）`
 
@@ -12,7 +12,7 @@
 
 - 工具实现模式照 `internal/fs/tools.go`（Name/Description/Schema/Execute 结构 + tools.Tool 方法集）。工具名常量 `FsSearchToolName = "fs_search"`。
 - `internal/config/config.go`：Config struct（Eval 后已有 Mode 字段，Mode-1 已合入）；applyDefaults 各 cap 白名单 append 模式（`if cfg.X.Enabled && !contains(cfg.Tools.Enabled, name) { append }`）；Mode-1 的 minimal 分支在 applyDefaults 末尾（`if cfg.Mode == ModeMinimal { ... }`，里面逐一关各 cap + 重置白名单）——**fs-search 需在 minimal 分支里加 `cfg.FsSearch.Enabled = false`**（minimal 不含搜索）。
-- 默认 cwd 读取：看 `internal/fs` 或 cmd/pa 如何取 agent cwd（config.DataDir 之外的工作目录；`cfg.Tools.RunCommand.Workdir` 或 os.Getwd；实施时确认实际默认，工具 path 缺省用它）。
+- 默认 cwd 读取：看 `internal/fs` 或 cmd/sta 如何取 agent cwd（config.DataDir 之外的工作目录；`cfg.Tools.RunCommand.Workdir` 或 os.Getwd；实施时确认实际默认，工具 path 缺省用它）。
 - D3 事件模式：照 jobs/eval 工具 emit 事件。
 
 ## 变更清单（精确）
@@ -110,7 +110,7 @@ type FsSearchConfig struct {
 - **minimal 分支**（Mode-1 已合入的 `if cfg.Mode == ModeMinimal` 块内）加：`cfg.FsSearch.Enabled = false`。
 - config.yaml：`fs_search:` 段 + 注释（enabled 默认 false D10）。
 
-### 5. cmd/pa/fssearch.go（新建）+ main.go 接线
+### 5. cmd/sta/fssearch.go（新建）+ main.go 接线
 - `registerFsSearch() error`（照 terminal.go/eval.go 模式）：
 ```go
 // registerFsSearch wires the file-content-search seam (D-GAP-1) when
@@ -130,14 +130,14 @@ func (a *app) registerFsSearch() error {
 ```
   （`NewFsSearchTool(cwd string)` 构造器。）
 - main.go：import `internal/fssearch`；`registerFsSearch()` 调用（放 registerFs 附近或 registerTerminal 前均可，无依赖）；无 defer。
-- cmd/pa/fssearch_test.go：makeXxxApp + 白名单模式：
+- cmd/sta/fssearch_test.go：makeXxxApp + 白名单模式：
   - `TestRegisterFsSearchDisabledRegistersNothing`（D10 门）。
   - `TestRegisterFsSearchEnabledRegistersAndSearches`：enabled + 临时目录 → 注册 fs_search → Execute `{"path": tmp, "query": "needle"}` 命中断言。
   - `TestFsSearchWhitelist`：enabled → 白名单含 fs_search（cfg 层或 app 层）。
 
 ## 验证
 
-`go build ./...` + `go test -count=1 ./internal/fssearch/ ./internal/config/ ./cmd/pa/ -run 'FsSearch|Fssearch|Search' -v` 全 PASS 后提交；随后 `go test -count=1 ./...` 全绿确认（含 Mode-1 minimal 分支测试不回归）。
+`go build ./...` + `go test -count=1 ./internal/fssearch/ ./internal/config/ ./cmd/sta/ -run 'FsSearch|Fssearch|Search' -v` 全 PASS 后提交；随后 `go test -count=1 ./...` 全绿确认（含 Mode-1 minimal 分支测试不回归）。
 
 ## 环境
 

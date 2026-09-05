@@ -54,6 +54,10 @@ const (
 	EventToolError        = EventToolResult
 	EventFeedbackRecord   = "feedback/record"    // dsh /feedback; log-only
 	EventWebCommandResult = "web/command-result" // Web-only command acknowledgement
+	// EventWebSearchLLMRequest is the canonical DSH log-only request snapshot
+	// emitted by the DeepSeek web-search provider. It must never enter model
+	// history; its payload is intentionally secret-free.
+	EventWebSearchLLMRequest = "web/deepseek-search-llm-request"
 	// Canonical dsh command lifecycle facts. They are log-only and pair a
 	// resolved slash-command invocation with its settled result.
 	EventCommandRun  = "command/run"
@@ -1293,12 +1297,25 @@ type userMessageData struct {
 // user-role wire representation. It is intentionally small: the Web layer
 // only needs the stable source label, while DeriveHistory ignores it.
 type messageSource struct {
-	Kind       string `json:"kind"`
-	Plugin     string `json:"plugin,omitempty"`
-	TeamID     string `json:"teamId,omitempty"`
-	MessageID  string `json:"messageId,omitempty"`
-	SenderID   string `json:"senderId,omitempty"`
-	SenderName string `json:"senderName,omitempty"`
+	Kind             string `json:"kind"`
+	RPCID            string `json:"rpcId,omitempty"`
+	ClientTimeZone   string `json:"clientTimeZone,omitempty"`
+	Form             string `json:"form,omitempty"`
+	Update           bool   `json:"update,omitempty"`
+	Plugin           string `json:"plugin,omitempty"`
+	Name             string `json:"name,omitempty"`
+	Entries          any    `json:"entries,omitempty"`
+	References       any    `json:"references,omitempty"`
+	Sections         any    `json:"sections,omitempty"`
+	Summary          string `json:"summary,omitempty"`
+	SenderSessionID  string `json:"senderSessionId,omitempty"`
+	Baseline         bool   `json:"baseline,omitempty"`
+	BaselineIdentity string `json:"baselineIdentity,omitempty"`
+	Changes          any    `json:"changes,omitempty"`
+	TeamID           string `json:"teamId,omitempty"`
+	MessageID        string `json:"messageId,omitempty"`
+	SenderID         string `json:"senderId,omitempty"`
+	SenderName       string `json:"senderName,omitempty"`
 }
 
 type wireContentBlock struct {
@@ -1888,18 +1905,52 @@ func NewUserMessageAt(turn, step, index int, message llm.Message) any {
 	if len(content) == 0 && message.Text() != "" {
 		content = []llm.ContentBlock{llm.Text(message.Text())}
 	}
-	sourceKind, sourcePlugin := message.SourceKind, message.SourcePlugin
-	if sourceKind == "" {
-		sourceKind = "user"
-	}
 	return userMessageData{
 		ID: fmt.Sprintf("turn:%d:step:%d:user:%d", turn, step, index), Role: "user",
-		Content: toWireContentBlocks(content), Source: &messageSource{
-			Kind: sourceKind, Plugin: sourcePlugin, TeamID: message.SourceTeamID,
-			MessageID: message.SourceMessageID, SenderID: message.SourceSenderID,
-			SenderName: message.SourceSenderName,
-		},
+		Content: toWireContentBlocks(content), Source: newMessageSource(message, "user"),
 	}
+}
+
+// newMessageSource projects the runtime-only model message provenance onto the
+// canonical durable source shape. defaultKind is used for ordinary user input;
+// context producers normally provide their own plugin or skill source.
+func newMessageSource(message llm.Message, defaultKind string) *messageSource {
+	kind := message.SourceKind
+	if kind == "" {
+		kind = defaultKind
+	}
+	return &messageSource{
+		Kind: kind, RPCID: message.SourceRPCID, ClientTimeZone: message.SourceClientTimeZone,
+		Plugin: message.SourcePlugin, Form: message.SourceForm,
+		Update:     message.SourceUpdate,
+		Entries:    durableOptionalValue(message.SourceEntries),
+		References: durableOptionalValue(message.SourceReferences),
+		Name:       message.SourceName, Sections: durableOptionalValue(message.SourceSections),
+		Summary:         message.SourceSummary,
+		SenderSessionID: message.SourceSenderSessionID,
+		Baseline:        message.SourceBaseline, BaselineIdentity: message.SourceBaselineIdentity,
+		Changes: durableOptionalValue(message.SourceChanges),
+		TeamID:  message.SourceTeamID, MessageID: message.SourceMessageID,
+		SenderID: message.SourceSenderID, SenderName: message.SourceSenderName,
+	}
+}
+
+// durableOptionalValue prevents a typed nil slice/map from reaching an any
+// field and serializing as null. DSH's merge-extensible source treats absent
+// and null collections differently; producers that supplied no collection must
+// not leave a null artifact in a durable row.
+func durableOptionalValue(value any) any {
+	if value == nil {
+		return nil
+	}
+	rv := reflect.ValueOf(value)
+	switch rv.Kind() {
+	case reflect.Slice, reflect.Map:
+		if rv.IsNil() {
+			return nil
+		}
+	}
+	return value
 }
 
 // NewTeamMessage builds the durable target-session receipt for one Team
@@ -2013,6 +2064,40 @@ func NewContextMessage(text string, blocks []llm.ContentBlock, sourceKind, sourc
 		Text:    text,
 		Content: toWireContentBlocks(blocks),
 		Source:  &messageSource{Kind: sourceKind, Plugin: sourcePlugin},
+	}
+}
+
+// NewContextMessageWithForm is the form-aware context constructor used by
+// producers whose durable source carries structured data (DSH catalog, snapshot,
+// notice, relay, and recall forms).
+func NewContextMessageWithForm(text string, blocks []llm.ContentBlock, sourceKind, sourcePlugin, form string, entries any) any {
+	return userMessageData{
+		Text:    text,
+		Content: toWireContentBlocks(blocks),
+		Source:  &messageSource{Kind: sourceKind, Plugin: sourcePlugin, Form: form, Entries: entries},
+	}
+}
+
+// NewContextMessageWithFormUpdate is the replacement-aware form of
+// NewContextMessageWithForm. update marks that this complete context replaces
+// every earlier context published with the same source kind.
+func NewContextMessageWithFormUpdate(text string, blocks []llm.ContentBlock, sourceKind, sourcePlugin, form string, entries any, update bool) any {
+	return userMessageData{
+		Text:    text,
+		Content: toWireContentBlocks(blocks),
+		Source:  &messageSource{Kind: sourceKind, Plugin: sourcePlugin, Form: form, Update: update, Entries: entries},
+	}
+}
+
+// NewContextMessageFromLLM persists a rich deferred context while retaining
+// every producer-owned source field. Tool additional contexts and nested Code
+// Mode contexts use this boundary so DSH forms such as notice and relay survive
+// replay and native Web projection.
+func NewContextMessageFromLLM(message llm.Message) any {
+	return userMessageData{
+		Text:    message.Text(),
+		Content: toWireContentBlocks(message.Content),
+		Source:  newMessageSource(message, "plugin"),
 	}
 }
 
@@ -2554,6 +2639,9 @@ type subagentReportData struct {
 	ID            string `json:"id"`
 	ParentSession string `json:"parentSession,omitempty"`
 	Content       string `json:"content"`
+	// MessageID identifies the intended parent relay receipt. Older logs
+	// predate relay delivery and have no safe cold-recovery identity.
+	MessageID string `json:"messageId,omitempty"`
 }
 
 // NewSubagentStart builds the subagent/start payload recorded when a
@@ -2579,7 +2667,13 @@ func NewSubagentEnd(childID, provider, stopReason, outputSummary string) any {
 // NewSubagentReport builds the subagent/report payload recorded when a child
 // explicitly reports to its parent session (dispatch-m5b-2 §1 / D3).
 func NewSubagentReport(childID, parentSessionID, content string) any {
-	return subagentReportData{ID: childID, ParentSession: parentSessionID, Content: content}
+	return NewSubagentReportWithID(childID, parentSessionID, content, "")
+}
+
+// NewSubagentReportWithID adds the stable identity used by the DSH-compatible
+// parent relay and its crash-recovery receipt.
+func NewSubagentReportWithID(childID, parentSessionID, content, messageID string) any {
+	return subagentReportData{ID: childID, ParentSession: parentSessionID, Content: content, MessageID: messageID}
 }
 
 type goalRoundStartData struct {
@@ -3140,13 +3234,9 @@ func NewCodeDispatchWithContentMetaAndConclusion(rootCallID, parentCallID, subCa
 	}
 	rich := make([]userMessageData, 0, len(messages))
 	for _, message := range messages {
-		kind, plugin := message.SourceKind, message.SourcePlugin
-		if kind == "" {
-			kind = "plugin"
-		}
 		rich = append(rich, userMessageData{
 			Role: "user", Text: message.Text(), Content: toWireContentBlocks(message.Content),
-			Source: &messageSource{Kind: kind, Plugin: plugin, TeamID: message.SourceTeamID, MessageID: message.SourceMessageID, SenderID: message.SourceSenderID, SenderName: message.SourceSenderName},
+			Source: newMessageSource(message, "plugin"),
 		})
 	}
 	return codeDispatchData{

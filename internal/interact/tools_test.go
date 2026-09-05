@@ -46,7 +46,7 @@ func countEventType(recs []eventRecord, typ string) int {
 // TestInteractToolsSchemaShape verifies the D7 argument schemas shipped with
 // the tools (dispatch-m6d-2 §3): interact_ask requires a non-empty prompt and
 // rejects unknown properties; interact_status requires a non-empty id. The
-// registry compiles and enforces these (cmd/pa), so the shape is asserted here.
+// registry compiles and enforces these (cmd/sta), so the shape is asserted here.
 func TestInteractToolsSchemaShape(t *testing.T) {
 	e := NewEngine(nil)
 	defer e.Close()

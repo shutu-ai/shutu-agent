@@ -14,7 +14,7 @@
 **做**：
 1. `internal/attachment`：`Store`（`SaveImage`/`Read` + 校验：类型/大小）。
 2. config：`llm.multimodal.enabled`（默认 false）+ `llm.model_input_modalities`（默认 `text`）+ 图片上限。
-3. `cmd/pa`：`/attach <path>` 命令（启用时）：校验文件 → `SaveImage` → 落 `user/message` 事件（`Content` 含 image block，只存 `ImageRef`）→ 返回附件 id 提示。
+3. `cmd/sta`：`/attach <path>` 命令（启用时）：校验文件 → `SaveImage` → 落 `user/message` 事件（`Content` 含 image block，只存 `ImageRef`）→ 返回附件 id 提示。
 4. `inputModalities` 声明 + `/llm-status` 显示 modalities（`text` / `text,image`）。
 5. 测试。
 
@@ -51,7 +51,7 @@ func (s *Store) SaveImage(mediaType string, data []byte, maxBytes int) (llm.Imag
 func (s *Store) Read(ref llm.ImageRef) ([]byte, error)
 ```
 
-- **说明**：`attachment` 依赖 `internal/llm`（`ImageRef`）；`llm` **不**依赖 `attachment`（provider 只拿 `ImageRef.Path` 自行读文件，保持 llm 纯接缝——见 M8-3b）。若担心反向依赖，`SaveImage` 返回的 `ImageRef` 由调用方（cmd/pa）组装即可，`attachment` 可只返回 `(id string, err error)` 让调用方构造——**由你决定**，原则是 `llm ← attachment` 单向、`llm` 不反向依赖。
+- **说明**：`attachment` 依赖 `internal/llm`（`ImageRef`）；`llm` **不**依赖 `attachment`（provider 只拿 `ImageRef.Path` 自行读文件，保持 llm 纯接缝——见 M8-3b）。若担心反向依赖，`SaveImage` 返回的 `ImageRef` 由调用方（cmd/sta）组装即可，`attachment` 可只返回 `(id string, err error)` 让调用方构造——**由你决定**，原则是 `llm ← attachment` 单向、`llm` 不反向依赖。
 
 ## 3. config 契约（internal/config）
 
@@ -71,7 +71,7 @@ type MultimodalConfig struct {
 - 默认：`multimodal.enabled=false`；`model_input_modalities` 缺省 `text`；`multimodal.max_image_bytes` 缺省 3.5MiB；批量上限为 20 张/100MiB，解码像素上限 40M、单边上限 2000px。
 - config.yaml `llm:` 段补 `model_input_modalities` 与 `multimodal:` 子段注释（含"默认关 D10 / 图片只存引用"说明）。
 
-## 4. cmd/pa 接线契约
+## 4. cmd/sta 接线契约
 
 - `app` 增加 `attachStore *attachment.Store` 字段。
 - `registerAttachments()`（或并入 registerLLM 之后）：`llm.multimodal.enabled` 时创建 `attachment.NewStore(filepath.Join(cfg.DataDir, "attachments"))` 存入 `a.attachStore`；disabled 不创建（D10）。
@@ -89,7 +89,7 @@ type MultimodalConfig struct {
 
 - `internal/attachment`：SaveImage 校验（坏扩展名/空数据/超限 fail-closed）；Save 后 Read 往返一致；目录创建；id 唯一（两次 Save 不同 id）。
 - `internal/config`：multimodal 默认（enabled=false、model_input_modalities=text、max_image_bytes 默认）；解析覆盖。
-- `cmd/pa`：`/attach` disabled → 错误；enabled → 校验通过落 user/message 事件（事件 data 含 image block 且只有 ImageRef 无字节）；坏扩展名/超限/不存在文件 → fail-closed 错误；`/llm-status` 显示 modalities + multimodal 状态。
+- `cmd/sta`：`/attach` disabled → 错误；enabled → 校验通过落 user/message 事件（事件 data 含 image block 且只有 ImageRef 无字节）；坏扩展名/超限/不存在文件 → fail-closed 错误；`/llm-status` 显示 modalities + multimodal 状态。
 
 ## 6. 提交与报告
 

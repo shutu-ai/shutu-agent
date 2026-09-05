@@ -7,7 +7,7 @@
 
 - **不改 `internal/loop/loop.go`**（D4）；主循环保持串行（D5）；**零新第三方依赖**；CGO-free；原有测试全绿。
 - **模型可见 ⇒ 已落日志**（D3）：先定义事件类型，再实现。
-- **工具参数入口校验**（D7）：工具在 M7-2 才做；本 half 只做接缝 + Provider，**不注册任何工具、不改 config、不改 cmd/pa**。
+- **工具参数入口校验**（D7）：工具在 M7-2 才做；本 half 只做接缝 + Provider，**不注册任何工具、不改 config、不改 cmd/sta**。
 - 包内依赖单向：`internal/web` 不依赖 `internal/loop`；消费方只依赖接口（D2）。
 - 每个模块完成后**阶段提交**（commit message 前缀 `M7-1`）。
 
@@ -21,7 +21,7 @@ github.com/shutu-ai/shutu-agent 需要联网能力。M7 定 DeepSeek 官方搜�
 3. 事件载荷类型：`SearchRequestEvent`（供 M7-2 组合根把 `web/search-request` 落日志；本 half 只定义类型 + 构造函数，不接线）。
 4. 单元测试。
 
-**不做（本 half）**：fetch provider、HTML→markdown、`web_search`/`web_fetch` 工具、config、cmd/pa 接线（全在 M7-2）。
+**不做（本 half）**：fetch provider、HTML→markdown、`web_search`/`web_fetch` 工具、config、cmd/sta 接线（全在 M7-2）。
 
 ## 2. 包结构
 

@@ -1,7 +1,7 @@
 // tools.go — the GAP-3 Consumer half of the workflow seam (ADR
 // 2026-08-20-standard-gaps.md D-GAP-2, 用户拍板 JSON DAG 声明式编排): the
 // workflow tool is registered into the tools.Registry by the composition
-// root (cmd/pa) when workflow.enabled, and auto-whitelisted by
+// root (cmd/sta) when workflow.enabled, and auto-whitelisted by
 // config.applyDefaults the same way the ralph/fs_search tools are. It
 // implements the tools.Tool method set structurally (Go structural typing), so
 // this package never imports the tools package — the seam stays decoupled. D7

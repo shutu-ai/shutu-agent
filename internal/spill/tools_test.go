@@ -15,7 +15,7 @@ type eventRec struct {
 
 // newSpillToolsWithEvents returns an engine and a SpillTools bundle wired to a
 // slice that records every emitted spill/* event (the composition root wires
-// the same sink to the session log in cmd/pa, D3).
+// the same sink to the session log in cmd/sta, D3).
 func newSpillToolsWithEvents(t *testing.T) (*engine, *SpillTools, *[]eventRec) {
 	t.Helper()
 	e := NewEngine(nil)

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Replay the shared core-turn fixture through DeepSeek Harness' real Session
+ * Replay the shared core-turn fixture through the reference project's real Session
  * implementation. Run with the reference repository's tsx loader, because
  * the checkout intentionally keeps packages in source form:
  *

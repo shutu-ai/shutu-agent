@@ -32,7 +32,7 @@
 对照阅读的 github.com/shutu-ai/shutu-agent 文件（非 dsh，仅用于映射约束）：
 - `internal/webserver/static/index.html`、`app.js`、`style.css`
 - `internal/webserver/webserver.go`（`handleSubagents` / `handleJobs` / `writeJSON`）
-- `cmd/pa/webserver.go`（`webSubagents` / `webJobs` 洗白层）
+- `cmd/sta/webserver.go`（`webSubagents` / `webJobs` 洗白层）
 - `internal/jobs/service.go`（`Status` 枚举：running/stopping/completed/killed/failed）
 
 ---
@@ -224,7 +224,7 @@ div.root
 3. **无 RPC 控制**：不能终止任务（`jobs` 无 kill 端点暴露给 web）、不能打开子代理会话、不能看中间日志 → 面板**纯只读**，无行内操作按钮、无行点击跳转。
 4. **无推送**：无 polling 之外的实时通道 → 前端 10s 轮询 + 手动刷新；`document.visibilityState==='hidden'` 时暂停轮询（省资源）。
 5. **501 未接线**：provider 未 wire 时 `GET /api/*` 返回 501 → 前端把 501 当「未启用」，显示空态（或面板隐藏），不报错轰炸。401 沿用现有 `api()` 统一处理（跳登录）。
-6. **disabled 能力**：`jobs_enabled/subagent_enabled=false` 时后端返回 `[]`（`cmd/pa/webserver.go`），前端自然显示「暂无…」空态，无需额外判断。
+6. **disabled 能力**：`jobs_enabled/subagent_enabled=false` 时后端返回 `[]`（`cmd/sta/webserver.go`），前端自然显示「暂无…」空态，无需额外判断。
 7. **`detail` 只在 terminal 时通常有值**（"exit code: N" 等），running 时常为空 → 状态列用 `detail ?? 状态词`（dsh 同款），无需后端保证。
 8. **长文本**：label/detail 单行省略（dsh `.label` 省略号、`.status` `max-width:40%` + ellipsis），避免撑破 336px 弹层。
 

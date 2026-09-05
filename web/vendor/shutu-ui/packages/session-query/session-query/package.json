@@ -1,0 +1,57 @@
+{
+  "name": "@shutu-ai/session-query",
+  "description": "Combined session query service contract with concrete reads, traces, and filters",
+  "version": "0.1.0-rc.8",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shutu-ai/shutu-agent.git",
+    "directory": "packages/session-query/session-query"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./invariant": {
+      "types": "./lib/types/invariant.d.ts",
+      "default": "./lib/invariant.js"
+    },
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/invariant.js",
+    "lib/types/**/*.d.ts"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@shutu-ai/brand": "workspace:^",
+    "@shutu-ai/invariants": "workspace:^",
+    "@shutu-ai/llm": "workspace:^",
+    "@shutu-ai/session": "workspace:^",
+    "@shutu-ai/session-title": "workspace:^",
+    "@shutu-ai/session-persistence": "workspace:^",
+    "@shutu-ai/cordis": "workspace:^"
+  },
+  "peerDependenciesMeta": {
+    "@shutu-ai/session-persistence": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@shutu-ai/brand": "workspace:^",
+    "@shutu-ai/invariants": "workspace:^",
+    "@shutu-ai/llm": "workspace:^",
+    "@shutu-ai/session": "workspace:^",
+    "@shutu-ai/session-title": "workspace:^",
+    "@shutu-ai/session-persistence": "workspace:^",
+    "@shutu-ai/cordis": "workspace:^"
+  }
+}

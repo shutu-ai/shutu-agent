@@ -1,0 +1,55 @@
+{
+  "name": "@shutu-ai/session-projection-cache",
+  "description": "Persisted projection cache (ctx.sessionProjectionCache): durable per-session projection checkpoints over the domain data form, throttled write-behind, and the cold-read ladder (cache row + persistence tail replay)",
+  "version": "0.1.0-rc.8",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shutu-ai/shutu-agent.git",
+    "directory": "packages/session/session-projection-cache"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./invariant": {
+      "types": "./lib/types/invariant.d.ts",
+      "default": "./lib/invariant.js"
+    },
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/invariant.js",
+    "lib/types/**/*.d.ts"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@shutu-ai/schemastery": "workspace:^",
+    "zod": "^4.4.3"
+  },
+  "peerDependencies": {
+    "@shutu-ai/invariants": "workspace:^",
+    "@shutu-ai/session": "workspace:^",
+    "@shutu-ai/session-persistence": "workspace:^",
+    "@shutu-ai/session-projection": "workspace:^",
+    "@shutu-ai/storage-domain": "workspace:^",
+    "@shutu-ai/cordis": "workspace:^"
+  },
+  "devDependencies": {
+    "@shutu-ai/invariants": "workspace:^",
+    "@shutu-ai/session": "workspace:^",
+    "@shutu-ai/session-persistence": "workspace:^",
+    "@shutu-ai/session-projection": "workspace:^",
+    "@shutu-ai/storage": "workspace:^",
+    "@shutu-ai/storage-domain": "workspace:^",
+    "@shutu-ai/cordis": "workspace:^"
+  }
+}

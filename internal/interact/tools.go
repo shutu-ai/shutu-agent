@@ -1,6 +1,6 @@
 // tools.go — the M6d-2 Consumer half of the interact seam (design.md §8
 // Consumer / D2, dispatch-m6d-2 §3): interact_ask and interact_status are
-// registered into the tools.Registry by the composition root (cmd/pa) when
+// registered into the tools.Registry by the composition root (cmd/sta) when
 // interact.enabled, and auto-whitelisted by config.applyDefaults the same way
 // the job_*/subagent_*/skill_*/schedule_*/plan_*/spill_* tools are. They
 // implement the tools.Tool method set structurally (Go structural typing), so
@@ -17,7 +17,7 @@
 // the injected onEvent sink (the composition root wires it to the session log),
 // and each append happens inside a tool Execute — the serial main-loop path
 // (D5). interact/resolve and interact/deny are emitted by the wiring layer's
-// sensitive-tool gate (see cmd/pa), not by a tool.
+// sensitive-tool gate (see cmd/sta), not by a tool.
 package interact
 
 import (

@@ -1,7 +1,7 @@
 // tools.go — the M6f-3 Consumer half of the safe-file-operation seam
 // (design.md §8 Consumer / D2, dispatch-m6f-3 §4): read, write and
 // list are registered into the tools.Registry by the composition root
-// (cmd/pa) when fs.enabled, and auto-whitelisted by config.applyDefaults the
+// (cmd/sta) when fs.enabled, and auto-whitelisted by config.applyDefaults the
 // same way the job_*/subagent_*/skill_*/schedule_*/plan_*/spill_*/interact_*/
 // code_*/mcp_* tools are. The tools implement the tools.Tool method set
 // structurally (Go structural typing), so this package never imports the

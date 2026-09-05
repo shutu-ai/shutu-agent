@@ -300,7 +300,7 @@ type HarnessSession struct {
 // Run queues input, waits for its durable inbox receipt, and collects the
 // whole root session plus discovered descendants through the next idle state.
 // Context cancellation abandons only collection; the SDK has no per-prompt
-// wire cancellation, matching the DeepSeek Harness client contract.
+// wire cancellation, matching the reference SDK client contract.
 func (s *HarnessSession) Run(ctx context.Context, blocks []ContentBlock) (RunResult, error) {
 	if err := s.Harness.Start(ctx); err != nil {
 		return RunResult{}, err

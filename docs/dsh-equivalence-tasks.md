@@ -1001,8 +1001,8 @@ limits; and the strict race/leak/fault/security/performance CI gate.
   `runtimeLogs` 等全局/兼容 turn 路径。所有 CLI、Web、ACP、SDK、subagent、
   Team、job、workflow 和 terminal 请求必须从 addressed Agent/Session
   解析 context，不得按进程当前 session 回退。
-  - 相关现状：`cmd/pa/main.go` 的 compatibility fields、
-    `cmd/pa/agent_runtime.go` 的 bridge、`runTurnForLegacy`。
+  - 相关现状：`cmd/sta/main.go` 的 compatibility fields、
+    `cmd/sta/agent_runtime.go` 的 bridge、`runTurnForLegacy`。
   - 验收：两个 Agent 并发运行、切换 active session、关闭其中一个后，任何
     event、tool、approval、job、provider、projection 都不能串 session；
     删除 legacy 路径后全量测试仍通过。

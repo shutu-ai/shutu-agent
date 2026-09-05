@@ -5,6 +5,7 @@ package terminal
 import (
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -26,7 +27,29 @@ func shellCommand(opts SessionOpts) *exec.Cmd {
 		// Keep the process in the interactive stdin loop. Supplying -Command
 		// here executes the bootstrap script but does not reliably transition
 		// Windows PowerShell back to reading a redirected stdin pipe.
-		args = append(args, "-NoLogo", "-NoExit")
+		// Agent-owned shells start without the user's profile: profile scripts
+		// are an untrusted environment channel and can also delay readiness.
+		// Explicit terminal.args remain the escape hatch for deployments that
+		// intentionally need a profile-aware shell.
+		addPowerShellFlagOnce := func(name string) {
+			if !slices.ContainsFunc(args, func(arg string) bool {
+				return strings.EqualFold(strings.TrimSpace(arg), name)
+			}) {
+				args = append(args, name)
+			}
+		}
+		addPowerShellFlagOnce("-NoLogo")
+		addPowerShellFlagOnce("-NoExit")
+		if !slices.ContainsFunc(args, func(arg string) bool {
+			switch strings.ToLower(strings.TrimSpace(arg)) {
+			case "-noprofile", "-profile", "/noprofile", "/profile":
+				return true
+			default:
+				return false
+			}
+		}) {
+			addPowerShellFlagOnce("-NoProfile")
+		}
 	}
 	return exec.Command(shell, args...)
 }

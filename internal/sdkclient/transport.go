@@ -1,4 +1,4 @@
-// DTO and wire transport for the DeepSeek Harness SDK runtime.
+// DTO and wire transport for the Shutu SDK runtime.
 //
 // This package is deliberately transport-neutral: the same LineTransport can
 // speak to an in-memory peer or to the runtime subprocess owned by Client.

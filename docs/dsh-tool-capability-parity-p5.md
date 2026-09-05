@@ -10,5 +10,5 @@ P5 已完成：
 
 验证：
 
-- `go test ./internal/fs ./cmd/pa`
+- `go test ./internal/fs ./cmd/sta`
 

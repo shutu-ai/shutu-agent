@@ -90,6 +90,7 @@ var (
 	// ErrTooLarge 是 data 超过 maxBytes 时的错误。
 	ErrTooLarge          = errors.New("attachment: image exceeds max bytes")
 	ErrInvalidImage      = errors.New("attachment: invalid image data")
+	ErrTypeMismatch      = errors.New("attachment: declared image type does not match its data")
 	ErrTooManyPixels     = errors.New("attachment: image exceeds pixel limit")
 	ErrDimensionTooLarge = errors.New("attachment: image exceeds dimension limit")
 	ErrTooManyImages     = errors.New("attachment: image count exceeds limit")
@@ -112,6 +113,7 @@ type Store struct {
 type ImageInput struct {
 	MediaType string
 	Data      []byte
+	Name      string
 }
 
 // NewStore 创建/打开附件目录（<dir> 不存在则 mkdir -p）。dir 空 → 默认
@@ -298,6 +300,9 @@ func (s *Store) SaveImages(inputs []ImageInput, maxBytes int) ([]llm.ImageRef, e
 		if created {
 			createdPaths = append(createdPaths, ref.Path)
 		}
+		if input.Name != "" {
+			ref.Name = input.Name
+		}
 		refs = append(refs, ref)
 	}
 	return refs, nil
@@ -328,8 +333,11 @@ func ProbeImage(data []byte, mediaType string) (int, int, error) {
 		return 0, 0, fmt.Errorf("%w: %v", ErrInvalidImage, err)
 	}
 	expected := map[string]string{"image/png": "png", "image/jpeg": "jpeg", "image/gif": "gif"}[mediaType]
-	if expected == "" || format != expected || config.Width <= 0 || config.Height <= 0 {
+	if expected == "" || config.Width <= 0 || config.Height <= 0 {
 		return 0, 0, ErrInvalidImage
+	}
+	if format != expected {
+		return 0, 0, ErrTypeMismatch
 	}
 	return config.Width, config.Height, nil
 }

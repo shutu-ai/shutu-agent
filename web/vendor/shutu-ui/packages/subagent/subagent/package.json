@@ -1,0 +1,106 @@
+{
+  "name": "@shutu-ai/subagent",
+  "description": "Abstract subagent seam (ctx.subagents): named-provider registry for delegating to child agents",
+  "version": "0.1.0-rc.8",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shutu-ai/shutu-agent.git",
+    "directory": "packages/subagent/subagent"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./invariant": {
+      "types": "./lib/types/invariant.d.ts",
+      "default": "./lib/invariant.js"
+    },
+    "./client": {
+      "types": "./lib/types/client.d.ts",
+      "default": "./lib/types/client.js"
+    },
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/invariant.js",
+    "lib/types/**/*.js",
+    "lib/types/**/*.d.ts"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "zod": "^4.4.3"
+  },
+  "peerDependencies": {
+    "@shutu-ai/agent": "workspace:^",
+    "@shutu-ai/agent-presets": "workspace:^",
+    "@shutu-ai/brand": "workspace:^",
+    "@shutu-ai/invariants": "workspace:^",
+    "@shutu-ai/llm": "workspace:^",
+    "@shutu-ai/sandbox": "workspace:^",
+    "@shutu-ai/sandbox-policy": "workspace:^",
+    "@shutu-ai/scope": "workspace:^",
+    "@shutu-ai/session": "workspace:^",
+    "@shutu-ai/session-persistence": "workspace:^",
+    "@shutu-ai/session-projection": "workspace:^",
+    "@shutu-ai/session-projection-cache": "workspace:^",
+    "@shutu-ai/jobs": "workspace:^",
+    "@shutu-ai/tools": "workspace:^",
+    "@shutu-ai/user-approval": "workspace:^",
+    "@shutu-ai/cordis": "workspace:^"
+  },
+  "peerDependenciesMeta": {
+    "@shutu-ai/agent-presets": {
+      "optional": true
+    },
+    "@shutu-ai/sandbox": {
+      "optional": true
+    },
+    "@shutu-ai/sandbox-policy": {
+      "optional": true
+    },
+    "@shutu-ai/session-persistence": {
+      "optional": true
+    },
+    "@shutu-ai/session-projection": {
+      "optional": true
+    },
+    "@shutu-ai/session-projection-cache": {
+      "optional": true
+    },
+    "@shutu-ai/jobs": {
+      "optional": true
+    },
+    "@shutu-ai/user-approval": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@shutu-ai/agent": "workspace:^",
+    "@shutu-ai/agent-presets": "workspace:^",
+    "@shutu-ai/brand": "workspace:^",
+    "@shutu-ai/invariants": "workspace:^",
+    "@shutu-ai/llm": "workspace:^",
+    "@shutu-ai/sandbox": "workspace:^",
+    "@shutu-ai/sandbox-policy": "workspace:^",
+    "@shutu-ai/scope": "workspace:^",
+    "@shutu-ai/session": "workspace:^",
+    "@shutu-ai/session-persistence": "workspace:^",
+    "@shutu-ai/session-projection": "workspace:^",
+    "@shutu-ai/session-projection-cache": "workspace:^",
+    "@shutu-ai/storage": "workspace:^",
+    "@shutu-ai/storage-domain": "workspace:^",
+    "@shutu-ai/jobs": "workspace:^",
+    "@shutu-ai/tools": "workspace:^",
+    "@shutu-ai/user-approval": "workspace:^",
+    "@shutu-ai/cordis": "workspace:^"
+  }
+}

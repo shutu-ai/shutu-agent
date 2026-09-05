@@ -8,9 +8,10 @@ import { fileURLToPath } from 'node:url'
 
 const scriptDir = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(scriptDir, '..')
-const referenceRoot = resolve(
-  process.env.DSH_REFERENCE_ROOT ?? join(repoRoot, '..', 'deepseek-harness'),
-)
+if (!process.env.SHUTU_REFERENCE_ROOT) {
+  process.env.SHUTU_REFERENCE_ROOT = resolve(repoRoot, '.reference', 'dsh')
+}
+const referenceRoot = resolve(process.env.SHUTU_REFERENCE_ROOT)
 const requireFromReference = createRequire(join(referenceRoot, 'package.json'))
 const ts = requireFromReference('typescript')
 const referencePackage = JSON.parse(readFileSync(join(referenceRoot, 'package.json'), 'utf8'))
@@ -25,14 +26,14 @@ const protocolSource = join(
 )
 
 const packageEntries = new Map([
-  ['@deepseek-ai/dsh-attachment', 'packages/attachment/attachment/src/index.ts'],
-  ['@deepseek-ai/dsh-brand', 'packages/brand/brand/src/index.ts'],
-  ['@deepseek-ai/dsh-llm', 'packages/llm/llm/src/index.ts'],
-  ['@deepseek-ai/dsh-scope', 'packages/scope/scope/src/index.ts'],
-  ['@deepseek-ai/dsh-session', 'packages/core/session/src/index.ts'],
-  ['@deepseek-ai/dsh-subagent', 'packages/subagent/subagent/src/index.ts'],
-  ['@deepseek-ai/dsh-typert-protocol', 'packages/typert/protocol/src/index.ts'],
-  ['@deepseek-ai/cordis', 'vendor/cordis/src/index.ts'],
+  ['@shutu-ai/dsh-attachment', 'packages/attachment/attachment/src/index.ts'],
+  ['@shutu-ai/dsh-brand', 'packages/brand/brand/src/index.ts'],
+  ['@shutu-ai/dsh-llm', 'packages/llm/llm/src/index.ts'],
+  ['@shutu-ai/dsh-scope', 'packages/scope/scope/src/index.ts'],
+  ['@shutu-ai/dsh-session', 'packages/core/session/src/index.ts'],
+  ['@shutu-ai/dsh-subagent', 'packages/subagent/subagent/src/index.ts'],
+  ['@shutu-ai/dsh-typert-protocol', 'packages/typert/protocol/src/index.ts'],
+  ['@shutu-ai/cordis', 'vendor/cordis/src/index.ts'],
 ])
 
 const basePath = ts.findConfigFile(referenceRoot, ts.sys.fileExists, 'tsconfig.base.json')

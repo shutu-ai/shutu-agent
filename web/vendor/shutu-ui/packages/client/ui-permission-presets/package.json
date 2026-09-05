@@ -1,0 +1,85 @@
+{
+  "name": "@shutu-ai/client-ui-permission-presets",
+  "description": "Permission surfaces: a new-session default in General settings and a current-session /permission popup over the permissions projection",
+  "version": "0.1.0-rc.8",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shutu-ai/shutu-agent.git",
+    "directory": "packages/client/ui-permission-presets"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./invariant": {
+      "types": "./lib/types/invariant.d.ts",
+      "default": "./lib/invariant.js"
+    },
+    "./client": {
+      "types": "./lib/types/client/index.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "shutu": {
+    "client": {
+      "inject": [
+        "@shutu-ai/client-connection",
+        "@shutu-ai/client-locale",
+        "@shutu-ai/client-runtime",
+        "@shutu-ai/client-ui-commands",
+        "@shutu-ai/api-remotes",
+        "@shutu-ai/client-ui-settings"
+      ],
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "bundle": "tsdown",
+    "watch": "tsdown --watch"
+  },
+  "license": "MIT",
+  "peerDependencies": {
+    "@shutu-ai/cordis": "workspace:^",
+    "@shutu-ai/api-remotes": "workspace:^",
+    "@shutu-ai/client-connection": "workspace:^",
+    "@shutu-ai/client-locale": "workspace:^",
+    "@shutu-ai/client-runtime": "workspace:^",
+    "@shutu-ai/client-ui-commands": "workspace:^",
+    "@shutu-ai/client-ui-settings": "workspace:^",
+    "@shutu-ai/client-ui-input-trigger": "workspace:^",
+    "@shutu-ai/invariants": "workspace:^",
+    "@shutu-ai/permission-presets": "workspace:^"
+  },
+  "devDependencies": {
+    "@shutu-ai/cordis": "workspace:^",
+    "@shutu-ai/api-remotes": "workspace:^",
+    "@shutu-ai/client-connection": "workspace:^",
+    "@shutu-ai/client-locale": "workspace:^",
+    "@shutu-ai/client-runtime": "workspace:^",
+    "@shutu-ai/client-test-runtime": "workspace:^",
+    "@shutu-ai/client-ui-commands": "workspace:^",
+    "@shutu-ai/client-ui-primitives": "workspace:^",
+    "@shutu-ai/client-ui-settings": "workspace:^",
+    "@shutu-ai/client-ui-input-trigger": "workspace:^",
+    "@shutu-ai/client-ui-slots": "workspace:^",
+    "@shutu-ai/invariants": "workspace:^",
+    "@shutu-ai/permission-presets": "workspace:^",
+    "@types/react": "~18.3.1",
+    "react": "^18.2.0"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/invariant.js",
+    "lib/client.js",
+    "lib/types/**/*.d.ts"
+  ]
+}

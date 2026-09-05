@@ -8,7 +8,7 @@
 - **不改 `internal/loop/loop.go`**（D4）；主循环串行（D5，**无后台 goroutine**）；**零新第三方依赖**；CGO-free；原有测试全绿。
 - **工具参数入口校验**（D7）：`web_search`/`web_fetch` 的 Execute 由 `tools.Registry` 按编译好的 JSON Schema 统一校验后才进入实现。
 - **D3**：搜索请求经 DeepSeek provider 的 `OnRequest` 落 `web/search-request`（M7-1 已定义）；工具结果走通用 `tool/result`。工具层不再重复发 web 事件。
-- 本 half 可改：`internal/config/config.go`、`internal/config/config.yaml`（文档）、`cmd/pa/main.go`（register 链 + /help 状态行）、新增 `internal/web/{httpfetch.go,policy.go,html.go,tools.go}` 及其测试。**不改** `internal/web/{service.go,deepseek.go}`（M7-1 已验收，只读）。
+- 本 half 可改：`internal/config/config.go`、`internal/config/config.yaml`（文档）、`cmd/sta/main.go`（register 链 + /help 状态行）、新增 `internal/web/{httpfetch.go,policy.go,html.go,tools.go}` 及其测试。**不改** `internal/web/{service.go,deepseek.go}`（M7-1 已验收，只读）。
 - 每模块完成后**阶段提交**（commit message 前缀 `M7-2`）。
 
 ## 1. 交付清单
@@ -18,7 +18,7 @@
 3. `tools.go`：`web_search` / `web_fetch` 工具（D7 schema、多查询**顺序扇出**合并、输出格式化）。
 4. `config.go`：`WebConfig` + 默认值 + `applyDefaults` 白名单（`web_search`/`web_fetch`）。
 5. `config.yaml`：`web:` 段文档（`enabled: false`）。
-6. `cmd/pa/main.go`：`registerWeb()` + 注册链插入（registerFs 之后、registerInteracts 之前）+ `/help` 状态行。
+6. `cmd/sta/main.go`：`registerWeb()` + 注册链插入（registerFs 之后、registerInteracts 之前）+ `/help` 状态行。
 7. 全部测试。
 
 ## 2. httpfetch.go + policy.go 契约
@@ -201,9 +201,9 @@ type DeepSeekWebConfig struct {
 - `var webToolNames = []string{"web_search", "web_fetch"}`（照 fsToolNames 同款，配注释）。
 - `config.yaml` 增加 `web:` 段（`enabled: false`，字段中文注释照 fs 段风格，含"默认关 D10"说明）。
 
-## 6. cmd/pa 接线契约
+## 6. cmd/sta 接线契约
 
-**`cmd/pa/web.go`（新文件）**：
+**`cmd/sta/web.go`（新文件）**：
 ```go
 // registerWeb 在 web.enabled 时创建 Engine + provider + 注册 web_* 工具（白名单已由
 // config.applyDefaults 加入）；disabled 零操作（D10）。放在 registerFs 之后、

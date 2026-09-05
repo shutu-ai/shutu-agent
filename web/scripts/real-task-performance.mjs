@@ -5,8 +5,7 @@ import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const dshRoot = resolve(process.env.SHUTU_DSH_ROOT ?? resolve(webRoot, '../../deepseek-harness'))
-const playwrightRoot = resolve(dshRoot, 'apps/web/node_modules/playwright')
+const playwrightRoot = resolve(webRoot, 'node_modules/playwright')
 const { chromium } = createRequire(import.meta.url)(playwrightRoot)
 const baseUrl = (process.env.SHUTU_REAL_TASK_URL ?? 'http://127.0.0.1:18099').replace(/\/$/, '')
 const sessionId = process.argv[2]
@@ -30,7 +29,7 @@ const performanceThresholds = {
 // Conversation/Trajectory content surface, while retaining all frame counts
 // and sequence ranges in the report.
 
-if (!existsSync(playwrightRoot)) throw new Error(`Playwright is unavailable under ${dshRoot}`)
+if (!existsSync(playwrightRoot)) throw new Error(`Playwright is unavailable under ${playwrightRoot}; run npm install.`)
 if (!sessionId) throw new Error('usage: node scripts/real-task-performance.mjs <session-id> [duration-seconds]')
 if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) throw new Error('duration must be positive')
 

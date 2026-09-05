@@ -197,10 +197,10 @@ $equivalenceCatalogManifest = Join-Path ([IO.Path]::GetTempPath()) (
 )
 try {
     Invoke-Required 'tool catalog manifest export' {
-        go run ./cmd/pa --catalog-manifest $equivalenceCatalogManifest
+        go run ./cmd/sta --catalog-manifest $equivalenceCatalogManifest
     }
     Invoke-Required 'tool catalog manifest verify' {
-        go run ./cmd/pa --verify-catalog-manifest $equivalenceCatalogManifest
+        go run ./cmd/sta --verify-catalog-manifest $equivalenceCatalogManifest
     }
 } finally {
     if (Test-Path -LiteralPath $equivalenceCatalogManifest -PathType Leaf) {
@@ -265,12 +265,12 @@ try {
     }
 }
 
-$equivalenceReference = $env:DSH_REFERENCE_ROOT
+$equivalenceReference = $env:SHUTU_REFERENCE_ROOT
 if ([string]::IsNullOrWhiteSpace($equivalenceReference)) {
-    throw 'DSH_REFERENCE_ROOT is required for the reference replay gate'
+    throw 'SHUTU_REFERENCE_ROOT is required for the reference replay gate'
 }
 if (-not (Test-Path -LiteralPath $equivalenceReference -PathType Container)) {
-    throw "DSH_REFERENCE_ROOT does not exist: $equivalenceReference"
+    throw "SHUTU_REFERENCE_ROOT does not exist: $equivalenceReference"
 }
 $equivalenceReferenceCommit = (& git -c "safe.directory=$equivalenceReference" -C $equivalenceReference rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or
@@ -279,4 +279,4 @@ if ($LASTEXITCODE -ne 0 -or
 }
 Invoke-Required 'reference replay contract' { go test -count=1 ./internal/session -run TestCoreTurnReplayMatchesReference }
 
-Write-Host 'DeepSeek Harness capability-equivalence gates passed.'
+Write-Host 'Shutu reference-equivalence gates passed.'

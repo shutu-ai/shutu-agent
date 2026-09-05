@@ -13,6 +13,26 @@ import (
 	"github.com/shutu-ai/shutu-agent/internal/llm"
 )
 
+func TestContextMessageSourceOmitsTypedNilCollections(t *testing.T) {
+	message := llm.Message{
+		Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("snapshot")},
+		SourceKind: "plugin", SourcePlugin: "nil-test",
+		SourceEntries:    []map[string]string(nil),
+		SourceReferences: []map[string]any(nil),
+		SourceSections:   []llm.ContextSnapshotSection(nil),
+		SourceChanges:    []map[string]string(nil),
+	}
+	raw, err := json.Marshal(NewContextMessageFromLLM(message))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, nullField := range []string{"entries", "references", "sections", "changes"} {
+		if strings.Contains(string(raw), `"`+nullField+`":null`) {
+			t.Fatalf("durable source serialized %s as null: %s", nullField, raw)
+		}
+	}
+}
+
 func TestAppendAssignsSeqAndType(t *testing.T) {
 	l := New()
 	ev, err := l.Append(EventUserMessage, NewUserMessage("hello"))

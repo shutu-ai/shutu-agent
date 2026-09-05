@@ -6,11 +6,13 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/shutu-ai/shutu-agent/internal/llm"
 	"github.com/shutu-ai/shutu-agent/internal/prompt"
 	"github.com/shutu-ai/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/timecontext"
 )
 
 func TestRunPreStepInjectorWithErrorStopsBeforeProvider(t *testing.T) {
@@ -222,7 +224,15 @@ func TestRuntimeContextUsesDshOrderAndSource(t *testing.T) {
 		Prompt: prompt.New("You are helpful."),
 		Model:  "deepseek-chat",
 		RuntimeContext: func(context.Context, string) []llm.Message {
-			return []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("runtime")}}}
+			return []llm.Message{{
+				Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("runtime")},
+				SourceKind:   "plugin",
+				SourcePlugin: "@shutu-ai/system-prompt",
+				SourceForm:   "snapshot",
+				SourceSections: []llm.ContextSnapshotSection{
+					{Name: "workspace", Text: "runtime"},
+				},
+			}}
 		},
 		PreStep: []PreStepInjector{{Name: "skill", Inject: func(context.Context, string) []llm.Message {
 			return []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("catalog")}}}
@@ -239,8 +249,13 @@ func TestRuntimeContextUsesDshOrderAndSource(t *testing.T) {
 
 	var runtimeSource, catalogSource struct {
 		Source *struct {
-			Kind   string `json:"kind"`
-			Plugin string `json:"plugin"`
+			Kind     string `json:"kind"`
+			Plugin   string `json:"plugin"`
+			Form     string `json:"form"`
+			Sections []struct {
+				Name string `json:"name"`
+				Text string `json:"text"`
+			} `json:"sections"`
 		} `json:"source"`
 	}
 	if err := json.Unmarshal(log.Events()[3].Data, &runtimeSource); err != nil {
@@ -249,11 +264,160 @@ func TestRuntimeContextUsesDshOrderAndSource(t *testing.T) {
 	if err := json.Unmarshal(log.Events()[4].Data, &catalogSource); err != nil {
 		t.Fatalf("catalog event: %v", err)
 	}
-	if runtimeSource.Source == nil || runtimeSource.Source.Kind != "plugin" || runtimeSource.Source.Plugin != "@shutu-ai/dsh-system-prompt" {
-		t.Fatalf("runtime source = %+v", runtimeSource.Source)
+	if runtimeSource.Source == nil || runtimeSource.Source.Kind != "plugin" ||
+		runtimeSource.Source.Plugin != "@shutu-ai/system-prompt" ||
+		runtimeSource.Source.Form != "snapshot" || len(runtimeSource.Source.Sections) != 1 ||
+		runtimeSource.Source.Sections[0].Name != "workspace" || runtimeSource.Source.Sections[0].Text != "runtime" {
+		t.Fatalf("runtime source = %+v, want DSH snapshot sections", runtimeSource.Source)
 	}
 	if catalogSource.Source == nil || catalogSource.Source.Kind != "skill-catalog" {
 		t.Fatalf("catalog source = %+v", catalogSource.Source)
+	}
+}
+
+// TestRuntimeContextVisibilityHonorsSourceAndReplacement verifies DSH snapshot
+// semantics: only a visible producer-owned snapshot suppresses republication;
+// ordinary user text does not, and compaction replacement does.
+func TestRuntimeContextVisibilityHonorsSourceAndReplacement(t *testing.T) {
+	loop := New(Config{Log: session.New()})
+	runtime := llm.Message{
+		Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("runtime")},
+		SourceKind: "plugin", SourcePlugin: "@shutu-ai/system-prompt",
+	}
+	if loop.visibleMessageExists(runtime) {
+		t.Fatal("runtime context reported visible before publication")
+	}
+	if _, err := loop.log.Append(session.EventUserMessage, session.NewUserMessage("runtime")); err != nil {
+		t.Fatal(err)
+	}
+	if loop.visibleMessageExists(runtime) {
+		t.Fatal("ordinary user text incorrectly suppressed runtime context")
+	}
+	runtimeEvent, err := loop.log.Append(session.EventUserMessage, session.NewUserMessageAt(1, 1, 1, runtime))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loop.visibleMessageExists(runtime) {
+		t.Fatal("durable runtime context not reported visible")
+	}
+	if _, err := loop.log.Append(session.EventUserMessage, session.NewUserMessageReplaceWithSources(
+		"summary", int64(runtimeEvent.Seq), int64(runtimeEvent.Seq), []uint64{runtimeEvent.Seq},
+	)); err != nil {
+		t.Fatal(err)
+	}
+	if loop.visibleMessageExists(runtime) {
+		t.Fatal("compaction-shadowed runtime context incorrectly suppressed republication")
+	}
+}
+
+func TestTimeContextAppendsAfterAllPreStepContributions(t *testing.T) {
+	model := &scriptedLLM{steps: [][]llm.StreamEvent{{
+		{Kind: llm.StreamTextDelta, Text: "ok"},
+		{Kind: llm.StreamFinish, FinishReason: "stop"},
+	}}}
+	log := session.New()
+	clock := time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC)
+	timeCtx, err := timecontext.New(timecontext.Config{TimeZone: "UTC"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	timeCtx.Now(func() time.Time { return clock })
+	agentLoop := New(Config{
+		LLM: model, Log: log, Tools: newTestRegistry(t),
+		Prompt: prompt.New("You are helpful."), Model: "deepseek-chat",
+		TimeContext: timeCtx,
+		PreStep: []PreStepInjector{{Name: "plugin", Inject: func(context.Context, string) []llm.Message {
+			return []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("plugin-context")}}}
+		}}},
+	})
+	if err := agentLoop.Run(context.Background(), "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if len(model.calls) != 1 {
+		t.Fatalf("provider calls = %d", len(model.calls))
+	}
+	messages := model.calls[0].Messages
+	if got := messages[len(messages)-1].Text(); !strings.Contains(got, "Time sampled while preparing turn 1, step 1:") {
+		t.Fatalf("final request message = %q", got)
+	}
+	var timeEventIndex = -1
+	events := log.Events()
+	for index, event := range events {
+		if event.Type != session.EventUserMessage {
+			continue
+		}
+		var payload struct {
+			Source *struct {
+				Plugin string `json:"plugin"`
+			} `json:"source"`
+		}
+		if json.Unmarshal(event.Data, &payload) == nil && payload.Source != nil && payload.Source.Plugin == "time-context" {
+			timeEventIndex = index
+		}
+	}
+	if timeEventIndex < 1 || events[timeEventIndex+1].Type != "assistant/chunk" {
+		t.Fatalf("time context ordering = %#v", events)
+	}
+	var payload struct {
+		Source *struct {
+			Kind     string `json:"kind"`
+			Plugin   string `json:"plugin"`
+			Form     string `json:"form"`
+			Sections []struct {
+				Name string `json:"name"`
+				Text string `json:"text"`
+			} `json:"sections"`
+		} `json:"source"`
+	}
+	if err := json.Unmarshal(events[timeEventIndex].Data, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Source == nil || payload.Source.Kind != "plugin" || payload.Source.Plugin != "time-context" ||
+		payload.Source.Form != "snapshot" || len(payload.Source.Sections) != 1 ||
+		payload.Source.Sections[0].Name != "time-context" {
+		t.Fatalf("time context source = %+v", payload.Source)
+	}
+}
+
+func TestVisibleContextMatchesCompleteProducerSource(t *testing.T) {
+	loop := New(Config{Log: session.New()})
+	section := func(text string) []llm.ContextSnapshotSection {
+		return []llm.ContextSnapshotSection{{Name: "state", Text: text}}
+	}
+	firstA := llm.Message{
+		Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("state A")},
+		SourceKind: "plugin", SourcePlugin: "state-test",
+		SourceForm: "snapshot", SourceSections: section("state A"),
+	}
+	secondB := llm.Message{
+		Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("state B")},
+		SourceKind: "plugin", SourcePlugin: "state-test",
+		SourceForm: "snapshot", SourceSections: section("state B"),
+		SourceUpdate: true,
+	}
+	thirdA := llm.Message{
+		Role: llm.RoleUser, Content: []llm.ContentBlock{llm.Text("state A")},
+		SourceKind: "plugin", SourcePlugin: "state-test",
+		SourceForm: "snapshot", SourceSections: section("state A"),
+		SourceUpdate: true,
+	}
+	if _, err := loop.log.Append(session.EventUserMessage, session.NewContextMessageFromLLM(firstA)); err != nil {
+		t.Fatal(err)
+	}
+	if !loop.visibleMessageExists(firstA) {
+		t.Fatal("initial A context not reported visible")
+	}
+	if _, err := loop.log.Append(session.EventUserMessage, session.NewContextMessageFromLLM(secondB)); err != nil {
+		t.Fatal(err)
+	}
+	if loop.visibleMessageExists(thirdA) {
+		t.Fatal("stale A payload incorrectly satisfied replacement A→B→A")
+	}
+	if _, err := loop.log.Append(session.EventUserMessage, session.NewContextMessageFromLLM(thirdA)); err != nil {
+		t.Fatal(err)
+	}
+	if !loop.visibleMessageExists(thirdA) {
+		t.Fatal("replacement A context not reported visible")
 	}
 }
 

@@ -1,0 +1,73 @@
+{
+  "name": "@shutu-ai/client-connection",
+  "description": "Wire consumer layer: HTTP-up/WebSocket-down client, ConnectionController dual streams with reconnect, and fixture api",
+  "version": "0.1.0-rc.8",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shutu-ai/shutu-agent.git",
+    "directory": "packages/client/connection"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./invariant": {
+      "types": "./lib/types/invariant.d.ts",
+      "default": "./lib/invariant.js"
+    },
+    "./client": {
+      "types": "./lib/types/client/index.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "shutu": {
+    "client": {
+      "inject": [],
+      "platform": "web",
+      "immediately": true
+    }
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@shutu-ai/schemastery": "workspace:^",
+    "ws": "^8.21.0"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/invariant.js",
+    "lib/client.js",
+    "lib/types/**/*.d.ts"
+  ],
+  "peerDependencies": {
+    "@shutu-ai/host-webserver": "workspace:^",
+    "@shutu-ai/invariants": "workspace:^",
+    "@shutu-ai/cordis": "workspace:^",
+    "@shutu-ai/attachment": "workspace:^",
+    "@shutu-ai/host-apiproxy": "workspace:^",
+    "@shutu-ai/commands": "workspace:^",
+    "@shutu-ai/llm": "workspace:^",
+    "@shutu-ai/session": "workspace:^",
+    "@shutu-ai/tools": "workspace:^"
+  },
+  "devDependencies": {
+    "@shutu-ai/host-webserver": "workspace:^",
+    "@shutu-ai/invariants": "workspace:^",
+    "@types/ws": "^8.18.1",
+    "@shutu-ai/cordis": "workspace:^",
+    "@shutu-ai/attachment": "workspace:^",
+    "@shutu-ai/host-apiproxy": "workspace:^",
+    "@shutu-ai/commands": "workspace:^",
+    "@shutu-ai/llm": "workspace:^",
+    "@shutu-ai/session": "workspace:^",
+    "@shutu-ai/tools": "workspace:^"
+  }
+}

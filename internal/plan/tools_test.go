@@ -18,7 +18,7 @@ type eventRec struct {
 
 // newPlanToolsWithEvents returns an engine and a PlanTools bundle wired to a
 // slice that records every emitted plan/* event (the composition root wires the
-// same sink to the session log in cmd/pa, D3).
+// same sink to the session log in cmd/sta, D3).
 func newPlanToolsWithEvents(t *testing.T) (*engine, *PlanTools, *[]eventRec) {
 	t.Helper()
 	e := NewEngine(nil)

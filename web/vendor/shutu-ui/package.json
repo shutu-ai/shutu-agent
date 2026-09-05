@@ -1,0 +1,8 @@
+{
+  "name": "@shutu-ai/shutu-ui",
+  "version": "0.1.0-rc.8",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "description": "Vendored Shutu Agent web UI runtime"
+}

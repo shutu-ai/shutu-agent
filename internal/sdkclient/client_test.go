@@ -332,7 +332,7 @@ func TestClientChildBadFramesDoNotPoisonLaterResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.ServerInfo.Name != "deepseek-harness-sdk-runtime" {
+	if result.ServerInfo.Name != "shutu-agent-sdk-runtime" {
 		t.Fatalf("initialize result = %#v", result)
 	}
 	if err := client.Close(); err != nil {
@@ -414,7 +414,7 @@ func fakeRuntime(mode string) error {
 				if err := out.Encode(map[string]any{
 					"jsonrpc": "2.0", "id": request.ID,
 					"result": map[string]any{
-						"serverInfo":   map[string]string{"name": "deepseek-harness-sdk-runtime", "version": "test"},
+						"serverInfo":   map[string]string{"name": "shutu-agent-sdk-runtime", "version": "test"},
 						"launchCwd":    launchCwd,
 						"envMarker":    os.Getenv(launchMarkerEnv),
 						"parentLeaked": os.Getenv(parentLeakEnv),
@@ -426,7 +426,7 @@ func fakeRuntime(mode string) error {
 			}
 			if err := out.Encode(map[string]any{
 				"jsonrpc": "2.0", "id": request.ID,
-				"result": map[string]any{"serverInfo": map[string]string{"name": "deepseek-harness-sdk-runtime", "version": "test"}},
+				"result": map[string]any{"serverInfo": map[string]string{"name": "shutu-agent-sdk-runtime", "version": "test"}},
 			}); err != nil {
 				return err
 			}

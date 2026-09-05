@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/shutu-ai/shutu-agent/internal/contractfixture"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
 	"github.com/shutu-ai/shutu-agent/internal/meter"
 	"github.com/shutu-ai/shutu-agent/internal/projection"
 	"github.com/shutu-ai/shutu-agent/internal/session"
@@ -63,6 +64,288 @@ func TestNativeProjectionCompletionLedgerMatchesMeterReplay(t *testing.T) {
 	}
 	if projected.Type != session.EventToolResult {
 		t.Fatalf("tool result projection type = %q", projected.Type)
+	}
+}
+
+func TestNativeProjectionNormalizesLegacyInboxInsertedNull(t *testing.T) {
+	cursor := newNativeProjectionCursor()
+	projected := cursor.project("legacy-inbox", session.Event{
+		Seq: 1, Type: session.EventAgentInboxSpliced, At: time.UnixMilli(1001), Version: session.EventVersion,
+		Data: json.RawMessage(`{"target":"next-step","start":0,"removedCount":1,"inserted":null,"outcome":"canceled"}`),
+	})
+	var data map[string]any
+	if err := json.Unmarshal(projected.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	inserted, ok := data["inserted"].([]any)
+	if !ok || len(inserted) != 0 {
+		t.Fatalf("legacy inbox inserted = %#v, want []", data["inserted"])
+	}
+	encoded, err := json.Marshal(projected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := session.ValidateWireEvent(encoded); err != nil {
+		t.Fatalf("normalized inbox event rejected: %v\n%s", err, encoded)
+	}
+}
+
+func TestNativeProjectionPreservesSkillInvocationSource(t *testing.T) {
+	payload := session.NewUserMessageAt(1, 1, 1, llm.Message{
+		Role:       llm.RoleUser,
+		Content:    []llm.ContentBlock{llm.Text("<skill_content name=\"review-bash\">body</skill_content>")},
+		SourceKind: "skill-invocation",
+		SourceName: "review-bash",
+		SourceForm: "instructions",
+	})
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cursor := newNativeProjectionCursor()
+	projected := cursor.project("skill-source", session.Event{
+		Seq: 1, Type: session.EventUserMessage, At: time.UnixMilli(1001), Version: session.EventVersion,
+		Data: raw,
+	})
+	var data struct {
+		Source *struct {
+			Kind string `json:"kind"`
+			Name string `json:"name"`
+			Form string `json:"form"`
+		} `json:"source"`
+	}
+	if err := json.Unmarshal(projected.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data.Source == nil || data.Source.Kind != "skill-invocation" ||
+		data.Source.Name != "review-bash" || data.Source.Form != "instructions" {
+		t.Fatalf("native skill source = %+v, want skill-invocation/review-bash/instructions", data.Source)
+	}
+}
+
+func TestNativeProjectionPreservesRuntimeSnapshotSections(t *testing.T) {
+	payload := session.NewUserMessageAt(1, 1, 1, llm.Message{
+		Role:         llm.RoleUser,
+		Content:      []llm.ContentBlock{llm.Text("Current runtime context.")},
+		SourceKind:   "plugin",
+		SourcePlugin: "@shutu-ai/system-prompt",
+		SourceForm:   "snapshot",
+		SourceSections: []llm.ContextSnapshotSection{{
+			Name: "workspace", Text: "Working directory: D:/work",
+		}},
+	})
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cursor := newNativeProjectionCursor()
+	projected := cursor.project("runtime-snapshot", session.Event{
+		Seq: 1, Type: session.EventUserMessage, At: time.UnixMilli(1001), Version: session.EventVersion,
+		Data: raw,
+	})
+	var data struct {
+		Source *struct {
+			Kind     string `json:"kind"`
+			Plugin   string `json:"plugin"`
+			Form     string `json:"form"`
+			Sections []struct {
+				Name string `json:"name"`
+				Text string `json:"text"`
+			} `json:"sections"`
+		} `json:"source"`
+	}
+	if err := json.Unmarshal(projected.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data.Source == nil || data.Source.Kind != "plugin" ||
+		data.Source.Plugin != "@shutu-ai/system-prompt" || data.Source.Form != "snapshot" ||
+		len(data.Source.Sections) != 1 || data.Source.Sections[0].Name != "workspace" ||
+		data.Source.Sections[0].Text != "Working directory: D:/work" {
+		t.Fatalf("native runtime source = %+v, want DSH snapshot sections", data.Source)
+	}
+}
+
+func TestNativeProjectionPreservesAgentInstructionBaselineSource(t *testing.T) {
+	payload := session.NewUserMessageAt(1, 1, 1, llm.Message{
+		Role:                   llm.RoleUser,
+		Content:                []llm.ContentBlock{llm.Text("<system-reminder>\nWorkspace rules\n</system-reminder>")},
+		SourceKind:             "agent-instructions",
+		SourceForm:             "instructions",
+		SourceBaseline:         true,
+		SourceBaselineIdentity: `{"projectRoot":"."}`,
+		SourceChanges: []map[string]any{{
+			"action": "set", "scope": ".", "path": "AGENTS.md",
+			"digest": "digest-1",
+		}},
+	})
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cursor := newNativeProjectionCursor()
+	projected := cursor.project("instruction-baseline", session.Event{
+		Seq: 1, Type: session.EventUserMessage, At: time.UnixMilli(1001), Version: session.EventVersion,
+		Data: raw,
+	})
+	var data struct {
+		Source *struct {
+			Kind             string              `json:"kind"`
+			Form             string              `json:"form"`
+			Baseline         bool                `json:"baseline"`
+			BaselineIdentity string              `json:"baselineIdentity"`
+			Changes          []map[string]string `json:"changes"`
+		} `json:"source"`
+	}
+	if err := json.Unmarshal(projected.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data.Source == nil || data.Source.Kind != "agent-instructions" ||
+		data.Source.Form != "instructions" || !data.Source.Baseline ||
+		data.Source.BaselineIdentity != `{"projectRoot":"."}` || len(data.Source.Changes) != 1 ||
+		data.Source.Changes[0]["path"] != "AGENTS.md" {
+		t.Fatalf("native instruction source = %+v, want complete DSH baseline", data.Source)
+	}
+}
+
+func TestNativeProjectionPreservesNoticeSummary(t *testing.T) {
+	payload := session.NewUserMessageAt(1, 1, 1, llm.Message{
+		Role:          llm.RoleUser,
+		Content:       []llm.ContentBlock{llm.Text("bash test [completed]")},
+		SourceKind:    "plugin",
+		SourcePlugin:  "tool-jobs",
+		SourceForm:    "notice",
+		SourceSummary: "bash test [completed]",
+	})
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cursor := newNativeProjectionCursor()
+	projected := cursor.project("job-notice", session.Event{
+		Seq: 1, Type: session.EventUserMessage, At: time.UnixMilli(1001), Version: session.EventVersion,
+		Data: raw,
+	})
+	var data struct {
+		Source *struct {
+			Kind    string `json:"kind"`
+			Plugin  string `json:"plugin"`
+			Form    string `json:"form"`
+			Summary string `json:"summary"`
+		} `json:"source"`
+	}
+	if err := json.Unmarshal(projected.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data.Source == nil || data.Source.Kind != "plugin" || data.Source.Plugin != "tool-jobs" ||
+		data.Source.Form != "notice" || data.Source.Summary != "bash test [completed]" {
+		t.Fatalf("native notice source = %+v, want DSH summary", data.Source)
+	}
+}
+
+func TestNativeProjectionPreservesSubagentSettledNotice(t *testing.T) {
+	payload := session.NewUserMessageAt(1, 1, 1, llm.Message{
+		Role:                  llm.RoleUser,
+		Content:               []llm.ContentBlock{llm.Text("Background subagent child-1 finished and will do no further work unless you send it more.")},
+		SourceKind:            "subagent-settled",
+		SourceForm:            "notice",
+		SourceSummary:         "Background subagent child-1 finished and will do no further work unless you send it more.",
+		SourceSenderSessionID: "child-1",
+	})
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cursor := newNativeProjectionCursor()
+	projected := cursor.project("subagent-notice", session.Event{
+		Seq: 1, Type: session.EventUserMessage, At: time.UnixMilli(1001), Version: session.EventVersion,
+		Data: raw,
+	})
+	var data struct {
+		Source *struct {
+			Kind            string `json:"kind"`
+			Form            string `json:"form"`
+			Summary         string `json:"summary"`
+			SenderSessionID string `json:"senderSessionId"`
+		} `json:"source"`
+	}
+	if err := json.Unmarshal(projected.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data.Source == nil || data.Source.Kind != "subagent-settled" ||
+		data.Source.Form != "notice" || data.Source.SenderSessionID != "child-1" ||
+		data.Source.Summary != "Background subagent child-1 finished and will do no further work unless you send it more." {
+		t.Fatalf("native subagent source = %+v, want DSH settlement notice", data.Source)
+	}
+}
+
+func TestNativeProjectionPreservesSubagentReportRelay(t *testing.T) {
+	payload := session.NewUserMessageAt(1, 1, 1, llm.Message{
+		Role:                  llm.RoleUser,
+		Content:               []llm.ContentBlock{llm.Text("Background subagent child-1 reported:\nselected findings")},
+		SourceKind:            "subagent-report",
+		SourceForm:            "relay",
+		SourceSenderSessionID: "child-1",
+	})
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cursor := newNativeProjectionCursor()
+	projected := cursor.project("subagent-report", session.Event{
+		Seq: 1, Type: session.EventUserMessage, At: time.UnixMilli(1001), Version: session.EventVersion,
+		Data: raw,
+	})
+	var data struct {
+		Source *struct {
+			Kind            string `json:"kind"`
+			Form            string `json:"form"`
+			SenderSessionID string `json:"senderSessionId"`
+		} `json:"source"`
+	}
+	if err := json.Unmarshal(projected.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data.Source == nil || data.Source.Kind != "subagent-report" ||
+		data.Source.Form != "relay" || data.Source.SenderSessionID != "child-1" {
+		t.Fatalf("native subagent report source = %+v, want DSH relay", data.Source)
+	}
+}
+
+func TestNativeProjectionPreservesSessionReferenceRecall(t *testing.T) {
+	references := []map[string]any{{
+		"sessionId": "source", "label": "Source", "capturedThroughSeq": 7,
+		"compacted": true, "originalMessages": 2, "retainedMessages": 1,
+		"omittedMessages": 1, "omittedBytes": 12, "truncated": true, "inputIndex": 0,
+	}}
+	payload := session.NewUserMessageAt(1, 1, 1, llm.Message{
+		Role:             llm.RoleUser,
+		Content:          []llm.ContentBlock{llm.Text(`[{"sessionId":"source","label":"Source"}]`)},
+		SourceKind:       "session-reference",
+		SourceForm:       "recall",
+		SourceReferences: references,
+	})
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cursor := newNativeProjectionCursor()
+	projected := cursor.project("session-recall", session.Event{
+		Seq: 1, Type: session.EventUserMessage, At: time.UnixMilli(1001), Version: session.EventVersion,
+		Data: raw,
+	})
+	var data struct {
+		Source *struct {
+			Kind       string           `json:"kind"`
+			Form       string           `json:"form"`
+			References []map[string]any `json:"references"`
+		} `json:"source"`
+	}
+	if err := json.Unmarshal(projected.Data, &data); err != nil {
+		t.Fatal(err)
+	}
+	if data.Source == nil || data.Source.Kind != "session-reference" || data.Source.Form != "recall" ||
+		len(data.Source.References) != 1 || data.Source.References[0]["label"] != "Source" {
+		t.Fatalf("native session recall source = %+v", data.Source)
 	}
 }
 

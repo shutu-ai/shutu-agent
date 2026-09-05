@@ -22,7 +22,11 @@ func TestSDKProtocolSchemaAcceptsReferenceNotificationsAndClientRequests(t *test
 			t.Fatalf("surface operation %s rejected by schema: %v", surfaceOp, err)
 		}
 	}
-	if referenceRoot := os.Getenv("DSH_REFERENCE_ROOT"); referenceRoot != "" {
+	referenceRoot := os.Getenv("SHUTU_REFERENCE_ROOT")
+	if referenceRoot == "" {
+		referenceRoot = filepath.Clean(filepath.Join("..", "..", ".reference", "dsh"))
+	}
+	if referenceRoot != "" {
 		for _, scenario := range []string{"text-turn", "bash-tool", "persistent-tools", "subagent-spawn-in-process"} {
 			path := filepath.Join(referenceRoot, "examples", "jsonrpc-agent", "tests", "snapshots", scenario, "notifications.expected.jsonl")
 			for _, notification := range loadReferenceNotifications(t, path) {
@@ -74,20 +78,18 @@ func TestSDKProtocolSchemaAcceptsReferenceNotificationsAndClientRequests(t *test
 }
 
 func TestSDKProtocolSchemaMatchesReferenceGeneratedArtifact(t *testing.T) {
-	referenceRoot := os.Getenv("DSH_REFERENCE_ROOT")
+	referenceRoot := os.Getenv("SHUTU_REFERENCE_ROOT")
 	if referenceRoot == "" {
-		referenceRoot = filepath.Join("..", "..", "..", "deepseek-harness")
-		if info, err := os.Stat(referenceRoot); err != nil || !info.IsDir() {
-			t.Skip("reference checkout is not available; schema drift gate is skipped")
-		}
+		t.Skip("opt-in schema drift gate requires SHUTU_REFERENCE_ROOT")
 	}
+	referenceRoot = filepath.Clean(referenceRoot)
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatal(err)
 	}
 	generated := filepath.Join(t.TempDir(), "protocol.schema.json")
 	command := exec.Command("node", filepath.Join(repoRoot, "tools", "generate-sdk-protocol-schema.mjs"), generated)
-	command.Env = append(os.Environ(), "DSH_REFERENCE_ROOT="+referenceRoot)
+	command.Env = append(os.Environ(), "SHUTU_REFERENCE_ROOT="+referenceRoot)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("generator failed: %v\n%s", err, output)
@@ -138,7 +140,7 @@ func TestSDKTypedResultsAreSchemaValid(t *testing.T) {
 	shutdownSchema := compileProtocolDefinition(t, "shutdownResult")
 
 	var initialize InitializeResult
-	initialize.ServerInfo.Name = "deepseek-harness-sdk-runtime"
+	initialize.ServerInfo.Name = "shutu-agent-sdk-runtime"
 	initialize.ServerInfo.Version = "test"
 	raw, err := json.Marshal(initialize)
 	if err != nil {

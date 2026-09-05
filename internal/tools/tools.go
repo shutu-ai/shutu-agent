@@ -340,7 +340,7 @@ type Registry struct {
 	// sensitive-tool approval runs through. The registry owns the hook so the
 	// gate stays inside the Execute pipeline (policy lives here, never in the
 	// loop, D4); the gate function itself is provided by the composition root
-	// (cmd/pa). nil means no gating.
+	// (cmd/sta). nil means no gating.
 	preHooks          []PreExecuteHook
 	executeHooks      []ExecuteHook
 	postHooks         []PostExecuteHook
@@ -1093,6 +1093,12 @@ func (r *Registry) Prepare(ctx context.Context, callID, name string, args any) (
 	if name == codeRunToolName && policy.CodeRun.Timeout > 0 {
 		timeout = policy.CodeRun.Timeout
 	}
+	if name == pwshToolName && policy.Shell.Timeout > 0 {
+		timeout = policy.Shell.Timeout
+	}
+	if name == runCommandName && policy.Shell.Timeout > 0 {
+		timeout = policy.Shell.Timeout
+	}
 	return &PreparedExecution{registry: r, callID: callID, name: name, args: v, timeout: timeout, generation: registration.Generation}, nil
 }
 
@@ -1771,6 +1777,14 @@ func (r *Registry) applyOutputCap(name, out string) ToolResult {
 	owner := r.owner
 	r.mu.RUnlock()
 	limit := policy.OutputLimit
+	if name == runCommandName || name == pwshToolName {
+		if policy.Shell.OutputLimit > 0 {
+			limit = policy.Shell.OutputLimit
+		}
+		if policy.Shell.MaxSpillBytes > 0 && len(out) > policy.Shell.MaxSpillBytes {
+			return truncateInlineResult(out, limit)
+		}
+	}
 	if limit <= 0 || len(out) <= limit {
 		return ToolResult{Output: out}
 	}

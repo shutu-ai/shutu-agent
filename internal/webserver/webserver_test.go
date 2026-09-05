@@ -46,7 +46,7 @@ func newTestServer(t *testing.T, token string) (*Server, *store.SQLiteStore) {
 		t.Fatalf("New: %v", err)
 	}
 	// Keep tests hermetic; production composition injects the user's
-	// ~/shudu fallback through cmd/pa.
+	// ~/shutu fallback through cmd/sta.
 	srv.SetDefaultWorkdir(t.TempDir())
 	return srv, st
 }
@@ -787,7 +787,7 @@ func TestMessageHandlerInvoked(t *testing.T) {
 	srv, _ := newTestServer(t, "tok")
 	var gotID, gotText string
 	var gotImages []llm.ImageRef
-	srv.SetMessageHandler(func(ctx context.Context, sessionID, text string, images []llm.ImageRef) error {
+	srv.SetMessageHandler(func(ctx context.Context, sessionID, text string, images []llm.ImageRef, meta PromptMeta) error {
 		gotID, gotText, gotImages = sessionID, text, images
 		return nil
 	})
@@ -835,7 +835,7 @@ func TestSessionQueueAPI(t *testing.T) {
 			}
 			return items, nil
 		},
-		func(ctx context.Context, sessionID, text string) (QueueItem, error) {
+		func(ctx context.Context, sessionID, text string, _ []llm.ContentBlock, meta PromptMeta) (QueueItem, error) {
 			item := QueueItem{ID: "q-1", Text: text, CreatedAt: created, Placement: "queued"}
 			items = append(items, item)
 			return item, nil
@@ -1331,12 +1331,12 @@ func TestRepairEventStreamFillsDurableGapInOrder(t *testing.T) {
 
 // TestConfigAPI verifies GET /api/config (M10 W2, ADR D-WEB2-D): the route sits
 // behind auth, invokes the injected config provider and serves its sanitized
-// map verbatim (the redaction itself is cmd/pa's webConfig — the token key is
+// map verbatim (the redaction itself is cmd/sta's webConfig — the token key is
 // served only as "***", never a plaintext); an unwired provider answers 501.
 func TestConfigAPI(t *testing.T) {
 	srv, _ := newTestServer(t, "tok")
 	called := false
-	// The fake mirrors cmd/pa's webConfig: web_server.token is redacted to
+	// The fake mirrors cmd/sta's webConfig: web_server.token is redacted to
 	// "***" (never the plaintext), so the boundary carries no secret.
 	srv.SetConfigProvider(func() map[string]any {
 		called = true
@@ -2337,7 +2337,7 @@ func TestMessageWithImages(t *testing.T) {
 	}
 	var gotText string
 	var gotImages []llm.ImageRef
-	srv.SetMessageHandler(func(ctx context.Context, sessionID, text string, images []llm.ImageRef) error {
+	srv.SetMessageHandler(func(ctx context.Context, sessionID, text string, images []llm.ImageRef, meta PromptMeta) error {
 		gotText, gotImages = text, images
 		return nil
 	})
@@ -2374,7 +2374,9 @@ func TestMessageWithImages(t *testing.T) {
 
 	// Images without a wired store → 501.
 	srv2, _ := newTestServer(t, "tok")
-	srv2.SetMessageHandler(func(ctx context.Context, sessionID, text string, images []llm.ImageRef) error { return nil })
+	srv2.SetMessageHandler(func(ctx context.Context, sessionID, text string, images []llm.ImageRef, meta PromptMeta) error {
+		return nil
+	})
 	rec = doReqBody(t, srv2.Handler(), "POST", "/api/sessions/s-1/message", "tok",
 		`{"text":"x","images":["any"]}`)
 	if rec.Code != http.StatusNotImplemented {
@@ -2415,23 +2417,55 @@ func TestEventViewHidesInternalContextMessages(t *testing.T) {
 			Data: mustData(t, session.NewUserMessage("Current runtime context. This snapshot supersedes earlier runtime-context snapshots.\n\nWorking directory: D:\\work"))},
 		{Seq: 4, Type: session.EventUserMessage, At: time.Now(), Version: 1,
 			Data: mustData(t, session.NewUserMessage("<skill_content name=\"demo\">\n<skill_instructions>\nhidden\n</skill_instructions>\n</skill_content>"))},
+		{Seq: 5, Type: session.EventUserMessage, At: time.Now(), Version: 1,
+			Data: mustData(t, session.NewUserMessageAt(1, 1, 5, llm.Message{
+				Role:                  llm.RoleUser,
+				Content:               []llm.ContentBlock{llm.Text("Background subagent child-1 finished and will do no further work unless you send it more.")},
+				SourceKind:            "subagent-settled",
+				SourceForm:            "notice",
+				SourceSummary:         "Background subagent child-1 finished and will do no further work unless you send it more.",
+				SourceSenderSessionID: "child-1",
+			}))},
+		{Seq: 6, Type: session.EventUserMessage, At: time.Now(), Version: 1,
+			Data: mustData(t, session.NewUserMessageAt(1, 1, 6, llm.Message{
+				Role:       llm.RoleUser,
+				Content:    []llm.ContentBlock{llm.Text(`[{"sessionId":"source","label":"Source"}]`)},
+				SourceKind: "session-reference",
+				SourceForm: "recall",
+			}))},
+		{Seq: 7, Type: session.EventUserMessage, At: time.Now(), Version: 1,
+			Data: mustData(t, session.NewUserMessageAt(1, 1, 7, llm.Message{
+				Role:       llm.RoleUser,
+				Content:    []llm.ContentBlock{llm.Text("Workspace instructions")},
+				SourceKind: "agent-instructions",
+				SourceForm: "instructions",
+			}))},
 	})
 	rec := doReq(t, srv.Handler(), "GET", "/api/sessions/s-context/events", "tok")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("events = %d: %s", rec.Code, rec.Body.String())
 	}
 	events := decodeEventPage(t, rec).Events
-	if len(events) != 4 || events[0].ContextMessage || events[0].Summary != "当前目录" {
+	if len(events) != 7 || events[0].ContextMessage || events[0].Summary != "当前目录" {
 		t.Fatalf("human event = %+v", events[0])
 	}
 	if events[1].Summary != "上下文注入 skill-catalog" || events[1].ContextSource != "skill-catalog" {
 		t.Fatalf("skill catalog context event = %+v", events[1])
 	}
-	if events[2].Summary != "上下文注入 @shutu-ai/dsh-system-prompt" || events[2].ContextSource != "@shutu-ai/dsh-system-prompt" {
+	if events[2].Summary != "上下文注入 @shutu-ai/system-prompt" || events[2].ContextSource != "@shutu-ai/system-prompt" {
 		t.Fatalf("runtime context event = %+v", events[2])
 	}
 	if events[3].Summary != "上下文注入 skill-invocation" || events[3].ContextSource != "skill-invocation" {
 		t.Fatalf("skill invocation context event = %+v", events[3])
+	}
+	if events[4].Summary != "上下文注入 subagent-settled" || events[4].ContextSource != "subagent-settled" {
+		t.Fatalf("subagent settlement context event = %+v", events[4])
+	}
+	if events[5].Summary != "上下文注入 session-reference" || events[5].ContextSource != "session-reference" {
+		t.Fatalf("session recall context event = %+v", events[5])
+	}
+	if events[6].Summary != "上下文注入 agent-instructions" || events[6].ContextSource != "agent-instructions" {
+		t.Fatalf("workspace instruction context event = %+v", events[6])
 	}
 	for _, ev := range events[1:] {
 		if !ev.ContextMessage || ev.Summary == "" {

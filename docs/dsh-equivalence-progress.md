@@ -167,7 +167,7 @@
 
 ## Latest verified delta (2026-09-01, production ACP disconnect oracle)
 
-- Added a production `cmd/pa` ACP regression in which the child owns SQLite,
+- Added a production `cmd/sta` ACP regression in which the child owns SQLite,
   `acpFactory`, the minimal tool registry, the Agent loop, and `acp.Server`.
   The parent is an external line-protocol client only. Its prompt commits a
   real `str_replace_editor` file side effect, then the client disconnects by
@@ -486,7 +486,7 @@ local `gcc` compiler.
   remaining reference-runtime, enforcement, lifecycle, storage, telemetry and
   CI-gate work. Full capability equivalence is still not claimed.
 
-Verification for this delta: `go test -count=1 ./internal/web ./cmd/pa` passes.
+Verification for this delta: `go test -count=1 ./internal/web ./cmd/sta` passes.
 
 - Per-session model selection now fails closed when a persisted provider ID is
   unknown; it no longer silently falls back to the process-global provider.
@@ -521,7 +521,7 @@ Verification for this delta: `go test -count=1 ./internal/web ./cmd/pa` passes.
 - Added regression coverage proving schedule create/list state does not leak
   between two session contexts.
 
-Verification for this delta: `go test -count=1 ./internal/schedule ./cmd/pa`
+Verification for this delta: `go test -count=1 ./internal/schedule ./cmd/sta`
 passes; full suite remains the required follow-up gate.
 
 ## Latest verified delta (2026-08-28, session-scoped plan projections)
@@ -592,7 +592,7 @@ equivalence claim.
 - Added a regression test for per-session compaction projection identity and
   reuse.
 
-Verification for this delta: `go test -count=1 ./cmd/pa` passes; the complete
+Verification for this delta: `go test -count=1 ./cmd/sta` passes; the complete
 suite and final gates remain required.
 
 ## Latest verified delta (2026-08-28, bounded JSONL cursor reads)
@@ -654,7 +654,7 @@ open and is not represented as complete by this change.
 - Added coverage that session-aware requests retain their owner and receive
   distinct IDs within one approval service.
 
-Verification for this delta: `go test ./internal/interact ./cmd/pa ./internal/persistence ./internal/store` passes.
+Verification for this delta: `go test ./internal/interact ./cmd/sta ./internal/persistence ./internal/store` passes.
 
 ## Latest verified delta (2026-08-28, Code Mode dispatch gate)
 
@@ -2305,7 +2305,7 @@ MCP lifecycle, external SDK replay, and final equivalence gates remain open.
   actual server through initialize/shutdown over the shared client transport.
 - [x] Verification: `go test ./internal/sdkclient`, targeted SDK/client tests,
   `go test -count=10 ./internal/sdkclient`, `go vet ./internal/sdkclient
-  ./cmd/pa`, and full `go test ./...` across all packages. The full run's
+  ./cmd/sta`, and full `go test ./...` across all packages. The full run's
   three Code Mode failures were sandbox denials on the pre-existing user-level
   workspace; an approved rerun of exactly those tests outside the workspace
   sandbox passes. `go test -race` remains unavailable on this host because CGO
@@ -2544,7 +2544,7 @@ MCP lifecycle, external SDK replay, and final equivalence gates remain open.
   stores retain the pre-claim plus compensating cleanup compatibility path.
 - New regressions prove: committed receipt retains the reservation, a second
   store handle cannot claim the same member identity after publication, and a
-  receipt conflict does not strand the reservation. Store, Team and `cmd/pa`
+  receipt conflict does not strand the reservation. Store, Team and `cmd/sta`
   focused/full regressions pass.
 - This closes only the Team member transaction edge. Generated-ID orphan
   recovery/GC, job/terminal/subagent/MCP/workflow receipt atomicity, and the
@@ -2587,7 +2587,7 @@ MCP lifecycle, external SDK replay, and final equivalence gates remain open.
   untouched, and the durable sink error is returned as the tool failure.
 - A failure-injection regression proves that a failed `workflow/start` closes
   admission before an external child can start. Existing Node cancellation,
-  stranded-agent, late-callback, one-terminal-end, and `cmd/pa` regressions
+  stranded-agent, late-callback, one-terminal-end, and `cmd/sta` regressions
   still pass.
 - A3.4 remains open: durable workflow intents and restart replay still need to
   prove that an interrupted run cannot duplicate an already-started external
@@ -2602,7 +2602,7 @@ MCP lifecycle, external SDK replay, and final equivalence gates remain open.
 - Protocol-boundary regressions cover malformed JSON, missing/unknown frame
   types, non-object event data, and missing agent/result required fields, plus
   the three valid frame families. Existing dynamic workflow, cancellation,
-  late-callback, and `cmd/pa` suites pass.
+  late-callback, and `cmd/sta` suites pass.
 - A3.4 still remains open for durable restart intents and the complete
   kill/crash/fault matrix.
 
@@ -2989,9 +2989,9 @@ MCP lifecycle, external SDK replay, and final equivalence gates remain open.
   one delivery boundary.
 - Added negative regressions for a failed inbox receipt (no durable splice on
   failure, exactly one committed receipt on retry, no duplicate on repeat) and
-  for wake-budget spend/restore. The focused `cmd/pa` regressions passed five
+  for wake-budget spend/restore. The focused `cmd/sta` regressions passed five
   times.
-- `go test ./internal/mcp ./cmd/pa`, `go vet ./internal/mcp ./cmd/pa`,
+- `go test ./internal/mcp ./cmd/sta`, `go vet ./internal/mcp ./cmd/sta`,
   `go build ./...`, and `git diff --check` pass. A2.2/A2.4 remain partial;
   full equivalence remains `fail`.
 
@@ -3011,7 +3011,7 @@ MCP lifecycle, external SDK replay, and final equivalence gates remain open.
   and shutdown, while `fail_on_startup_error=true` remains loud and closes the
   generation. A new integration regression proves the replacement generation
   publishes one tool after initial-start recovery.
-- `go test ./internal/mcp ./cmd/pa`, `go vet`, `go build ./...`, and
+- `go test ./internal/mcp ./cmd/sta`, `go vet`, `go build ./...`, and
   `git diff --check` pass. MCP list-changed, HTTP retirement, provider cold
   recovery and the remaining external crash-boundary contracts remain open.
 
@@ -3061,7 +3061,7 @@ MCP lifecycle, external SDK replay, and final equivalence gates remain open.
   owner state is rebuilt from the durable receipt, and repeated restarts do not
   duplicate the wake because the inbox insertion carries the stable job dedupe
   key.
-- The A2.4 acceptance command passes across `./internal/... ./cmd/pa`, along
+- The A2.4 acceptance command passes across `./internal/... ./cmd/sta`, along
   with focused vet, build and diff checks.
 
 ## 2026-08-31 provider credential revocation matrix
@@ -3212,7 +3212,7 @@ MCP lifecycle, external SDK replay, and final equivalence gates remain open.
   journal failure replay. A failed Start leaves no ghost memo or owned job, and
   a later healthy request materializes a fresh Agent.
 - A1.5's acceptance command passes across `internal/agent`, `internal/store`
-  and `cmd/pa`.
+  and `cmd/sta`.
 
 ## 2026-08-31 canonical worker-death recovery closure
 
@@ -3399,7 +3399,7 @@ MCP lifecycle, external SDK replay, and final equivalence gates remain open.
   call the application admission gate before touching process-local state. The new
   owner/shutdown matrix proves foreign and unknown items cannot mutate another
   session and that late shutdown mutations preserve the existing queue.
-- The exact acceptance command passes across `internal/webserver` and `cmd/pa`.
+- The exact acceptance command passes across `internal/webserver` and `cmd/sta`.
   Overall equivalence remains blocked by A0.2, A2.5, A3.x, A4.4/A4.5, A6.3,
   A7.1-A7.3, A8.x and the A9 release gates; `claimAllowed` remains false.
 
@@ -3522,7 +3522,7 @@ MCP lifecycle, external SDK replay, and final equivalence gates remain open.
   history before admission and returns `ErrCapabilityUnavailable` for a
   non-vision target. Native RPC maps that stable class to `model-unavailable`
   and does not write the session override.
-- `cmd/pa/modelcatalog_test.go:TestSessionModelSelectionRejectsTextRouteForDurableImages`
+- `cmd/sta/modelcatalog_test.go:TestSessionModelSelectionRejectsTextRouteForDurableImages`
   and the native selection tests cover the route-level negative path. A6.3
   remains partial: pending inbox image admission and a provider-owned
   `listModels/resolveModelInfo` seam are still missing, and non-DeepSeek facts
@@ -3978,7 +3978,7 @@ all tools owned by that server, so an unavailable generation is no longer left
 callable after retries stop. This is covered by
 `internal/mcp/reconnect_test.go:TestReconnectingClientNotifiesExhaustionOnce`
 and
-`cmd/pa/mcps_test.go:TestRegisterMcpsWithdrawsToolsAfterReconnectBudgetExhaustion`.
+`cmd/sta/mcps_test.go:TestRegisterMcpsWithdrawsToolsAfterReconnectBudgetExhaustion`.
 
 This repairs the terminal MCP tool-lifecycle boundary; A7.2 remains open for
 the complete external stdio/Streamable HTTP reconnect, close, and side-effect
@@ -4077,7 +4077,7 @@ idle transitions and flushed only after their prerequisite durable event has
 been forwarded. This prevents later `session.event` notifications from
 overtaking `session.status(running)` for an external client. The real external
 client regression
-`cmd/pa/sdk_test.go:TestSDKServerExternalClientPromptRunsAgentThroughIdle`
+`cmd/sta/sdk_test.go:TestSDKServerExternalClientPromptRunsAgentThroughIdle`
 passed ten consecutive runs, and the full Go suite passed after the change.
 
 This is a bounded A7.3 repair; the pinned SDK/reference-provider replay matrix
@@ -4253,7 +4253,7 @@ not executed.
 
 The SDK runtime now ignores malformed JSON lines, matching the pinned DSH line
 protocol. It no longer emits an uncorrelatable null-id parse-error response.
-`cmd/pa/sdk_test.go:TestSDKServerIgnoresMalformedJSONLines` covers the wire
+`cmd/sta/sdk_test.go:TestSDKServerIgnoresMalformedJSONLines` covers the wire
 behavior. A7.3 remains partial because the reference-runtime and provider
 fault/reconnect matrix is still not complete.
 
@@ -4272,7 +4272,7 @@ the dsh enforcing-backend requirement; A3.1/A3.2/A3.3 remain open or partial.
 Loop assembly now resolves the final provider/model route before deriving
 catalog-dependent output limits and context capacity. An explicit route can no
 longer inherit the global model's output budget during assembly. The regression
-is `cmd/pa/modelcatalog_test.go:TestBuildLoopUsesExplicitRouteCatalog`.
+is `cmd/sta/modelcatalog_test.go:TestBuildLoopUsesExplicitRouteCatalog`.
 A6.3 remains partial: complete upstream model facts, remote catalog
 refresh/failure/cancellation behavior, and transport-wide negative matrices are
 still required.
@@ -4304,7 +4304,7 @@ direct factory-level coverage that the unavailable `run_code` capability is
 absent from both the ACP and SDK tool catalogs, in addition to the existing
 Native/Web catalog and execution checks. The registry execution gate remains
 covered as well, so an unavailable capability cannot be reached through an
-alternate public transport. `cmd/pa/codes_test.go:TestRegisterCodeUnavailableRemovesRunCodeFromACPAndSDKCatalogs`
+alternate public transport. `cmd/sta/codes_test.go:TestRegisterCodeUnavailableRemovesRunCodeFromACPAndSDKCatalogs`
 passes with the focused suite. A3.2 remains partial because its dependency on
 an enforcing sandbox backend (A3.1) is still unresolved; this closes evidence
 coverage, not the backend requirement itself.
@@ -4383,8 +4383,8 @@ the existing ACP text update shape; mixed rich output keeps typed block order
 and still preflights every attachment before emitting any update.
 
 Evidence: `internal/session/session_test.go:TestDeriveHistoryAssistantPreservesRichContentBlocks`,
-`cmd/pa/acp_test.go:TestACPCommittedRichOutputPreservesOrderAndPreflightsAttachments`,
-and `cmd/pa/acp_test.go:TestACPEmitsOnlyCommittedAssistantMessage`.
+`cmd/sta/acp_test.go:TestACPCommittedRichOutputPreservesOrderAndPreflightsAttachments`,
+and `cmd/sta/acp_test.go:TestACPEmitsOnlyCommittedAssistantMessage`.
 
 ## Latest protocol correction (2026-09-01, ACP output delivery failure)
 
@@ -4409,7 +4409,7 @@ facts receive the deterministic selector-compatible default, while invalid or
 map-inconsistent defaults fail closed.
 
 Evidence: `internal/llm/model_catalog_test.go:TestModelDefaultReasoningEffortUsesOwnedMetadataAndLegacyFacts`,
-`cmd/pa/model_catalog_data_test.go:TestReasoningEffortCatalogIsProjectedToProviderAndWebRows`,
+`cmd/sta/model_catalog_data_test.go:TestReasoningEffortCatalogIsProjectedToProviderAndWebRows`,
 `internal/webserver/native_rpc_test.go:TestNativeLLMCatalogPreservesOwnedModelMetadata`.
 
 ### Latest model-catalog correction (2026-09-01, default output budget)
@@ -4424,7 +4424,7 @@ rows. A model without an explicit default uses the reference route fallback
 32768 for the non-DeepSeek adapters; capacity remains metadata only.
 
 Evidence: `internal/llm/deepseek/model_catalog_test.go:TestStreamMaterializesProviderDefaultMaxTokens`,
-`cmd/pa/model_catalog_data_test.go:TestDeepSeekReferenceCatalogMetadata`, and
+`cmd/sta/model_catalog_data_test.go:TestDeepSeekReferenceCatalogMetadata`, and
 the targeted provider/Native/Web regression suite.
 
 ### Latest projection correction (2026-09-01, SDK session snapshot)
@@ -4438,8 +4438,8 @@ request map unchanged. The method is included in the local generated schema
 as a shutu extension; the complete cross-entry equivalence fixture and ACP
 permission/reconnect projection remain open.
 
-Evidence: `cmd/pa/sdk.go`, `internal/sdkclient/client.go`,
-`internal/sdkclient/types.go`, `cmd/pa/sdk_test.go:TestSDKServerExternalClientPromptRunsAgentThroughIdle`,
+Evidence: `cmd/sta/sdk.go`, `internal/sdkclient/client.go`,
+`internal/sdkclient/types.go`, `cmd/sta/sdk_test.go:TestSDKServerExternalClientPromptRunsAgentThroughIdle`,
 `tools/generate-sdk-protocol-schema.mjs`.
 
 ## Latest sandbox correction (2026-09-01, controlled shell resource ceilings)
@@ -4505,7 +4505,7 @@ projection cursor, strengthening A8.1/A9.1 beyond the in-process transport
 test. This remains projection evidence only; the complete cross-entry byte
 equivalence and restart oracle are still required.
 
-Evidence: `cmd/pa/sdk_test.go:TestSDKClientDrivesRealRuntimeChildThroughIdle`.
+Evidence: `cmd/sta/sdk_test.go:TestSDKClientDrivesRealRuntimeChildThroughIdle`.
 
 Current gate status (2026-09-01): the register contains 47 tasks — 34 done,
 10 partial, and 3 open — so 13 remain non-done. Twelve are required release
@@ -4545,7 +4545,7 @@ claiming that the local code backend provides hostile-code isolation.
 Production ACP resume metadata now reports the last durable event sequence as
 `eventCursor`, rather than the count of restored events. This matters after
 non-contiguous durable sequences such as compaction/replacement. The SQLite
-factory regression `cmd/pa/acp_test.go:TestACPFactoryResumeRestoresDurableIdentityCWDHistoryAndCursor`
+factory regression `cmd/sta/acp_test.go:TestACPFactoryResumeRestoresDurableIdentityCWDHistoryAndCursor`
 drives `session/new → append → close → session/resume` and verifies identity,
 CWD, restored history, durable cursor, and cleanup. A7.1 remains partial because
 the complete external ACP/reference client matrix and post-disconnect
@@ -4559,8 +4559,8 @@ tool conflicts with another registry owner, newly registered tools are removed
 and same-name replacements are restored, so the previous live generation stays
 callable and the published-name index does not become stale.
 
-Evidence: `cmd/pa/mcps_test.go:TestMCPReconnectResyncReplacesPublishedGeneration`
-and `cmd/pa/mcps_test.go:TestMCPReconnectResyncKeepsPreviousGenerationOnConflict`.
+Evidence: `cmd/sta/mcps_test.go:TestMCPReconnectResyncReplacesPublishedGeneration`
+and `cmd/sta/mcps_test.go:TestMCPReconnectResyncKeepsPreviousGenerationOnConflict`.
 This fixes a concrete availability gap in A7.2; the full external MCP
 stdio/Streamable HTTP matrix and side-effect/restart oracle remain required.
 
@@ -4577,7 +4577,7 @@ triggers; the full external MCP fault/side-effect matrix remains required.
 
 ## 2026-09-01 A4.4 complete tool contract and rich replay
 
-- Added `cmd/pa/tool_contract_matrix_test.go`. It assembles every required
+- Added `cmd/sta/tool_contract_matrix_test.go`. It assembles every required
   model-facing production tool from its owning package, then drives each one
   through the same public Registry. The matrix proves disabled admission,
   schema-invalid admission, and approval/pre-execute denial boundaries without
@@ -4596,7 +4596,7 @@ triggers; the full external MCP fault/side-effect matrix remains required.
   tool/result append, restore, and derived provider history. Existing ACP, MCP,
   Code Mode, and session suites remain the transport-specific guards.
 
-Evidence: `cmd/pa/tool_contract_matrix_test.go`,
+Evidence: `cmd/sta/tool_contract_matrix_test.go`,
 `internal/tools/tools.go:validateContentBlocks`, plus the focused ownership,
 cancellation, rich-content, and per-domain tests already referenced by A4.4.
 A4.4 moves to done. Overall equivalence remains fail-closed for A3.1-A3.3,
@@ -4638,10 +4638,10 @@ A3.1 remains separately open for that enforcement work.
   DeepSeek defaults, curated tool facts, upstream GPT-5 effort facts, and
   Groq discovery capacities.
 
-Evidence: `cmd/pa/model_catalog_generated.json`,
-`cmd/pa/model_catalog_data.go`,
-`cmd/pa/model_catalog_data_test.go:TestGeneratedModelCatalogCoversPinnedUpstream`,
-and `cmd/pa/discover_test.go:TestDiscoverCatalogRoute`. A6.3 moves to done.
+Evidence: `cmd/sta/model_catalog_generated.json`,
+`cmd/sta/model_catalog_data.go`,
+`cmd/sta/model_catalog_data_test.go:TestGeneratedModelCatalogCoversPinnedUpstream`,
+and `cmd/sta/discover_test.go:TestDiscoverCatalogRoute`. A6.3 moves to done.
 This is static installed-catalog parity; A7.3 still owns the broader external
 wire/reference matrix and audio behavior.
 
@@ -4704,7 +4704,7 @@ Evidence:
 `internal/projection/projection_test.go:TestBuildFoldsPermissionPresetAndSandboxMode`,
 `internal/webserver/native_rpc_test.go:TestNativeHistoryPermissionUsesSharedProjectionOverConfigFallback`,
 and
-`cmd/pa/acp_test.go:TestACPFactoryResumeRejectsProjectionInvalidDurableEvent`.
+`cmd/sta/acp_test.go:TestACPFactoryResumeRejectsProjectionInvalidDurableEvent`.
 This advances A8.1; the complete native/SDK/ACP trajectory/control-state
 equivalence fixture remains outstanding.
 
@@ -4817,7 +4817,7 @@ equivalence fixture is still required.
   not separated by blank-line event terminators. That fixture was corrected
   before production passed; this is not a runtime provider change.
 
-Evidence: `cmd/pa/native_cli_cross_entry_test.go:TestNativeCLICrossEntryFixture`.
+Evidence: `cmd/sta/native_cli_cross_entry_test.go:TestNativeCLICrossEntryFixture`.
 This closes the native CLI execution and external-file-effect subcases.
 
 ## 2026-09-01 A9.1 child Agent production cross-entry leg
@@ -4897,7 +4897,7 @@ below supersedes it.
   Agent, SQLite/JSONL, and independent cold-projection oracles.
 
 Evidence: `internal/projection`, `internal/sessionquery`,
-`internal/webserver/native_projection.go`, `cmd/pa/sdk.go`, `cmd/pa/acp.go`,
+`internal/webserver/native_projection.go`, `cmd/sta/sdk.go`, `cmd/sta/acp.go`,
 and the A9.1 cross-entry suite. A8.1 moves to done. The release remains
 fail-closed for A3.1, A3.3, A7.3, and A9.2-A9.5.
 
@@ -4942,7 +4942,7 @@ execution remain.
   credential lease/rotation/revocation, bounded process termination, and
   platform process-tree cleanup.
 
-Evidence: `cmd/pa/tool_contract_matrix_test.go`,
+Evidence: `cmd/sta/tool_contract_matrix_test.go`,
 `internal/llm/provider_unsupported_input_test.go`, and the registered
 dependency matrices. A9.2 moves to done. Required blockers are now A3.1,
 A3.3, A7.3, A9.3-A9.5 plus optional A8.3.
@@ -5001,8 +5001,8 @@ cross-platform worker isolation/resource-budget matrix and worker-thread parity.
   system/user boundaries, and authorization. This closes the A7.3 reference SDK
   runtime/client leg.
 
-Evidence: `cmd/pa/reference_sdk_runtime_test.go`,
-`cmd/pa/testdata/reference_source_loader.mjs`, and the local provider endpoint.
+Evidence: `cmd/sta/reference_sdk_runtime_test.go`,
+`cmd/sta/testdata/reference_source_loader.mjs`, and the local provider endpoint.
 A7.3 remains partial only for the reference ACP runtime/client matrix.
 
 ## 2026-09-02 A3.1 Windows ACL blocker correction
@@ -5072,8 +5072,8 @@ for the pinned reference SDK/ACP runtime/client external matrix.
   one connection lifecycle. Production disconnect, reconnect, and resume
   behavior remain covered separately by the completed A7.1 external matrix.
 
-Evidence: `cmd/pa/reference_acp_runtime_test.go` and
-`cmd/pa/testdata/reference_source_loader.mjs`. A7.3 is done. Required blockers
+Evidence: `cmd/sta/reference_acp_runtime_test.go` and
+`cmd/sta/testdata/reference_source_loader.mjs`. A7.3 is done. Required blockers
 are now A3.1, A3.3, A9.3-A9.5 plus optional A8.3.
 
 ## 2026-09-02 A3.3 queued-call abandonment semantics
@@ -5092,7 +5092,7 @@ are now A3.1, A3.3, A9.3-A9.5 plus optional A8.3.
 
 Evidence: `internal/code/typescript_lifecycle_matrix_test.go` and the A3.3
 focused suite (`internal/code`, `internal/tools`, `internal/profile`, and
-`cmd/pa`). A3.3 remains partial for the cross-platform worker
+`cmd/sta`). A3.3 remains partial for the cross-platform worker
 isolation/resource-budget matrix and worker-thread parity.
 
 ## 2026-09-02 A3.3 Linux/Windows worker matrix closure
@@ -5180,7 +5180,7 @@ Evidence: `internal/code/local.go`, `internal/code/windows_acl.go`,
   remain `capability-unknown`.
 - The dependency issue in the old A8.3 note is stale in a useful way only
   historically: A3.2 is now done. The registered A8.3 command passes across all
-  `internal/...` packages and `cmd/pa`.
+  `internal/...` packages and `cmd/sta`.
 
 Evidence: `internal/profile/profile.go`,
 `internal/profile/profile_test.go`,

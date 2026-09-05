@@ -4,21 +4,19 @@ import { dirname, join, resolve } from 'node:path'
 import type { Plugin } from 'vite'
 
 const local = (relative: string): string => fileURLToPath(new URL(relative, import.meta.url))
-const dshRoot = resolve(process.env.SHUTU_DSH_ROOT ?? local('../../deepseek-harness'))
-const dsh = (relative: string): string => resolve(dshRoot, relative)
+const uiRoot = resolve(local('vendor/shutu-ui'))
+const ui = (relative: string): string => resolve(uiRoot, relative)
 const SHUTU_PACKAGE_SCOPE = '@shutu-ai'
-const DSH_REFERENCE_PACKAGE_SCOPE = '@deepseek-ai'
 
-function publicDshPackage(name: string): string {
+function publicUiPackage(name: string): string {
   return `${SHUTU_PACKAGE_SCOPE}/${name}`
 }
 
-/** Map the read-only DSH package namespace to the Shutu public namespace. */
-function referenceDshPackage(source: string): string | undefined {
+/** Restrict source resolution to Shutu's vendored UI namespace. */
+function referenceUiPackage(source: string): string | undefined {
   if (source.startsWith(`${SHUTU_PACKAGE_SCOPE}/`)) {
-    return `${DSH_REFERENCE_PACKAGE_SCOPE}/${source.slice(SHUTU_PACKAGE_SCOPE.length + 1)}`
+    return source
   }
-  if (source.startsWith(`${DSH_REFERENCE_PACKAGE_SCOPE}/`)) return source
   return undefined
 }
 
@@ -35,13 +33,13 @@ const NATIVE_CLIENT_PACKAGE_DIRS = [
 ] as const
 
 const NATIVE_CLIENT_PACKAGE_IDS = NATIVE_CLIENT_PACKAGE_DIRS.map(dir =>
-  publicDshPackage(`dsh-client-${dir}`))
+  publicUiPackage(`client-${dir}`))
 const NATIVE_EXTRA_PLUGIN_SPECS = [
-  ['typert/registry', publicDshPackage('dsh-typert-registry')],
-  ['extensions/cordis-client-runner', publicDshPackage('dsh-cordis-client-runner')],
-  ['extensions/ui-cordis', publicDshPackage('dsh-client-ui-cordis')],
-  ['session-query/session-log-export', publicDshPackage('dsh-session-log-export')],
-  ['__local-native-remote', publicDshPackage('dsh-api-remotes')],
+  ['typert/registry', publicUiPackage('typert-registry')],
+  ['extensions/cordis-client-runner', publicUiPackage('cordis-client-runner')],
+  ['extensions/ui-cordis', publicUiPackage('ui-cordis')],
+  ['session-query/session-log-export', publicUiPackage('session-log-export')],
+  ['__local-native-remote', publicUiPackage('api-remotes')],
 ] as const
 
 const NATIVE_PLUGIN_SPECS = [
@@ -49,27 +47,27 @@ const NATIVE_PLUGIN_SPECS = [
   ...NATIVE_EXTRA_PLUGIN_SPECS,
 ]
 
-/** Generate the statically linked DSH browser roster only for native builds. */
-function nativeDshRoster(): Plugin {
-  const virtualId = 'virtual:shutu-dsh-native-plugins'
+/** Generate the statically linked browser roster only for native builds. */
+function nativeUiRoster(): Plugin {
+  const virtualId = 'virtual:shutu-native-plugins'
   const resolvedId = `\0${virtualId}`
   return {
-    name: 'shutu-native-dsh-roster',
+    name: 'shutu-native-ui-roster',
     resolveId(id) {
       return id === virtualId ? resolvedId : undefined
     },
     load(id) {
       if (id !== resolvedId) return undefined
-      if (process.env.SHUTU_DSH_NATIVE !== '1') return 'export const DSH_NATIVE_PLUGINS = []'
+      if (process.env.SHUTU_UI_NATIVE !== '1') return 'export const SHUTU_NATIVE_PLUGINS = []'
       const imports = NATIVE_PLUGIN_SPECS.map(([relative, _id], index) => {
         const source = (relative === '__local-native-remote'
-          ? local('src/dsh-native-remote.ts')
-          : dsh(`packages/${relative}/src/client/index.ts`)).replaceAll('\\', '/')
+          ? local('src/native-remote.ts')
+          : ui(`packages/${relative}/src/client/index.ts`)).replaceAll('\\', '/')
         return `import * as plugin${index} from ${JSON.stringify(source)}`
       }).join('\n')
       const registrations = NATIVE_PLUGIN_SPECS.map(([_relative, id], index) =>
         `{ id: ${JSON.stringify(id)}, module: plugin${index} }`).join(',\n  ')
-      return `${imports}\nexport const DSH_NATIVE_PLUGINS = [\n  ${registrations}\n]`
+      return `${imports}\nexport const SHUTU_NATIVE_PLUGINS = [\n  ${registrations}\n]`
     },
   }
 }
@@ -111,17 +109,17 @@ function discoverSourcePackages(root: string): ReadonlyMap<string, SourcePackage
   return packages
 }
 
-/** Resolve DSH workspace package exports to their read-only TypeScript source. */
-function nativeDshSourceResolver(): Plugin {
+/** Resolve vendored UI workspace package exports to their TypeScript source. */
+function nativeUiSourceResolver(): Plugin {
   const packages = new Map<string, SourcePackage>()
-  for (const root of [dsh('packages'), dsh('vendor')]) {
+  for (const root of [ui('packages'), ui('vendor')]) {
     for (const [name, info] of discoverSourcePackages(root)) packages.set(name, info)
   }
   return {
     name: 'shutu-native-dsh-source-resolver',
     enforce: 'pre',
     resolveId(source) {
-      const referenceSource = referenceDshPackage(source)
+      const referenceSource = referenceUiPackage(source)
       if (referenceSource === undefined) return undefined
       const parts = referenceSource.split('/')
       const packageName = parts.slice(0, 2).join('/')
@@ -143,7 +141,7 @@ function nativeDshSourceResolver(): Plugin {
 }
 
 export default {
-  plugins: [nativeDshSourceResolver(), nativeDshRoster()],
+  plugins: [nativeUiSourceResolver(), nativeUiRoster()],
   base: '/',
   esbuild: {
     jsx: 'automatic',
@@ -151,20 +149,17 @@ export default {
   },
   resolve: {
     alias: [
-      { find: /^node:module$/, replacement: dsh('apps/web/src/node-module-stub.ts') },
-      { find: publicDshPackage('cordis'), replacement: dsh('vendor/cordis/src/index.ts') },
-      { find: publicDshPackage('cosmokit'), replacement: dsh('vendor/cosmokit/src/index.ts') },
-      { find: publicDshPackage('dsh-client-web'), replacement: dsh('packages/client/web/src/index.ts') },
-      { find: publicDshPackage('dsh-client-modules/client'), replacement: dsh('packages/client/modules/src/client/index.ts') },
-      { find: publicDshPackage('dsh-client-ui-renderer/client'), replacement: dsh('packages/client/ui-renderer/src/client/index.ts') },
-      { find: publicDshPackage('dsh-client-ui-slots'), replacement: dsh('packages/client/ui-slots/src/index.ts') },
-      { find: publicDshPackage('dsh-client-ui-primitives'), replacement: dsh('packages/client/ui-primitives/src/index.ts') },
-      { find: publicDshPackage('dsh-client-runtime/client'), replacement: dsh('packages/client/runtime/src/client/index.ts') },
-      { find: publicDshPackage('cordis-plugin-loader'), replacement: dsh('vendor/loader/src/index.ts') },
-      { find: '@shutu-dsh/trajectory', replacement: dsh('packages/client/ui-trajectory/src/client/timeline.ts') },
-      { find: '@standard-schema/spec', replacement: dsh('apps/web/node_modules/@standard-schema/spec') },
-      { find: 'react', replacement: dsh('apps/web/node_modules/react') },
-      { find: 'react-dom', replacement: dsh('apps/web/node_modules/react-dom') },
+      { find: /^node:module$/, replacement: ui('apps/web/src/node-module-stub.ts') },
+      { find: publicUiPackage('cordis'), replacement: ui('vendor/cordis/src/index.ts') },
+      { find: publicUiPackage('cosmokit'), replacement: ui('vendor/cosmokit/src/index.ts') },
+      { find: publicUiPackage('client-web'), replacement: ui('packages/client/web/src/index.ts') },
+      { find: publicUiPackage('client-modules/client'), replacement: ui('packages/client/modules/src/client/index.ts') },
+      { find: publicUiPackage('client-ui-renderer/client'), replacement: ui('packages/client/ui-renderer/src/client/index.ts') },
+      { find: publicUiPackage('client-ui-slots'), replacement: ui('packages/client/ui-slots/src/index.ts') },
+      { find: publicUiPackage('client-ui-primitives'), replacement: ui('packages/client/ui-primitives/src/index.ts') },
+      { find: publicUiPackage('client-runtime/client'), replacement: ui('packages/client/runtime/src/client/index.ts') },
+      { find: publicUiPackage('cordis-plugin-loader'), replacement: ui('vendor/loader/src/index.ts') },
+      { find: '@shutu-ai/trajectory', replacement: ui('packages/client/ui-trajectory/src/client/timeline.ts') },
     ],
   },
   build: {
@@ -173,14 +168,14 @@ export default {
     sourcemap: true,
   },
   define: {
-    __SHUTU_DSH_NATIVE__: JSON.stringify(process.env.SHUTU_DSH_NATIVE === '1'),
-    // DSH client packages intentionally read a closed build-time environment;
+    __SHUTU_UI_NATIVE__: JSON.stringify(process.env.SHUTU_UI_NATIVE === '1'),
+    // Vendored UI packages intentionally read a closed build-time environment;
     // never expose a runtime Node process object in the browser bundle.
     'process.env': JSON.stringify({
       NODE_ENV: 'production',
-      DSH_CLIENT_BUILD_PROFILE: 'official',
-      DSH_CLIENT_TITLE: 'SHUTU-AI',
-      DSH_CLIENT_COMMIT_HASH: 'shutu-native',
+      SHUTU_CLIENT_BUILD_PROFILE: 'official',
+      SHUTU_CLIENT_TITLE: 'SHUTU-AI',
+      SHUTU_CLIENT_COMMIT_HASH: 'shutu-native',
     }),
     'process.versions.node': '"0.0.0"',
     'process.execArgv': '[]',

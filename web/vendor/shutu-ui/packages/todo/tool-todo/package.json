@@ -1,0 +1,67 @@
+{
+  "name": "@shutu-ai/tool-todo",
+  "description": "Model-facing todo_write tool over the DeepSeek Harness event-sourced session log",
+  "version": "0.1.0-rc.8",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shutu-ai/shutu-agent.git",
+    "directory": "packages/todo/tool-todo"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./invariant": {
+      "types": "./lib/types/invariant.d.ts",
+      "default": "./lib/invariant.js"
+    },
+    "./client": {
+      "types": "./lib/types/client.d.ts",
+      "default": "./lib/types/client.js"
+    },
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/invariant.js",
+    "lib/types/**/*.js",
+    "lib/types/**/*.d.ts"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@shutu-ai/schemastery": "workspace:^",
+    "zod": "^4.4.3"
+  },
+  "peerDependencies": {
+    "@shutu-ai/agent": "workspace:^",
+    "@shutu-ai/invariants": "workspace:^",
+    "@shutu-ai/session": "workspace:^",
+    "@shutu-ai/session-projection": "workspace:^",
+    "@shutu-ai/tools": "workspace:^",
+    "@shutu-ai/cordis": "workspace:^"
+  },
+  "devDependencies": {
+    "@shutu-ai/cordis-plugin-include": "workspace:^",
+    "@shutu-ai/cordis-plugin-loader": "workspace:^",
+    "@shutu-ai/agent": "workspace:^",
+    "@shutu-ai/agent-loop": "workspace:^",
+    "@shutu-ai/agent-loop-testkit": "workspace:^",
+    "@shutu-ai/host-apiproxy": "workspace:^",
+    "@shutu-ai/invariants": "workspace:^",
+    "@shutu-ai/llm": "workspace:^",
+    "@shutu-ai/session": "workspace:^",
+    "@shutu-ai/session-projection": "workspace:^",
+    "@shutu-ai/system-prompt": "workspace:^",
+    "@shutu-ai/tools": "workspace:^",
+    "@shutu-ai/user-questions": "workspace:^",
+    "@shutu-ai/cordis": "workspace:^"
+  }
+}

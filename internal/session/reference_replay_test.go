@@ -20,23 +20,23 @@ type referenceReplayOutput struct {
 }
 
 // TestCoreTurnReplayMatchesReference is the executable double-replay gate.
-// It is opt-in because the Go project does not vendor the reference checkout;
-// CI that has both workspaces sets DSH_REFERENCE_ROOT. Without that external
-// dependency this test skips rather than weakening the local fixture tests or
-// claiming a reference comparison happened.
+// It is opt-in when no reference checkout exists. A project-local read-only
+// checkout at .reference/dsh is preferred; without either source this test
+// skips rather than weakening the local fixture tests or claiming a reference
+// comparison happened.
 func TestCoreTurnReplayMatchesReference(t *testing.T) {
-	referenceRoot := os.Getenv("DSH_REFERENCE_ROOT")
+	referenceRoot := os.Getenv("SHUTU_REFERENCE_ROOT")
+	_, thisFile, _, _ := runtime.Caller(0)
 	if referenceRoot == "" {
-		t.Skip("DSH_REFERENCE_ROOT is not set; reference double replay is not available")
+		referenceRoot = filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", "..", ".reference", "dsh"))
 	}
 	if _, err := os.Stat(filepath.Join(referenceRoot, "packages/core/session/src/index.ts")); err != nil {
-		t.Fatalf("reference Session source is unavailable: %v", err)
+		t.Skipf("reference Session source is unavailable: %v", err)
 	}
 	loader := filepath.Join(referenceRoot, "node_modules", "tsx", "dist", "loader.mjs")
 	if _, err := os.Stat(loader); err != nil {
-		t.Fatalf("reference tsx loader is unavailable: %v", err)
+		t.Skipf("reference tsx loader is unavailable: %v", err)
 	}
-	_, thisFile, _, _ := runtime.Caller(0)
 	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
 	fixture := filepath.Join(repoRoot, "internal", "contractfixture", "core-turn-replay.json")
 	script := filepath.Join(repoRoot, "scripts", "verify-reference-replay.mjs")

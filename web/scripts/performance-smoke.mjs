@@ -6,10 +6,9 @@ import { existsSync, mkdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 const webRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const dshRoot = resolve(process.env.SHUTU_DSH_ROOT ?? resolve(webRoot, '../../deepseek-harness'))
-const vite = resolve(dshRoot, 'apps/web/node_modules/vite/bin/vite.js')
+const vite = resolve(webRoot, 'node_modules/vite/bin/vite.js')
 const distIndex = resolve(webRoot, 'dist/index.html')
-const { chromium } = createRequire(import.meta.url)(resolve(dshRoot, 'apps/web/node_modules/playwright'))
+const { chromium } = createRequire(import.meta.url)(resolve(webRoot, 'node_modules/playwright'))
 const host = '127.0.0.1'
 const port = Number(process.env.SHUTU_PERF_PORT ?? 18118)
 const baseUrl = `http://${host}:${port}/`
@@ -18,7 +17,7 @@ const continuousSeconds = Number(process.env.SHUTU_PERF_CONTINUOUS_SECONDS ?? 0)
 const artifactDirectory = process.env.SHUTU_PERF_ARTIFACT_DIR === undefined ? null : resolve(process.env.SHUTU_PERF_ARTIFACT_DIR)
 if (artifactDirectory !== null) mkdirSync(artifactDirectory, { recursive: true })
 
-if (!existsSync(vite)) throw new Error(`Vite is unavailable at ${vite}; set SHUTU_DSH_ROOT to a DSH checkout.`)
+if (!existsSync(vite)) throw new Error(`Vite is unavailable at ${vite}; run npm install.`)
 if (!existsSync(distIndex)) throw new Error(`Native dist is unavailable at ${distIndex}; run npm.cmd run build first.`)
 if (!Number.isInteger(eventCount) || eventCount < 100) throw new Error('SHUTU_PERF_EVENTS must be an integer >= 100')
 

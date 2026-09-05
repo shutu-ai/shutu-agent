@@ -648,9 +648,9 @@ func TestLoadSkillDefaultsWhenAbsent(t *testing.T) {
 	if len(cfg.Skill.Dirs) != 0 {
 		t.Errorf("skill.dirs = %v, want empty", cfg.Skill.Dirs)
 	}
-	if cfg.Skill.CatalogMaxChars != DefaultSkillCatalogMaxChars {
-		t.Errorf("skill.catalog_max_chars = %d, want default %d",
-			cfg.Skill.CatalogMaxChars, DefaultSkillCatalogMaxChars)
+	if cfg.Skill.DescriptionMaxChars != DefaultSkillCatalogMaxChars {
+		t.Errorf("skill.description_max_chars = %d, want default %d",
+			cfg.Skill.DescriptionMaxChars, DefaultSkillCatalogMaxChars)
 	}
 	if cfg.Skill.BodyMaxChars != DefaultSkillBodyMaxChars {
 		t.Errorf("skill.body_max_chars = %d, want default %d",
@@ -663,12 +663,12 @@ func TestLoadSkillDefaultsWhenAbsent(t *testing.T) {
 	}
 }
 
-// M5d: an explicit skill section is honored (enabled, dirs, catalog_max_chars,
+// M5d: an explicit skill section is honored (enabled, dirs, description_max_chars,
 // body_max_chars), while non-positive bounds fall back to their defaults
 // (校验非负: a negative value never survives) (dispatch-m5d-2 §2).
 func TestLoadSkillParsesSectionAndFallsBack(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(path, []byte("skill:\n  enabled: true\n  dirs: [C:\\skills, D:\\more]\n  catalog_max_chars: 300\n  body_max_chars: 4096\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("skill:\n  enabled: true\n  dirs: [C:\\skills, D:\\more]\n  description_max_chars: 300\n  body_max_chars: 4096\n"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	cfg, err := Load(path)
@@ -681,8 +681,8 @@ func TestLoadSkillParsesSectionAndFallsBack(t *testing.T) {
 	if len(cfg.Skill.Dirs) != 2 || cfg.Skill.Dirs[0] != `C:\skills` || cfg.Skill.Dirs[1] != `D:\more` {
 		t.Errorf("skill.dirs = %v, want [C:\\skills D:\\more]", cfg.Skill.Dirs)
 	}
-	if cfg.Skill.CatalogMaxChars != 300 {
-		t.Errorf("skill.catalog_max_chars = %d, want 300", cfg.Skill.CatalogMaxChars)
+	if cfg.Skill.DescriptionMaxChars != 300 {
+		t.Errorf("skill.description_max_chars = %d, want 300", cfg.Skill.DescriptionMaxChars)
 	}
 	if cfg.Skill.BodyMaxChars != 4096 {
 		t.Errorf("skill.body_max_chars = %d, want 4096", cfg.Skill.BodyMaxChars)
@@ -690,16 +690,16 @@ func TestLoadSkillParsesSectionAndFallsBack(t *testing.T) {
 
 	// Non-positive (including negative) bounds fall back to the defaults.
 	path2 := filepath.Join(t.TempDir(), "config2.yaml")
-	if err := os.WriteFile(path2, []byte("skill:\n  enabled: true\n  catalog_max_chars: 0\n  body_max_chars: -1\n"), 0o600); err != nil {
+	if err := os.WriteFile(path2, []byte("skill:\n  enabled: true\n  description_max_chars: 0\n  body_max_chars: -1\n"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	cfg2, err := Load(path2)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg2.Skill.CatalogMaxChars != DefaultSkillCatalogMaxChars {
-		t.Errorf("skill.catalog_max_chars 0 = %d, want default %d",
-			cfg2.Skill.CatalogMaxChars, DefaultSkillCatalogMaxChars)
+	if cfg2.Skill.DescriptionMaxChars != DefaultSkillCatalogMaxChars {
+		t.Errorf("skill.description_max_chars 0 = %d, want default %d",
+			cfg2.Skill.DescriptionMaxChars, DefaultSkillCatalogMaxChars)
 	}
 	if cfg2.Skill.BodyMaxChars != DefaultSkillBodyMaxChars {
 		t.Errorf("skill.body_max_chars -1 = %d, want default %d",
@@ -2410,3 +2410,18 @@ func TestConfigCloneDetachesMutableFields(t *testing.T) {
 }
 
 func boolPtr(value bool) *bool { return &value }
+
+func TestTimeContextEnabledWithSchedule(t *testing.T) {
+	if (TimeContextConfig{}).EnabledWith(false) {
+		t.Fatal("nil time_context must follow disabled schedule")
+	}
+	if !(TimeContextConfig{}).EnabledWith(true) {
+		t.Fatal("nil time_context must follow enabled schedule")
+	}
+	if (TimeContextConfig{Enabled: boolPtr(true)}).EnabledWith(false) != true {
+		t.Fatal("explicit time_context.enabled=true must win over schedule")
+	}
+	if (TimeContextConfig{Enabled: boolPtr(false)}).EnabledWith(true) != false {
+		t.Fatal("explicit time_context.enabled=false must win over schedule")
+	}
+}

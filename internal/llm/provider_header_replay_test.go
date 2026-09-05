@@ -177,29 +177,29 @@ func TestEveryProviderHeaderReplay(t *testing.T) {
 				if got.Header.Get("User-Agent") != llm.AttributionUserAgent {
 					t.Fatalf("User-Agent = %q, want %q", got.Header.Get("User-Agent"), llm.AttributionUserAgent)
 				}
-				identityNames := []string{"X-Deepseek-Harness-User-Id", "X-Deepseek-Harness-Session-Id"}
+				identityNames := []string{"X-Shutu-User-Id", "X-Shutu-Session-Id"}
 				if tc.identityHeader {
 					for _, name := range identityNames {
 						if got.Header.Get(name) == "" {
 							t.Fatalf("%s is missing on official DeepSeek route", name)
 						}
 					}
-					if got.Header.Get("X-Deepseek-Harness-User-Id") != anonymousID {
-						t.Fatalf("anonymous user id = %q", got.Header.Get("X-Deepseek-Harness-User-Id"))
+					if got.Header.Get("X-Shutu-User-Id") != anonymousID {
+						t.Fatalf("anonymous user id = %q", got.Header.Get("X-Shutu-User-Id"))
 					}
-					if got.Header.Get("X-Deepseek-Harness-Session-Id") != sessionID {
-						t.Fatalf("session id = %q", got.Header.Get("X-Deepseek-Harness-Session-Id"))
+					if got.Header.Get("X-Shutu-Session-Id") != sessionID {
+						t.Fatalf("session id = %q", got.Header.Get("X-Shutu-Session-Id"))
 					}
 				} else {
-					for _, name := range append(identityNames, "X-Deepseek-Harness-Compact") {
+					for _, name := range append(identityNames, "X-Shutu-Compact") {
 						if value := got.Header.Get(name); value != "" {
 							t.Fatalf("%s = %q, want omitted outside official DeepSeek", name, value)
 						}
 					}
 				}
 				if tc.compactHeader {
-					if got.Header.Get("X-Deepseek-Harness-Compact") != "1" {
-						t.Fatalf("compaction header = %q, want 1", got.Header.Get("X-Deepseek-Harness-Compact"))
+					if got.Header.Get("X-Shutu-Compact") != "1" {
+						t.Fatalf("compaction header = %q, want 1", got.Header.Get("X-Shutu-Compact"))
 					}
 				}
 			case <-context.Background().Done():

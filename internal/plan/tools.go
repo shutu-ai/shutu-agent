@@ -1,7 +1,7 @@
 // tools.go — the M6b-2 Consumer half of the plan seam (design.md §8 Consumer /
 // D2, dispatch-m6b-2 §3): plan_goal, plan_plan, plan_todo, plan_status,
 // plan_list and plan_remove are registered into the tools.Registry by the
-// composition root (cmd/pa) when plan.enabled, and auto-whitelisted by
+// composition root (cmd/sta) when plan.enabled, and auto-whitelisted by
 // config.applyDefaults the same way the job_*/subagent_*/skill_*/schedule_*
 // tools are. They implement the tools.Tool method set structurally (Go
 // structural typing), so this package never imports the tools package — the

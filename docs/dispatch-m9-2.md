@@ -41,19 +41,19 @@ type TerminalConfig struct {
 - applyDefaults：enabled 默认 false、其余默认如上。
 - config.yaml 增 `terminal:` 段注释（含"默认关 D10 / 会话环境 scrubbed（凭证不继承）"）。
 
-## 3. 组合根接线契约（cmd/pa）
+## 3. 组合根接线契约（cmd/sta）
 
 - `app` 增加 `termSess *terminal.Session`（单活跃会话）+ `termOwner string`（拥有它的 session id）。
-- `registerTerminal()`（新文件 `cmd/pa/terminal.go`，enabled 时）：
+- `registerTerminal()`（新文件 `cmd/sta/terminal.go`，enabled 时）：
   1. 构造 `terminalTools`（见 §4）→ 注册 5 个工具到 `a.reg`（照 registerJobs 同款，循环 Register）。
   2. D3 事件回调：`terminal/start` / `terminal/stop` append 到 `a.log`（照 job/* onEvent 同款；a.log 读取在调用时）。
 - `command` switch 增 `/term` 子命令（§5）。
 - 生命周期：应用关闭时若有活跃会话 → `termSess.Close()`（照 deferred Close 心智）。
 - printHelp 增 `/term <start|write|read|signal|stop>` 行。
 
-## 4. 模型工具五件套契约（internal/terminal/tools.go 或 cmd/pa）
+## 4. 模型工具五件套契约（internal/terminal/tools.go 或 cmd/sta）
 
-> 工具放 `internal/terminal`（照 jobs.NewJobTools 同款：`NewTerminalTools(accessor, onEvent)`）。accessor 提供会话访问（cmd/pa 闭包：取当前活跃会话 + 校验 owner）。
+> 工具放 `internal/terminal`（照 jobs.NewJobTools 同款：`NewTerminalTools(accessor, onEvent)`）。accessor 提供会话访问（cmd/sta 闭包：取当前活跃会话 + 校验 owner）。
 
 ```go
 // tools.go（internal/terminal）
@@ -84,7 +84,7 @@ func (t *TerminalTools) Stop() tools.Tool    // terminal_stop
 **owner 校验**：write/read/signal/stop 前 `acc.GetActive()` 校验会话存在且属于当前 session（照 job owner 心智；本段单活跃会话，owner 不符 → 错误）。
 **错误**：无会话 → 错误提示"no active terminal session (start one with terminal_start)"；会话已退出 → 错误。
 
-## 5. /term REPL 命令契约（cmd/pa/terminal.go）
+## 5. /term REPL 命令契约（cmd/sta/terminal.go）
 
 `/term <start [command]|write <text>|read [offset count]|signal <stop|interrupt>|stop>`
 - `start`：起会话（enabled 才可用）；`write`：Write 后打印 wait + viewport（有界）；`read`：打印窗口；`signal`/`stop`：执行并打印结果。
@@ -92,13 +92,13 @@ func (t *TerminalTools) Stop() tools.Tool    // terminal_stop
 
 ## 6. 测试要求
 
-`cmd/pa/terminal_test.go` + `internal/terminal/tools_test.go`：
+`cmd/sta/terminal_test.go` + `internal/terminal/tools_test.go`：
 - 工具层（tools_test.go）：start 无 owner/owner 不符 fail；start 后 write/read/signal/stop 走通；已活跃再 start → 错误；会话退出后 write → 错误；容量截断（大输出 → truncated 标记 + `[truncated]` 尾）。
-- 接线层（cmd/pa）：`registerTerminal` enabled=false → 零工具零注册（D10）；enabled=true → 5 工具注册；/term start 后 write echo 返回；事件 `terminal/start`/`terminal/stop` append 到日志（断言事件类型出现）。
+- 接线层（cmd/sta）：`registerTerminal` enabled=false → 零工具零注册（D10）；enabled=true → 5 工具注册；/term start 后 write echo 返回；事件 `terminal/start`/`terminal/stop` append 到日志（断言事件类型出现）。
 - 真实终端冒烟：短 idle（100ms）短 timeout（2s），断言 start + write("echo hi") 返回含 hi。
 
 ## 7. 提交与报告
 
-- 每模块阶段提交（`M9-2: ...`）：config → tools → cmd/pa 接线 → 测试。
+- 每模块阶段提交（`M9-2: ...`）：config → tools → cmd/sta 接线 → 测试。
 - 完成后 `go vet ./...` / `go test -count=1 ./...` / `go build ./...` 全绿再报告。
 - 报告：改动文件清单、实现决策（对照本契约的偏离）、跑过的命令、测试结果。

@@ -203,6 +203,7 @@ func (f *Filesystem) scanRoot(ctx context.Context, root fsRoot) ([]Candidate, er
 		out = append(out, Candidate{
 			Name:        parsed.name,
 			Description: parsed.description,
+			WhenToUse:   parsed.whenToUse,
 			Source:      root.source,
 			Rank:        root.rank,
 			Path:        path,
@@ -219,6 +220,7 @@ func (f *Filesystem) scanRoot(ctx context.Context, root fsRoot) ([]Candidate, er
 type parsedSkill struct {
 	name           string
 	description    string
+	whenToUse      string
 	content        string
 	modelInvocable bool
 	userInvocable  bool
@@ -264,6 +266,7 @@ func parseSkillFile(path, name string) (*parsedSkill, error) {
 	if description == "" {
 		return nil, nil
 	}
+	whenToUse, _ := stringField(meta, "whenToUse")
 
 	modelInvocable := true
 	if v, present := frontmatterBool(meta, "disable-model-invocation"); present && v {
@@ -277,6 +280,7 @@ func parseSkillFile(path, name string) (*parsedSkill, error) {
 	return &parsedSkill{
 		name:           name,
 		description:    description,
+		whenToUse:      whenToUse,
 		content:        content,
 		modelInvocable: modelInvocable,
 		userInvocable:  userInvocable,

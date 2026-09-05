@@ -12,6 +12,6 @@ P7 已完成，五个只读 `session_*` 工具已按 DSH 的模型调用边界�
 
 验证：
 
-- `go test ./internal/sessionquery ./internal/config ./cmd/pa`
+- `go test ./internal/sessionquery ./internal/config ./cmd/sta`
 - `go test ./...`
 

@@ -1,6 +1,6 @@
 // tools.go — the GAP-2 Consumer half of the ralph seam (ADR
 // 2026-08-20-standard-gaps.md D-GAP-3, 对齐 dsh tool-ralph): the ralph tool is
-// registered into the tools.Registry by the composition root (cmd/pa) when
+// registered into the tools.Registry by the composition root (cmd/sta) when
 // ralph.enabled, and auto-whitelisted by config.applyDefaults the same way the
 // eval_*/fs_search tools are. It implements the tools.Tool method set
 // structurally (Go structural typing), so this package never imports the tools

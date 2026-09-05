@@ -1,7 +1,7 @@
 // tools.go — the M5b-2 Consumer half of the subagent seam (ADR
 // 2026-08-18-m5-agent-core.md 决策 ② / dispatch-m5b-2 §2): subagent,
 // subagent_fork, send_message and interrupt_agent are registered into the
-// tools.Registry by the composition root (cmd/pa) when subagent.enabled, and
+// tools.Registry by the composition root (cmd/sta) when subagent.enabled, and
 // auto-whitelisted by config.applyDefaults the same way the job_* tools are.
 // They implement the tools.Tool method set structurally (Go structural
 // typing), so this package never imports the tools package — the seam stays
@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/shutu-ai/shutu-agent/internal/jobs"
+	"github.com/shutu-ai/shutu-agent/internal/llm"
 	"github.com/shutu-ai/shutu-agent/internal/runtimectx"
 	"github.com/shutu-ai/shutu-agent/internal/session"
 )
@@ -126,7 +127,8 @@ type Teammate struct {
 	Parent      string
 	Running     bool
 	Continuable bool
-	Send        func(context.Context, string) error
+	Send        func(context.Context, string, map[string]string) error
+	SendContent func(context.Context, []llm.ContentBlock, map[string]string) error
 	SendQuiet   func(context.Context, string) error
 	Followup    func(context.Context, string) error
 	Cancel      func(string) error
@@ -147,6 +149,11 @@ type TeammateDirectory interface {
 // supplies the stable child result and lineage.
 type CompletionWake func(context.Context, string, string, Result) error
 
+// ReportDelivery sends one child-authored report to the live parent Agent.
+// The composition root owns inbox placement; the tool bundle owns sender and
+// parent authorization and commits the durable report fact first.
+type ReportDelivery func(ctx context.Context, parentSessionID, childID, messageID, output string) error
+
 // SubagentTools bundles the shared state of the four subagent_* tools: the
 // Runtime service, the default delegation depth (from config.max_depth), the
 // owner-session provider, the event sink, the child/settle registry shared
@@ -161,6 +168,7 @@ type SubagentTools struct {
 	onEvent            func(typ string, data any)
 	onSessionEvent     func(sessionID, typ string, data any) error
 	onCompletionWake   CompletionWake
+	onReportDelivery   ReportDelivery
 	endTracker         *subagentEndTracker
 
 	mu         sync.Mutex
@@ -250,7 +258,7 @@ func (t *SubagentTools) ListAgents() SubagentListAgentsTool { return SubagentLis
 func (t *SubagentTools) Send() SubagentSendTool { return SubagentSendTool{t: t} }
 
 // DshSend returns the DSH-shaped send_message surface. The legacy Send tool
-// remains available to package callers but is not registered by cmd/pa.
+// remains available to package callers but is not registered by cmd/sta.
 func (t *SubagentTools) DshSend() SubagentMessageTool {
 	return SubagentMessageTool{t: t, name: ToolSendName, wakeup: false}
 }
@@ -285,13 +293,23 @@ func (t *SubagentTools) ReportFromChildContext(ctx context.Context, childID, out
 	if childID == "" || output == "" {
 		return "", fmt.Errorf("%s: child id and output are required", ToolReportName)
 	}
-	info, _, ok := t.lookup(childID)
-	if !ok || info == nil || strings.TrimSpace(info.parent) == "" {
+	// lookup's third return reports settlement, not registry membership. A
+	// continuable child remains authorized to report after its turn completes.
+	info, _, _ := t.lookup(childID)
+	if info == nil || strings.TrimSpace(info.parent) == "" {
 		return "", fmt.Errorf("%s: direct parent is not live; report was not delivered", ToolReportName)
 	}
 	messageID := t.nextMessageID(childID)
-	if err := t.emitForSession(ctx, info.parent, session.EventSubagentReport, session.NewSubagentReport(childID, info.parent, output)); err != nil {
+	if err := t.emitForSession(ctx, info.parent, session.EventSubagentReport, session.NewSubagentReportWithID(childID, info.parent, output, messageID)); err != nil {
 		return "", err
+	}
+	t.mu.Lock()
+	deliver := t.onReportDelivery
+	t.mu.Unlock()
+	if deliver != nil {
+		if err := deliver(ctx, info.parent, childID, messageID, output); err != nil {
+			return "", err
+		}
 	}
 	return messageID, nil
 }
@@ -328,6 +346,17 @@ func (t *SubagentTools) SetCompletionWake(wake CompletionWake) {
 	t.mu.Unlock()
 }
 
+// SetReportDelivery binds the parent-inbox relay used by the host. It remains
+// optional so library callers can retain the older log-only behavior.
+func (t *SubagentTools) SetReportDelivery(delivery ReportDelivery) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.onReportDelivery = delivery
+	t.mu.Unlock()
+}
+
 // SetTeammateProvisioner binds the DSH spawn_teammate surface to a durable
 // Agent Teams roster. Without it, the legacy subagent provider remains the
 // compatibility fallback for library users.
@@ -360,6 +389,27 @@ func (t *SubagentTools) nextMessageID(childID string) string {
 // The web adapter uses this method after it has performed the durable parent
 // lineage check; the tool bundle remains the owner of the live Run reference.
 func (t *SubagentTools) SendTo(ctx context.Context, childID, message string) error {
+	return t.SendToWithMetadata(ctx, childID, message, nil)
+}
+
+// SendToWithMetadata queues one browser-originated follow-up while preserving
+// DSH user-rpc provenance for providers that support metadata-aware send.
+func (t *SubagentTools) SendToWithMetadata(
+	ctx context.Context, childID, message string, metadata map[string]string,
+) error {
+	return t.SendContentToWithMetadata(ctx, childID, []llm.ContentBlock{llm.Text(message)}, metadata)
+}
+
+// SendContentToWithMetadata queues one browser-originated rich follow-up while
+// preserving DSH user-rpc provenance for providers that support content send.
+func (t *SubagentTools) SendContentToWithMetadata(
+	ctx context.Context, childID string, content []llm.ContentBlock, metadata map[string]string,
+) error {
+	var textMessage string
+	var textOnly bool
+	if len(content) == 1 && content[0].Kind == llm.BlockText {
+		textMessage, textOnly = content[0].Text, true
+	}
 	info, _, _ := t.lookup(childID)
 	if info == nil {
 		member, err := t.directoryMember(ctx, childID)
@@ -369,12 +419,27 @@ func (t *SubagentTools) SendTo(ctx context.Context, childID, message string) err
 		if member.Send == nil {
 			return fmt.Errorf("%w: %s", ErrNotContinuable, childID)
 		}
-		return member.Send(ctx, message)
+		if member.SendContent != nil {
+			return member.SendContent(ctx, content, metadata)
+		}
+		if len(content) != 1 || content[0].Kind != llm.BlockText {
+			return fmt.Errorf("%w: rich content", ErrNotContinuable)
+		}
+		return member.Send(ctx, content[0].Text, metadata)
 	}
 	if info.run.Send == nil {
 		return fmt.Errorf("%w: %s", ErrNotContinuable, childID)
 	}
-	return info.run.Send(ctx, message)
+	if info.run.SendContentWithMetadata != nil {
+		return info.run.SendContentWithMetadata(ctx, content, metadata)
+	}
+	if info.run.SendWithMetadata != nil && len(content) == 1 && content[0].Kind == llm.BlockText {
+		return info.run.SendWithMetadata(ctx, content[0].Text, metadata)
+	}
+	if !textOnly {
+		return fmt.Errorf("%w: rich content", ErrNotContinuable)
+	}
+	return info.run.Send(ctx, textMessage)
 }
 
 // InterruptTo cancels one browser-addressed child turn. The web adapter
@@ -965,7 +1030,10 @@ func (t SubagentMessageTool) ExecuteResult(ctx context.Context, args any) (agent
 		} else {
 			send = member.SendQuiet
 			if send == nil {
-				send = member.Send
+				member := member
+				send = func(ctx context.Context, message string) error {
+					return member.Send(ctx, message, nil)
+				}
 			}
 		}
 		id = member.ID

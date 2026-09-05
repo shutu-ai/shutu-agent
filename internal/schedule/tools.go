@@ -1,7 +1,7 @@
 // tools.go — the M6a-2 Consumer half of the schedule seam (design.md §8
 // Consumer / D2, dispatch-m6a-2 §3): schedule_create, schedule_list and
 // schedule_delete are registered into the tools.Registry by the composition
-// root (cmd/pa) when schedule.enabled, and auto-whitelisted by
+// root (cmd/sta) when schedule.enabled, and auto-whitelisted by
 // config.applyDefaults the same way the job_*/subagent_*/skill_* tools are.
 // They implement the tools.Tool method set structurally (Go structural
 // typing), so this package never imports the tools package — the seam stays
@@ -18,7 +18,7 @@
 // schedule/delete — all through the injected onEvent sink (the composition
 // root wires it to the session log), and each append happens inside a tool
 // Execute — the serial main-loop path (D5). schedule/fire is emitted by the
-// wiring layer's pre-step path (see cmd/pa), not by a tool.
+// wiring layer's pre-step path (see cmd/sta), not by a tool.
 package schedule
 
 import (

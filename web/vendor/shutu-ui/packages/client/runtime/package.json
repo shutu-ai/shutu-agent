@@ -1,0 +1,94 @@
+{
+  "name": "@shutu-ai/client-runtime",
+  "description": "Client core services: SlotRegistry, SessionRuntime (scope tree + object layer)",
+  "version": "0.1.0-rc.8",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shutu-ai/shutu-agent.git",
+    "directory": "packages/client/runtime"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./invariant": {
+      "types": "./lib/types/invariant.d.ts",
+      "default": "./lib/invariant.js"
+    },
+    "./client": {
+      "types": "./lib/types/client/index.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "shutu": {
+    "client": {
+      "inject": [
+        "@shutu-ai/client-connection",
+        "@shutu-ai/typert-registry",
+        "@shutu-ai/api-remotes"
+      ],
+      "platform": "web",
+      "immediately": true
+    }
+  },
+  "license": "MIT",
+  "dependencies": {
+    "immer": "^10.1.1",
+    "zustand": "~4.4.7"
+  },
+  "peerDependencies": {
+    "@shutu-ai/cordis": "workspace:^",
+    "@shutu-ai/api-remotes": "workspace:^",
+    "@shutu-ai/invariants": "workspace:^",
+    "@shutu-ai/typert-protocol": "workspace:^",
+    "@shutu-ai/typert-registry": "workspace:^",
+    "@shutu-ai/agent": "workspace:^",
+    "@shutu-ai/attachment": "workspace:^",
+    "@shutu-ai/client-connection": "workspace:^",
+    "@shutu-ai/commands": "workspace:^",
+    "@shutu-ai/host-apiproxy": "workspace:^",
+    "@shutu-ai/llm": "workspace:^",
+    "@shutu-ai/llm-retry": "workspace:^",
+    "@shutu-ai/session": "workspace:^",
+    "@shutu-ai/session-projection": "workspace:^",
+    "@shutu-ai/session-title": "workspace:^",
+    "@shutu-ai/tools": "workspace:^"
+  },
+  "devDependencies": {
+    "@shutu-ai/cordis": "workspace:^",
+    "@shutu-ai/api-remotes": "workspace:^",
+    "@shutu-ai/invariants": "workspace:^",
+    "@shutu-ai/timeout": "workspace:^",
+    "@shutu-ai/typert-protocol": "workspace:^",
+    "@shutu-ai/typert-registry": "workspace:^",
+    "@types/react": "~18.3.1",
+    "@shutu-ai/client-ui-slots": "workspace:^",
+    "react": "^18.2.0",
+    "@shutu-ai/agent": "workspace:^",
+    "@shutu-ai/attachment": "workspace:^",
+    "@shutu-ai/client-connection": "workspace:^",
+    "@shutu-ai/commands": "workspace:^",
+    "@shutu-ai/host-apiproxy": "workspace:^",
+    "@shutu-ai/llm": "workspace:^",
+    "@shutu-ai/llm-retry": "workspace:^",
+    "@shutu-ai/session": "workspace:^",
+    "@shutu-ai/session-projection": "workspace:^",
+    "@shutu-ai/session-title": "workspace:^",
+    "@shutu-ai/tools": "workspace:^"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/invariant.js",
+    "lib/client.js",
+    "lib/types/**/*.d.ts"
+  ]
+}

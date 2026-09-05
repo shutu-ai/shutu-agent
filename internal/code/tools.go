@@ -1,6 +1,6 @@
 // tools.go — the M6e-2 Consumer half of the code-sandbox seam (design.md §8
 // Consumer / D2, dispatch-m6e-2 §3): run_code is registered into the
-// tools.Registry by the composition root (cmd/pa) when code.enabled, and
+// tools.Registry by the composition root (cmd/sta) when code.enabled, and
 // auto-whitelisted by config.applyDefaults the same way the job_*/subagent_*/
 // skill_*/schedule_*/plan_*/spill_*/interact_* tools are. It implements the
 // tools.Tool method set structurally (Go structural typing), so this package
@@ -143,7 +143,7 @@ func (t *CodeTools) emitContext(ctx context.Context, typ string, data any) error
 
 // CodeRunTool executes TypeScript Code Mode through ProgramRuntime in the
 // production wiring. The legacy Engine constructor remains available for
-// isolated shell-seam tests; it is not used by cmd/pa's PTC path.
+// isolated shell-seam tests; it is not used by cmd/sta's PTC path.
 type CodeRunTool struct {
 	t *CodeTools
 }

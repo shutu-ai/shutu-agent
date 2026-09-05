@@ -51,6 +51,14 @@ import (
 // cap applies to tool outputs, reasoning, snippets and injected text.
 const maxSummary = 200
 
+// PromptMeta carries canonical DSH user-rpc provenance into the composition
+// root. The native client sends ClientTimeZone; legacy REST callers leave it
+// empty, and time-context then reports the browser zone unavailable.
+type PromptMeta struct {
+	RPCID          string `json:"rpcId,omitempty"`
+	ClientTimeZone string `json:"clientTimeZone,omitempty"`
+}
+
 // Server is the M10 web portal: a net/http server over the read-only session
 // store. Authentication is optional (D-WEB-2 change, user decision 2026-08-20):
 // when token == "" every API route is open to the local machine (the
@@ -78,19 +86,33 @@ type Server struct {
 	// default; the latter is mirrored into the persistent settings table by the
 	// native settings bridge without coupling the native API to the legacy REST
 	// settings surface.
-	nativeSettingsMu     sync.Mutex
-	nativeSettings       map[string]nativeSettingsDocument
-	nativeSettingsLoaded map[string]bool
+	nativeSettingsMu            sync.Mutex
+	nativeSettings              map[string]nativeSettingsDocument
+	nativeSettingsLoaded        map[string]bool
+	nativeSettingsSubscribersMu sync.Mutex
+	nativeSettingsSubscribers   map[uint64]func(string, int)
+	nativeSettingsSubscriberID  uint64
+	// Canonical owner-event fanout for the configuration plane. These carry
+	// references and topology facts only; credential values never enter them.
+	nativeCredentialSubscribersMu sync.Mutex
+	nativeCredentialSubscribers   map[uint64]func(string)
+	nativeCredentialSubscriberID  uint64
+	nativeLLMAdapterSubscribersMu sync.Mutex
+	nativeLLMAdapterSubscribers   map[uint64]func()
+	nativeLLMAdapterSubscriberID  uint64
 
 	// M10 W1 interactive wiring (ADR D-WEB2-A/B/C): the optional handlers the
 	// composition root injects after New. All three are nil until a Setter is
 	// called; a nil handler makes its API answer 501.
-	msgFn          func(ctx context.Context, sessionID, text string, images []llm.ImageRef) error
-	sessFn         func(ctx context.Context, action, id string) (string, error)
-	evSrc          func(sessionID string, sink func(session.Event)) func()
-	queueListFn    func(ctx context.Context, sessionID string) ([]QueueItem, error)
-	queueEnqueueFn func(ctx context.Context, sessionID, text string) (QueueItem, error)
-	queueUpdateFn  func(ctx context.Context, sessionID, itemID, action string) error
+	msgFn                      func(ctx context.Context, sessionID, text string, images []llm.ImageRef, meta PromptMeta) error
+	sessFn                     func(ctx context.Context, action, id string) (string, error)
+	nativeSessionCreateFn      func(ctx context.Context, spec NativeSessionCreateSpec) (NativeSessionCreateResult, error)
+	nativeSessionCreateMu      sync.Mutex
+	nativeSessionCreateFlights map[string]*nativeSessionCreateFlight
+	evSrc                      func(sessionID string, sink func(session.Event)) func()
+	queueListFn                func(ctx context.Context, sessionID string) ([]QueueItem, error)
+	queueEnqueueFn             func(ctx context.Context, sessionID, text string, content []llm.ContentBlock, meta PromptMeta) (QueueItem, error)
+	queueUpdateFn              func(ctx context.Context, sessionID, itemID, action string) error
 	// nativeMuxSubscribers receives authoritative queue/job refreshes for one
 	// subscribed session. The map is transport-only; providers remain owned by
 	// the composition root.
@@ -105,16 +127,20 @@ type Server struct {
 	nativeConns   map[io.Closer]struct{}
 	nativeClosing bool
 	nativeDone    sync.WaitGroup
+	// DSH serializes workspace create/rename/delete on one mutation chain so
+	// concurrent path/title operations cannot publish duplicate or stale state.
+	workspaceMutationMu sync.Mutex
 	// nativeQueueUpdateFn accepts the DSH action vocabulary. The legacy queue
 	// callback above intentionally remains text/action-only for the REST API;
 	// this seam carries the native edit payload without weakening that API.
 	nativeQueueUpdateFn          func(ctx context.Context, sessionID, itemID, action, text string) error
-	nativeSubagentPromptFn       func(ctx context.Context, childSessionID, text string) error
+	nativeSubagentPromptFn       func(ctx context.Context, childSessionID string, content []llm.ContentBlock, meta PromptMeta) error
 	nativeSubagentInterruptFn    func(childSessionID, reason string) error
 	nativeGoalMutationFn         func(ctx context.Context, mutation NativeGoalMutation) (NativeGoalMutationResult, error)
 	nativeCredentialSetFn        func(ctx context.Context, ref, value string) error
 	nativeCredentialUnsetFn      func(ctx context.Context, ref string) error
 	nativeSettingsOpenDocumentFn func(ctx context.Context) error
+	nativeSettingsAppliedFn      func(ctx context.Context, namespace string, resolved map[string]any) error
 	nativeAgentPresetManager     NativeAgentPresetManager
 	nativeCommandManager         NativeCommandManager
 	profileRegistry              *profile.Registry
@@ -126,10 +152,14 @@ type Server struct {
 	// without the webserver knowing any runtime state. nil (the default) leaves
 	// every row's status empty.
 	statusFn func(ctx context.Context, m store.SessionMeta) SessionStatus
+	// liveAgentCountFn reports the number of Agents currently published by the
+	// runtime registry. host.describe must count live Agent handles, not every
+	// durable session row that happens to have a computed status.
+	liveAgentCountFn func() int
 
 	// cfgFn is the M10 W2 config provider (ADR D-WEB2-D): it returns the
 	// sanitized configuration view for GET /api/config. The redaction itself is
-	// the composition root's job (cmd/pa's webConfig never exposes web_server.
+	// the composition root's job (cmd/sta's webConfig never exposes web_server.
 	// token or any key); the webserver only forwards the provider's map. nil
 	// (the default) makes the API answer 501.
 	cfgFn func() map[string]any
@@ -205,9 +235,14 @@ type Server struct {
 	// the two scopes and persists display groups. nil (the default) makes every
 	// /api/config/skills route answer 501.
 	skillsFn func(ctx context.Context, action string, req SkillRequest) (map[string]any, error)
+	// skillCatalogFn is the native DSH read-only view addressed by one
+	// session's durable cwd. It is deliberately separate from skillsFn, which
+	// owns the settings-page management surface and includes disabled/global
+	// rows not exposed to the composer.
+	skillCatalogFn func(ctx context.Context, cwd string) ([]SkillCatalogEntry, error)
 
 	// interactionFn/resolverFn expose the live DSH-style approval surface. The
-	// engine remains owned by cmd/pa; this server only transports request views
+	// engine remains owned by cmd/sta; this server only transports request views
 	// and a resolve command.
 	interactionFn               func(ctx context.Context, sessionID string) ([]interact.Request, error)
 	resolveInteractionFn        func(ctx context.Context, sessionID, id string, status interact.ApprovalStatus, answer string) error
@@ -285,7 +320,21 @@ type QueueItem struct {
 	Text      string    `json:"text"`
 	CreatedAt time.Time `json:"created_at"`
 	Placement string    `json:"placement"`
+	// Content preserves rich prompt admission for the native DSH queue
+	// projection. The legacy REST queue remains text-only and may leave it nil.
+	Content []llm.ContentBlock `json:"-"`
 }
+
+// Stable queue admission failures returned by composition-root callbacks and
+// mapped to DSH's session.updateQueue error codes. Keep these sentinel-wrapped
+// so an implementation can add context without losing the wire classification.
+var (
+	// ErrQueueItemNotFound means the id is not pending in this live queue.
+	ErrQueueItemNotFound = errors.New("queued item is no longer pending")
+	// ErrSteerUnavailable means the pending item exists, but the current turn
+	// no longer accepts a strict steer.
+	ErrSteerUnavailable = errors.New("current turn no longer accepts steering")
+)
 
 // ProviderDiscover is the POST /api/config/provider/discover payload: the
 // endpoint as the form currently shows it (base URL + protocol + a key typed
@@ -332,12 +381,29 @@ type SkillRequest struct {
 	Names     []string    `json:"names"`
 }
 
+// SkillCatalogEntry is the read-only, session-scoped skill projection used by
+// DSH's slash picker. Provenance and filesystem paths intentionally stay
+// host-side.
+type SkillCatalogEntry struct {
+	Name           string
+	Description    string
+	WhenToUse      string
+	ModelInvocable bool
+}
+
 // SetSkillManager wires the skill-management API (POST /api/config/skills, the
 // dsh-skill-mcp-panel 对齐 settings page). The composition root dispatches each
 // action to the skill.Manager and returns a JSON-able result map. nil (the
 // default) keeps every /api/config/skills route at 501.
 func (s *Server) SetSkillManager(fn func(ctx context.Context, action string, req SkillRequest) (map[string]any, error)) {
 	s.skillsFn = fn
+}
+
+// SetSkillCatalogProvider wires DSH's session-addressed skill.list contract.
+// The host resolves the session cwd before invoking the provider; skill lookup
+// never creates or resumes an Agent.
+func (s *Server) SetSkillCatalogProvider(fn func(ctx context.Context, cwd string) ([]SkillCatalogEntry, error)) {
+	s.skillCatalogFn = fn
 }
 
 // SetMCPManager wires the live MCP diagnostics/refresh action used by the
@@ -683,8 +749,8 @@ func (s *Server) untrackNativeConnection(conn io.Closer) {
 // SetMessageHandler wires the message dispatch API (POST
 // /api/sessions/{id}/message). images carries the parsed image refs of the
 // message (P5), nil/empty for text-only turns. Called by the composition root
-// (cmd/pa) at registration time; nil (the default) makes the API answer 501.
-func (s *Server) SetMessageHandler(fn func(ctx context.Context, sessionID, text string, images []llm.ImageRef) error) {
+// (cmd/sta) at registration time; nil (the default) makes the API answer 501.
+func (s *Server) SetMessageHandler(fn func(ctx context.Context, sessionID, text string, images []llm.ImageRef, meta PromptMeta) error) {
 	s.msgFn = fn
 }
 
@@ -692,7 +758,7 @@ func (s *Server) SetMessageHandler(fn func(ctx context.Context, sessionID, text 
 // owns execution and cancellation; nil callbacks leave the queue API at 501.
 func (s *Server) SetQueueManager(
 	list func(ctx context.Context, sessionID string) ([]QueueItem, error),
-	enqueue func(ctx context.Context, sessionID, text string) (QueueItem, error),
+	enqueue func(ctx context.Context, sessionID, text string, content []llm.ContentBlock, meta PromptMeta) (QueueItem, error),
 	update func(ctx context.Context, sessionID, itemID, action string) error,
 ) {
 	s.queueListFn = list
@@ -794,7 +860,7 @@ func (s *Server) SetNativeQueueUpdater(fn func(ctx context.Context, sessionID, i
 // SetNativeSubagentManager wires the live child inbox and cancellation seams
 // used by DSH's subagent.prompt and subagent.interrupt RPCs.
 func (s *Server) SetNativeSubagentManager(
-	prompt func(ctx context.Context, childSessionID, text string) error,
+	prompt func(ctx context.Context, childSessionID string, content []llm.ContentBlock, meta PromptMeta) error,
 	interrupt func(childSessionID, reason string) error,
 ) {
 	s.nativeSubagentPromptFn = prompt
@@ -942,6 +1008,13 @@ func (s *Server) SetNativeSettingsDocumentOpener(fn func(context.Context) error)
 	s.nativeSettingsOpenDocumentFn = fn
 }
 
+// SetNativeSettingsApplier notifies the composition root after a native
+// settings document changes. The callback receives the resolved base+user view
+// so provider owners can rebuild live runtime state from the effective facts.
+func (s *Server) SetNativeSettingsApplier(fn func(ctx context.Context, namespace string, resolved map[string]any) error) {
+	s.nativeSettingsAppliedFn = fn
+}
+
 // SetNativeAgentPresetManager wires the DSH agent-preset authoring surface.
 func (s *Server) SetNativeAgentPresetManager(manager NativeAgentPresetManager) {
 	s.nativeAgentPresetManager = manager
@@ -954,6 +1027,56 @@ func (s *Server) SetSessionManager(fn func(ctx context.Context, action, id strin
 	s.sessFn = fn
 }
 
+// NativeSessionCreateSpec carries DSH session.create admission inputs. A
+// non-empty SessionID adopts a durable session only when its cwd and explicit
+// preset are compatible; an empty ID reserves a fresh identity.
+type NativeSessionCreateSpec struct {
+	SessionID            string
+	CWD                  string
+	WorkspaceID          string
+	AgentPreset          string
+	AgentPresetRequested bool
+}
+
+// NativeSessionCreateResult echoes the identity actually served and the preset
+// actually running in it. The preset may differ from the request default when a
+// named identity adopts an existing session.
+type NativeSessionCreateResult struct {
+	SessionID   string
+	AgentPreset string
+	CWD         string
+}
+
+// NativeSessionCreateError lets a runtime creator return DSH's stable create
+// error domain (for example session-conflict or agent-preset-conflict) while
+// the transport owns the RPC envelope.
+type NativeSessionCreateError struct {
+	Code    string
+	Message string
+	Details map[string]any
+}
+
+// nativeSessionCreateFlight deduplicates concurrent named create retries so
+// only the first identity admission runs; followers await the same outcome.
+type nativeSessionCreateFlight struct {
+	done    chan struct{}
+	result  NativeSessionCreateResult
+	failure nativeRPCResult
+	failed  bool
+}
+
+func (e *NativeSessionCreateError) Error() string { return e.Message }
+
+func NewNativeSessionCreateError(code, message string, details map[string]any) *NativeSessionCreateError {
+	return &NativeSessionCreateError{Code: code, Message: message, Details: details}
+}
+
+// SetNativeSessionCreator wires the DSH native create/adoption path. Unlike
+// the legacy session manager, it honors the caller-requested identity and cwd.
+func (s *Server) SetNativeSessionCreator(fn func(ctx context.Context, spec NativeSessionCreateSpec) (NativeSessionCreateResult, error)) {
+	s.nativeSessionCreateFn = fn
+}
+
 // SetEventSource wires the real-time event stream (GET
 // /api/sessions/{id}/events/stream): the source subscribes a session and calls
 // sink for each new event; the returned func unsubscribes. Called by the
@@ -963,7 +1086,7 @@ func (s *Server) SetEventSource(fn func(sessionID string, sink func(session.Even
 }
 
 // SetConfigProvider wires the read-only config view (GET /api/config, M10 W2,
-// ADR D-WEB2-D). The provider returns a sanitized map — cmd/pa's webConfig
+// ADR D-WEB2-D). The provider returns a sanitized map — cmd/sta's webConfig
 // never includes web_server.token or any key — and the webserver forwards it
 // verbatim. Called by the composition root; nil makes the API answer 501.
 func (s *Server) SetConfigProvider(fn func() map[string]any) {
@@ -1022,6 +1145,12 @@ func (s *Server) SetSessionStatusProvider(fn func(ctx context.Context, m store.S
 	s.statusFn = fn
 }
 
+// SetLiveAgentCounter wires the read-only live Agent count for host.describe.
+// Called by the composition root; nil leaves the count at zero.
+func (s *Server) SetLiveAgentCounter(fn func() int) {
+	s.liveAgentCountFn = fn
+}
+
 // SetSubagentProvider wires the read-only subagent panel (GET /api/subagents,
 // M10 W4, ADR D-WEB2-H). The provider returns sanitized child-agent views
 // (id/status/timestamps only). Called by the composition root; nil makes the
@@ -1042,7 +1171,7 @@ func (s *Server) SetJobsProvider(fn func(ctx context.Context, sessionID string) 
 // wiring (M10 W1, ADR D-WEB2). The composition root reads it in its wiring
 // tests; nil fields mean the corresponding API answers 501.
 type InteractiveHandlers struct {
-	Message   func(ctx context.Context, sessionID, text string, images []llm.ImageRef) error
+	Message   func(ctx context.Context, sessionID, text string, images []llm.ImageRef, meta PromptMeta) error
 	Session   func(ctx context.Context, action, id string) (string, error)
 	Event     func(sessionID string, sink func(session.Event)) func()
 	Config    func() map[string]any
@@ -1209,7 +1338,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleConfig implements GET /api/config (M10 W2, ADR D-WEB2-D): it serves
-// the injected config provider's sanitized map verbatim. The provider (cmd/pa's
+// the injected config provider's sanitized map verbatim. The provider (cmd/sta's
 // webConfig) is responsible for redaction — web_server.token and any keys are
 // never included — so the API boundary never carries a plaintext secret. An
 // unwired provider answers 501.
@@ -1482,7 +1611,7 @@ func (s *Server) handleSessionTitle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Compatibility embedders without a live runtime cannot mint a log event.
-	// Production cmd/pa wires nativeSessionRenameFn, so this path is deliberately
+	// Production cmd/sta wires nativeSessionRenameFn, so this path is deliberately
 	// storage-only and must not be treated as the canonical runtime contract.
 	if err := s.store.SetSessionTitle(r.Context(), id, title, session.TitleSourceUser); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -1646,7 +1775,12 @@ func isInternalContextMessage(ev session.Event) bool {
 		return false
 	}
 	if d.Source != nil && (d.Source.Kind == "skill-catalog" ||
-		(d.Source.Kind == "plugin" && d.Source.Plugin == "@shutu-ai/dsh-system-prompt")) {
+		d.Source.Kind == "skill-invocation" ||
+		d.Source.Kind == "agent-instructions" ||
+		d.Source.Kind == "session-reference" ||
+		d.Source.Kind == "subagent-settled" ||
+		d.Source.Kind == "subagent-report" ||
+		(d.Source.Kind == "plugin" && d.Source.Plugin == "@shutu-ai/system-prompt")) {
 		return true
 	}
 	text := d.Text
@@ -1657,6 +1791,7 @@ func isInternalContextMessage(ev session.Event) bool {
 	}
 	return strings.HasPrefix(text, "<system-reminder>\n") ||
 		strings.HasPrefix(text, "Current runtime context.") ||
+		strings.HasPrefix(text, "Background subagent ") ||
 		strings.HasPrefix(text, "<skill_content name=\"")
 }
 
@@ -1680,6 +1815,18 @@ func internalContextSource(ev session.Event) string {
 		if d.Source.Kind == "skill-catalog" {
 			return "skill-catalog"
 		}
+		if d.Source.Kind == "skill-invocation" {
+			return "skill-invocation"
+		}
+		if d.Source.Kind == "agent-instructions" {
+			return "agent-instructions"
+		}
+		if d.Source.Kind == "session-reference" {
+			return "session-reference"
+		}
+		if d.Source.Kind == "subagent-settled" || d.Source.Kind == "subagent-report" {
+			return d.Source.Kind
+		}
 		if d.Source.Kind == "plugin" && d.Source.Plugin != "" {
 			return d.Source.Plugin
 		}
@@ -1694,9 +1841,11 @@ func internalContextSource(ev session.Event) string {
 	}
 	switch {
 	case strings.HasPrefix(text, "Current runtime context."):
-		return "@shutu-ai/dsh-system-prompt"
+		return "@shutu-ai/system-prompt"
 	case strings.HasPrefix(text, "<system-reminder>\n"):
 		return "skill-catalog"
+	case strings.HasPrefix(text, "Background subagent "):
+		return "subagent-settled"
 	case strings.HasPrefix(text, "<skill_content name=\""):
 		return "skill-invocation"
 	default:
@@ -2459,7 +2608,7 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 
 // sessionDefaultWorkdir returns the configured fallback, resolving it once at
 // the API boundary so persisted session headers are always absolute. With no
-// override it creates and uses <user-home>/shudu.
+// override it creates and uses <user-home>/shutu.
 func (s *Server) sessionDefaultWorkdir() (string, error) {
 	dir := strings.TrimSpace(s.defaultWorkdir)
 	if dir == "" {
@@ -2467,7 +2616,7 @@ func (s *Server) sessionDefaultWorkdir() (string, error) {
 		if err != nil || strings.TrimSpace(home) == "" {
 			return "", fmt.Errorf("webserver: resolve user home: %w", err)
 		}
-		dir = filepath.Join(home, "shudu")
+		dir = filepath.Join(home, "shutu")
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return "", fmt.Errorf("webserver: create default workdir %q: %w", dir, err)
 		}
@@ -3231,7 +3380,7 @@ func (s *Server) handleWorkspaceDirectoryList(w http.ResponseWriter, r *http.Req
 		var err error
 		// Start at the same directory used by ungrouped sessions and workspaces
 		// without an explicit path. Enumerating the user's home root is not
-		// reliable on Windows (it may be ACL-protected), while ~/shudu is the
+		// reliable on Windows (it may be ACL-protected), while ~/shutu is the
 		// application-owned default and is created by sessionDefaultWorkdir.
 		path, err = s.sessionDefaultWorkdir()
 		if err != nil {
@@ -3439,7 +3588,7 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 			images = append(images, ref)
 		}
 	}
-	if err := s.msgFn(r.Context(), id, body.Text, images); err != nil {
+	if err := s.msgFn(r.Context(), id, body.Text, images, PromptMeta{}); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
@@ -3447,7 +3596,7 @@ func (s *Server) handleMessage(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleQueueList implements GET /api/sessions/{id}/queue. The queue is
-// process-owned by cmd/pa, so an unwired generic server answers 501.
+// process-owned by cmd/sta, so an unwired generic server answers 501.
 func (s *Server) handleQueueList(w http.ResponseWriter, r *http.Request) {
 	if s.queueListFn == nil {
 		writeJSON(w, http.StatusNotImplemented, map[string]any{"error": "queue manager not wired"})
@@ -3482,7 +3631,7 @@ func (s *Server) handleQueueEnqueue(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "text is required"})
 		return
 	}
-	item, err := s.queueEnqueueFn(r.Context(), r.PathValue("id"), body.Text)
+	item, err := s.queueEnqueueFn(r.Context(), r.PathValue("id"), body.Text, []llm.ContentBlock{llm.Text(body.Text)}, PromptMeta{})
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
@@ -3519,10 +3668,10 @@ func (s *Server) handleQueueUpdate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// maxWebImageBytes caps a single uploaded image via the web portal (P5). The
-// value matches DSH's default imageLimits.maxImageBytes (3.5 MiB); the backend
-// fails closed so the portal never writes a giant file even if the client lies.
-const maxWebImageBytes = 7 << 19
+// maxWebImageBytes caps a single uploaded image via the web portal and native
+// prompt admission. DSH's default limit is 5 MiB; the backend still verifies
+// every image so an oversized or lying browser payload is admitted nowhere.
+const maxWebImageBytes = 5 << 20
 
 // attachmentView is the POST /api/sessions/{id}/attachments response.
 type attachmentView struct {

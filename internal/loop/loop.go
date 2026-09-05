@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -21,6 +22,7 @@ import (
 	"github.com/shutu-ai/shutu-agent/internal/prompt"
 	"github.com/shutu-ai/shutu-agent/internal/runtimectx"
 	"github.com/shutu-ai/shutu-agent/internal/session"
+	"github.com/shutu-ai/shutu-agent/internal/timecontext"
 	"github.com/shutu-ai/shutu-agent/internal/tools"
 )
 
@@ -56,6 +58,10 @@ type PreStepInjector struct {
 	InjectWithError func(ctx context.Context, userText string) ([]llm.Message, error)
 	OncePerTurn     bool // run only for the first step of a turn
 	Deduplicate     bool // do not append an identical visible context message twice
+	// Unbounded marks injectors whose producer owns a complete wire contract.
+	// The skill catalog is one instance: DSH publishes every entry and bounds
+	// each description, so a generic 4k cut silently hides later skills.
+	Unbounded bool
 }
 
 // PreStepDecision is the authoritative result of the agent/pre-step
@@ -154,7 +160,8 @@ type Loop struct {
 	stop                   []string
 	contextWindow          int
 	runtimeContext         func(context.Context, string) []llm.Message // dsh-style durable runtime snapshot
-	preStep                []PreStepInjector                           // additional injectors, in registration order
+	timeContext            *timecontext.Service
+	preStep                []PreStepInjector // additional injectors, in registration order
 	preStepHooks           []PreStepHook
 	requestHooks           []RequestHook
 	requestErrorHooks      []RequestErrorHook
@@ -170,6 +177,7 @@ type Loop struct {
 	runtimeAgentID         string
 	runtimeEmit            func(string, any) error
 	maxParallelToolCalls   int
+	maxParallelToolCallsFn func() int
 }
 
 // Config wires the loop's dependencies. All fields are required except the
@@ -206,6 +214,10 @@ type Config struct {
 	// projected after the current user message and deduplicated against the
 	// visible session surface.
 	RuntimeContext func(context.Context, string) []llm.Message
+	// TimeContext, when non-nil, appends the DSH-compatible durable clock
+	// reading after every other pre-step contribution. Errors fail the step
+	// before provider I/O; nil leaves the optional provider disabled.
+	TimeContext *timecontext.Service
 	// PreStep registers additional pre-step context injectors. Injectors run in
 	// registration order, with returned context bounded to maxInjectorChars;
 	// OncePerTurn and Deduplicate control their cadence. A panicking injector is
@@ -257,6 +269,10 @@ type Config struct {
 	// MaxParallelToolCalls bounds the rolling pool for explicitly
 	// concurrency-safe tools. Zero uses dsh's default of ten.
 	MaxParallelToolCalls int
+	// MaxParallelToolCallsFunc, when set, is consulted for every tool batch so
+	// a committed settings change reaches an already-constructed Agent loop.
+	// A non-positive result falls back to MaxParallelToolCalls/default rules.
+	MaxParallelToolCallsFunc func() int
 }
 
 // New returns a Loop.
@@ -277,6 +293,7 @@ func New(cfg Config) *Loop {
 		stop:                   append([]string(nil), cfg.Stop...),
 		contextWindow:          cfg.ContextWindow,
 		runtimeContext:         cfg.RuntimeContext,
+		timeContext:            cfg.TimeContext,
 		preStep:                append([]PreStepInjector(nil), cfg.PreStep...),
 		preStepHooks:           append([]PreStepHook(nil), cfg.PreStepHooks...),
 		requestHooks:           append([]RequestHook(nil), cfg.RequestHooks...),
@@ -293,7 +310,18 @@ func New(cfg Config) *Loop {
 		runtimeAgentID:         cfg.RuntimeAgentID,
 		runtimeEmit:            cfg.RuntimeEmit,
 		maxParallelToolCalls:   maxParallelToolCalls(cfg.MaxParallelToolCalls),
+		maxParallelToolCallsFn: cfg.MaxParallelToolCallsFunc,
 	}
+}
+
+func (l *Loop) effectiveMaxParallelToolCalls() int {
+	if l == nil {
+		return 1
+	}
+	if l.maxParallelToolCallsFn != nil {
+		return maxParallelToolCalls(l.maxParallelToolCallsFn())
+	}
+	return l.maxParallelToolCalls
 }
 
 func maxParallelToolCalls(value int) int {
@@ -468,6 +496,16 @@ func (l *Loop) RunMessages(ctx context.Context, inputs []llm.Message) (runErr er
 		contextMessages, err := l.collectInjectors(stepCtx, step, userText)
 		if err != nil {
 			return err
+		}
+		if l.timeContext != nil {
+			requestMessages := append(append([]llm.Message(nil), entered...), contextMessages...)
+			reading, err := l.timeContext.Reading(l.log.Events(), turnNumber, step+1, requestMessages)
+			if err != nil {
+				return err
+			}
+			if reading != nil {
+				contextMessages = append(contextMessages, *reading)
+			}
 		}
 		if len(contextMessages) > 0 {
 			entered = append(append([]llm.Message(nil), entered...), contextMessages...)
@@ -653,11 +691,28 @@ func (l *Loop) collectInjectors(ctx context.Context, step int, userText string) 
 			if inj.Deduplicate && (l.visibleMessageExists(message) || containsMessage(out, message)) {
 				continue
 			}
-			message.SourceKind, message.SourcePlugin = contextSource(inj.Name)
+			// Preserve producer-owned source first; only injectors that still
+			// return legacy unattributed context get the transport fallback.
+			if message.SourceKind == "" {
+				if sourceKind, sourcePlugin := legacyContextSource(inj.Name); sourceKind != "" {
+					message.SourceKind, message.SourcePlugin = sourceKind, sourcePlugin
+				}
+			}
 			out = append(out, message)
 		}
 	}
 	return out, nil
+}
+
+func legacyContextSource(injectorName string) (kind, plugin string) {
+	switch injectorName {
+	case "runtime-context":
+		return "plugin", "@shutu-ai/system-prompt"
+	case "skill":
+		return "skill-catalog", ""
+	default:
+		return "", ""
+	}
 }
 
 func cloneMessages(in []llm.Message) []llm.Message {
@@ -691,20 +746,30 @@ func (l *Loop) effectiveInjectors() []PreStepInjector {
 		Deduplicate: true,
 	}
 	var out []PreStepInjector
+	runtimeInserted := false
 	for _, inj := range l.preStep {
 		if inj.Name == "compaction" {
 			out = append(out, inj)
 			continue
 		}
-		if l.runtimeContext != nil && len(out) == 0 {
+		if inj.Name == "agent-instructions" && l.runtimeContext != nil && !runtimeInserted {
+			out = append(out, inj)
 			out = append(out, runtime)
+			runtimeInserted = true
+			continue
+		}
+		if l.runtimeContext != nil && !runtimeInserted && len(out) == 0 {
+			out = append(out, runtime)
+			runtimeInserted = true
 		}
 		out = append(out, inj)
 	}
-	if l.runtimeContext != nil && len(out) == 0 {
+	if l.runtimeContext != nil && !runtimeInserted && len(out) == 0 {
 		out = append(out, runtime)
-	} else if l.runtimeContext != nil && len(out) > 0 && out[0].Name == "compaction" {
+		runtimeInserted = true
+	} else if l.runtimeContext != nil && !runtimeInserted && len(out) > 0 && out[0].Name == "compaction" {
 		out = append([]PreStepInjector{out[0], runtime}, out[1:]...)
+		runtimeInserted = true
 	}
 	return out
 }
@@ -716,10 +781,12 @@ func (l *Loop) appendContextMessage(injectorName string, message llm.Message) er
 	if strings.TrimSpace(message.Text()) == "" && len(message.Content) == 0 {
 		return nil
 	}
-	sourceKind, sourcePlugin := contextSource(injectorName)
 	var payload any
-	if sourceKind != "" {
-		payload = session.NewContextMessage(message.Text(), message.Content, sourceKind, sourcePlugin)
+	if message.SourceKind != "" {
+		// Producers own their complete durable source. The injector name is
+		// transport wiring, not a reason to collapse plugin, skill, recall, or
+		// instruction provenance into one generic shape.
+		payload = session.NewContextMessageFromLLM(message)
 	} else {
 		payload = session.NewUserMessageWithBlocks(message.Text(), message.Content)
 	}
@@ -728,40 +795,132 @@ func (l *Loop) appendContextMessage(injectorName string, message llm.Message) er
 	return err
 }
 
-func contextSource(injectorName string) (kind, plugin string) {
-	switch injectorName {
-	case "runtime-context":
-		return "plugin", "@shutu-ai/dsh-system-prompt"
-	case "skill":
-		return "skill-catalog", ""
-	default:
-		return "", ""
-	}
-}
-
 func (l *Loop) visibleMessageExists(message llm.Message) bool {
 	want := message.Text()
 	if want == "" {
 		return false
 	}
+	events := l.log.Events()
+	shadowed := make(map[uint64]bool)
+	for _, event := range events {
+		if event.Type != session.EventUserMessage {
+			continue
+		}
+		if sourceSeqs, ok := session.EventSourceEventSeqs(event); ok {
+			for _, seq := range sourceSeqs {
+				shadowed[seq] = true
+			}
+			continue
+		}
+		if replacement, ok := session.SurfaceReplacement(event); ok {
+			for seq := uint64(replacement.Start); seq <= uint64(replacement.End); seq++ {
+				shadowed[seq] = true
+			}
+		}
+	}
 	// Stable pre-step snapshots only need to know whether an equivalent user
-	// text was already persisted. Re-deriving the whole model surface here is
+	// text is still visible. Re-deriving the whole model surface here is
 	// unnecessarily expensive for restored long sessions (especially after
 	// repeated compaction replacements), so inspect the append-only user rows
-	// directly. This preserves the old text equality semantics without making
-	// cancellation wait for a full history fold.
-	for _, event := range l.log.Events() {
+	// directly. Source attribution prevents ordinary user text from suppressing
+	// a producer-owned snapshot; shadowed rows do not suppress republication.
+	for _, event := range events {
 		if event.Type != session.EventUserMessage {
 			continue
 		}
 		var data struct {
-			Text string `json:"text"`
+			Text    string `json:"text"`
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+			Source *durableMessageSource `json:"source"`
 		}
-		if json.Unmarshal(event.Data, &data) == nil && data.Text == want {
+		if json.Unmarshal(event.Data, &data) != nil {
+			continue
+		}
+		// NewContextMessageFromLLM persists Text and rich Content as the same
+		// projection for compatibility. Compare one or the other, never both.
+		text := data.Text
+		if len(data.Content) > 0 {
+			text = ""
+			for _, block := range data.Content {
+				text += block.Text
+			}
+		}
+		if text != want {
+			continue
+		}
+		if message.SourceKind != "" {
+			// A recurring payload is not necessarily a live context: DSH's
+			// replacement state is producer-owned, so A→B→A must publish the
+			// final A even though an older A row has the same text. Compare the
+			// complete durable source, not just kind/plugin/body.
+			if data.Source == nil || !data.Source.equal(message) {
+				continue
+			}
+		} else if data.Source != nil && data.Source.Kind != "user" {
+			continue
+		}
+		if !shadowed[event.Seq] {
 			return true
 		}
 	}
 	return false
+}
+
+// durableMessageSource mirrors the producer-owned user/message source. It is
+// local to the loop's visibility fast path; session owns the durable schema.
+type durableMessageSource struct {
+	Kind             string `json:"kind"`
+	Form             string `json:"form,omitempty"`
+	Update           bool   `json:"update,omitempty"`
+	Plugin           string `json:"plugin,omitempty"`
+	Name             string `json:"name,omitempty"`
+	Entries          any    `json:"entries,omitempty"`
+	References       any    `json:"references,omitempty"`
+	Sections         any    `json:"sections,omitempty"`
+	Summary          string `json:"summary,omitempty"`
+	SenderSessionID  string `json:"senderSessionId,omitempty"`
+	Baseline         bool   `json:"baseline,omitempty"`
+	BaselineIdentity string `json:"baselineIdentity,omitempty"`
+	Changes          any    `json:"changes,omitempty"`
+	TeamID           string `json:"teamId,omitempty"`
+	MessageID        string `json:"messageId,omitempty"`
+	SenderID         string `json:"senderId,omitempty"`
+	SenderName       string `json:"senderName,omitempty"`
+}
+
+func (s *durableMessageSource) equal(message llm.Message) bool {
+	if s == nil {
+		return false
+	}
+	candidate := durableMessageSource{
+		Kind: message.SourceKind, Form: message.SourceForm, Update: message.SourceUpdate,
+		Plugin: message.SourcePlugin, Name: message.SourceName, Entries: optionalJSONValue(message.SourceEntries),
+		References: optionalJSONValue(message.SourceReferences), Sections: optionalJSONValue(message.SourceSections),
+		Summary: message.SourceSummary, SenderSessionID: message.SourceSenderSessionID,
+		Baseline: message.SourceBaseline, BaselineIdentity: message.SourceBaselineIdentity,
+		Changes: optionalJSONValue(message.SourceChanges), TeamID: message.SourceTeamID,
+		MessageID: message.SourceMessageID, SenderID: message.SourceSenderID,
+		SenderName: message.SourceSenderName,
+	}
+	left, leftErr := json.Marshal(*s)
+	right, rightErr := json.Marshal(candidate)
+	return leftErr == nil && rightErr == nil && string(left) == string(right)
+}
+
+func optionalJSONValue(value any) any {
+	if value == nil {
+		return nil
+	}
+	rv := reflect.ValueOf(value)
+	switch rv.Kind() {
+	case reflect.Slice, reflect.Map:
+		if rv.IsNil() {
+			return nil
+		}
+	}
+	return value
 }
 
 // safeInject calls one injector and bounds its contribution, containing a
@@ -780,6 +939,9 @@ func (l *Loop) safeInject(inj PreStepInjector, ctx context.Context, userText str
 		if err != nil {
 			return nil, err
 		}
+		if inj.Unbounded {
+			return msgs, nil
+		}
 		return truncateInjectorContext(msgs), nil
 	}
 	if inj.Inject == nil {
@@ -791,7 +953,11 @@ func (l *Loop) safeInject(inj PreStepInjector, ctx context.Context, userText str
 			err = nil
 		}
 	}()
-	return truncateInjectorContext(inj.Inject(ctx, userText)), nil
+	msgs = inj.Inject(ctx, userText)
+	if inj.Unbounded {
+		return msgs, nil
+	}
+	return truncateInjectorContext(msgs), nil
 }
 
 // truncateInjectorContext bounds the total context text one injector may
@@ -1619,7 +1785,7 @@ func (l *Loop) executeCalls(ctx context.Context, turnNumber, stepNumber int, cal
 		}
 
 		parsed, parseErr := tools.ParseArguments([]byte(calls[next].Arguments))
-		if parseErr != nil || !l.tools.IsConcurrencySafe(calls[next].Name, parsed) || l.maxParallelToolCalls <= 1 {
+		if parseErr != nil || !l.tools.IsConcurrencySafe(calls[next].Name, parsed) || l.effectiveMaxParallelToolCalls() <= 1 {
 			prepareArgs := any(parsed)
 			if parseErr != nil {
 				prepareArgs = []byte(calls[next].Arguments)
@@ -1687,7 +1853,7 @@ func (l *Loop) executeParallelGroup(ctx context.Context, turnNumber, stepNumber 
 	}
 
 	fill := func() error {
-		for ctx.Err() == nil && *next < len(calls) && len(running)+len(ready) < l.maxParallelToolCalls {
+		for ctx.Err() == nil && *next < len(calls) && len(running)+len(ready) < l.effectiveMaxParallelToolCalls() {
 			call := calls[*next]
 			parsed, parseErr := tools.ParseArguments([]byte(call.Arguments))
 			if parseErr != nil || !l.tools.IsConcurrencySafe(call.Name, parsed) {
@@ -1891,7 +2057,7 @@ func (l *Loop) appendToolAdditionalContexts(result tools.ToolResult) error {
 			continue
 		}
 		if _, err := l.log.Append(session.EventUserMessage,
-			session.NewContextMessage(message.Text(), message.Content, message.SourceKind, message.SourcePlugin)); err != nil {
+			session.NewContextMessageFromLLM(message)); err != nil {
 			return err
 		}
 	}

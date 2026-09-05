@@ -11,5 +11,5 @@ P4 已完成：
 
 验证：
 
-- `go test ./internal/subagent ./cmd/pa ./internal/config`
+- `go test ./internal/subagent ./cmd/sta ./internal/config`
 

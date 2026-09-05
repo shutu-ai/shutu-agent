@@ -62,6 +62,7 @@ func (additionalContextTool) ExecuteResult(context.Context, any) (tools.ToolResu
 		Output: "ok",
 		AdditionalContextMessages: []llm.Message{{
 			Role: llm.RoleUser, SourceKind: "plugin", SourcePlugin: "deferred-test",
+			SourceForm: "notice", SourceSummary: "deferred rich context",
 			Content: []llm.ContentBlock{llm.Text("deferred rich context")},
 		}},
 	}, nil
@@ -189,16 +190,34 @@ func TestToolAdditionalContextsArePersistedAfterResultAndReachNextStep(t *testin
 	}
 	events := log.Events()
 	resultIndex, contextIndex := -1, -1
+	var contextEvent session.Event
 	for i, event := range events {
 		if event.Type == session.EventToolResult && resultIndex < 0 {
 			resultIndex = i
 		}
 		if event.Type == session.EventUserMessage && strings.Contains(string(event.Data), "deferred rich context") {
 			contextIndex = i
+			contextEvent = event
 		}
 	}
 	if resultIndex < 0 || contextIndex <= resultIndex {
 		t.Fatalf("additional context ordering result=%d context=%d events=%v", resultIndex, contextIndex, events)
+	}
+	var contextData struct {
+		Source *struct {
+			Kind    string `json:"kind"`
+			Plugin  string `json:"plugin"`
+			Form    string `json:"form"`
+			Summary string `json:"summary"`
+		} `json:"source"`
+	}
+	if err := json.Unmarshal(contextEvent.Data, &contextData); err != nil {
+		t.Fatal(err)
+	}
+	if contextData.Source == nil || contextData.Source.Kind != "plugin" ||
+		contextData.Source.Plugin != "deferred-test" || contextData.Source.Form != "notice" ||
+		contextData.Source.Summary != "deferred rich context" {
+		t.Fatalf("additional context source = %+v, want durable DSH notice", contextData.Source)
 	}
 }
 
@@ -1164,6 +1183,25 @@ func TestRunParallelToolCalls(t *testing.T) {
 	}
 	if len(ordered) != 4 || !strings.Contains(ordered[0], "parallel_a") || !strings.Contains(ordered[1], "parallel_b") || !strings.Contains(ordered[2], "parallel_a") || !strings.Contains(ordered[3], "parallel_b") {
 		t.Fatalf("tool event order = %v, want call a, call b, result a, result b", ordered)
+	}
+}
+
+func TestMaxParallelToolCallsFuncIsReadPerBatch(t *testing.T) {
+	limit := 2
+	loop := New(Config{
+		Prompt:               prompt.New("You are helpful."),
+		Model:                "deepseek-chat",
+		MaxParallelToolCalls: 1,
+		MaxParallelToolCallsFunc: func() int {
+			return limit
+		},
+	})
+	if got := loop.effectiveMaxParallelToolCalls(); got != 2 {
+		t.Fatalf("dynamic limit = %d, want 2", got)
+	}
+	limit = 0
+	if got := loop.effectiveMaxParallelToolCalls(); got != 10 {
+		t.Fatalf("invalid dynamic limit = %d, want default 10", got)
 	}
 }
 
