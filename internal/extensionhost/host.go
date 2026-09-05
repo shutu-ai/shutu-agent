@@ -97,10 +97,12 @@ type managedExtension struct {
 }
 
 type Host struct {
-	config Config
-	mu     sync.RWMutex
-	items  []*managedExtension
-	closed bool
+	config         Config
+	mu             sync.RWMutex
+	items          []*managedExtension
+	closed         bool
+	contextStateMu sync.Mutex
+	contextStates  map[string]*contextCadenceState
 }
 
 func New(config Config) *Host {
@@ -137,7 +139,7 @@ func New(config Config) *Host {
 	if config.AgentName == "" {
 		config.AgentName = "shutu-agent"
 	}
-	return &Host{config: config}
+	return &Host{config: config, contextStates: make(map[string]*contextCadenceState)}
 }
 
 func Discover(explicit []Source, root string) ([]Source, error) {
@@ -525,16 +527,17 @@ func (h *Host) observe(event Event) {
 }
 
 type contextCadenceState struct {
-	lastTurn  string
-	lastInput string
+	lastTurn   string
+	lastInput  string
+	lastStepID string
 }
 
 func (h *Host) ContextInjector() loop.PreStepInjector {
-	state := contextCadenceState{}
 	return loop.PreStepInjector{
 		Name: "extensions",
 		InjectWithError: func(ctx context.Context, userText string) ([]llm.Message, error) {
-			contributions, err := h.ProvideContext(ctx, userText, &state)
+			state := h.contextStateFor(ctx)
+			contributions, err := h.ProvideContext(ctx, userText, state)
 			if err != nil {
 				return nil, err
 			}
@@ -551,12 +554,43 @@ func (h *Host) ContextInjector() loop.PreStepInjector {
 	}
 }
 
+func (h *Host) contextStateFor(ctx context.Context) *contextCadenceState {
+	correlation, _ := runtimectx.CorrelationOf(ctx)
+	if correlation.SessionID == "" {
+		return &contextCadenceState{}
+	}
+	h.contextStateMu.Lock()
+	defer h.contextStateMu.Unlock()
+	state := h.contextStates[correlation.SessionID]
+	if state == nil {
+		state = &contextCadenceState{}
+		h.contextStates[correlation.SessionID] = state
+	}
+	return state
+}
+
+// RefreshContext is the generic manual trigger. It bypasses cadence only for
+// providers that explicitly declare the manual strategy; other strategies
+// retain their normal deduplication semantics.
+func (h *Host) RefreshContext(ctx context.Context, userText string) ([]extension.ContextContribution, error) {
+	state := h.contextStateFor(ctx)
+	return h.provideContext(ctx, userText, state, true)
+}
+
 func (h *Host) ProvideContext(ctx context.Context, userText string, state *contextCadenceState) ([]extension.ContextContribution, error) {
+	return h.provideContext(ctx, userText, state, false)
+}
+
+func (h *Host) provideContext(ctx context.Context, userText string, state *contextCadenceState, includeManual bool) ([]extension.ContextContribution, error) {
+	if state == nil {
+		state = h.contextStateFor(ctx)
+	}
 	h.mu.RLock()
 	items := append([]*managedExtension(nil), h.items...)
 	h.mu.RUnlock()
 	correlation, _ := runtimectx.CorrelationOf(ctx)
-	h.publishContextRequested(ctx, userText, extension.ContextBeforeEveryModelCall)
+	inputIdentity := normalizedInput(userText)
+	h.publishContextRequested(ctx, userText)
 	var all []extension.ContextContribution
 	var requiredErr error
 	for _, item := range items {
@@ -564,16 +598,17 @@ func (h *Host) ProvideContext(ctx context.Context, userText string, state *conte
 			continue
 		}
 		strategy := item.manifest.ContextProvider.Strategy
-		if strategy == extension.ContextManual {
+		if strategy == extension.ContextManual && !includeManual {
 			continue
 		}
 		if strategy == extension.ContextOncePerTurn && correlation.TurnID != "" && state.lastTurn == correlation.TurnID {
 			continue
 		}
-		if strategy == extension.ContextOnUserInputChange && state.lastInput == userText && state.lastTurn == correlation.TurnID {
+		if strategy == extension.ContextOnUserInputChange && state.lastInput == inputIdentity {
 			continue
 		}
-		if strategy == extension.ContextAfterToolResult && correlation.StepID == "" {
+		sameTurn := correlation.TurnID != "" && state.lastTurn == correlation.TurnID
+		if strategy == extension.ContextAfterToolResult && (!sameTurn || state.lastStepID == "" || correlation.StepID == state.lastStepID) {
 			continue
 		}
 		request := extension.ContextRequest{Metadata: map[string]string{}}
@@ -632,9 +667,10 @@ func (h *Host) ProvideContext(ctx context.Context, userText string, state *conte
 		h.observe(event)
 		all = append(all, bounded...)
 	}
-	if state != nil {
+	if state != nil && !includeManual {
 		state.lastTurn = correlation.TurnID
-		state.lastInput = userText
+		state.lastInput = inputIdentity
+		state.lastStepID = correlation.StepID
 	}
 	if requiredErr != nil {
 		return nil, fmt.Errorf("extension: required context provider failed: %w", requiredErr)

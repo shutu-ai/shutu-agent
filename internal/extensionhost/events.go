@@ -171,9 +171,9 @@ func (h *Host) PublishSessionEvent(sessionID string, event session.Event) {
 	}
 }
 
-func (h *Host) publishContextRequested(ctx context.Context, userText string, strategy extension.ContextStrategy) {
+func (h *Host) publishContextRequested(ctx context.Context, userText string) {
 	correlation, _ := runtimectx.CorrelationOf(ctx)
-	payload := map[string]any{"strategy": string(strategy)}
+	payload := map[string]any{"mode": "automatic"}
 	if userText != "" {
 		payload["input_hash"] = inputHash(userText)
 	}
@@ -201,6 +201,10 @@ func inputHash(value string) string {
 	normalized := strings.Join(strings.Fields(value), " ")
 	sum := sha256.Sum256([]byte(normalized))
 	return hex.EncodeToString(sum[:8])
+}
+
+func normalizedInput(value string) string {
+	return strings.Join(strings.Fields(value), " ")
 }
 
 func eventNumbers(data map[string]any) (turn, step int) {
