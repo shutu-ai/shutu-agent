@@ -448,15 +448,6 @@ func (p *localProvider) exec(ctx context.Context, code, cwd, workspaceRoot strin
 			return Result{}, fmt.Errorf("code: configure Windows ACL sandbox: %w", err)
 		}
 	}
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		return Result{}, fmt.Errorf("code: create stdout pipe: %w", err)
-	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		return Result{}, fmt.Errorf("code: create stderr pipe: %w", err)
-	}
-
 	var tree processTree
 	var treeReady atomic.Bool
 	var closeTreeOnce sync.Once
@@ -479,19 +470,8 @@ func (p *localProvider) exec(ctx context.Context, code, cwd, workspaceRoot strin
 
 	stdoutCapture := &boundedCapture{limit: maxOut}
 	stderrCapture := &boundedCapture{limit: maxOut}
-	stdoutDone := make(chan error, 1)
-	stderrDone := make(chan error, 1)
-	startCapture := func() {
-		go func() {
-			_, copyErr := io.Copy(stdoutCapture, stdoutPipe)
-			stdoutDone <- copyErr
-		}()
-		go func() {
-			_, copyErr := io.Copy(stderrCapture, stderrPipe)
-			stderrDone <- copyErr
-		}()
-	}
-
+	cmd.Stdout = stdoutCapture
+	cmd.Stderr = stderrCapture
 	start := time.Now()
 	// Start and publication are serialized with Close. This prevents Close
 	// from returning while a checked-but-not-yet-started command escapes the
@@ -522,13 +502,10 @@ func (p *localProvider) exec(ctx context.Context, code, cwd, workspaceRoot strin
 		}
 		return Result{Duration: runDuration(start)}, fmt.Errorf("code: start: %w", err)
 	}
-	// Start draining before attaching the tree. This keeps cleanup bounded even
-	// if tree setup fails after a child has already begun writing.
-	startCapture()
 	// Full-access runs receive zero resource limits above, so this stays zero
 	// there. Controlled modes get an explicit kernel-enforced concurrent
 	// process ceiling on Windows; POSIX shells inherit the ulimit spelling.
-	tree, err = attachProcessTree(cmd, processTreeLimits{
+	tree, err := attachProcessTree(cmd, processTreeLimits{
 		maxProcesses: limits.processes,
 		memoryBytes:  limits.memoryBytes,
 	})
@@ -536,8 +513,6 @@ func (p *localProvider) exec(ctx context.Context, code, cwd, workspaceRoot strin
 		p.mu.Unlock()
 		_ = cmd.Cancel()
 		_ = cmd.Wait()
-		<-stdoutDone
-		<-stderrDone
 		return Result{Duration: runDuration(start)}, fmt.Errorf("code: attach process tree: %w", err)
 	}
 	treeReady.Store(true)
@@ -554,8 +529,6 @@ func (p *localProvider) exec(ctx context.Context, code, cwd, workspaceRoot strin
 		p.mu.Unlock()
 	}()
 	waitErr := cmd.Wait()
-	stdoutCopyErr := <-stdoutDone
-	stderrCopyErr := <-stderrDone
 	duration := runDuration(start)
 
 	timedOut := runCtx.Err() == context.DeadlineExceeded
@@ -565,16 +538,6 @@ func (p *localProvider) exec(ctx context.Context, code, cwd, workspaceRoot strin
 		if err := aclRun.close(); err != nil {
 			return Result{Duration: duration, TimedOut: timedOut}, fmt.Errorf("code: cleanup Windows ACL sandbox: %w", err)
 		}
-	}
-	// os/exec closes StdoutPipe as part of Wait. On Windows a copy goroutine
-	// that was already draining the fully-settled stream can observe that
-	// close as "file already closed" even though the command exited normally;
-	// do not turn that ordinary reap race into a transport failure.
-	if stdoutCopyErr != nil && !expectedPipeClose(stdoutCopyErr) && ctx.Err() == nil && runCtx.Err() == nil {
-		return Result{Duration: duration, TimedOut: timedOut}, fmt.Errorf("code: read stdout: %w", stdoutCopyErr)
-	}
-	if stderrCopyErr != nil && !expectedPipeClose(stderrCopyErr) && ctx.Err() == nil && runCtx.Err() == nil {
-		return Result{Duration: duration, TimedOut: timedOut}, fmt.Errorf("code: read stderr: %w", stderrCopyErr)
 	}
 	// Every subprocess result crosses the model/session boundary as UTF-8. On
 	// Windows shellCommand selects code page 65001; this final guard also keeps

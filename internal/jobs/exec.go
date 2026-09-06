@@ -78,34 +78,17 @@ func runCommandLine(command, workdir string) func(ctx context.Context) (JobOutco
 func runCommandLineBounded(command, workdir string) func(ctx context.Context) (JobOutcome, error) {
 	return func(ctx context.Context) (JobOutcome, error) {
 		cmd := newShellCommand(command, workdir, scrubbedEnv())
-		stdout, err := cmd.StdoutPipe()
-		if err != nil {
-			return JobOutcome{}, fmt.Errorf("job: create stdout pipe: %w", err)
-		}
-		stderr, err := cmd.StderrPipe()
-		if err != nil {
-			return JobOutcome{}, fmt.Errorf("job: create stderr pipe: %w", err)
-		}
+		capture := &boundedOutput{limit: defaultJobOutputLimit}
+		cmd.Stdout = capture
+		cmd.Stderr = capture
 		if err := cmd.Start(); err != nil {
 			return JobOutcome{}, fmt.Errorf("job: start: %w", err)
 		}
 		attachJobProcessGroup(cmd)
 		defer releaseJobProcessGroup(cmd)
-		capture := &boundedOutput{limit: defaultJobOutputLimit}
-		copyDone := make(chan error, 2)
-		go func() { _, copyErr := io.Copy(capture, stdout); copyDone <- copyErr }()
-		go func() { _, copyErr := io.Copy(capture, stderr); copyDone <- copyErr }()
 		stop := monitorContext(ctx, cmd)
 		waitErr := cmd.Wait()
 		stop()
-		copyErr1 := <-copyDone
-		copyErr2 := <-copyDone
-		if copyErr1 != nil && ctx.Err() == nil {
-			return JobOutcome{}, fmt.Errorf("job: read stdout: %w", copyErr1)
-		}
-		if copyErr2 != nil && ctx.Err() == nil {
-			return JobOutcome{}, fmt.Errorf("job: read stderr: %w", copyErr2)
-		}
 		out := []byte(strings.ToValidUTF8(capture.String(), "?"))
 		if capture.truncated {
 			out = append(out, []byte("\n[output truncated]")...)

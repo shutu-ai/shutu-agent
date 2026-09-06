@@ -72,19 +72,11 @@ func TestExternalACPProcessDisconnectCleansEstablishedSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	stderr, err := command.StderrPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
+	var stderrBuffer bytes.Buffer
+	command.Stderr = &stderrBuffer
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
-	stderrDone := make(chan struct{})
-	var stderrBytes []byte
-	go func() {
-		stderrBytes, _ = io.ReadAll(stderr)
-		close(stderrDone)
-	}()
 	defer func() {
 		_ = stdin.Close()
 		_ = command.Process.Kill()
@@ -135,8 +127,7 @@ func TestExternalACPProcessDisconnectCleansEstablishedSession(t *testing.T) {
 	if err := command.Wait(); err != nil {
 		t.Fatalf("child ACP process exit = %v", err)
 	}
-	<-stderrDone
-	stderrText := string(stderrBytes)
+	stderrText := stderrBuffer.String()
 	if !strings.Contains(stderrText, "ACP_EXTERNAL_CANCELLED") || !strings.Contains(stderrText, "ACP_EXTERNAL_CLOSED") {
 		t.Fatalf("child cleanup markers = %q", stderrText)
 	}

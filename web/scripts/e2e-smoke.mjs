@@ -551,6 +551,7 @@ async function runDesktop(browser) {
   assert.ok(sockets.has('/api/events.host'), 'native host WebSocket was not opened')
 
   const settingsButton = page.getByRole('button', { name: '设置', exact: true })
+  await settingsButton.waitFor()
   await settingsButton.focus()
   await settingsButton.click()
   const settings = page.getByRole('dialog')
