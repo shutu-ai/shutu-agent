@@ -547,6 +547,7 @@ func TestSessionAgentMemoRetriesTransientLogFailures(t *testing.T) {
 
 type sessionOwnedLLM struct {
 	sessionID string
+	mu        sync.Mutex
 	requests  []llm.ChatRequest
 }
 
@@ -554,7 +555,9 @@ func (l *sessionOwnedLLM) ID() string      { return "session-owned" }
 func (l *sessionOwnedLLM) Available() bool { return true }
 
 func (l *sessionOwnedLLM) Stream(_ context.Context, req llm.ChatRequest) (llm.StreamReader, error) {
+	l.mu.Lock()
 	l.requests = append(l.requests, req)
+	l.mu.Unlock()
 	text := "answer:" + l.sessionID
 	if len(req.Messages) > 1 {
 		text = "answer:" + req.Messages[1].Text()
