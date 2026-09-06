@@ -528,6 +528,10 @@ async function waitForCondition(check, timeoutMs = 15_000) {
   throw new Error('timed out waiting for native fixture condition')
 }
 
+async function newPage(browser, options = {}) {
+  return browser.newPage({ locale: 'zh-CN', ...options })
+}
+
 async function waitForNativeShell(page, allowLoaded = false) {
   await page.locator('button').first().waitFor()
   assert.match(await page.title(), /SHUTU-AI|DSH Local Build/)
@@ -539,7 +543,7 @@ async function waitForNativeShell(page, allowLoaded = false) {
 }
 
 async function runDesktop(browser) {
-  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+  const page = await newPage(browser, { viewport: { width: 1280, height: 900 } })
   const issues = []
   page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
   page.on('pageerror', error => issues.push(error.message))
@@ -582,7 +586,7 @@ async function runDesktop(browser) {
 }
 
 async function runDarkDesktop(browser) {
-  const page = await browser.newPage({ viewport: { width: 1280, height: 900 }, colorScheme: 'dark' })
+  const page = await newPage(browser, { viewport: { width: 1280, height: 900 }, colorScheme: 'dark' })
   const issues = []
   page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
   page.on('pageerror', error => issues.push(error.message))
@@ -601,7 +605,7 @@ async function runDarkDesktop(browser) {
 }
 
 async function runReconnectDesktop(browser) {
-  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+  const page = await newPage(browser, { viewport: { width: 1280, height: 900 } })
   const issues = []
   page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
   page.on('pageerror', error => issues.push(error.message))
@@ -621,7 +625,7 @@ async function runReconnectDesktop(browser) {
 }
 
 async function runLoadingDesktop(browser) {
-  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+  const page = await newPage(browser, { viewport: { width: 1280, height: 900 } })
   const issues = []
   page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
   page.on('pageerror', error => issues.push(error.message))
@@ -639,7 +643,7 @@ async function runLoadingDesktop(browser) {
 async function runErrorStateMatrix(browser) {
   const results = []
   for (const viewport of [{ width: 1280, height: 900, name: 'desktop' }, { width: 390, height: 844, name: 'mobile' }]) {
-    const page = await browser.newPage({ viewport: { width: viewport.width, height: viewport.height } })
+    const page = await newPage(browser, { viewport: { width: viewport.width, height: viewport.height } })
     const issues = []
     page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
     page.on('pageerror', error => issues.push(error.message))
@@ -671,7 +675,7 @@ async function runErrorStateMatrix(browser) {
 async function runVisualGeometryMatrix(browser) {
   const results = []
   for (const viewport of [{ width: 1280, height: 900, name: 'desktop' }, { width: 390, height: 844, name: 'mobile' }]) {
-    const page = await browser.newPage({ viewport: { width: viewport.width, height: viewport.height } })
+    const page = await newPage(browser, { viewport: { width: viewport.width, height: viewport.height } })
     const issues = []
     page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
     page.on('pageerror', error => issues.push(error.message))
@@ -747,7 +751,7 @@ async function runVisualGeometryMatrix(browser) {
 async function runVisualGeometryMatrixStable(browser) {
   const results = []
   for (const viewport of [{ width: 1280, height: 900, name: 'desktop' }, { width: 390, height: 844, name: 'mobile' }]) {
-    const page = await browser.newPage({ viewport: { width: viewport.width, height: viewport.height } })
+    const page = await newPage(browser, { viewport: { width: viewport.width, height: viewport.height } })
     const issues = []
     page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
     page.on('pageerror', error => issues.push(error.message))
@@ -794,7 +798,7 @@ async function runVisualGeometryMatrixStable(browser) {
 async function runAccessibilityMatrix(browser) {
   const results = []
   for (const viewport of [{ width: 1280, height: 900, name: 'desktop' }, { width: 390, height: 844, name: 'mobile' }]) {
-    const page = await browser.newPage({ viewport: { width: viewport.width, height: viewport.height } })
+    const page = await newPage(browser, { viewport: { width: viewport.width, height: viewport.height } })
     const issues = []
     page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
     page.on('pageerror', error => issues.push(error.message))
@@ -886,7 +890,7 @@ async function runCrossBrowserAccessibilityMatrix() {
 }
 
 async function runCapabilityMatrix(browser) {
-  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+  const page = await newPage(browser, { viewport: { width: 1280, height: 900 } })
   const issues = []
   page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
   page.on('pageerror', error => issues.push(error.message))
@@ -919,7 +923,7 @@ async function runCapabilityMatrix(browser) {
 }
 
 async function runExtendedCapabilityMatrix(browser) {
-  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+  const page = await newPage(browser, { viewport: { width: 1280, height: 900 } })
   const issues = []
   page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
   page.on('pageerror', error => issues.push(error.message))
@@ -1012,7 +1016,7 @@ async function runExtendedCapabilityMatrix(browser) {
   await page.keyboard.press('Escape')
 
   // Historical image content loads through the session-authorized attachment RPC.
-  const imagePage = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+  const imagePage = await newPage(browser, { viewport: { width: 1280, height: 900 } })
   const imageIssues = []
   imagePage.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') imageIssues.push(message.text()) })
   imagePage.on('pageerror', error => imageIssues.push(error.message))
@@ -1039,7 +1043,7 @@ async function runExtendedCapabilityMatrix(browser) {
 }
 
 async function runSearchErrorRecovery(browser) {
-  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+  const page = await newPage(browser, { viewport: { width: 1280, height: 900 } })
   const issues = []
   page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
   page.on('pageerror', error => issues.push(error.message))
@@ -1065,7 +1069,7 @@ async function runSearchErrorRecovery(browser) {
 }
 
 async function runUngroupedNewSession(browser) {
-  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+  const page = await newPage(browser, { viewport: { width: 1280, height: 900 } })
   const issues = []
   page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
   page.on('pageerror', error => issues.push(error.message))
@@ -1086,7 +1090,7 @@ async function runUngroupedNewSession(browser) {
 }
 
 async function runSessionLifecycle(browser) {
-  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+  const page = await newPage(browser, { viewport: { width: 1280, height: 900 } })
   const issues = []
   page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
   page.on('pageerror', error => issues.push(error.message))
@@ -1143,7 +1147,7 @@ async function runSessionLifecycle(browser) {
 }
 
 async function runInteractionControls(browser) {
-  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+  const page = await newPage(browser, { viewport: { width: 1280, height: 900 } })
   const issues = []
   page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
   page.on('pageerror', error => issues.push(error.message))
@@ -1181,7 +1185,7 @@ async function runInteractionControls(browser) {
 }
 
 async function runQueueControls(browser) {
-  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+  const page = await newPage(browser, { viewport: { width: 1280, height: 900 } })
   const issues = []
   page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
   page.on('pageerror', error => issues.push(error.message))
@@ -1237,7 +1241,7 @@ async function runQueueControls(browser) {
 }
 
 async function runCancelPlanGoalControls(browser) {
-  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+  const page = await newPage(browser, { viewport: { width: 1280, height: 900 } })
   const issues = []
   page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
   page.on('pageerror', error => issues.push(error.message))
@@ -1296,7 +1300,7 @@ async function runCancelPlanGoalControls(browser) {
 }
 
 async function runRetryControls(browser) {
-  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } })
+  const page = await newPage(browser, { viewport: { width: 1280, height: 900 } })
   const issues = []
   page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
   page.on('pageerror', error => issues.push(error.message))
@@ -1334,7 +1338,7 @@ function goalStateForFixture() {
 }
 
 async function runMobile(browser) {
-  const page = await browser.newPage({ viewport: { width: 390, height: 844 } })
+  const page = await newPage(browser, { viewport: { width: 390, height: 844 } })
   const issues = []
   page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
   page.on('pageerror', error => issues.push(error.message))
@@ -1368,7 +1372,7 @@ async function runPixelCapture(browser) {
     { name: 'dark-desktop', viewport: { width: 1280, height: 900 }, colorScheme: 'dark' },
     { name: 'light-mobile', viewport: { width: 390, height: 844 } },
   ]) {
-    const page = await browser.newPage({ viewport: variant.viewport, ...(variant.colorScheme === undefined ? {} : { colorScheme: variant.colorScheme }) })
+    const page = await newPage(browser, { viewport: variant.viewport, ...(variant.colorScheme === undefined ? {} : { colorScheme: variant.colorScheme }) })
     const issues = []
     page.on('console', message => { if (message.type() === 'error' || message.type() === 'warning') issues.push(message.text()) })
     page.on('pageerror', error => issues.push(error.message))

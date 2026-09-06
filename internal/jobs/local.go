@@ -451,13 +451,10 @@ func (l *Local) Kill(ctx context.Context, id, callerSession, reason string) (str
 	cancelJob()
 
 	l.mu.Lock()
-	if isTerminal(rec.status) {
+	if !isTerminal(rec.status) {
+		rec.status = StatusStopping
 		rec.reported = true
-		l.mu.Unlock()
-		return "already-finished", nil
 	}
-	rec.status = StatusStopping
-	rec.reported = true
 	l.mu.Unlock()
 	return "requested", nil
 }
