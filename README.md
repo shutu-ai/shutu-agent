@@ -24,6 +24,11 @@ docs/          设计基线、等价任务、部署和验收记录
 scripts/       发布包、部署 smoke 与验收工具
 ```
 
+## License
+
+Apache-2.0，详见 [LICENSE](LICENSE)。DeepSeek Harness 相关来源与必需归属见
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
 项目是独立构建的。`.reference/dsh` 只作为可选的本地只读参考，不进入 Go module、前端依赖或发布运行时。vendored 前端来源与授权信息见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ## 环境要求
