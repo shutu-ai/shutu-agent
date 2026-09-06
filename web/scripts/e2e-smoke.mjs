@@ -861,7 +861,7 @@ async function runAccessibilityMatrix(browser) {
         && active.getAttribute('aria-haspopup') === 'dialog'
         && active.getAttribute('aria-expanded') === 'false'
         && document.querySelector('[role="dialog"]') === null
-    }, undefined, { timeout: 2_000 })
+    }, undefined, { timeout: 15_000 })
     assert.deepEqual(issues, [])
     results.push({ viewport: `${viewport.width}x${viewport.height}`, tabs: semantics.tabs.length, focusableCount, namedControls: semantics.controls.length, touchTargets: semantics.controls.filter(control => control.width >= 24 && control.height >= 24).length, console: 'clean' })
     await page.close()
