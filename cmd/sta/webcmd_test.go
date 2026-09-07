@@ -99,7 +99,7 @@ func TestWebCommandGoal(t *testing.T) {
 }
 
 func TestNativeCommandManagerReturnsCommittedWebLifecycleResult(t *testing.T) {
-	a := makePlanApp(false)
+	a := makeNativeTurnApp(t, "s-command-manager")
 	manager := nativeCommandManager{app: a}
 	execution, matched, err := manager.Execute(context.Background(), a.currentID, "/help", nil)
 	if err != nil || !matched {
@@ -322,9 +322,8 @@ func TestWebCommandPlanModeMatchesDSH(t *testing.T) {
 
 func TestWebMessagePlanModeSubmitsOnlySuffix(t *testing.T) {
 	llm := &turnLLM{}
-	a := makeTurnApp()
+	a := makeNativeTurnApp(t, "s-plan-turn")
 	a.llm = llm
-	a.currentID = "s-plan-turn"
 	if err := a.webMessage(context.Background(), "s-plan-turn", "/plan design the change", nil, webserver.PromptMeta{}); err != nil {
 		t.Fatalf("webMessage /plan: %v", err)
 	}
@@ -517,9 +516,8 @@ func TestWebCommandUnknown(t *testing.T) {
 // webCommand without entering model history or starting an LLM turn.
 func TestWebMessageSlashRouting(t *testing.T) {
 	llm := &turnLLM{}
-	a := makeTurnApp()
+	a := makeNativeTurnApp(t, "s-a")
 	a.llm = llm
-	a.currentID = "s-a"
 	if err := a.webMessage(context.Background(), "s-a", "/help", nil, webserver.PromptMeta{}); err != nil {
 		t.Fatalf("webMessage: %v", err)
 	}

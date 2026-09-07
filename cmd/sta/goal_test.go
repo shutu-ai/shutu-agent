@@ -8,6 +8,7 @@ import (
 	"github.com/shutu-ai/shutu-agent/internal/config"
 	"github.com/shutu-ai/shutu-agent/internal/llm"
 	"github.com/shutu-ai/shutu-agent/internal/plan"
+	"github.com/shutu-ai/shutu-agent/internal/runtimectx"
 	"github.com/shutu-ai/shutu-agent/internal/session"
 )
 
@@ -59,6 +60,7 @@ func TestRunIdleGoalContinuesAfterOuterTurnWithoutRecursion(t *testing.T) {
 	}
 	defer a.plans.Close()
 	a.currentID = "session-goal"
+	installNativeRuntime(t, a, a.currentID)
 	a.prompt = makeTurnApp().prompt
 	goal, err := a.plans.CreateGoal(context.Background(), "Ship", "ship the agent")
 	if err != nil {
@@ -72,7 +74,12 @@ func TestRunIdleGoalContinuesAfterOuterTurnWithoutRecursion(t *testing.T) {
 	if err := a.runIdleGoal(context.Background(), false); err != nil {
 		t.Fatalf("runIdleGoal: %v", err)
 	}
-	goals, err := a.plans.List(context.Background())
+	goalCtx := runtimectx.With(context.Background(), runtimectx.Runtime{SessionID: a.currentID})
+	goalEngine, err := a.planEngineFor(goalCtx)
+	if err != nil {
+		t.Fatalf("planEngineFor: %v", err)
+	}
+	goals, err := goalEngine.List(goalCtx)
 	if err != nil {
 		t.Fatalf("list goals: %v", err)
 	}

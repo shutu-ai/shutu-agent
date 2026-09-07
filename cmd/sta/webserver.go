@@ -754,11 +754,10 @@ func (a *app) drainWebQueue(sessionID string) {
 	}()
 }
 
-// webMessage handles one web chat message for a session (ADR D-WEB2-A): when
-// the target session differs from the current one it is resumed first (attachSink
-// already rebinds to the new session), then the turn runs under the global serial
-// lock with a silent loop (chunks already persist; the SSE event stream renders
-// the flow). P5: an images list logs a user/message event carrying the image
+// webMessage handles one web chat message for a native Agent session (ADR
+// D-WEB2-A). The addressed Agent owns the runtime and the turn runs under a
+// per-session lock with a silent loop (chunks already persist; the SSE event
+// stream renders the flow). P5: an images list logs a user/message event carrying the image
 // blocks first (only the refs — the bytes live in the attachment store, same
 // path as /attach, D4: the loop is untouched), then the text turn runs.
 func (a *app) webMessage(ctx context.Context, sessionID, text string, images []llm.ImageRef, meta webserver.PromptMeta) error {
@@ -766,31 +765,26 @@ func (a *app) webMessage(ctx context.Context, sessionID, text string, images []l
 }
 
 // webMessageWithContent lets the queue replay the exact ordered prompt
-// admission while legacy callers keep the text/image convenience contract.
+// admission while callers keep the text/image convenience contract.
 func (a *app) webMessageWithContent(ctx context.Context, sessionID, text string, images []llm.ImageRef, queuedContent []llm.ContentBlock, meta webserver.PromptMeta) error {
 	if strings.TrimSpace(text) == "" && len(images) == 0 {
 		return errors.New("empty message text")
 	}
+	if a.agentRegistry == nil {
+		return errors.New("agent runtime is unavailable")
+	}
 	defer a.drainWebQueue(sessionID)
-	// Agent-backed sessions already own independent loop/runtime state. Keep
-	// their command and ordinary-message paths serialized only within the
-	// addressed session; using the process-global legacy turn lock here would make two
-	// browser conversations contend for one another's turn boundary.
-	if a.agentRegistry != nil && sessionID != "" {
+	// Keep command and ordinary-message paths serialized only within the
+	// addressed session; browser conversations must not contend for one another's
+	// turn boundary.
+	if sessionID != "" {
 		unlock := a.lockWebSession(sessionID)
 		defer unlock()
 	}
 	// Sensitive-tool approvals raised during a Web turn are resolved by the
 	// browser approval card, not by the REPL stdin prompt.
 	ctx = withWebApprovalContext(ctx)
-	// Agent-backed sessions are independent runtime objects. Only the legacy
-	// command path needs to activate the process-global compatibility session.
-	if a.agentRegistry == nil && sessionID != "" && sessionID != a.currentID {
-		if err := a.resumeSession(ctx, sessionID); err != nil {
-			return err
-		}
-	}
-	if a.agentRegistry != nil && sessionID != "" {
+	if sessionID != "" {
 		log, err := a.sessionLogForAgent(ctx, sessionID)
 		if err != nil {
 			return err
@@ -829,15 +823,7 @@ func (a *app) webMessageWithContent(ctx context.Context, sessionID, text string,
 			finishPlan := func(kind, result string) error {
 				return appendCommandDone(planLog, planID, kind, result)
 			}
-			var submit bool
-			var err error
-			if a.agentRegistry == nil {
-				a.sessionStateMu.Lock()
-				submit, err = a.webPlanCommandWithImages(ctx, strings.TrimSpace(trimmed[len("/plan"):]), images)
-				a.sessionStateMu.Unlock()
-			} else {
-				submit, err = a.webPlanCommandWithImages(ctx, strings.TrimSpace(trimmed[len("/plan"):]), images)
-			}
+			submit, err := a.webPlanCommandWithImages(ctx, strings.TrimSpace(trimmed[len("/plan"):]), images)
 			if err != nil {
 				_ = finishPlan("error", err.Error())
 				return err
@@ -860,14 +846,7 @@ func (a *app) webMessageWithContent(ctx context.Context, sessionID, text string,
 			}
 			return a.runIdleGoalFor(ctx, sessionID, a.webLog(ctx), false)
 		}
-		var err error
-		if a.agentRegistry == nil {
-			a.sessionStateMu.Lock()
-			err = a.webCommand(ctx, trimmed)
-			a.sessionStateMu.Unlock()
-		} else {
-			err = a.webCommand(ctx, trimmed)
-		}
+		err := a.webCommand(ctx, trimmed)
 		if err != nil {
 			return err
 		}
@@ -990,94 +969,6 @@ func (a *app) lockWebSession(sessionID string) func() {
 	a.webSessionMu.Unlock()
 	lock.Lock()
 	return lock.Unlock
-}
-
-// webCommand handles a leading "/" in a web composer message (dsh 斜杠命令
-// 对齐, ①③⑤): it appends the command as a user/message, dispatches it, and
-// appends the result as an assistant/message so the web chat renders the whole
-// exchange without an LLM turn. The events flow through the same event hub as
-// a turn, so the SSE stream renders them. Session-switching commands (/new,
-// /resume) are deliberately not routed here — the sidebar and the composer "+"
-// menu already drive them through the session manager.
-func (a *app) webCommandLegacy(ctx context.Context, line string) (err error) {
-	// Keep the historical entry point on the canonical command lifecycle. The
-	// old implementation below is retained only for source compatibility and
-	// must never execute because it predates the command result contract.
-	if a != nil {
-		return a.webCommand(ctx, line)
-	}
-
-	log := a.webLog(ctx)
-	if log == nil {
-		return errors.New("no active session")
-	}
-	fields := strings.Fields(line)
-	if len(fields) == 0 {
-		return errors.New("empty command")
-	}
-	name := fields[0]
-	args := fields[1:]
-	commandID := ""
-	commandKind := "success"
-	commandText := ""
-	if isWebCommandName(strings.TrimPrefix(name, "/")) {
-		commandID, err = appendCommandRun(log, strings.TrimPrefix(name, "/"), commandArgs(line, name))
-		if err != nil {
-			return err
-		}
-		defer func() {
-			if err != nil {
-				commandKind = "error"
-				commandText = err.Error()
-			}
-			if appendErr := appendCommandDone(log, commandID, commandKind, commandText); err == nil && appendErr != nil {
-				err = appendErr
-			}
-		}()
-	}
-	if name == "/feedback" {
-		result, err := a.webFeedback(ctx, strings.TrimSpace(line[len(name):]))
-		if err != nil {
-			commandKind = "error"
-			commandText = err.Error()
-		} else {
-			commandText = result
-			result = "⚠ " + err.Error()
-		}
-		_, appendErr := log.Append(session.EventWebCommandResult, session.NewWebCommandResult(result, "feedback"))
-		if appendErr != nil {
-			return appendErr
-		}
-		return nil
-	}
-	if name == "/plan" {
-		_, err = a.webPlanCommand(ctx, strings.TrimSpace(line[len(name):]))
-		return err
-	}
-	if name == "/export" {
-		if len(args) > 0 {
-			commandKind = "error"
-			commandText = "The Web /export command does not accept a path."
-			return a.appendWebCommandResultOn(log, "The Web /export command does not accept a path.")
-		}
-		commandText = "Session log download requested."
-		return a.appendWebCommandResultOn(log, "Session log download requested.", "export")
-	}
-	if _, err := log.Append(session.EventUserMessage, session.NewUserMessage(line)); err != nil {
-		return err
-	}
-	result, err := a.execWebCommand(ctx, name, args)
-	if err != nil {
-		commandKind = "error"
-		commandText = err.Error()
-	} else {
-		commandText = result
-		result = "⚠ " + err.Error()
-	}
-	if _, err := log.Append(session.EventAssistantMessage, session.NewAssistantMessage(result, nil, "stop")); err != nil {
-		return err
-	}
-	return nil
 }
 
 // execWebCommand dispatches a single web slash command and returns its UI
@@ -1766,36 +1657,20 @@ func (a *app) webPlanGoal(ctx context.Context, args []string) (string, error) {
 	return res.Output, nil
 }
 
-// webSessionManager implements the session new/resume API (ADR D-WEB2-C),
-// reusing the REPL's newSession/resumeSession.
+// webSessionManager implements the native Agent-backed session new/resume API
+// (ADR D-WEB2-C).
 func (a *app) webSessionManager(ctx context.Context, action, id string) (string, error) {
-	// Agent-backed web sessions are independent runtime objects. Do not reuse
-	// the REPL's currentID/log switch, otherwise two browser tabs can redirect
-	// each other's command fallbacks and workspace selection.
-	if a.agentRegistry != nil {
-		switch action {
-		case "new":
-			return a.newAgentSession(ctx)
-		case "resume":
-			if err := a.resumeAgentSession(ctx, id); err != nil {
-				return "", err
-			}
-			return id, nil
-		default:
-			return "", fmt.Errorf("unknown session action %q", action)
-		}
+	if a.agentRegistry == nil {
+		return "", errors.New("agent runtime is unavailable")
 	}
 	switch action {
 	case "new":
-		if err := a.newSession(ctx); err != nil {
-			return "", err
-		}
-		return a.currentID, nil
+		return a.newAgentSession(ctx)
 	case "resume":
-		if err := a.resumeSession(ctx, id); err != nil {
+		if err := a.resumeAgentSession(ctx, id); err != nil {
 			return "", err
 		}
-		return a.currentID, nil
+		return id, nil
 	default:
 		return "", fmt.Errorf("unknown session action %q", action)
 	}

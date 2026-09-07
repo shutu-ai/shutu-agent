@@ -251,16 +251,15 @@ func main() {
 		hub: NewEventHub(),
 		// baseCtx = the process-lifetime signal ctx (see the field comment): the
 		// persist sink and the web-only block live as long as the process.
-		baseCtx:            ctx,
-		agentRegistry:      agent.NewRegistry(),
-		strictAgentRuntime: true,
-		pluginRegistry:     plugin.NewRegistryWithTools(nil, reg),
-		sessionAgents:      make(map[string]*agent.Handle),
-		jobTraceSpans:      make(map[string]*observability.Span),
-		usageMeter:         meter.New(),
-		metrics:            observability.New(),
-		tracer:             observability.NewTracer(4096),
-		telemetry:          telemetry,
+		baseCtx:        ctx,
+		agentRegistry:  agent.NewRegistry(),
+		pluginRegistry: plugin.NewRegistryWithTools(nil, reg),
+		sessionAgents:  make(map[string]*agent.Handle),
+		jobTraceSpans:  make(map[string]*observability.Span),
+		usageMeter:     meter.New(),
+		metrics:        observability.New(),
+		tracer:         observability.NewTracer(4096),
+		telemetry:      telemetry,
 	}
 	if telemetry != nil {
 		if err := shutdown.Register("telemetry", func() error {
@@ -735,9 +734,15 @@ func main() {
 	if app.webserver != nil {
 		registerShutdown("webserver", app.webserver.Close)
 	}
-	if err := app.startup(ctx); err != nil {
-		fmt.Fprintln(os.Stderr, "sta:", err)
-		os.Exit(1)
+	// The native web client owns first-session creation. In web-only mode the
+	// legacy REPL startup session would be a blank persistence row without a
+	// native Agent handle, so let the client create the real Ungrouped session
+	// through session.create instead.
+	if !*webOnly {
+		if err := app.startup(ctx); err != nil {
+			fmt.Fprintln(os.Stderr, "sta:", err)
+			os.Exit(1)
+		}
 	}
 	app.startGoalScheduler(ctx)
 	registerShutdown("goal-schedulers", func() error { app.closeGoalSchedulers(); return nil })
@@ -930,11 +935,9 @@ type app struct {
 	// transcript.
 	interactionResolveMu sync.Mutex
 	// agentRegistry owns the long-lived root Agent handles used by the native
-	// and ACP bridges. Production composition sets strictAgentRuntime, so a
-	// missing registry is fail-closed; lightweight compatibility/test apps may
-	// leave both unset and use the legacy direct path.
-	agentRegistry      *agent.Registry
-	strictAgentRuntime bool
+	// and ACP bridges. A missing registry is a composition error and fails
+	// closed; all production turns must use an addressed Agent handle.
+	agentRegistry *agent.Registry
 	// pluginRegistry owns plugin generations and generation-guarded tool
 	// publication into reg. It is created for every production composition so
 	// optional plugin hosts cannot bypass canonical ownership metadata.
@@ -1790,10 +1793,7 @@ func (a *app) runTurnForWithMeta(ctx context.Context, sessionID, text string, in
 		return err
 	}
 	if a.agentRegistry == nil {
-		if a.strictAgentRuntime || a.reg == nil || a.log == nil {
-			return errors.New("agent runtime is unavailable")
-		}
-		return a.runTurnForLegacy(ctx, sessionID, text, interactive)
+		return errors.New("agent runtime is unavailable")
 	}
 	handle, err := a.sessionAgent(sessionID)
 	if err != nil {
@@ -1821,10 +1821,7 @@ func (a *app) runTurnContentForWithMeta(ctx context.Context, sessionID string, c
 		return err
 	}
 	if a.agentRegistry == nil {
-		if a.strictAgentRuntime || a.reg == nil || a.log == nil {
-			return errors.New("agent runtime is unavailable")
-		}
-		return a.runTurnContentForLegacy(ctx, sessionID, content, interactive, meta)
+		return errors.New("agent runtime is unavailable")
 	}
 	handle, err := a.sessionAgent(sessionID)
 	if err != nil {
@@ -1841,50 +1838,6 @@ func (a *app) runTurnContentForWithMeta(ctx context.Context, sessionID string, c
 		metadata["interactive"] = "true"
 	}
 	return handle.RunContent(ctx, content, metadata)
-}
-
-// runTurnForLegacy is retained only for small compatibility hosts and tests
-// that intentionally do not compose the Agent registry. The production app
-// sets strictAgentRuntime and never reaches this process-global path.
-func (a *app) runTurnForLegacy(ctx context.Context, sessionID, text string, interactive bool) error {
-	a.sessionStateMu.Lock()
-	defer a.sessionStateMu.Unlock()
-	if sessionID != "" && sessionID != a.currentID {
-		if err := a.resumeSession(ctx, sessionID); err != nil {
-			return err
-		}
-	}
-	activeID := a.currentID
-	defer a.runningSession.Store("")
-	a.runningSession.Store(activeID)
-	rt, restore, err := a.applySessionRuntimeE(activeID)
-	if err != nil {
-		return err
-	}
-	defer restore()
-	return a.newLoopFor(rt, interactive).Run(ctx, text)
-}
-
-func (a *app) runTurnContentForLegacy(ctx context.Context, sessionID string, content []llm.ContentBlock, interactive bool, meta webserver.PromptMeta) error {
-	a.sessionStateMu.Lock()
-	defer a.sessionStateMu.Unlock()
-	if sessionID != "" && sessionID != a.currentID {
-		if err := a.resumeSession(ctx, sessionID); err != nil {
-			return err
-		}
-	}
-	activeID := a.currentID
-	defer a.runningSession.Store("")
-	a.runningSession.Store(activeID)
-	rt, restore, err := a.applySessionRuntimeE(activeID)
-	if err != nil {
-		return err
-	}
-	defer restore()
-	message := llm.Message{Role: llm.RoleUser, Content: append([]llm.ContentBlock(nil), content...)}
-	message.SourceRPCID = meta.RPCID
-	message.SourceClientTimeZone = meta.ClientTimeZone
-	return a.newLoopFor(rt, interactive).RunMessages(ctx, []llm.Message{message})
 }
 
 // repl drives turns from stdin, handling the session commands.

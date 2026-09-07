@@ -34,8 +34,7 @@ func TestNativeFeedbackCommandPersistsWithoutModelHistory(t *testing.T) {
 }
 
 func TestNativePlanCommandUsesSuffixAsTheTurn(t *testing.T) {
-	a := makeTurnApp()
-	a.currentID = "native-plan"
+	a := makeNativeTurnApp(t, "native-plan")
 
 	if err := a.command(context.Background(), "/plan design the change"); err != nil {
 		t.Fatalf("command: %v", err)

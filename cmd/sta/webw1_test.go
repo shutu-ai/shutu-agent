@@ -10,7 +10,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -105,43 +104,55 @@ func makeTurnApp() *app {
 	}
 }
 
-// TestRunTurnSerial verifies D5 (M10 W1): concurrent runTurn calls share the
-// global turnMu, so at most one loop Run (one LLM Stream) is in flight at any
-// moment and every message still produces its own turn's events.
-func TestRunTurnSerial(t *testing.T) {
-	llm := &turnLLM{}
+// installNativeRuntime gives a focused test app the same addressed Agent
+// runtime used by production Web/CLI turns. It replaces the removed global
+// direct-loop compatibility path in lightweight test fixtures.
+func installNativeRuntime(t *testing.T, a *app, sessionID string) {
+	t.Helper()
+	ctx := context.Background()
+	if a.store == nil {
+		st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "native-turn.db"))
+		if err != nil {
+			t.Fatalf("open native test store: %v", err)
+		}
+		a.store = st
+		t.Cleanup(func() { _ = st.Close() })
+	}
+	if _, err := a.store.GetSessionMeta(ctx, sessionID); errors.Is(err, store.ErrNotFound) {
+		if err := a.store.CreateSession(ctx, sessionID, time.Now().UTC()); err != nil {
+			t.Fatalf("create native test session: %v", err)
+		}
+	} else if err != nil {
+		t.Fatalf("get native test session: %v", err)
+	}
+	a.baseCtx = ctx
+	if a.hub == nil {
+		a.hub = NewEventHub()
+	}
+	a.agentRegistry = agent.NewRegistry()
+	a.sessionAgents = make(map[string]*agent.Handle)
+	a.runtimeMu.Lock()
+	if a.runtimeLogs == nil {
+		a.runtimeLogs = make(map[string]*session.Log)
+	}
+	a.runtimeLogs[sessionID] = a.log
+	a.runtimeMu.Unlock()
+	a.currentID = sessionID
+	a.attachSink(ctx)
+	t.Cleanup(func() { _ = a.agentRegistry.CloseAll() })
+}
+
+func makeNativeTurnApp(t *testing.T, sessionID string) *app {
+	t.Helper()
 	a := makeTurnApp()
-	a.cfg.AgentInstructions.Enabled = config.Bool(false)
-	a.llm = llm
-	var wg sync.WaitGroup
-	for i := 0; i < 5; i++ {
-		wg.Add(1)
-		go func(n int) {
-			defer wg.Done()
-			if err := a.runTurn(context.Background(), fmt.Sprintf("msg-%d", n), false); err != nil {
-				t.Errorf("runTurn: %v", err)
-			}
-		}(i)
-	}
-	wg.Wait()
-	if llm.maxActive != 1 {
-		t.Fatalf("max concurrent LLM streams = %d, want 1 (turnMu must serialize)", llm.maxActive)
-	}
-	if llm.calls != 5 {
-		t.Fatalf("LLM calls = %d, want 5", llm.calls)
-	}
-	// DSH runtime-context semantics retain one visible producer snapshot for
-	// all five turns; 35 events cover the five canonical turns.
-	if n := len(a.log.Events()); n != 36 {
-		t.Fatalf("log events = %d, want 36", n)
-	}
+	installNativeRuntime(t, a, sessionID)
+	return a
 }
 
 // TestWebMessageRunsTurn verifies webMessage dispatches a turn on the current
 // session: the log gains user/message, assistant/chunk and assistant/message.
 func TestWebMessageRunsTurn(t *testing.T) {
-	a := makeTurnApp()
-	a.currentID = "s-a"
+	a := makeNativeTurnApp(t, "s-a")
 	if err := a.webMessage(context.Background(), "s-a", "hi", nil, webserver.PromptMeta{}); err != nil {
 		t.Fatalf("webMessage: %v", err)
 	}
@@ -153,14 +164,13 @@ func TestWebMessageRunsTurn(t *testing.T) {
 }
 
 func TestWebMessageRichPromptIsOneDurableSourceAttributedMessage(t *testing.T) {
-	a := makeTurnApp()
+	a := makeNativeTurnApp(t, "s-rich")
 	a.cfg.LLM.Multimodal.Enabled = config.Bool(true)
 	store, err := attachment.NewStore(filepath.Join(t.TempDir(), "attachments"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	a.attachStore = store
-	a.currentID = "s-rich"
 	image := llm.ImageRef{ID: "img-1", MediaType: "image/png", Bytes: 68}
 	meta := webserver.PromptMeta{RPCID: "rich-rpc", ClientTimeZone: "Asia/Shanghai"}
 	if err := a.webMessage(context.Background(), "s-rich", "describe this", []llm.ImageRef{image}, meta); err != nil {
@@ -204,10 +214,9 @@ func TestWebMessageRichPromptIsOneDurableSourceAttributedMessage(t *testing.T) {
 // only the explicit stop endpoint cancels its turn context.
 func TestWebMessageSurvivesRequestDisconnect(t *testing.T) {
 	model := &disconnectLLM{started: make(chan context.Context, 1), release: make(chan struct{})}
-	a := makeTurnApp()
+	a := makeNativeTurnApp(t, "s-a")
 	a.llm = model
 	a.baseCtx = context.Background()
-	a.currentID = "s-a"
 
 	requestCtx, disconnect := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
@@ -257,7 +266,7 @@ func TestWebMessageResumesOtherSession(t *testing.T) {
 	}
 	a := makeTurnApp()
 	a.store = st
-	a.currentID = "s-a"
+	installNativeRuntime(t, a, "s-a")
 	// Keep a.log consistent with currentID so the blank check (len(log)==0)
 	// reflects the session the user is leaving — the app invariant is that
 	// a.log always corresponds to a.currentID.
@@ -265,8 +274,8 @@ func TestWebMessageResumesOtherSession(t *testing.T) {
 	if err := a.webMessage(ctx, "s-other", "hi", nil, webserver.PromptMeta{}); err != nil {
 		t.Fatalf("webMessage: %v", err)
 	}
-	if a.currentID != "s-other" {
-		t.Fatalf("currentID = %q, want s-other (resumed)", a.currentID)
+	if a.currentID != "s-a" {
+		t.Fatalf("currentID = %q, want s-a (native Web must not switch CLI selection)", a.currentID)
 	}
 	events, err := st.LoadSession(ctx, "s-other")
 	if err != nil {
@@ -275,9 +284,10 @@ func TestWebMessageResumesOtherSession(t *testing.T) {
 	if len(events) == 0 {
 		t.Fatal("the resumed session must hold the turn's events")
 	}
-	// The blank source session was discarded on switch (dsh).
-	if _, err := st.LoadSession(ctx, "s-a"); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("s-a err = %v, want ErrNotFound (blank session discarded on switch)", err)
+	// Native Web sessions are independent; switching browser sessions must not
+	// prune or otherwise mutate the CLI's selected session.
+	if _, err := st.LoadSession(ctx, "s-a"); err != nil {
+		t.Fatalf("s-a err = %v, want the independent CLI session to remain", err)
 	}
 }
 
@@ -670,6 +680,7 @@ func TestWebSessionNewThenMessageAfterRequestCtxCancelled(t *testing.T) {
 	a := makeTurnApp()
 	a.store = st
 	a.baseCtx = context.Background() // the process-lifetime ctx (main sets it)
+	installNativeRuntime(t, a, "bootstrap")
 	a.currentID = ""
 
 	// Simulate POST /api/sessions: a request-scoped ctx that is cancelled when

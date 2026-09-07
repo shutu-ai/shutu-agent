@@ -73,7 +73,7 @@ func (a *app) webCommand(ctx context.Context, line string) (returnErr error) {
 	if name == "/plan" {
 		var submit bool
 		submit, returnErr = a.webPlanCommand(ctx, strings.TrimSpace(line[len(name):]))
-		if returnErr == nil && submit && a.agentRegistry != nil {
+		if returnErr == nil && submit {
 			returnErr = a.runTurnFor(ctx, a.runtimeSessionID(ctx), strings.TrimSpace(line[len(name):]), false)
 		}
 		return returnErr

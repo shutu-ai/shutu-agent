@@ -660,6 +660,10 @@ func TestWebMessageUserSkillRunsTurnAndInjectsBody(t *testing.T) {
 		{Kind: llm.StreamFinish, FinishReason: "stop"},
 	}}}
 	a.llm = model
+	installNativeRuntime(t, a, a.currentID)
+	a.titleMu.Lock()
+	a.titleDone = map[string]bool{a.currentID: true}
+	a.titleMu.Unlock()
 
 	if err := a.webMessage(context.Background(), a.currentID, "/review-bash inspect this", nil, webserver.PromptMeta{}); err != nil {
 		t.Fatalf("webMessage: %v", err)
