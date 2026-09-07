@@ -3024,14 +3024,20 @@ func OpenNativePath(ctx context.Context, path string) error {
 	if _, err := os.Stat(path); err != nil {
 		return err
 	}
+	// The native opener is handed off asynchronously. Once Start succeeds, the
+	// child must outlive the HTTP request that initiated it; CommandContext
+	// would kill it as soon as net/http cancels that request context.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "windows":
-		cmd = exec.CommandContext(ctx, "explorer.exe", path)
+		cmd = exec.Command("explorer.exe", path)
 	case "darwin":
-		cmd = exec.CommandContext(ctx, "open", path)
+		cmd = exec.Command("open", path)
 	default:
-		cmd = exec.CommandContext(ctx, "xdg-open", path)
+		cmd = exec.Command("xdg-open", path)
 	}
 	return cmd.Start()
 }
