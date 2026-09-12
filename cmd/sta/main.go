@@ -11,12 +11,14 @@ import (
 	"bufio"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -58,6 +60,7 @@ import (
 	"github.com/shutu-ai/shutu-agent/internal/timecontext"
 	"github.com/shutu-ai/shutu-agent/internal/tools"
 	"github.com/shutu-ai/shutu-agent/internal/web"
+	"github.com/shutu-ai/shutu-agent/internal/webinstance"
 	"github.com/shutu-ai/shutu-agent/internal/webserver"
 )
 
@@ -92,12 +95,55 @@ func main() {
 	}
 	cfg.WebServer.DistDir = resolveFrontendDist(*configPath, cfg.WebServer.DistDir)
 
+	// Reserve both the instance identity and the TCP address before opening the
+	// store or initializing any extension. File locks release when the process
+	// crashes; the listener is the final authority for configs that share an
+	// address but use different data directories.
+	var webOnlyLock *webinstance.Lock
+	var webOnlyListener net.Listener
+	webOnlyListenerOwned := false
+	if *webOnly {
+		if !cfg.WebServer.Enabled {
+			fmt.Fprintln(os.Stderr, "sta: --web-only requires web_server.enabled=true in config")
+			os.Exit(1)
+		}
+		addrDigest := sha256.Sum256([]byte(cfg.WebServer.Addr))
+		lockName := fmt.Sprintf("web-only-%x.lock", addrDigest[:8])
+		webOnlyLock, err = webinstance.TryAcquire(filepath.Join(cfg.DataDir, lockName))
+		if err != nil {
+			if errors.Is(err, webinstance.ErrAlreadyRunning) {
+				fmt.Fprintf(os.Stderr, "sta: web-only instance already running for %s\n", cfg.WebServer.Addr)
+			} else {
+				fmt.Fprintln(os.Stderr, "sta:", err)
+			}
+			os.Exit(1)
+		}
+		webOnlyListener, err = net.Listen("tcp", cfg.WebServer.Addr)
+		if err != nil {
+			_ = webOnlyLock.Close()
+			fmt.Fprintf(os.Stderr, "sta: web-only listener %s is unavailable (another instance may be running): %v\n", cfg.WebServer.Addr, err)
+			os.Exit(1)
+		}
+		webOnlyListenerOwned = true
+		defer func() {
+			if webOnlyListenerOwned && webOnlyListener != nil {
+				_ = webOnlyListener.Close()
+			}
+		}()
+	}
+
 	st, err := store.OpenSQLite(filepath.Join(cfg.DataDir, "pa.db"))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "sta:", err)
 		os.Exit(1)
 	}
 	shutdown := lifecycle.New()
+	if webOnlyLock != nil {
+		if err := shutdown.Register("web-only-instance", webOnlyLock.Close); err != nil {
+			fmt.Fprintln(os.Stderr, "sta: shutdown:", err)
+			os.Exit(1)
+		}
+	}
 	if err := shutdown.Register("store", st.Close); err != nil {
 		fmt.Fprintln(os.Stderr, "sta: shutdown:", err)
 		os.Exit(1)
@@ -727,10 +773,17 @@ func main() {
 		}
 		return
 	}
-	if err := app.registerWebServer(); err != nil {
+	var webServerErr error
+	if *webOnly {
+		webServerErr = app.registerWebServer(webOnlyListener)
+	} else {
+		webServerErr = app.registerWebServer()
+	}
+	if err := webServerErr; err != nil {
 		fmt.Fprintln(os.Stderr, "sta:", err)
 		os.Exit(1)
 	}
+	webOnlyListenerOwned = false
 	if app.webserver != nil {
 		registerShutdown("webserver", app.webserver.Close)
 	}

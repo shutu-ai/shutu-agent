@@ -8,7 +8,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -294,6 +296,66 @@ func TestHostStartupFailureIsClassified(t *testing.T) {
 	}
 }
 
+func TestHostInitializeFailureIncludesExitAndStderrDiagnostics(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := writeTestManifest(t, dir, "init-fail", extension.RestartNever, 0)
+	host := New(Config{StartupTimeout: time.Second, Sources: []Source{{ManifestPath: manifestPath, Required: true, Grants: []string{"user.input"}}}, Registry: tools.New()})
+	err := host.Start(context.Background())
+	if err == nil {
+		t.Fatal("initialize failure must fail")
+	}
+	message := err.Error()
+	for _, want := range []string{"initialize init-fail", "exit code 7", "init diagnostic", "stderr tail"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("initialize error %q does not contain %q", message, want)
+		}
+	}
+	if strings.Contains(message, "super-secret-token") {
+		t.Fatalf("initialize diagnostics leaked a secret: %q", message)
+	}
+}
+
+func TestExtensionCloseTerminatesOwnedDescendant(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := writeTestManifest(t, dir, "tree", extension.RestartNever, 0)
+	pidPath := filepath.Join(dir, "grandchild.pid")
+	manifest := readManifestForTest(t, manifestPath)
+	manifest.Transport.Env = append(manifest.Transport.Env, "EXTENSION_GRANDCHILD_PID_FILE="+pidPath)
+	rewriteTestManifest(t, manifestPath, manifest)
+	host := New(Config{StartupTimeout: 3 * time.Second, ShutdownTimeout: time.Second, Sources: []Source{{ManifestPath: manifestPath, Required: true, Grants: []string{"user.input"}}}, Registry: tools.New()})
+	if err := host.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	pidDataDeadline := time.Now().Add(2 * time.Second)
+	var pid int
+	for pid == 0 && time.Now().Before(pidDataDeadline) {
+		data, err := os.ReadFile(pidPath)
+		if err == nil {
+			pid, _ = strconv.Atoi(strings.TrimSpace(string(data)))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if pid == 0 {
+		_ = host.Close()
+		t.Fatal("tree fixture did not publish grandchild pid")
+	}
+	if !processStillAlive(pid) {
+		_ = host.Close()
+		t.Fatalf("tree fixture grandchild exited before cleanup, pid=%d", pid)
+	}
+	if err := host.Close(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for processStillAlive(pid) && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if processStillAlive(pid) {
+		terminateTestProcess(pid)
+		t.Fatalf("owned grandchild survived extension host close, pid=%d", pid)
+	}
+}
+
 func writeTestManifest(t *testing.T, dir, id string, restart extension.RestartPolicy, maxRestarts int) string {
 	t.Helper()
 	mode := "normal"
@@ -302,6 +364,12 @@ func writeTestManifest(t *testing.T, dir, id string, restart extension.RestartPo
 	}
 	if id == "full" {
 		mode = "full"
+	}
+	if id == "init-fail" {
+		mode = "init-fail"
+	}
+	if id == "tree" {
+		mode = "tree"
 	}
 	manifest := extension.Manifest{
 		ID: id, Name: strings.ToUpper(id[:1]) + id[1:], Version: "0.1.0", ExtensionAPI: "1.0",
@@ -352,10 +420,34 @@ func rewriteTestManifest(t *testing.T, path string, manifest extension.Manifest)
 }
 
 func TestExtensionHostHelperProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_EXTENSION_GRANDCHILD") == "1" {
+		if pidPath := os.Getenv("EXTENSION_GRANDCHILD_PID_FILE"); pidPath != "" {
+			if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o600); err != nil {
+				os.Exit(1)
+			}
+		}
+		for {
+			time.Sleep(time.Hour)
+		}
+	}
 	if os.Getenv("GO_WANT_EXTENSION_PROCESS") != "1" {
 		return
 	}
 	mode := os.Getenv("EXTENSION_TEST_MODE")
+	if mode == "init-fail" {
+		fmt.Fprintln(os.Stderr, "init diagnostic: super-secret-token=should-not-escape")
+		os.Exit(7)
+	}
+	if mode == "tree" {
+		child := exec.Command(os.Args[0], "-test.run=^TestExtensionHostHelperProcess$", "--")
+		child.Env = append(os.Environ(), "GO_WANT_EXTENSION_GRANDCHILD=1")
+		child.Stdout = io.Discard
+		child.Stderr = io.Discard
+		if err := child.Start(); err != nil {
+			fmt.Fprintln(os.Stderr, "tree fixture start failed:", err)
+			os.Exit(1)
+		}
+	}
 	if pidPath := os.Getenv("EXTENSION_PID_FILE"); pidPath != "" {
 		if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o600); err != nil {
 			os.Exit(1)

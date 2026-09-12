@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -159,7 +160,7 @@ func (h *eventHub) SubscribeInto(sessionID string, sink func(session.Event)) fun
 	return unsub
 }
 
-func (a *app) registerWebServer() error {
+func (a *app) registerWebServer(prebound ...net.Listener) error {
 	if !a.cfg.WebServer.Enabled {
 		return nil // D10: not registered when disabled
 	}
@@ -345,7 +346,13 @@ func (a *app) registerWebServer() error {
 	}
 	a.webserver = srv
 	go func() {
-		if err := srv.Serve(); err != nil {
+		var err error
+		if len(prebound) > 0 {
+			err = srv.ServeListener(prebound[0])
+		} else {
+			err = srv.Serve()
+		}
+		if err != nil {
 			fmt.Fprintln(os.Stderr, "sta: web server:", err)
 		}
 	}()

@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -714,6 +715,20 @@ func (s *Server) Addr() string { return s.addr }
 // Serve blocks serving the portal until Close.
 func (s *Server) Serve() error {
 	err := s.srv.ListenAndServe()
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
+}
+
+// ServeListener serves on an already-bound listener. The composition root
+// uses this in web-only mode so address conflicts are detected before any
+// extension process is initialized.
+func (s *Server) ServeListener(listener net.Listener) error {
+	if listener == nil {
+		return errors.New("webserver: listener is required")
+	}
+	err := s.srv.Serve(listener)
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
