@@ -70,4 +70,35 @@ describe('WorkspaceRuntime', () => {
 
     expect(sessions.create).toHaveBeenCalledWith({})
   })
+
+  it('creates and opens the default Ungrouped session on an empty deployment', async () => {
+    const list = createSnapshotStore<SessionsPortList>({
+      ids: [], byId: {}, current: undefined, phase: 'ready',
+      subagentsByParent: {}, jobsBySession: {}, currentAddress: undefined,
+    })
+    const sessions: SessionsPort = {
+      list,
+      create: vi.fn(async () => 's-first'),
+      open: vi.fn(),
+      clear: vi.fn(),
+    }
+    const api = {
+      workspace: {
+        list: vi.fn(async () => ({
+          result: { ok: true, value: { items: [], archivedSessionIds: [] } },
+        })),
+      },
+    } as unknown as IApiClient
+    const runtime = new WorkspaceRuntime(
+      { reflect: { provide: vi.fn() } } as unknown as Context,
+      api,
+      sessions,
+    )
+
+    runtime.startInitialSelection()
+    runtime.handleConnected()
+
+    await vi.waitFor(() => expect(sessions.open).toHaveBeenCalledWith('s-first'))
+    expect(sessions.create).toHaveBeenCalledWith({})
+  })
 })

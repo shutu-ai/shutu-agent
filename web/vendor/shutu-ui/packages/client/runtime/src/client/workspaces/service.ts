@@ -146,7 +146,8 @@ export class WorkspaceRuntime implements IWorkspaces {
   /**
    * Follow the first complete Workspace/Session baseline and select a default
    * session exactly once. A restored current session wins; otherwise the most
-   * recent Workspace is connected (reusing or creating its blank session).
+   * recent Workspace is connected (reusing or creating its blank session), or
+   * a real Ungrouped session is created when no named Workspace exists.
    * Later explicit clears stay cleared instead of retriggering this startup
    * policy. A failed connect may retry on the next baseline projection.
    * @returns disposer for the baseline subscription; late work cannot navigate after disposal.
@@ -158,18 +159,40 @@ export class WorkspaceRuntime implements IWorkspaces {
     this.initialSelectionStarted = true
     let state: 'waiting' | 'connecting' | 'done' = 'waiting'
     let disposed = false
+    let emptyDeploymentCheckDeferred = false
     const reconcile = (): void => {
       if (disposed || state !== 'waiting') return
       const workspace = this.list.getSnapshot()
       if (!workspace.baselinesReady) return
-      const current = this.sessions.list.getSnapshot().current
+      const sessionList = this.sessions.list.getSnapshot()
+      const current = sessionList.current
       const target = workspace.recentWorkspaceId
-      if (current !== undefined || target === undefined) {
+      if (current !== undefined) {
         state = 'done'
         return
       }
+      // Only an actually empty deployment gets an implicit first session.
+      // Existing ungrouped history should remain unselected until the user
+      // chooses it, rather than causing another blank session on every load.
+      if (target === undefined && sessionList.ids.length > 0) {
+        state = 'done'
+        return
+      }
+      // Workspace and Session projections are independent subscriptions. Let
+      // a just-completed Session baseline publish its rows before deciding
+      // that this is truly an empty deployment.
+      if (target === undefined && !emptyDeploymentCheckDeferred) {
+        emptyDeploymentCheckDeferred = true
+        setTimeout(() => {
+          reconcile()
+        }, 0)
+        return
+      }
       state = 'connecting'
-      void this.connectWorkspace(target).then(
+      const attempt = target === undefined
+        ? this.sessions.create({})
+        : this.connectWorkspace(target)
+      void attempt.then(
         (sessionId) => {
           if (disposed) return
           if (this.sessions.list.getSnapshot().current === undefined) {

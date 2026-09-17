@@ -34,6 +34,8 @@ function valueFor(method) {
       return { credentials: {} }
     case 'session.list':
       return { items: [] }
+    case 'session.create':
+      return { sessionId: 'initial-fixture' }
     case 'workspace.list':
       return { items: [], ungroupedSessionIds: [], archivedSessionIds: [] }
     case 'session.search':
@@ -1077,8 +1079,11 @@ async function runUngroupedNewSession(browser) {
   const { createPayloads } = await installNativeMock(page, { ungroupedSession: true })
   await page.goto(baseUrl, { waitUntil: 'domcontentloaded' })
   await waitForNativeShell(page)
-  await page.getByText('未分组', { exact: true }).click()
-  await page.getByText('Ungrouped fixture', { exact: true }).waitFor({ timeout: 15_000 })
+  const fixture = page.getByText('Ungrouped fixture', { exact: true })
+  if (!(await fixture.isVisible().catch(() => false))) {
+    await page.getByLabel('会话', { exact: true }).getByText('未分组', { exact: true }).click()
+  }
+  await fixture.waitFor({ timeout: 15_000 })
   const newSession = page.locator('button[aria-label="New session"], button[aria-label="新建会话"]').last()
   await newSession.click()
   await page.getByText('Ungrouped fixture', { exact: true }).waitFor({ timeout: 15_000 })
